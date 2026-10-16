@@ -98,6 +98,28 @@ internal static class KernelSocketCompatExports
         return true;
     }
 
+    /// <summary>
+    /// The host socket behind an emulated socket descriptor, for readiness
+    /// monitoring. Returns true for every socket descriptor; the socket is null
+    /// while the descriptor has no host socket yet (not connected or bound).
+    /// </summary>
+    internal static bool TryGetHostSocket(int fd, out System.Net.Sockets.Socket? socket)
+    {
+        lock (Gate)
+        {
+            if (!Sockets.TryGetValue(fd, out var state))
+            {
+                socket = null;
+                return false;
+            }
+
+            socket = state.Connected && state.Client is not null
+                ? state.Client.Client
+                : state.DatagramSocket;
+            return true;
+        }
+    }
+
     internal static bool TryCloseSocketFd(int fd)
     {
         lock (Gate)

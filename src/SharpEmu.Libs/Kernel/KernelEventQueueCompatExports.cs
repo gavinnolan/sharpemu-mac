@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using SharpEmu.Libs.Network;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -10,58 +9,70 @@ using System.Threading;
 
 namespace SharpEmu.Libs.Kernel;
 
-public static class KernelEventQueueCompatExports
+/// <summary>
+/// The kqueue core behind every equeue. Each queue owns a knote table keyed by
+/// (ident, filter) and a list of active knotes in trigger order, as FreeBSD 11's
+/// <c>kern_event.c</c> does. Every producer (user events, VideoOut, AGC end of
+/// pipe, AMPR, timers, descriptors) changes a knote through
+/// <see cref="ActivateLocked"/>, and every activation wakes both guest waiters
+/// (through the scheduler's wake key) and host waiters (through the queue
+/// monitor), so no trigger can be lost.
+/// </summary>
+public static partial class KernelEventQueueCompatExports
 {
     private const int KernelEventSize = 0x20;
+
     public const short KernelEventFilterRead = -1;
+    public const short KernelEventFilterWrite = -2;
+    public const short KernelEventFilterVnode = -4;
+    public const short KernelEventFilterTimer = -7;
+    public const short KernelEventFilterUser = -11;
+    public const short KernelEventFilterDisplay = -13;
     public const short KernelEventFilterGraphics = -14;
     public const short KernelEventFilterHrTimer = -15;
-    public const short KernelEventFilterUser = -11;
     public const short KernelEventFilterAmpr = -25;
     public const short KernelEventFilterAmprSystem = -30;
-    public const ushort KernelEventFlagClear = 0x20;
-    public const ushort KernelEventFlagOneShot = 0x10;
+
+    public const ushort KernelEventFlagAdd = 0x0001;
+    public const ushort KernelEventFlagDelete = 0x0002;
+    public const ushort KernelEventFlagEnable = 0x0004;
+    public const ushort KernelEventFlagDisable = 0x0008;
+    public const ushort KernelEventFlagOneShot = 0x0010;
+    public const ushort KernelEventFlagClear = 0x0020;
+    public const ushort KernelEventFlagReceipt = 0x0040;
+    public const ushort KernelEventFlagDispatch = 0x0080;
+    public const ushort KernelEventFlagForceOneShot = 0x0100;
+    public const ushort KernelEventFlagError = 0x4000;
     public const ushort KernelEventFlagEof = 0x8000;
-    private const int ReadEventPollPeriodMilliseconds = 10;
+
+    // The flags a knote keeps from its registration and reports with every event
+    // (kn_kevent.flags with EV_ADD/DELETE/ENABLE/DISABLE/FORCEONESHOT stripped).
+    private const ushort PersistentFlagMask =
+        KernelEventFlagOneShot | KernelEventFlagClear | KernelEventFlagReceipt | KernelEventFlagDispatch;
+
+    /// <summary>
+    /// Interrupt filters (AGC end of pipe) report each occurrence with its own
+    /// data word, because the guest reads a context id per interrupt. Past this
+    /// many undelivered occurrences the oldest is folded into the next one, whose
+    /// fflags then count both, so an undrained queue stays bounded.
+    /// </summary>
+    internal const int MaxPendingOccurrencesPerKnote = 64;
+
+    // Events reported by one wait; the rest stay queued for the next one.
+    private const int MaxEventsPerWait = 1024;
 
     private static readonly object _eventQueueGate = new();
-    private static readonly Dictionary<ulong, EventQueueState> _eventQueues = new();
+    private static readonly Dictionary<ulong, Kqueue> _eventQueues = new();
+    private static Kqueue[] _eventQueueSnapshot = [];
     private static readonly ConditionalWeakTable<object, EventQueueRuntimeIdentity>
         _eventQueueRuntimeIdentities = new();
-    private static readonly Dictionary<ulong, KernelEventDeque> _pendingEvents = new();
-    private static readonly Dictionary<ulong, Dictionary<(ulong Ident, short Filter), KernelEventRegistration>> _registeredEvents = new();
-    private static readonly Dictionary<(ulong Handle, int Id), HrTimerState> _hrTimers = new();
     private static long _nextEventQueueHandle = 1;
     private static long _nextEventQueueWaiterId;
     private static long _nextEventRegistrationGeneration;
     private static long _nextEventQueueGeneration;
     private static long _nextEventQueueRuntimeId;
-    private static int _readEventRegistrationCount;
-    private static int _readEventPollActive;
-    private static readonly Timer _readEventPollTimer = new(
-        PollReadEvents,
-        null,
-        Timeout.Infinite,
-        Timeout.Infinite);
 
     private sealed record EventQueueRuntimeIdentity(ulong Id);
-
-    private sealed class HrTimerState
-    {
-        public required ulong Handle { get; init; }
-        public required int Id { get; init; }
-        public required ulong UserData { get; init; }
-        public Timer? Timer { get; set; }
-    }
-
-    private sealed class EventQueueState
-    {
-        public required ulong Handle { get; init; }
-        public required ulong RuntimeId { get; init; }
-        public required ulong Generation { get; init; }
-        public required string WakeKey { get; init; }
-        public bool Deleted { get; set; }
-    }
 
     public readonly record struct KernelQueuedEvent(
         ulong Ident,
@@ -70,22 +81,6 @@ public static class KernelEventQueueCompatExports
         uint Fflags,
         ulong Data,
         ulong UserData);
-
-    private readonly record struct KernelEventRegistration(
-        ulong Ident,
-        short Filter,
-        ulong UserData,
-        ushort Flags,
-        ulong LowWater,
-        ulong Generation);
-
-    private readonly record struct ReadEventPollTarget(
-        ulong EqueueHandle,
-        ulong EqueueGeneration,
-        int FileDescriptor,
-        ulong UserData,
-        ulong LowWater,
-        ulong RegistrationGeneration);
 
     internal readonly record struct KernelEventRegistrationToken(
         ulong EqueueHandle,
@@ -104,41 +99,50 @@ public static class KernelEventQueueCompatExports
         int TriggeredCount,
         int StaleCount);
 
-    // Grow-only ring buffer standing in for LinkedList<KernelQueuedEvent>, which
-    // allocated a node per enqueue — steady churn at one enqueue per vblank/flip edge
-    // per registered queue. Mutated only under _eventQueueGate.
-    private sealed class KernelEventDeque
+    private sealed class Kqueue
     {
-        private KernelQueuedEvent[] _items = new KernelQueuedEvent[4];
+        public required ulong Handle { get; init; }
+        public required ulong RuntimeId { get; init; }
+        public required ulong Generation { get; init; }
+        public required string WakeKey { get; init; }
+        public readonly object Gate = new();
+        public readonly Dictionary<(ulong Ident, short Filter), Knote> Knotes = new();
+        public readonly KnoteList Active = new();
+        public bool Deleted;
+        public int Descriptor = -1;
+    }
+
+    private struct Occurrence
+    {
+        public ulong Data;
+        public uint Count;
+    }
+
+    // Fixed ring of undelivered interrupt occurrences for one knote.
+    private sealed class OccurrenceRing
+    {
+        private readonly Occurrence[] _items = new Occurrence[MaxPendingOccurrencesPerKnote];
         private int _head;
 
         public int Count { get; private set; }
 
-        public KernelQueuedEvent this[int index]
-        {
-            get => _items[(_head + index) % _items.Length];
-            set => _items[(_head + index) % _items.Length] = value;
-        }
-
-        public void AddLast(in KernelQueuedEvent item)
+        public void Push(ulong data)
         {
             if (Count == _items.Length)
             {
-                var grown = new KernelQueuedEvent[_items.Length * 2];
-                for (var i = 0; i < Count; i++)
-                {
-                    grown[i] = this[i];
-                }
-
-                _items = grown;
-                _head = 0;
+                // Fold the oldest occurrence into the next so the newest data survives.
+                var oldest = _items[_head];
+                _head = (_head + 1) % _items.Length;
+                Count--;
+                ref var next = ref _items[_head];
+                next.Count = SaturatingAdd(next.Count, oldest.Count);
             }
 
-            _items[(_head + Count) % _items.Length] = item;
+            _items[(_head + Count) % _items.Length] = new Occurrence { Data = data, Count = 1 };
             Count++;
         }
 
-        public KernelQueuedEvent RemoveFirst()
+        public Occurrence Pop()
         {
             var value = _items[_head];
             _head = (_head + 1) % _items.Length;
@@ -146,58 +150,108 @@ public static class KernelEventQueueCompatExports
             return value;
         }
 
-        public int FindIndex(ulong ident, short filter)
+        public void Clear()
         {
-            for (var i = 0; i < Count; i++)
-            {
-                var candidate = this[i];
-                if (candidate.Ident == ident && candidate.Filter == filter)
-                {
-                    return i;
-                }
-            }
+            _head = 0;
+            Count = 0;
+        }
+    }
 
-            return -1;
+    private sealed class Knote
+    {
+        public Knote(Kqueue owner, ulong ident, short filter)
+        {
+            Owner = owner;
+            Ident = ident;
+            Filter = filter;
+            Generation = unchecked((ulong)Interlocked.Increment(ref _nextEventRegistrationGeneration));
         }
 
-        public bool Remove(ulong ident, short filter)
-            => RemoveAll(ident, filter) != 0;
+        public Kqueue Owner { get; }
+        public ulong Ident { get; }
+        public short Filter { get; }
+        public ulong Generation { get; }
 
-        public int RemoveAll(ulong ident, short filter)
+        // Registration (kn_kevent / kn_sfflags / kn_sdata).
+        public ushort Flags;
+        public uint SFflags;
+        public ulong SData;
+        public ulong UserData;
+
+        // Status.
+        public bool Disabled;
+        public bool Queued;
+        public bool Triggered;
+        public bool Dropped;
+
+        // Pending state reported by the next delivery.
+        public uint Fflags;
+        public ulong Data;
+        public ushort StatusFlags;
+        public OccurrenceRing? Occurrences;
+
+        // A raw event injected through EnqueueEvent: delivered exactly once.
+        public bool Transient;
+        public KernelQueuedEvent Injected;
+
+        // Attached sources.
+        public object? TimerToken;
+        public long TimerPeriodTicks;
+        public long TimerNextDue;
+        public IDisposable? Watch;
+
+        public Knote? Prev;
+        public Knote? Next;
+    }
+
+    // Intrusive doubly linked list, so activation, removal and requeue are O(1).
+    private sealed class KnoteList
+    {
+        public Knote? Head { get; private set; }
+        private Knote? _tail;
+
+        public int Count { get; private set; }
+
+        public void AddLast(Knote knote)
         {
-            var originalCount = Count;
-            var writeIndex = 0;
-            for (var readIndex = 0; readIndex < originalCount; readIndex++)
+            knote.Prev = _tail;
+            knote.Next = null;
+            if (_tail is null)
             {
-                var candidate = this[readIndex];
-                if (candidate.Ident == ident && candidate.Filter == filter)
-                {
-                    continue;
-                }
-
-                this[writeIndex++] = candidate;
+                Head = knote;
+            }
+            else
+            {
+                _tail.Next = knote;
             }
 
-            Count = writeIndex;
-            return originalCount - writeIndex;
+            _tail = knote;
+            Count++;
         }
 
-        public int UpdateUserData(ulong ident, short filter, ulong userData)
+        public void Remove(Knote knote)
         {
-            var updatedCount = 0;
-            for (var index = 0; index < Count; index++)
+            if (knote.Prev is null)
             {
-                var candidate = this[index];
-                if (candidate.Ident != ident || candidate.Filter != filter)
-                {
-                    continue;
-                }
-
-                this[index] = candidate with { UserData = userData };
-                updatedCount++;
+                Head = knote.Next;
+            }
+            else
+            {
+                knote.Prev.Next = knote.Next;
             }
 
-            return updatedCount;
+            if (knote.Next is null)
+            {
+                _tail = knote.Prev;
+            }
+            else
+            {
+                knote.Next.Prev = knote.Prev;
+            }
+
+            knote.Prev = null;
+            knote.Next = null;
+            Count--;
         }
     }
 
@@ -217,11 +271,14 @@ public static class KernelEventQueueCompatExports
         private WaitCompletion _completion;
 
         public required CpuContext Ctx { get; init; }
-        public required EventQueueState State { get; init; }
+        public required Kqueue State { get; init; }
         public required ulong EventsAddress { get; init; }
         public required int EventCapacity { get; init; }
         public required ulong OutCountAddress { get; init; }
         public required long WaiterId { get; init; }
+
+        // kevent(2) reports the count as its return value and failures through errno.
+        public bool PosixResult { get; init; }
 
         public int Resume()
         {
@@ -242,19 +299,33 @@ public static class KernelEventQueueCompatExports
                 _reservedCount = 0;
             }
 
-            var result = completion switch
+            int result;
+            if (PosixResult)
             {
-                WaitCompletion.Reserved when reservedEvents is not null =>
-                    DeliverReservedEvents(
-                        Ctx,
-                        reservedEvents,
-                        reservedCount,
-                        EventsAddress,
-                        OutCountAddress),
-                WaitCompletion.Deleted =>
-                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED,
-                _ => (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,
-            };
+                result = completion switch
+                {
+                    WaitCompletion.Reserved when reservedEvents is not null =>
+                        DeliverReservedEventsPosix(Ctx, reservedEvents, reservedCount, EventsAddress),
+                    WaitCompletion.Deleted => PosixFail(Ctx, PosixEbadf),
+                    _ => 0,
+                };
+            }
+            else
+            {
+                result = completion switch
+                {
+                    WaitCompletion.Reserved when reservedEvents is not null =>
+                        DeliverReservedEvents(
+                            Ctx,
+                            reservedEvents,
+                            reservedCount,
+                            EventsAddress,
+                            OutCountAddress),
+                    WaitCompletion.Deleted =>
+                        (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED,
+                    _ => (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,
+                };
+            }
 
             if (_logEqueue)
             {
@@ -314,37 +385,14 @@ public static class KernelEventQueueCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var handle = unchecked((ulong)Interlocked.Increment(ref _nextEventQueueHandle));
-        var generation = unchecked((ulong)Interlocked.Increment(
-            ref _nextEventQueueGeneration));
-        var state = new EventQueueState
+        var state = CreateQueue(ctx.Memory);
+        if (!ctx.TryWriteUInt64(outAddress, state.Handle))
         {
-            Handle = handle,
-            RuntimeId = GetEventQueueRuntimeId(ctx.Memory),
-            Generation = generation,
-            WakeKey = $"sceKernelWaitEqueue:{handle:X16}:{generation:X16}",
-        };
-        lock (_eventQueueGate)
-        {
-            _eventQueues.Add(handle, state);
-            _pendingEvents[handle] = new KernelEventDeque();
-            _registeredEvents[handle] = new Dictionary<(ulong Ident, short Filter), KernelEventRegistration>();
-        }
-
-        if (!ctx.TryWriteUInt64(outAddress, handle))
-        {
-            lock (_eventQueueGate)
-            {
-                state.Deleted = true;
-                _eventQueues.Remove(handle);
-                _pendingEvents.Remove(handle);
-                _registeredEvents.Remove(handle);
-                Monitor.PulseAll(_eventQueueGate);
-            }
+            _ = DestroyQueue(state.Handle);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        TraceEventQueue(ctx, "create", handle);
+        TraceEventQueue(ctx, "create", state.Handle);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -356,143 +404,69 @@ public static class KernelEventQueueCompatExports
     public static int KernelDeleteEqueue(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
-        EventQueueState state;
+        if (DestroyQueue(handle) is not { } state)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        TraceEventQueue(ctx, "delete", handle, $"generation={state.Generation}");
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static Kqueue CreateQueue(ICpuMemory memory, int descriptor = -1)
+    {
+        var handle = unchecked((ulong)Interlocked.Increment(ref _nextEventQueueHandle));
+        var generation = unchecked((ulong)Interlocked.Increment(ref _nextEventQueueGeneration));
+        var state = new Kqueue
+        {
+            Handle = handle,
+            RuntimeId = GetEventQueueRuntimeId(memory),
+            Generation = generation,
+            WakeKey = $"sceKernelWaitEqueue:{handle:X16}:{generation:X16}",
+            Descriptor = descriptor,
+        };
         lock (_eventQueueGate)
         {
-            if (!_eventQueues.Remove(handle, out state!) || state.Deleted)
+            _eventQueues.Add(handle, state);
+            _eventQueueSnapshot = [.. _eventQueues.Values];
+        }
+
+        return state;
+    }
+
+    private static Kqueue? DestroyQueue(ulong handle)
+    {
+        Kqueue? state;
+        lock (_eventQueueGate)
+        {
+            if (!_eventQueues.Remove(handle, out state))
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                return null;
             }
 
+            _eventQueueSnapshot = [.. _eventQueues.Values];
+        }
+
+        List<Knote> dropped;
+        lock (state.Gate)
+        {
             state.Deleted = true;
-            _pendingEvents.Remove(handle);
-            CancelHrTimersLocked(handle);
-            if (_registeredEvents.Remove(handle, out var registrations))
+            dropped = [.. state.Knotes.Values];
+            foreach (var knote in dropped)
             {
-                _readEventRegistrationCount -= registrations.Values.Count(
-                    registration => registration.Filter == KernelEventFilterRead);
-                UpdateReadEventPollTimerLocked();
+                DropKnoteLocked(state, knote);
             }
-            Monitor.PulseAll(_eventQueueGate);
+
+            Monitor.PulseAll(state.Gate);
         }
 
-        WakeEventQueue(
-            state,
-            _logEqueue ? $"source=delete generation={state.Generation}" : null);
-        TraceEventQueue(
-            ctx,
-            "delete",
-            handle,
-            $"generation={state.Generation}");
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "R74tt43xP6k",
-        ExportName = "sceKernelAddHRTimerEvent",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelAddHrTimerEvent(CpuContext ctx)
-    {
-        var handle = ctx[CpuRegister.Rdi];
-        var id = unchecked((int)ctx[CpuRegister.Rsi]);
-        var timespecAddress = ctx[CpuRegister.Rdx];
-        var userData = ctx[CpuRegister.Rcx];
-
-        if (timespecAddress == 0 ||
-            !ctx.TryReadUInt64(timespecAddress, out var secondsBits) ||
-            !ctx.TryReadUInt64(timespecAddress + sizeof(ulong), out var nanosecondsBits))
+        foreach (var knote in dropped)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            DetachKnoteSources(knote);
         }
 
-        var seconds = unchecked((long)secondsBits);
-        var nanoseconds = unchecked((long)nanosecondsBits);
-        if (seconds < 0 || nanoseconds < 0 || nanoseconds >= 1_000_000_000 ||
-            seconds > (long.MaxValue - nanoseconds) / 1_000_000_000)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        var totalNanoseconds = seconds * 1_000_000_000 + nanoseconds;
-        HrTimerState timerState;
-        lock (_eventQueueGate)
-        {
-            if (!_eventQueues.TryGetValue(handle, out var equeue) || equeue.Deleted)
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            var key = (handle, id);
-            if (_hrTimers.Remove(key, out var previous))
-            {
-                previous.Timer?.Dispose();
-            }
-
-            if (!_registeredEvents.TryGetValue(handle, out var events))
-            {
-                events = new Dictionary<(ulong Ident, short Filter), KernelEventRegistration>();
-                _registeredEvents[handle] = events;
-            }
-
-            events[(unchecked((uint)id), KernelEventFilterHrTimer)] = new KernelEventRegistration(
-                unchecked((uint)id),
-                KernelEventFilterHrTimer,
-                userData,
-                (ushort)(KernelEventFlagOneShot | KernelEventFlagClear),
-                0,
-                unchecked((ulong)Interlocked.Increment(ref _nextEventRegistrationGeneration)));
-
-            timerState = new HrTimerState
-            {
-                Handle = handle,
-                Id = id,
-                UserData = userData,
-            };
-            _hrTimers[key] = timerState;
-            ScheduleHrTimer(timerState, totalNanoseconds);
-        }
-
-        TraceEventQueue(ctx, "add_hrtimer", handle, $"id={id} ns={totalNanoseconds} user_data=0x{userData:X16}");
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "J+LF6LwObXU",
-        ExportName = "sceKernelDeleteHRTimerEvent",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelDeleteHrTimerEvent(CpuContext ctx)
-    {
-        var handle = ctx[CpuRegister.Rdi];
-        var id = unchecked((int)ctx[CpuRegister.Rsi]);
-        var ident = unchecked((uint)id);
-
-        lock (_eventQueueGate)
-        {
-            if (!_eventQueues.TryGetValue(handle, out var equeue) || equeue.Deleted)
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            if (!_hrTimers.Remove((handle, id), out var timerState))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            timerState.Timer?.Dispose();
-            if (_registeredEvents.TryGetValue(handle, out var events))
-            {
-                events.Remove((ident, KernelEventFilterHrTimer));
-            }
-            if (_pendingEvents.TryGetValue(handle, out var pending))
-            {
-                _ = pending.Remove(ident, KernelEventFilterHrTimer);
-            }
-        }
-
-        TraceEventQueue(ctx, "delete_hrtimer", handle, $"id={id}");
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        Signal(state, _logEqueue ? $"source=delete generation={state.Generation}" : null);
+        return state;
     }
 
     [SysAbiExport(
@@ -500,38 +474,61 @@ public static class KernelEventQueueCompatExports
         ExportName = "sceKernelAddReadEvent",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelAddReadEvent(CpuContext ctx)
+    public static int KernelAddReadEvent(CpuContext ctx) =>
+        AddDescriptorEvent(ctx, KernelEventFilterRead, "add_read");
+
+    [SysAbiExport(
+        Nid = "JxJ4tfgKlXA",
+        ExportName = "sceKernelDeleteReadEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelDeleteReadEvent(CpuContext ctx) =>
+        DeleteDescriptorEvent(ctx, KernelEventFilterRead, "delete_read");
+
+    [SysAbiExport(
+        Nid = "R-tyYMpYaxY",
+        ExportName = "sceKernelAddWriteEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelAddWriteEvent(CpuContext ctx) =>
+        AddDescriptorEvent(ctx, KernelEventFilterWrite, "add_write");
+
+    [SysAbiExport(
+        Nid = "cBGTk8S92XM",
+        ExportName = "sceKernelDeleteWriteEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelDeleteWriteEvent(CpuContext ctx) =>
+        DeleteDescriptorEvent(ctx, KernelEventFilterWrite, "delete_write");
+
+    private static int AddDescriptorEvent(CpuContext ctx, short filter, string trace)
     {
         var handle = ctx[CpuRegister.Rdi];
         var fileDescriptor = unchecked((int)ctx[CpuRegister.Rsi]);
         var lowWater = Math.Max(1UL, ctx[CpuRegister.Rdx]);
         var userData = ctx[CpuRegister.Rcx];
 
-        if (!TryGetDescriptorReadiness(
-                fileDescriptor,
-                lowWater,
-                out _,
-                out _,
-                out _))
+        if (!TryGetLiveEventQueue(handle, out _))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        // An unknown descriptor is EBADF, as kqueue_register's fget reports it.
+        if (!TryGetDescriptorState(fileDescriptor, filter, lowWater, out _, out _, out _))
+        {
+            return SceEbadf;
         }
 
         var registered = RegisterEvent(
             handle,
             unchecked((uint)fileDescriptor),
-            KernelEventFilterRead,
+            filter,
             userData,
             flags: 0,
             lowWater);
-        if (registered)
-        {
-            RefreshReadEvents(handle);
-        }
-
         TraceEventQueue(
             ctx,
-            "add_read",
+            trace,
             handle,
             $"fd={fileDescriptor} low_water={lowWater} user_data=0x{userData:X16}");
         return registered
@@ -539,20 +536,12 @@ public static class KernelEventQueueCompatExports
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
-    [SysAbiExport(
-        Nid = "JxJ4tfgKlXA",
-        ExportName = "sceKernelDeleteReadEvent",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelDeleteReadEvent(CpuContext ctx)
+    private static int DeleteDescriptorEvent(CpuContext ctx, short filter, string trace)
     {
         var handle = ctx[CpuRegister.Rdi];
         var fileDescriptor = unchecked((int)ctx[CpuRegister.Rsi]);
-        var deleted = DeleteRegisteredEvent(
-            handle,
-            unchecked((uint)fileDescriptor),
-            KernelEventFilterRead);
-        TraceEventQueue(ctx, "delete_read", handle, $"fd={fileDescriptor}");
+        var deleted = DeleteRegisteredEvent(handle, unchecked((uint)fileDescriptor), filter);
+        TraceEventQueue(ctx, trace, handle, $"fd={fileDescriptor}");
         return deleted
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
@@ -627,11 +616,19 @@ public static class KernelEventQueueCompatExports
     public static int KernelTriggerUserEvent(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
-        var triggered = TriggerRegisteredEvent(
+        var ident = UserEventIdent(ctx);
+        var userData = ctx[CpuRegister.Rdx];
+        // sceKernelTriggerUserEvent's third argument replaces the event's udata.
+        var triggered = TriggerKnote(
             handle,
-            UserEventIdent(ctx),
+            ident,
             KernelEventFilterUser,
-            userData: ctx[CpuRegister.Rdx]);
+            static (knote, userData) =>
+            {
+                knote.UserData = userData;
+                return true;
+            },
+            userData);
         TraceEventQueue(ctx, "trigger_user", handle);
         return triggered
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
@@ -776,6 +773,41 @@ public static class KernelEventQueueCompatExports
     }
 
     [SysAbiExport(
+        Nid = "Q0qr9AyqJSk",
+        ExportName = "sceKernelGetEventFflags",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelGetEventFflags(CpuContext ctx)
+    {
+        _ = TryReadUInt32(ctx, ctx[CpuRegister.Rdi] + 0x0C, out var fflags);
+        ctx[CpuRegister.Rax] = fflags;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // A failed kevent change is reported as EV_ERROR with the errno in data
+    // (kqueue_kevent); every other event has no error.
+    [SysAbiExport(
+        Nid = "Uu-iDFC9aUc",
+        ExportName = "sceKernelGetEventError",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelGetEventError(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        Span<byte> flagBytes = stackalloc byte[sizeof(ushort)];
+        var error = 0;
+        if (ctx.Memory.TryRead(address + 0x0A, flagBytes) &&
+            (BinaryPrimitives.ReadUInt16LittleEndian(flagBytes) & KernelEventFlagError) != 0 &&
+            ctx.TryReadUInt64(address + 0x10, out var data))
+        {
+            error = unchecked((int)data);
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)(long)error);
+        return error;
+    }
+
+    [SysAbiExport(
         Nid = "fzyMKs9kim0",
         ExportName = "sceKernelWaitEqueue",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -804,12 +836,8 @@ public static class KernelEventQueueCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        RefreshReadEvents(handle);
-        var deliveredCount = DequeueEvents(
-            ctx,
-            state,
-            eventsAddress,
-            eventCapacity);
+        RefreshDescriptorKnotes(state);
+        var deliveredCount = DequeueEvents(ctx, state, eventsAddress, eventCapacity);
         if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -819,182 +847,144 @@ public static class KernelEventQueueCompatExports
         {
             if (_logEqueue)
             {
-                TraceEventQueue(
-                    ctx,
-                    "wait-deliver",
-                    handle,
-                    $"delivered={deliveredCount} capacity={eventCapacity}");
+                TraceEventQueue(ctx, "wait-deliver", handle, $"delivered={deliveredCount} capacity={eventCapacity}");
             }
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        lock (_eventQueueGate)
+        if (!IsLive(state))
         {
-            if (!IsLiveEventQueueLocked(state))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
-            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
         }
 
         if (IsSynchronousPoll(timeoutAddress, timeoutUsec))
         {
-            if (_logEqueue)
-            {
-                TraceEventQueue(
-                    ctx,
-                    "wait-poll-timeout",
-                    handle,
-                    $"capacity={eventCapacity}");
-            }
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
         }
 
         var waiterId = Interlocked.Increment(ref _nextEventQueueWaiterId);
-        var blockDeadlineTimestamp = timeoutAddress == 0
+        var deadline = timeoutAddress == 0
             ? 0
-            : GuestThreadExecution.ComputeDeadlineTimestamp(
-                TimeSpan.FromMicroseconds(timeoutUsec));
-        var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
-            ctx,
-            "sceKernelWaitEqueue",
-            state.WakeKey,
-            new EqueueWaiter
-            {
-                Ctx = ctx,
-                State = state,
-                EventsAddress = eventsAddress,
-                EventCapacity = eventCapacity,
-                OutCountAddress = outCountAddress,
-                WaiterId = waiterId,
-            },
-            blockDeadlineTimestamp);
-        if (requestedBlock)
+            : GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromMicroseconds(timeoutUsec));
+        if (GuestThreadExecution.RequestCurrentThreadBlock(
+                ctx,
+                "sceKernelWaitEqueue",
+                state.WakeKey,
+                new EqueueWaiter
+                {
+                    Ctx = ctx,
+                    State = state,
+                    EventsAddress = eventsAddress,
+                    EventCapacity = eventCapacity,
+                    OutCountAddress = outCountAddress,
+                    WaiterId = waiterId,
+                },
+                deadline))
         {
-            var wakeAfterRegistration = false;
-            lock (_eventQueueGate)
-            {
-                wakeAfterRegistration =
-                    !IsLiveEventQueueLocked(state) ||
-                    HasPendingEventsLocked(state.Handle);
-            }
-
-            if (wakeAfterRegistration)
-            {
-                WakeEventQueue(
-                    state,
-                    _logEqueue
-                        ? "source=post-registration-state-check"
-                        : null);
-            }
-
+            // The scheduler re-checks the waiter once the thread is parked, so an
+            // activation between this point and the park is not lost.
             if (_logEqueue)
             {
                 TraceEventQueue(
                     ctx,
                     "wait-block",
                     handle,
-                    $"generation={state.Generation} waiter={waiterId} " +
-                    $"capacity={eventCapacity} timeout=" +
-                    (timeoutAddress == 0 ? "infinite " : $"{timeoutUsec}_usec ") +
-                    $"events=0x{eventsAddress:X16} out_count=0x{outCountAddress:X16}");
+                    $"generation={state.Generation} waiter={waiterId} capacity={eventCapacity} timeout=" +
+                    (timeoutAddress == 0 ? "infinite" : $"{timeoutUsec}_usec"));
             }
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (timeoutAddress != 0)
+        // A host thread parks on the queue monitor; every activation pulses it.
+        var outcome = HostWait(state, deadline, eventCapacity, out var events, out var count);
+        if (outcome == HostWaitOutcome.Deleted)
         {
-            var deadline = Environment.TickCount64 +
-                Math.Max(
-                    1L,
-                    (long)Math.Min(
-                        ((ulong)timeoutUsec + 999UL) / 1000UL,
-                        int.MaxValue));
-            lock (_eventQueueGate)
-            {
-                while (IsLiveEventQueueLocked(state) &&
-                       !HasPendingEventsLocked(handle))
-                {
-                    var remaining = deadline - Environment.TickCount64;
-                    if (remaining <= 0)
-                    {
-                        break;
-                    }
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
+        }
 
-                    Monitor.Wait(_eventQueueGate, (int)Math.Min(remaining, 100));
-                }
-
-                if (!IsLiveEventQueueLocked(state))
-                {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
-                }
-            }
-
-            deliveredCount = DequeueEvents(
-                ctx,
-                state,
-                eventsAddress,
-                eventCapacity);
-            if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            if (deliveredCount > 0)
-            {
-                if (_logEqueue)
-                {
-                    TraceEventQueue(
-                        ctx,
-                        "wait-timed-deliver",
-                        handle,
-                        $"waiter={waiterId} delivered={deliveredCount} capacity={eventCapacity} " +
-                        $"timeout_usec={timeoutUsec}");
-                }
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-            }
-
-            if (_logEqueue)
-            {
-                TraceEventQueue(
-                    ctx,
-                    "wait-timeout",
-                    handle,
-                    $"waiter={waiterId} capacity={eventCapacity} timeout_usec={timeoutUsec}");
-            }
+        if (outcome == HostWaitOutcome.TimedOut)
+        {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
         }
 
-        if (_logEqueue)
-        {
-            TraceEventQueue(
-                ctx,
-                "wait",
-                handle,
-                $"waiter={waiterId} capacity={eventCapacity} timeout_usec={timeoutUsec}");
-        }
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return DeliverReservedEvents(ctx, events!, count, eventsAddress, outCountAddress);
     }
 
-    public static bool IsValidEqueue(ulong handle)
+    private enum HostWaitOutcome
     {
-        return TryGetLiveEventQueue(handle, out _);
+        Reserved,
+        TimedOut,
+        Deleted,
     }
 
-    private static bool TryGetLiveEventQueue(
-        ulong handle,
-        out EventQueueState state)
+    private static HostWaitOutcome HostWait(
+        Kqueue state,
+        long deadlineTimestamp,
+        int capacity,
+        out KernelQueuedEvent[]? events,
+        out int count)
+    {
+        events = null;
+        count = 0;
+        lock (state.Gate)
+        {
+            while (true)
+            {
+                if (state.Deleted)
+                {
+                    return HostWaitOutcome.Deleted;
+                }
+
+                if (state.Active.Count != 0)
+                {
+                    capacity = Math.Min(capacity, MaxEventsPerWait);
+                    events = ArrayPool<KernelQueuedEvent>.Shared.Rent(capacity);
+                    count = ReserveLocked(state, events, capacity);
+                    if (count != 0)
+                    {
+                        return HostWaitOutcome.Reserved;
+                    }
+
+                    ArrayPool<KernelQueuedEvent>.Shared.Return(events);
+                    events = null;
+                }
+
+                if (deadlineTimestamp == 0)
+                {
+                    Monitor.Wait(state.Gate);
+                    continue;
+                }
+
+                var remaining = deadlineTimestamp - System.Diagnostics.Stopwatch.GetTimestamp();
+                if (remaining <= 0)
+                {
+                    return HostWaitOutcome.TimedOut;
+                }
+
+                var milliseconds = Math.Max(1, (long)Math.Ceiling(
+                    remaining * 1000.0 / System.Diagnostics.Stopwatch.Frequency));
+                Monitor.Wait(state.Gate, (int)Math.Min(milliseconds, int.MaxValue));
+            }
+        }
+    }
+
+    public static bool IsValidEqueue(ulong handle) => TryGetLiveEventQueue(handle, out _);
+
+    private static bool TryGetLiveEventQueue(ulong handle, out Kqueue state)
     {
         lock (_eventQueueGate)
         {
-            return _eventQueues.TryGetValue(handle, out state!) &&
-                !state.Deleted;
+            return _eventQueues.TryGetValue(handle, out state!) && !state.Deleted;
         }
     }
 
-    private static bool IsLiveEventQueueLocked(EventQueueState state) =>
-        !state.Deleted &&
-        _eventQueues.TryGetValue(state.Handle, out var current) &&
-        ReferenceEquals(current, state);
+    private static bool IsLive(Kqueue state)
+    {
+        lock (state.Gate)
+        {
+            return !state.Deleted;
+        }
+    }
 
     private static ulong GetEventQueueRuntimeId(ICpuMemory memory)
     {
@@ -1017,135 +1007,261 @@ public static class KernelEventQueueCompatExports
         uint timeoutUsec) =>
         timeoutAddress != 0 && timeoutUsec == 0;
 
-    private static bool HasPendingEventsLocked(ulong handle) =>
-        _pendingEvents.TryGetValue(handle, out var events) &&
-        events.Count != 0;
+    // ---- Knote state machine (callers hold Kqueue.Gate) ----
 
-    private static void ScheduleHrTimer(HrTimerState timerState, long totalNanoseconds)
+    /// <summary>
+    /// The single trigger path: marks the knote active and queues it unless it is
+    /// disabled or already queued, then pulses host waiters. Callers wake guest
+    /// waiters with <see cref="Signal"/> after leaving the queue lock.
+    /// </summary>
+    private static void ActivateLocked(Kqueue state, Knote knote)
     {
-        if (totalNanoseconds < 1_200_000)
+        if (knote.Dropped)
         {
-            ThreadPool.UnsafeQueueUserWorkItem(
-                static state =>
-                {
-                    var (timer, nanoseconds) = ((HrTimerState Timer, long Nanoseconds))state!;
-                    global::SharpEmu.Libs.HostTiming.SleepMicroseconds((nanoseconds + 999) / 1000);
-                    FireHrTimer(timer);
-                },
-                (timerState, totalNanoseconds));
             return;
         }
 
-        var dueTime = TimeSpan.FromTicks(Math.Max(1, totalNanoseconds / 100));
-        timerState.Timer = new Timer(
-            static state => FireHrTimer((HrTimerState)state!),
-            timerState,
-            dueTime,
-            Timeout.InfiniteTimeSpan);
-    }
-
-    private static void FireHrTimer(HrTimerState timerState)
-    {
-        EventQueueState? equeueState = null;
-        lock (_eventQueueGate)
+        knote.Triggered = true;
+        if (!knote.Disabled && !knote.Queued)
         {
-            var key = (timerState.Handle, timerState.Id);
-            if (!_hrTimers.TryGetValue(key, out var current) ||
-                !ReferenceEquals(current, timerState) ||
-                !_eventQueues.TryGetValue(timerState.Handle, out var equeue) ||
-                equeue.Deleted)
-            {
-                return;
-            }
-
-            _hrTimers.Remove(key);
-            timerState.Timer?.Dispose();
-
-            var ident = unchecked((uint)timerState.Id);
-            if (_registeredEvents.TryGetValue(timerState.Handle, out var events))
-            {
-                events.Remove((ident, KernelEventFilterHrTimer));
-            }
-
-            if (!_pendingEvents.TryGetValue(timerState.Handle, out var pending))
-            {
-                pending = new KernelEventDeque();
-                _pendingEvents[timerState.Handle] = pending;
-            }
-
-            pending.AddLast(new KernelQueuedEvent(
-                ident,
-                KernelEventFilterHrTimer,
-                (ushort)(KernelEventFlagOneShot | KernelEventFlagClear),
-                0,
-                1,
-                timerState.UserData));
-            Monitor.PulseAll(_eventQueueGate);
-            equeueState = equeue;
+            state.Active.AddLast(knote);
+            knote.Queued = true;
         }
 
-        WakeEventQueue(
-            equeueState,
-            _logEqueue
-                ? $"source=hrtimer ident=0x{unchecked((uint)timerState.Id):X16}"
-                : null);
+        Monitor.PulseAll(state.Gate);
     }
 
-    private static void CancelHrTimersLocked(ulong handle)
+    private static void DeactivateLocked(Kqueue state, Knote knote)
     {
-        var keys = _hrTimers.Keys
-            .Where(key => key.Handle == handle)
-            .ToArray();
-        foreach (var key in keys)
+        knote.Triggered = false;
+        if (knote.Queued)
         {
-            if (_hrTimers.Remove(key, out var timerState))
-            {
-                timerState.Timer?.Dispose();
-            }
+            state.Active.Remove(knote);
+            knote.Queued = false;
         }
     }
 
-    public static bool EnqueueEvent(ulong handle, KernelQueuedEvent queuedEvent)
+    private static void ResetPendingLocked(Knote knote)
     {
-        EventQueueState state;
-        lock (_eventQueueGate)
+        knote.Triggered = false;
+        knote.Data = 0;
+        knote.Fflags = 0;
+        knote.StatusFlags = 0;
+        knote.Occurrences?.Clear();
+    }
+
+    // Removes the knote from its queue. Sources (timers, watches, descriptor
+    // arming) are released by DetachKnoteSources outside the queue lock.
+    private static void DropKnoteLocked(Kqueue state, Knote knote)
+    {
+        if (knote.Dropped)
         {
-            if (!_eventQueues.TryGetValue(handle, out state!) ||
-                state.Deleted)
+            return;
+        }
+
+        knote.Dropped = true;
+        if (knote.Queued)
+        {
+            state.Active.Remove(knote);
+            knote.Queued = false;
+        }
+
+        if (state.Knotes.TryGetValue((knote.Ident, knote.Filter), out var current) &&
+            ReferenceEquals(current, knote))
+        {
+            state.Knotes.Remove((knote.Ident, knote.Filter));
+        }
+    }
+
+    private static void DetachKnoteSources(Knote knote)
+    {
+        if (Interlocked.Exchange(ref knote.TimerToken, null) is IDisposable timer)
+        {
+            timer.Dispose();
+        }
+
+        Interlocked.Exchange(ref knote.Watch, null)?.Dispose();
+        if (knote.Filter is KernelEventFilterRead or KernelEventFilterWrite or KernelEventFilterVnode)
+        {
+            UnindexDescriptorKnote(knote);
+        }
+    }
+
+    private static void SetEnabledLocked(Kqueue state, Knote knote, bool enabled)
+    {
+        if (!enabled)
+        {
+            knote.Disabled = true;
+            if (knote.Queued)
+            {
+                state.Active.Remove(knote);
+                knote.Queued = false;
+            }
+
+            return;
+        }
+
+        knote.Disabled = false;
+        if (knote.Triggered && !knote.Queued)
+        {
+            state.Active.AddLast(knote);
+            knote.Queued = true;
+            Monitor.PulseAll(state.Gate);
+        }
+    }
+
+    /// <summary>
+    /// kqueue_scan: reports each active knote at most once per call, in trigger
+    /// order, then applies EV_ONESHOT (drop), EV_DISPATCH (disable), EV_CLEAR
+    /// (reset) or level semantics (requeue at the tail).
+    /// </summary>
+    private static int ReserveLocked(Kqueue state, Span<KernelQueuedEvent> events, int capacity)
+    {
+        var count = 0;
+        var budget = state.Active.Count;
+        List<Knote>? detached = null;
+        while (count < capacity && budget-- > 0 && state.Active.Head is { } knote)
+        {
+            state.Active.Remove(knote);
+            knote.Queued = false;
+            if (knote.Dropped || knote.Disabled || !knote.Triggered)
+            {
+                continue;
+            }
+
+            var flags = (ushort)((knote.Flags & PersistentFlagMask) | knote.StatusFlags);
+            if (knote.Transient)
+            {
+                events[count++] = knote.Injected;
+                DropKnoteLocked(state, knote);
+                continue;
+            }
+
+            if (knote.Occurrences is { Count: > 0 } ring)
+            {
+                while (count < capacity && ring.Count > 0)
+                {
+                    var occurrence = ring.Pop();
+                    events[count++] = new KernelQueuedEvent(
+                        knote.Ident,
+                        knote.Filter,
+                        flags,
+                        occurrence.Count,
+                        occurrence.Data,
+                        knote.UserData);
+                }
+
+                if (ring.Count > 0)
+                {
+                    state.Active.AddLast(knote);
+                    knote.Queued = true;
+                    continue;
+                }
+            }
+            else
+            {
+                events[count++] = new KernelQueuedEvent(
+                    knote.Ident,
+                    knote.Filter,
+                    flags,
+                    knote.Fflags,
+                    knote.Data,
+                    knote.UserData);
+            }
+
+            if ((knote.Flags & KernelEventFlagOneShot) != 0)
+            {
+                DropKnoteLocked(state, knote);
+                (detached ??= []).Add(knote);
+                continue;
+            }
+
+            if ((knote.Flags & KernelEventFlagDispatch) != 0)
+            {
+                knote.Disabled = true;
+            }
+
+            if ((knote.Flags & KernelEventFlagClear) != 0)
+            {
+                ResetPendingLocked(knote);
+                OnClearedLocked(state, knote);
+                continue;
+            }
+
+            if (!knote.Disabled)
+            {
+                state.Active.AddLast(knote);
+                knote.Queued = true;
+            }
+        }
+
+        if (detached is not null)
+        {
+            // Releasing a timer only flags it cancelled; no lock is taken.
+            foreach (var knote in detached)
+            {
+                if (Interlocked.Exchange(ref knote.TimerToken, null) is IDisposable timer)
+                {
+                    timer.Dispose();
+                }
+            }
+        }
+
+        return count;
+    }
+
+    private static bool TryReserveEvents(
+        Kqueue state,
+        int eventCapacity,
+        out KernelQueuedEvent[] events,
+        out int count,
+        out bool deleted)
+    {
+        events = null!;
+        count = 0;
+        deleted = false;
+        lock (state.Gate)
+        {
+            if (state.Deleted)
+            {
+                deleted = true;
+                return false;
+            }
+
+            if (state.Active.Count == 0)
             {
                 return false;
             }
 
-            if (!_pendingEvents.TryGetValue(handle, out var queue))
+            var capacity = Math.Min(eventCapacity, MaxEventsPerWait);
+            var rented = ArrayPool<KernelQueuedEvent>.Shared.Rent(capacity);
+            count = ReserveLocked(state, rented, capacity);
+            if (count == 0)
             {
-                queue = new KernelEventDeque();
-                _pendingEvents[handle] = queue;
+                ArrayPool<KernelQueuedEvent>.Shared.Return(rented);
+                return false;
             }
 
-            queue.AddLast(queuedEvent);
-            Monitor.PulseAll(_eventQueueGate);
+            events = rented;
+            return true;
+        }
+    }
+
+    /// <summary>Wakes every waiter of the queue: guest threads by wake key.</summary>
+    private static void Signal(Kqueue state, string? detail = null)
+    {
+        if (_logEqueue)
+        {
+            TraceEventQueueHost(
+                "wake",
+                state.Handle,
+                $"generation={state.Generation}" + (detail is null ? string.Empty : $" {detail}"));
         }
 
-        WakeEventQueue(
-            state,
-            _logEqueue
-                ? $"source=enqueue ident=0x{queuedEvent.Ident:X16} " +
-                  $"filter={queuedEvent.Filter} data=0x{queuedEvent.Data:X16}"
-                : null);
-
-        return true;
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(state.WakeKey);
     }
 
-    internal static bool TriggerAmprEvent(ulong handle, ulong ident, ulong data)
-    {
-        return TriggerRegisteredEvent(
-            handle,
-            ident,
-            KernelEventFilterAmpr,
-            0,
-            data,
-            preserveRegisteredUserData: true);
-    }
+    // ---- Registration API used by the other libraries ----
 
     public static bool RegisterEvent(
         ulong handle,
@@ -1155,46 +1271,214 @@ public static class KernelEventQueueCompatExports
         ushort flags = KernelEventFlagClear,
         ulong lowWater = 0)
     {
-        lock (_eventQueueGate)
+        if (!TryGetLiveEventQueue(handle, out var state))
         {
-            if (!_eventQueues.TryGetValue(handle, out var state) ||
-                state.Deleted)
+            return false;
+        }
+
+        Knote knote;
+        lock (state.Gate)
+        {
+            if (state.Deleted)
             {
                 return false;
             }
 
-            if (!_registeredEvents.TryGetValue(handle, out var events))
+            knote = AttachOrUpdateLocked(state, ident, filter, userData, flags, sfflags: 0, lowWater, out _);
+        }
+
+        if (filter is KernelEventFilterRead or KernelEventFilterWrite)
+        {
+            IndexDescriptorKnote(knote);
+            RefreshDescriptorKnote(knote);
+        }
+
+        return true;
+    }
+
+    // kqueue_register for EV_ADD: a new knote takes the persistent flags; an
+    // existing one keeps its flags and pending state and takes the new udata,
+    // sfflags and sdata.
+    private static Knote AttachOrUpdateLocked(
+        Kqueue state,
+        ulong ident,
+        short filter,
+        ulong userData,
+        ushort flags,
+        uint sfflags,
+        ulong sdata,
+        out bool created)
+    {
+        var key = (ident, filter);
+        if (state.Knotes.TryGetValue(key, out var knote) && !knote.Transient)
+        {
+            knote.UserData = userData;
+            knote.SFflags = sfflags;
+            knote.SData = sdata;
+            created = false;
+            return knote;
+        }
+
+        if (knote is not null)
+        {
+            DropKnoteLocked(state, knote);
+        }
+
+        knote = new Knote(state, ident, filter)
+        {
+            Flags = (ushort)(flags & PersistentFlagMask),
+            UserData = userData,
+            SFflags = sfflags,
+            SData = sdata,
+        };
+        if (filter == KernelEventFilterGraphics)
+        {
+            knote.Occurrences = new OccurrenceRing();
+        }
+
+        state.Knotes[key] = knote;
+        created = true;
+        return knote;
+    }
+
+    public static bool DeleteRegisteredEvent(
+        ulong handle,
+        ulong ident,
+        short filter)
+    {
+        if (!TryGetLiveEventQueue(handle, out var state))
+        {
+            return false;
+        }
+
+        Knote? knote;
+        lock (state.Gate)
+        {
+            if (!state.Knotes.TryGetValue((ident, filter), out knote))
             {
-                events = new Dictionary<(ulong Ident, short Filter), KernelEventRegistration>();
-                _registeredEvents[handle] = events;
+                return false;
             }
 
-            var key = (ident, filter);
-            var isExistingRegistration = events.ContainsKey(key);
-            var isNewReadRegistration =
-                filter == KernelEventFilterRead &&
-                !isExistingRegistration;
-            events[(ident, filter)] = new KernelEventRegistration(
-                ident,
-                filter,
-                userData,
-                flags,
-                lowWater,
-                unchecked((ulong)Interlocked.Increment(
-                    ref _nextEventRegistrationGeneration)));
-            if (isExistingRegistration &&
-                _pendingEvents.TryGetValue(handle, out var pending))
-            {
-                _ = pending.UpdateUserData(ident, filter, userData);
-            }
-            if (isNewReadRegistration)
-            {
-                _readEventRegistrationCount++;
-                UpdateReadEventPollTimerLocked();
-            }
-            return true;
+            DropKnoteLocked(state, knote);
         }
+
+        DetachKnoteSources(knote);
+        return true;
     }
+
+    /// <summary>
+    /// Applies <paramref name="update"/> to the knote (ident, filter) of one queue
+    /// and activates it when the update reports an occurrence.
+    /// </summary>
+    private static bool TriggerKnote<TArg>(
+        ulong handle,
+        ulong ident,
+        short filter,
+        Func<Knote, TArg, bool> update,
+        TArg argument)
+    {
+        if (!TryGetLiveEventQueue(handle, out var state))
+        {
+            return false;
+        }
+
+        lock (state.Gate)
+        {
+            if (state.Deleted ||
+                !state.Knotes.TryGetValue((ident, filter), out var knote) ||
+                knote.Transient)
+            {
+                return false;
+            }
+
+            if (update(knote, argument))
+            {
+                ActivateLocked(state, knote);
+            }
+        }
+
+        Signal(state, _logEqueue ? $"source=trigger ident=0x{ident:X16} filter={filter}" : null);
+        return true;
+    }
+
+    // Next-state function shared by the interrupt-style filters: graphics keeps
+    // each occurrence, the others keep the newest data (AMPR, display hints).
+    private static void ApplyDataTriggerLocked(Knote knote, ulong data)
+    {
+        if (knote.Occurrences is { } ring)
+        {
+            ring.Push(data);
+            return;
+        }
+
+        knote.Data = data;
+    }
+
+    /// <summary>
+    /// Injects a raw event. A registered knote for (ident, filter) takes its data,
+    /// fflags and udata; otherwise a transient knote delivers the event exactly
+    /// once. A second injection before delivery replaces the first.
+    /// </summary>
+    public static bool EnqueueEvent(ulong handle, KernelQueuedEvent queuedEvent)
+    {
+        if (!TryGetLiveEventQueue(handle, out var state))
+        {
+            return false;
+        }
+
+        lock (state.Gate)
+        {
+            if (state.Deleted)
+            {
+                return false;
+            }
+
+            var key = (queuedEvent.Ident, queuedEvent.Filter);
+            if (!state.Knotes.TryGetValue(key, out var knote) || knote.Transient)
+            {
+                if (knote is null)
+                {
+                    knote = new Knote(state, queuedEvent.Ident, queuedEvent.Filter) { Transient = true };
+                    state.Knotes[key] = knote;
+                }
+
+                knote.Injected = queuedEvent;
+            }
+            else
+            {
+                ApplyDataTriggerLocked(knote, queuedEvent.Data);
+                knote.Fflags = queuedEvent.Fflags;
+                knote.UserData = queuedEvent.UserData;
+            }
+
+            ActivateLocked(state, knote);
+        }
+
+        Signal(
+            state,
+            _logEqueue
+                ? $"source=enqueue ident=0x{queuedEvent.Ident:X16} filter={queuedEvent.Filter} data=0x{queuedEvent.Data:X16}"
+                : null);
+        return true;
+    }
+
+    /// <summary>
+    /// Completes an AMPR kernel-event command. Only a knote registered with
+    /// sceKernelAddAmprEvent receives it: it keeps its registered udata and takes
+    /// the command's data. An unregistered (queue, id) is reported to the caller,
+    /// which fails the command with NOT_FOUND.
+    /// </summary>
+    internal static bool TriggerAmprEvent(ulong handle, ulong ident, ulong data) =>
+        TriggerKnote(
+            handle,
+            ident,
+            KernelEventFilterAmpr,
+            static (knote, data) =>
+            {
+                knote.Data = data;
+                return true;
+            },
+            data);
 
     /// <summary>
     /// Captures the exact lifetime of every matching registration owned by one
@@ -1210,32 +1494,32 @@ public static class KernelEventQueueCompatExports
         ArgumentNullException.ThrowIfNull(memory);
         var runtimeId = GetEventQueueRuntimeId(memory);
         List<KernelEventRegistrationToken>? targets = null;
-        lock (_eventQueueGate)
+        foreach (var state in Volatile.Read(ref _eventQueueSnapshot))
         {
-            foreach (var (handle, registrations) in _registeredEvents)
+            if (state.RuntimeId != runtimeId)
             {
-                if (!_eventQueues.TryGetValue(handle, out var state) ||
-                    state.Deleted ||
-                    state.RuntimeId != runtimeId ||
-                    !registrations.TryGetValue((ident, filter), out var registration))
+                continue;
+            }
+
+            lock (state.Gate)
+            {
+                if (state.Deleted ||
+                    !state.Knotes.TryGetValue((ident, filter), out var knote) ||
+                    knote.Transient)
                 {
                     continue;
                 }
 
                 (targets ??= []).Add(new KernelEventRegistrationToken(
-                    handle,
+                    state.Handle,
                     state.Generation,
-                    registration.Ident,
-                    registration.Filter,
-                    registration.Generation));
+                    knote.Ident,
+                    knote.Filter,
+                    knote.Generation));
             }
         }
 
-        return new KernelEventRegistrationSnapshot(
-            runtimeId,
-            ident,
-            filter,
-            targets?.ToArray() ?? []);
+        return new KernelEventRegistrationSnapshot(runtimeId, ident, filter, targets?.ToArray() ?? []);
     }
 
     /// <summary>
@@ -1247,320 +1531,91 @@ public static class KernelEventQueueCompatExports
         ulong data)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        HashSet<EventQueueState>? wakeQueues = null;
         var triggeredCount = 0;
         var staleCount = 0;
-        lock (_eventQueueGate)
+        foreach (var target in snapshot.Targets)
         {
-            foreach (var target in snapshot.Targets)
+            Kqueue? state;
+            lock (_eventQueueGate)
             {
-                if (!_eventQueues.TryGetValue(
-                        target.EqueueHandle,
-                        out var state) ||
-                    state.Deleted ||
-                    state.Generation != target.EqueueGeneration ||
-                    state.RuntimeId != snapshot.RuntimeId ||
-                    !_registeredEvents.TryGetValue(
-                        target.EqueueHandle,
-                        out var registrations) ||
-                    !registrations.TryGetValue(
-                        (target.Ident, target.Filter),
-                        out var registration) ||
-                    registration.Generation != target.Generation)
-                {
-                    staleCount++;
-                    continue;
-                }
-
-                if (!_pendingEvents.TryGetValue(
-                        target.EqueueHandle,
-                        out var queue))
-                {
-                    queue = new KernelEventDeque();
-                    _pendingEvents[target.EqueueHandle] = queue;
-                }
-
-                QueueOrUpdateEvent(
-                    queue,
-                    new KernelQueuedEvent(
-                        registration.Ident,
-                        registration.Filter,
-                        registration.Flags,
-                        1,
-                        data,
-                        registration.UserData));
-                (wakeQueues ??= []).Add(state);
-                triggeredCount++;
+                _ = _eventQueues.TryGetValue(target.EqueueHandle, out state);
             }
-        }
 
-        if (wakeQueues is not null)
-        {
-            foreach (var state in wakeQueues)
+            var triggered = false;
+            if (state is not null &&
+                state.Generation == target.EqueueGeneration &&
+                state.RuntimeId == snapshot.RuntimeId)
             {
-                WakeEventQueue(
-                    state,
-                    _logEqueue
-                        ? $"source=trigger-captured ident=0x{snapshot.Ident:X16} " +
-                          $"filter={snapshot.Filter} data=0x{data:X16}"
-                        : null);
+                lock (state.Gate)
+                {
+                    if (!state.Deleted &&
+                        state.Knotes.TryGetValue((target.Ident, target.Filter), out var knote) &&
+                        knote.Generation == target.Generation)
+                    {
+                        ApplyDataTriggerLocked(knote, data);
+                        ActivateLocked(state, knote);
+                        triggered = true;
+                    }
+                }
             }
+
+            if (!triggered)
+            {
+                staleCount++;
+                continue;
+            }
+
+            triggeredCount++;
+            Signal(
+                state!,
+                _logEqueue
+                    ? $"source=trigger-captured ident=0x{snapshot.Ident:X16} filter={snapshot.Filter} data=0x{data:X16}"
+                    : null);
         }
 
         return new CapturedEventDeliveryResult(triggeredCount, staleCount);
     }
 
-    public static bool DeleteRegisteredEvent(
-        ulong handle,
-        ulong ident,
-        short filter)
-    {
-        lock (_eventQueueGate)
-        {
-            if (!_registeredEvents.TryGetValue(handle, out var events) ||
-                !events.Remove((ident, filter), out var registration))
-            {
-                return false;
-            }
-
-            if (registration.Filter == KernelEventFilterRead)
-            {
-                _readEventRegistrationCount--;
-                UpdateReadEventPollTimerLocked();
-            }
-
-            if (_pendingEvents.TryGetValue(handle, out var pending))
-            {
-                _ = pending.RemoveAll(ident, filter);
-            }
-
-            return true;
-        }
-    }
-
-    public static int TriggerRegisteredEvents(
-        ulong ident,
-        short filter,
-        ulong data)
-    {
-        List<EventQueueState>? wakeQueues = null;
-        var triggeredCount = 0;
-        lock (_eventQueueGate)
-        {
-            foreach (var (handle, registrations) in _registeredEvents)
-            {
-                if (!_eventQueues.TryGetValue(handle, out var state) ||
-                    state.Deleted ||
-                    !registrations.TryGetValue((ident, filter), out var registration))
-                {
-                    continue;
-                }
-
-                if (!_pendingEvents.TryGetValue(handle, out var queue))
-                {
-                    queue = new KernelEventDeque();
-                    _pendingEvents[handle] = queue;
-                }
-
-                QueueOrUpdateEvent(
-                    queue,
-                    new KernelQueuedEvent(
-                        registration.Ident,
-                        registration.Filter,
-                        registration.Flags,
-                        1,
-                        data,
-                        registration.UserData));
-                (wakeQueues ??= []).Add(state);
-                triggeredCount++;
-            }
-        }
-
-        if (wakeQueues is not null)
-        {
-            foreach (var state in wakeQueues)
-            {
-                WakeEventQueue(
-                    state,
-                    _logEqueue
-                        ? $"source=trigger ident=0x{ident:X16} filter={filter} data=0x{data:X16}"
-                        : null);
-            }
-        }
-
-        return triggeredCount;
-    }
-
-    // Add one event to each queue that registered this filter and identifier.
+    /// <summary>
+    /// Raises one occurrence of (ident, filter) on every queue that registered
+    /// it (the AGC end-of-pipe interrupt). Each occurrence keeps its own data;
+    /// see <see cref="MaxPendingOccurrencesPerKnote"/> for the bound.
+    /// </summary>
     public static int TriggerRegisteredEventsByFilter(
         short filter,
         ulong data,
         ulong ident)
     {
-        List<EventQueueState>? wakeQueues = null;
         var triggeredCount = 0;
-        lock (_eventQueueGate)
+        foreach (var state in Volatile.Read(ref _eventQueueSnapshot))
         {
-            foreach (var (handle, registrations) in _registeredEvents)
+            lock (state.Gate)
             {
-                if (!_eventQueues.TryGetValue(handle, out var state) ||
-                    state.Deleted)
+                if (state.Deleted ||
+                    !state.Knotes.TryGetValue((ident, filter), out var knote) ||
+                    knote.Transient)
                 {
                     continue;
                 }
 
-                foreach (var registration in registrations.Values)
-                {
-                    if (registration.Filter != filter || registration.Ident != ident)
-                    {
-                        continue;
-                    }
-
-                    if (!_pendingEvents.TryGetValue(handle, out var queue))
-                    {
-                        queue = new KernelEventDeque();
-                        _pendingEvents[handle] = queue;
-                    }
-
-                    queue.AddLast(new KernelQueuedEvent(
-                        registration.Ident,
-                        registration.Filter,
-                        registration.Flags,
-                        1,
-                        data,
-                        registration.UserData));
-
-                    (wakeQueues ??= []).Add(state);
-                    triggeredCount++;
-
-                    // Wake a queue one time for this trigger.
-                    break;
-                }
+                ApplyDataTriggerLocked(knote, data);
+                ActivateLocked(state, knote);
             }
-        }
 
-        if (wakeQueues is not null)
-        {
-            foreach (var state in wakeQueues)
-            {
-                WakeEventQueue(
-                    state,
-                    _logEqueue
-                        ? $"source=trigger-filter filter={filter} data=0x{data:X16}"
-                        : null);
-            }
+            triggeredCount++;
+            Signal(state, _logEqueue ? $"source=trigger-filter filter={filter} data=0x{data:X16}" : null);
         }
 
         return triggeredCount;
     }
 
     /// <summary>
-    /// Queues one event for every registration using <paramref name="filter"/>.
-    /// Unlike <see cref="TriggerRegisteredEvents"/>, this preserves distinct
-    /// event identifiers registered on the same queue. AGC driver completion
-    /// queues use this form because the driver, rather than a packet-provided
-    /// identifier, announces that the whole submission reached end-of-pipe.
+    /// Raises a VideoOut event. Data packs the low timestamp bits (0-11), the
+    /// number of occurrences since the last delivery (12-15, saturating at 15)
+    /// and the payload hint (16-63). A queue without a knote for the event gets
+    /// one attached with EV_CLEAR, so VideoOut registrations made before the
+    /// queue learned of them still deliver.
     /// </summary>
-    public static int TriggerRegisteredEventsDistinct(short filter)
-    {
-        HashSet<EventQueueState>? wakeQueues = null;
-        var triggeredCount = 0;
-        lock (_eventQueueGate)
-        {
-            foreach (var (handle, registrations) in _registeredEvents)
-            {
-                if (!_eventQueues.TryGetValue(handle, out var state) ||
-                    state.Deleted)
-                {
-                    continue;
-                }
-
-                foreach (var registration in registrations.Values)
-                {
-                    if (registration.Filter != filter)
-                    {
-                        continue;
-                    }
-
-                    if (!_pendingEvents.TryGetValue(handle, out var queue))
-                    {
-                        queue = new KernelEventDeque();
-                        _pendingEvents[handle] = queue;
-                    }
-
-                    QueueOrUpdateEvent(
-                        queue,
-                        new KernelQueuedEvent(
-                            registration.Ident,
-                            registration.Filter,
-                            registration.Flags,
-                            1,
-                            registration.Ident,
-                            registration.UserData));
-                    (wakeQueues ??= []).Add(state);
-                    triggeredCount++;
-                }
-            }
-        }
-
-        if (wakeQueues is not null)
-        {
-            foreach (var state in wakeQueues)
-            {
-                WakeEventQueue(
-                    state,
-                    _logEqueue ? $"source=trigger-distinct filter={filter}" : null);
-            }
-        }
-
-        return triggeredCount;
-    }
-
-    private static bool TriggerRegisteredEvent(
-        ulong handle,
-        ulong ident,
-        short filter,
-        ulong userData,
-        ulong data = 0,
-        bool preserveRegisteredUserData = false)
-    {
-        EventQueueState state;
-        lock (_eventQueueGate)
-        {
-            if (!_eventQueues.TryGetValue(handle, out state!) ||
-                state.Deleted ||
-                !_registeredEvents.TryGetValue(handle, out var registrations) ||
-                !registrations.TryGetValue((ident, filter), out var registration))
-            {
-                return false;
-            }
-
-            if (!_pendingEvents.TryGetValue(handle, out var queue))
-            {
-                queue = new KernelEventDeque();
-                _pendingEvents[handle] = queue;
-            }
-
-            QueueOrUpdateEvent(
-                queue,
-                new KernelQueuedEvent(
-                    registration.Ident,
-                    registration.Filter,
-                    registration.Flags,
-                    0,
-                    data,
-                    preserveRegisteredUserData ? registration.UserData : userData));
-        }
-
-        WakeEventQueue(
-            state,
-            _logEqueue
-                ? $"source=trigger-one ident=0x{ident:X16} filter={filter} " +
-                  $"user_data=0x{userData:X16}"
-                : null);
-        return true;
-    }
-
     public static bool TriggerDisplayEvent(
         ulong handle,
         ulong ident,
@@ -1568,54 +1623,35 @@ public static class KernelEventQueueCompatExports
         ulong eventHint,
         ulong userData)
     {
-        EventQueueState state;
-        lock (_eventQueueGate)
+        if (!TryGetLiveEventQueue(handle, out var state))
         {
-            if (!_eventQueues.TryGetValue(handle, out state!) ||
-                state.Deleted)
+            return false;
+        }
+
+        lock (state.Gate)
+        {
+            if (state.Deleted)
             {
                 return false;
             }
 
-            if (!_pendingEvents.TryGetValue(handle, out var events))
+            if (!state.Knotes.TryGetValue((ident, filter), out var knote) || knote.Transient)
             {
-                events = new KernelEventDeque();
-                _pendingEvents[handle] = events;
+                knote = AttachOrUpdateLocked(state, ident, filter, userData, KernelEventFlagClear, 0, 0, out _);
             }
 
-            var count = 1UL;
-            var pendingIndex = events.FindIndex(ident, filter);
-            if (pendingIndex >= 0)
-            {
-                count = Math.Min(((events[pendingIndex].Data >> 12) & 0xFUL) + 1, 0xFUL);
-            }
-
+            var count = knote.Triggered
+                ? Math.Min(((knote.Data >> 12) & 0xFUL) + 1, 0xFUL)
+                : 1UL;
             var timeBits = unchecked((ulong)Environment.TickCount64) & 0xFFFUL;
-            var eventData = timeBits | (count << 12) | (eventHint & 0xFFFF_FFFF_FFFF_0000UL);
-            var triggeredEvent = new KernelQueuedEvent(
-                ident,
-                filter,
-                0x20,
-                0,
-                eventData,
-                userData);
-
-            if (pendingIndex >= 0)
-            {
-                events[pendingIndex] = triggeredEvent;
-            }
-            else
-            {
-                events.AddLast(triggeredEvent);
-            }
+            knote.Data = timeBits | (count << 12) | (eventHint & 0xFFFF_FFFF_FFFF_0000UL);
+            knote.UserData = userData;
+            ActivateLocked(state, knote);
         }
 
-        WakeEventQueue(
+        Signal(
             state,
-            _logEqueue
-                ? $"source=display ident=0x{ident:X16} filter={filter} hint=0x{eventHint:X16}"
-                : null);
-
+            _logEqueue ? $"source=display ident=0x{ident:X16} filter={filter} hint=0x{eventHint:X16}" : null);
         return true;
     }
 
@@ -1656,241 +1692,14 @@ public static class KernelEventQueueCompatExports
         }
     }
 
-    private static void PollReadEvents(object? state)
-    {
-        _ = state;
-        if (Interlocked.Exchange(ref _readEventPollActive, 1) != 0)
-        {
-            return;
-        }
-
-        try
-        {
-            RefreshReadEvents(handle: null);
-        }
-        finally
-        {
-            Volatile.Write(ref _readEventPollActive, 0);
-        }
-    }
-
-    private static void RefreshReadEvents(ulong? handle)
-    {
-        List<ReadEventPollTarget>? targets = null;
-        lock (_eventQueueGate)
-        {
-            if (_readEventRegistrationCount == 0)
-            {
-                return;
-            }
-
-            foreach (var (equeueHandle, registrations) in _registeredEvents)
-            {
-                if (handle.HasValue && equeueHandle != handle.Value)
-                {
-                    continue;
-                }
-
-                if (!_eventQueues.TryGetValue(equeueHandle, out var state) ||
-                    state.Deleted)
-                {
-                    continue;
-                }
-
-                foreach (var registration in registrations.Values)
-                {
-                    if (registration.Filter != KernelEventFilterRead)
-                    {
-                        continue;
-                    }
-
-                    (targets ??= []).Add(new ReadEventPollTarget(
-                        equeueHandle,
-                        state.Generation,
-                        unchecked((int)registration.Ident),
-                        registration.UserData,
-                        Math.Max(1UL, registration.LowWater),
-                        registration.Generation));
-                }
-            }
-        }
-
-        if (targets is null)
-        {
-            return;
-        }
-
-        foreach (var target in targets)
-        {
-            var exists = TryGetDescriptorReadiness(
-                target.FileDescriptor,
-                target.LowWater,
-                out var ready,
-                out var availableBytes,
-                out var eventFlags);
-            EventQueueState? wakeState = null;
-            lock (_eventQueueGate)
-            {
-                if (!_eventQueues.TryGetValue(target.EqueueHandle, out var state) ||
-                    state.Deleted ||
-                    state.Generation != target.EqueueGeneration ||
-                    !_registeredEvents.TryGetValue(
-                        target.EqueueHandle,
-                        out var registrations) ||
-                    !registrations.TryGetValue(
-                        (unchecked((uint)target.FileDescriptor), KernelEventFilterRead),
-                        out var registration) ||
-                    registration.Generation != target.RegistrationGeneration)
-                {
-                    continue;
-                }
-
-                if (!exists)
-                {
-                    registrations.Remove((registration.Ident, registration.Filter));
-                    _readEventRegistrationCount--;
-                    if (_pendingEvents.TryGetValue(target.EqueueHandle, out var staleQueue))
-                    {
-                        _ = staleQueue.Remove(registration.Ident, registration.Filter);
-                    }
-                    UpdateReadEventPollTimerLocked();
-                    continue;
-                }
-
-                if (!ready)
-                {
-                    if (_pendingEvents.TryGetValue(target.EqueueHandle, out var inactiveQueue))
-                    {
-                        _ = inactiveQueue.Remove(registration.Ident, registration.Filter);
-                    }
-                    continue;
-                }
-
-                if (!_pendingEvents.TryGetValue(target.EqueueHandle, out var queue))
-                {
-                    queue = new KernelEventDeque();
-                    _pendingEvents[target.EqueueHandle] = queue;
-                }
-
-                QueueOrUpdateEvent(
-                    queue,
-                    new KernelQueuedEvent(
-                        registration.Ident,
-                        registration.Filter,
-                        eventFlags,
-                        0,
-                        availableBytes,
-                        registration.UserData));
-                Monitor.PulseAll(_eventQueueGate);
-                wakeState = state;
-            }
-
-            if (wakeState is not null)
-            {
-                WakeEventQueue(
-                    wakeState,
-                    _logEqueue
-                        ? $"source=read-ready fd={target.FileDescriptor} " +
-                          $"available={availableBytes} flags=0x{eventFlags:X4}"
-                        : null);
-            }
-        }
-    }
-
-    private static bool TryGetDescriptorReadiness(
-        int fileDescriptor,
-        ulong lowWater,
-        out bool ready,
-        out ulong availableBytes,
-        out ushort eventFlags)
-    {
-        if (KernelSocketCompatExports.TryGetReadEventState(
-                fileDescriptor,
-                lowWater,
-                out ready,
-                out availableBytes,
-                out eventFlags) ||
-            KernelMemoryCompatExports.TryGetFileReadEventState(
-                fileDescriptor,
-                lowWater,
-                out ready,
-                out availableBytes,
-                out eventFlags) ||
-            NetExports.TryGetReadEventState(
-                fileDescriptor,
-                lowWater,
-                out ready,
-                out availableBytes,
-                out eventFlags))
-        {
-            return true;
-        }
-
-        ready = false;
-        availableBytes = 0;
-        eventFlags = 0;
-        return false;
-    }
-
-    private static void UpdateReadEventPollTimerLocked()
-    {
-        var period = _readEventRegistrationCount > 0
-            ? ReadEventPollPeriodMilliseconds
-            : Timeout.Infinite;
-        _readEventPollTimer.Change(period, period);
-    }
-
-    private static void QueueOrUpdateEvent(
-        KernelEventDeque queue,
-        KernelQueuedEvent queuedEvent)
-    {
-        var pendingIndex = queue.FindIndex(queuedEvent.Ident, queuedEvent.Filter);
-        if (pendingIndex < 0)
-        {
-            queue.AddLast(queuedEvent);
-            return;
-        }
-
-        queue[pendingIndex] = queuedEvent.Filter is KernelEventFilterUser or KernelEventFilterRead
-            ? queuedEvent
-            : queuedEvent with
-        {
-            Fflags = Math.Max(queue[pendingIndex].Fflags + 1, queuedEvent.Fflags),
-        };
-    }
-
-    private static void WakeEventQueue(
-        EventQueueState state,
-        string? detail = null)
-    {
-        if (_logEqueue)
-        {
-            TraceEventQueueHost(
-                "wake",
-                state.Handle,
-                $"generation={state.Generation}" +
-                (detail is null ? string.Empty : $" {detail}"));
-        }
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(state.WakeKey);
-    }
-
     private static int DequeueEvents(
         CpuContext ctx,
-        EventQueueState state,
+        Kqueue state,
         ulong eventsAddress,
         int eventCapacity)
     {
-        if (eventsAddress == 0 || eventCapacity <= 0)
-        {
-            return 0;
-        }
-
-        if (!TryReserveEvents(
-                state,
-                eventCapacity,
-                out var events,
-                out var count,
-                out _))
+        if (eventsAddress == 0 || eventCapacity <= 0 ||
+            !TryReserveEvents(state, eventCapacity, out var events, out var count, out _))
         {
             return 0;
         }
@@ -1917,75 +1726,16 @@ public static class KernelEventQueueCompatExports
         return deliveredCount;
     }
 
-    private static bool TryReserveEvents(
-        EventQueueState state,
-        int eventCapacity,
-        out KernelQueuedEvent[] events,
-        out int count,
-        out bool deleted)
-    {
-        events = null!;
-        count = 0;
-        deleted = false;
-        lock (_eventQueueGate)
-        {
-            if (!IsLiveEventQueueLocked(state))
-            {
-                deleted = true;
-                return false;
-            }
-
-            if (!_pendingEvents.TryGetValue(state.Handle, out var queue) ||
-                queue.Count == 0)
-            {
-                return false;
-            }
-
-            count = Math.Min(eventCapacity, queue.Count);
-            events = ArrayPool<KernelQueuedEvent>.Shared.Rent(count);
-            for (var i = 0; i < count; i++)
-            {
-                events[i] = queue.RemoveFirst();
-            }
-
-            // Level-triggered events remain ready until their registration is
-            // deleted or their source clears. EV_CLEAR events model edges and
-            // are consumed by this delivery.
-            for (var i = 0; i < count; i++)
-            {
-                if ((events[i].Flags & KernelEventFlagClear) == 0)
-                {
-                    queue.AddLast(events[i]);
-                }
-            }
-        }
-
-        return true;
-    }
-
-    internal static int ReservePendingEventCountForTest(
-        ulong handle,
-        int eventCapacity)
+    internal static int ReservePendingEventCountForTest(ulong handle, int eventCapacity)
     {
         if (!TryGetLiveEventQueue(handle, out var state) ||
-            !TryReserveEvents(
-                state,
-                eventCapacity,
-                out var events,
-                out var count,
-                out _))
+            !TryReserveEvents(state, eventCapacity, out var events, out var count, out _))
         {
             return 0;
         }
 
-        try
-        {
-            return count;
-        }
-        finally
-        {
-            ArrayPool<KernelQueuedEvent>.Shared.Return(events);
-        }
+        ArrayPool<KernelQueuedEvent>.Shared.Return(events);
+        return count;
     }
 
     internal static bool TryReservePendingEventForTest(
@@ -1994,25 +1744,14 @@ public static class KernelEventQueueCompatExports
     {
         queuedEvent = default;
         if (!TryGetLiveEventQueue(handle, out var state) ||
-            !TryReserveEvents(
-                state,
-                1,
-                out var events,
-                out var count,
-                out _))
+            !TryReserveEvents(state, 1, out var events, out var count, out _))
         {
             return false;
         }
 
-        try
-        {
-            queuedEvent = events[0];
-            return count == 1;
-        }
-        finally
-        {
-            ArrayPool<KernelQueuedEvent>.Shared.Return(events);
-        }
+        queuedEvent = events[0];
+        ArrayPool<KernelQueuedEvent>.Shared.Return(events);
+        return count == 1;
     }
 
     private static bool WriteKernelEvent(CpuContext ctx, ulong address, KernelQueuedEvent queuedEvent)
@@ -2026,6 +1765,9 @@ public static class KernelEventQueueCompatExports
         BinaryPrimitives.WriteUInt64LittleEndian(eventBytes[0x18..], queuedEvent.UserData);
         return ctx.Memory.TryWrite(address, eventBytes);
     }
+
+    private static uint SaturatingAdd(uint left, uint right) =>
+        left > uint.MaxValue - right ? uint.MaxValue : left + right;
 
     private static readonly bool _logEqueue =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_EQUEUE"), "1", StringComparison.Ordinal);
@@ -2044,8 +1786,7 @@ public static class KernelEventQueueCompatExports
         var suffix = string.IsNullOrWhiteSpace(detail) ? string.Empty : $" {detail}";
         Console.Error.WriteLine(
             $"[LOADER][TRACE] equeue.{operation}: handle=0x{handle:X16} " +
-            $"depth={GetPendingEventCount(handle)} registrations={GetRegistrationCount(handle)}" +
-            $"{suffix} {KernelSyncTraceFormatter.FormatContext(ctx)}");
+            $"{DescribeQueue(handle)}{suffix} {KernelSyncTraceFormatter.FormatContext(ctx)}");
     }
 
     private static void TraceEventQueueHost(
@@ -2055,24 +1796,20 @@ public static class KernelEventQueueCompatExports
     {
         var suffix = string.IsNullOrWhiteSpace(detail) ? string.Empty : $" {detail}";
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] equeue.{operation}: handle=0x{handle:X16} " +
-            $"depth={GetPendingEventCount(handle)} registrations={GetRegistrationCount(handle)} " +
+            $"[LOADER][TRACE] equeue.{operation}: handle=0x{handle:X16} {DescribeQueue(handle)} " +
             $"{KernelSyncTraceFormatter.FormatCurrentThread()}{suffix}");
     }
 
-    private static int GetPendingEventCount(ulong handle)
+    private static string DescribeQueue(ulong handle)
     {
-        lock (_eventQueueGate)
+        if (!TryGetLiveEventQueue(handle, out var state))
         {
-            return _pendingEvents.TryGetValue(handle, out var events) ? events.Count : 0;
+            return "depth=0 registrations=0";
         }
-    }
 
-    private static int GetRegistrationCount(ulong handle)
-    {
-        lock (_eventQueueGate)
+        lock (state.Gate)
         {
-            return _registeredEvents.TryGetValue(handle, out var events) ? events.Count : 0;
+            return $"depth={state.Active.Count} registrations={state.Knotes.Count}";
         }
     }
 

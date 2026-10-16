@@ -86,6 +86,13 @@ public static partial class NetExports
         }
     }
 
+    internal static bool TryGetHostSocket(int socketId, out Socket? socket)
+    {
+        var found = _sockets.TryGetValue(socketId, out var value);
+        socket = value;
+        return found;
+    }
+
     internal static bool TryGetReadEventState(
         int socketId,
         ulong lowWater,

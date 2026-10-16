@@ -2461,6 +2461,11 @@ public static partial class KernelMemoryCompatExports
     {
         var profile = FileIoProfile.Begin();
         var outcome = KernelCloseCoreInner(ctx, fd);
+        if (outcome == (int)OrbisGen2Result.ORBIS_GEN2_OK && fd > 2)
+        {
+            KernelEventQueueCompatExports.OnDescriptorClosed(fd);
+        }
+
         FileIoProfile.End(
             FileIoProfile.Op.Close,
             profile,
@@ -2471,6 +2476,12 @@ public static partial class KernelMemoryCompatExports
     private static int KernelCloseCoreInner(CpuContext ctx, int fd)
     {
         if (fd is 0 or 1 or 2)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (KernelEventQueueCompatExports.TryCloseKqueueDescriptor(fd))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;

@@ -126,8 +126,9 @@ public sealed class KernelReadEventTests
         ctx[CpuRegister.Rsi] = 0x7FFF_FFFF;
         ctx[CpuRegister.Rdx] = 1;
 
+        // kqueue_register reports a descriptor that is not open as EBADF.
         Assert.Equal(
-            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND,
+            unchecked((int)0x80020009),
             KernelEventQueueCompatExports.KernelAddReadEvent(ctx));
 
         ctx[CpuRegister.Rdi] = equeue;
