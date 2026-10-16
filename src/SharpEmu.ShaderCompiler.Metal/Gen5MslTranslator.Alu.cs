@@ -381,15 +381,15 @@ public static partial class Gen5MslTranslator
                 // ---- integer arithmetic ----
                 "VAddU32" or "VAddI32" =>
                     intClamp
-                        ? SaturatedAddSub(instruction, subtract: false, reverse: false, signed: instruction.Opcode == "VAddI32")
+                        ? SaturatedAddSub(instruction, subtract: false, reverse: false, signed: IsSignedNoCarryAddSub(instruction))
                         : $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}))",
                 "VSubU32" or "VSubI32" =>
                     intClamp
-                        ? SaturatedAddSub(instruction, subtract: true, reverse: false, signed: instruction.Opcode == "VSubI32")
+                        ? SaturatedAddSub(instruction, subtract: true, reverse: false, signed: IsSignedNoCarryAddSub(instruction))
                         : $"(({RawSource(instruction, 0)}) - ({RawSource(instruction, 1)}))",
                 "VSubrevU32" or "VSubrevI32" =>
                     intClamp
-                        ? SaturatedAddSub(instruction, subtract: true, reverse: true, signed: instruction.Opcode == "VSubrevI32")
+                        ? SaturatedAddSub(instruction, subtract: true, reverse: true, signed: IsSignedNoCarryAddSub(instruction))
                         : $"(({RawSource(instruction, 1)}) - ({RawSource(instruction, 0)}))",
                 "VMulI32I24" =>
                     EmitSignedMultiply24(instruction),
@@ -787,6 +787,14 @@ public static partial class Gen5MslTranslator
             var up = Temp("uint", $"(32u - {width}) & 31u");
             return AsUInt($"({width} == 0u ? 0 : (as_type<int>(as_type<uint>({shifted}) << {up}) >> {up}))");
         }
+
+        /// <summary>Whether a no-carry add/sub saturates as signed under clamp. Only the
+        /// VOP3-only V_ADD_NC_I32 (0x37F) and V_SUB_NC_I32 (0x376) are signed. The decoder names
+        /// the VOP2 opcodes 0x25-0x27 VAddI32/VSubI32/VSubrevI32, but on gfx10 they are
+        /// V_ADD_NC_U32, V_SUB_NC_U32 and V_SUBREV_NC_U32 (their VOP3 forms 0x125-0x127 decode
+        /// as the U32 names), so an SDWA clamp on them saturates to 0..0xFFFFFFFF.</summary>
+        private static bool IsSignedNoCarryAddSub(Gen5ShaderInstruction instruction) =>
+            instruction.Encoding == Gen5ShaderEncoding.Vop3 && instruction.Opcode is "VAddI32" or "VSubI32";
 
         // The clamp bit on the 32-bit add/sub family saturates the result: unsigned
         // forms to 0..0xFFFFFFFF, signed forms to INT_MIN..INT_MAX.

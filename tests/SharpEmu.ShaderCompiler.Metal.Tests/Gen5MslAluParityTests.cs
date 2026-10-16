@@ -54,8 +54,9 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         new object[] { "VAddI32", 0x7FFFFFFFu, 1u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x7FFFFFFFu },
         new object[] { "VAddI32", 0x80000000u, 0xFFFFFFFFu, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x80000000u },
         new object[] { "VSubI32", 0x80000000u, 1u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x80000000u },
-        new object[] { "VSubrevI32", 1u, 0x80000000u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x80000000u },
-        new object[] { "VSubrevI32", 0xFFFFFFFFu, 0x7FFFFFFFu, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x7FFFFFFFu },
+        // VSubrevI32 is VOP2 0x27, V_SUBREV_NC_U32 (gfx10 has no signed subrev): unsigned saturation.
+        new object[] { "VSubrevI32", 1u, 0x80000000u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x7FFFFFFFu },
+        new object[] { "VSubrevI32", 0xFFFFFFFFu, 0x7FFFFFFFu, 0u, 0u, 0u, 0u, 0u, 0u, true, 0u },
         new object[] { "VAddCoU32", 0xFFFFFFF0u, 0x20u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0xFFFFFFFFu },
         new object[] { "VAddCoU32", 0xFFFFFFF0u, 0x20u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x10u },
         new object[] { "VSubCoU32", 3u, 5u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0u },
