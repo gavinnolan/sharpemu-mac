@@ -72,7 +72,8 @@ public sealed class AjmExportsTests : IDisposable
         context[CpuRegister.Rdi] = 0x0000000300000000;
         context[CpuRegister.Rsi] = ContextAddress;
 
-        Assert.Equal(unchecked((int)0x806A0001), AjmExports.AjmInitialize(context));
+        Assert.Equal(InvalidParameter, AjmExports.AjmInitialize(context));
+        Assert.Equal(unchecked((ulong)InvalidParameter), context[CpuRegister.Rax]);
         Assert.Equal(sentinel, ReadUInt32(ContextAddress));
     }
 
