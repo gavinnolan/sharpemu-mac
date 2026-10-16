@@ -244,14 +244,8 @@ public static partial class Gen5MslTranslator
                     instruction,
                     destination,
                     $"{F16(instruction, 0)} * {F16(instruction, 1)}"),
-                "VMinF32" => FloatResult(instruction, $"fmin({F(instruction, 0)}, {F(instruction, 1)})"),
-                "VMaxF32" => FloatResult(instruction, $"fmax({F(instruction, 0)}, {F(instruction, 1)})"),
-                "VMin3F16" => MinimumHalfResult(instruction, destination, true),
-                "VMinF16" => MinimumHalfResult(instruction, destination, false),
-                "VMaxF16" => Float16Result(
-                    instruction,
-                    destination,
-                    $"fmax({F16(instruction, 0)}, {F16(instruction, 1)})"),
+                "VMinF32" or "VMaxF32" or "VMin3F32" or "VMax3F32" or "VMed3F32" => MinMaxF32Result(instruction),
+                "VMinF16" or "VMaxF16" or "VMin3F16" or "VMax3F16" or "VMed3F16" => MinMaxF16Result(instruction, destination),
                 // The decoder normalizes mk/ak literal placement, so every MAD/FMA
                 // form is fma(src0, src1, src2) exactly like the SPIR-V translator.
                 "VFmaF32" or "VMadF32" or "VMadAkF32" or "VMadMkF32" or "VFmaAkF32" or "VFmaMkF32" =>
@@ -313,16 +307,6 @@ public static partial class Gen5MslTranslator
                 "VFrexpExpI32F32" => EmitFrexpF32(instruction, mantissa: false),
                 "VFrexpMantF16" => EmitFrexpF16(instruction, destination, mantissa: true),
                 "VFrexpExpI16F16" => EmitFrexpF16(instruction, destination, mantissa: false),
-                "VMax3F16" => Float16Result(instruction, destination,
-                    $"fmax(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
-                "VMed3F16" => Float16Result(instruction, destination,
-                    Median(F16(instruction, 0), F16(instruction, 1), F16(instruction, 2))),
-                "VMin3F32" =>
-                    FloatResult(instruction, $"fmin(fmin({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)})"),
-                "VMax3F32" =>
-                    FloatResult(instruction, $"fmax(fmax({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)})"),
-                "VMed3F32" =>
-                    FloatResult(instruction, Median(F(instruction, 0), F(instruction, 1), F(instruction, 2))),
 
                 // ---- conversions ----
                 "VCvtF32I32" => FloatResult(instruction, $"(float)as_type<int>({RawSource(instruction, 0)})"),
@@ -1128,10 +1112,11 @@ public static partial class Gen5MslTranslator
             {
                 "VPkAddF16" => $"({left} + {right})",
                 "VPkMulF16" => $"({left} * {right})",
-                // fminnum_like / fmaxnum_like: a NaN operand yields the other one,
-                // which is exactly what MSL's fmin/fmax are specified to do.
-                "VPkMinF16" => $"fmin({left}, {right})",
-                "VPkMaxF16" => $"fmax({left}, {right})",
+                // V_MIN/MAX_F16 per lane: a NaN operand yields the other one (quieted when
+                // signalling in IEEE mode) and -0 orders below +0, which MSL's fmin/fmax
+                // leave unspecified.
+                "VPkMinF16" => PackedHalfMinMax("sharpemu_min_f16", left, right),
+                "VPkMaxF16" => PackedHalfMinMax("sharpemu_max_f16", left, right),
                 // Use half fma itself: float fma followed by half conversion can
                 // double-round at a half midpoint (MSL specification section 6.6).
                 _ => $"(float)fma(half({left}), half({right}), half({PackedF16Operand(instruction, control, sources, 2, highLane)}))",
@@ -1145,6 +1130,10 @@ public static partial class Gen5MslTranslator
             // clamping ahead of the narrowing gives the f16 the hardware clamps to.
             return $"((uint)as_type<ushort>(half({value})))";
         }
+
+        private string PackedHalfMinMax(string helper, string left, string right) =>
+            $"(float)as_type<half>((ushort){helper}((uint)as_type<ushort>(half({left})), " +
+            $"(uint)as_type<ushort>(half({right})), {(_request.IeeeMode ? "true" : "false")}))";
 
         /// <summary>One packed-f16 source half widened to f32, with its lane's negate applied.</summary>
         private string PackedF16Operand(
@@ -2890,17 +2879,25 @@ public static partial class Gen5MslTranslator
             StoreScalar(register + 1, $"(uint)(({ulongValue}) >> 32)");
         }
 
-        /// <summary>Float view of a source with abs/neg modifiers from VOP3/SDWA/DPP.</summary>
-        /// <summary>V_MED3 on a NaN operand answers MIN3 of all three, and the min skips the
-        /// NaN, so a clamp compiled to med3(hi, x, lo) flushes a NaN x to lo. The min/max
-        /// network alone returns hi for that x.</summary>
-        private string Median(string a, string b, string c)
+        /// <summary>V_MIN/MAX/MIN3/MAX3/MED3_F32 through the prelude's bit-level helpers (ISA
+        /// 12.7, 12.12): a NaN operand yields the other one (quieted when signalling in IEEE
+        /// mode), -0 orders below +0, and V_MED3 on a NaN operand answers MIN3, so a clamp
+        /// compiled to med3(hi, x, lo) flushes a NaN x to lo. Metal's fmin/fmax return either
+        /// zero and compare f32 denormals as zero.</summary>
+        private string MinMaxF32Result(Gen5ShaderInstruction instruction)
         {
-            var x = Temp("float", a);
-            var y = Temp("float", b);
-            var z = Temp("float", c);
-            return $"((isnan({x}) || isnan({y}) || isnan({z})) ? fmin(fmin({x}, {y}), {z}) : " +
-                $"fmax(fmin({x}, {y}), fmin(fmax({x}, {y}), {z})))";
+            var ieee = _request.IeeeMode ? "true" : "false";
+            string Bits(int index) => Temp("uint", AsUInt(F(instruction, index)));
+            var bits = instruction.Opcode switch
+            {
+                "VMinF32" => $"sharpemu_min_f32({Bits(0)}, {Bits(1)}, {ieee})",
+                "VMaxF32" => $"sharpemu_max_f32({Bits(0)}, {Bits(1)}, {ieee})",
+                "VMin3F32" => $"sharpemu_min_f32(sharpemu_min_f32({Bits(0)}, {Bits(1)}, {ieee}), {Bits(2)}, {ieee})",
+                "VMax3F32" => $"sharpemu_max_f32(sharpemu_max_f32({Bits(0)}, {Bits(1)}, {ieee}), {Bits(2)}, {ieee})",
+                _ => $"sharpemu_med3_f32({Bits(0)}, {Bits(1)}, {Bits(2)}, {ieee})",
+            };
+            var result = Temp("uint", bits);
+            return HasFloatOutputModifiers(instruction) ? FloatResult(instruction, AsFloat(result)) : result;
         }
 
         private string F(Gen5ShaderInstruction instruction, int sourceIndex)
@@ -3060,22 +3057,20 @@ public static partial class Gen5MslTranslator
             return Temp("uint", bits);
         }
 
-        private string MinimumHalfBits(string left, string right)
+        /// <summary>The f16 forms of <see cref="MinMaxF32Result"/>, on the f16 bits, into the
+        /// op_sel-selected destination half.</summary>
+        private string MinMaxF16Result(Gen5ShaderInstruction instruction, uint destination)
         {
-            var leftNan = Temp("bool", $"(({left} & 0x7FFFu) > 0x7C00u)");
-            var rightNan = Temp("bool", $"(({right} & 0x7FFFu) > 0x7C00u)");
-            string Ordered(string value) => $"({value} ^ (({value} & 0x8000u) != 0u ? 0xFFFFu : 0x8000u))";
-            var result = $"({leftNan} ? {right} : ({rightNan} ? {left} : ({Ordered(left)} < {Ordered(right)} ? {left} : {right})))";
-            if (_request.IeeeMode)
-                result = $"(({leftNan} && ({left} & 0x200u) == 0u) ? ({left} | 0x200u) : " +
-                    $"(({rightNan} && ({right} & 0x200u) == 0u) ? ({right} | 0x200u) : {result}))";
-            return Temp("uint", result);
-        }
-
-        private string MinimumHalfResult(Gen5ShaderInstruction instruction, uint destination, bool ternary)
-        {
-            var bits = MinimumHalfBits(ReadMinimumHalfBits(instruction, 0), ReadMinimumHalfBits(instruction, 1));
-            if (ternary) bits = MinimumHalfBits(bits, ReadMinimumHalfBits(instruction, 2));
+            var ieee = _request.IeeeMode ? "true" : "false";
+            string Bits(int index) => ReadMinimumHalfBits(instruction, index);
+            var bits = Temp("uint", instruction.Opcode switch
+            {
+                "VMinF16" => $"sharpemu_min_f16({Bits(0)}, {Bits(1)}, {ieee})",
+                "VMaxF16" => $"sharpemu_max_f16({Bits(0)}, {Bits(1)}, {ieee})",
+                "VMin3F16" => $"sharpemu_min_f16(sharpemu_min_f16({Bits(0)}, {Bits(1)}, {ieee}), {Bits(2)}, {ieee})",
+                "VMax3F16" => $"sharpemu_max_f16(sharpemu_max_f16({Bits(0)}, {Bits(1)}, {ieee}), {Bits(2)}, {ieee})",
+                _ => $"sharpemu_med3_f16({Bits(0)}, {Bits(1)}, {Bits(2)}, {ieee})",
+            });
             var control = instruction.Control as Gen5Vop3Control;
             var (modifier, clamp) = FloatOutputModifiers(instruction);
             if (modifier != 0)

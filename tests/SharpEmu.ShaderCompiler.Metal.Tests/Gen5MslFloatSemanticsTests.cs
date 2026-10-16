@@ -75,6 +75,46 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         Assert.Equal(expected, Execute(shader));
     }
 
+    // V_MIN/V_MAX order -0 below +0 (ISA 12.7); V_MED3 is the max of the two operands other
+    // than the one MAX3 matches; in IEEE mode a signalling NaN comes back quieted, and V_MIN3
+    // then takes the min of that quiet NaN and src2, which is src2.
+    [Theory]
+    [InlineData("VMinF32", 0x00000000u, 0x80000000u, 0u, false, 0x80000000u)]
+    [InlineData("VMinF32", 0x80000000u, 0x00000000u, 0u, false, 0x80000000u)]
+    [InlineData("VMaxF32", 0x00000000u, 0x80000000u, 0u, false, 0x00000000u)]
+    [InlineData("VMaxF32", 0x80000000u, 0x00000000u, 0u, false, 0x00000000u)]
+    [InlineData("VMin3F32", 0x3F800000u, 0x00000000u, 0x80000000u, false, 0x80000000u)]
+    [InlineData("VMax3F32", 0xBF800000u, 0x80000000u, 0x00000000u, false, 0x00000000u)]
+    [InlineData("VMed3F32", 0x00000000u, 0x80000000u, 0x80000000u, false, 0x80000000u)]
+    [InlineData("VMed3F32", 0x477FE000u, 0x7FC00000u, 0u, false, 0u)]
+    [InlineData("VMinF32", 0x7F800001u, 0x3F800000u, 0u, false, 0x3F800000u)]
+    [InlineData("VMinF32", 0x7F800001u, 0x3F800000u, 0u, true, 0x7FC00001u)]
+    [InlineData("VMaxF32", 0x3F800000u, 0xFF800002u, 0u, true, 0xFFC00002u)]
+    [InlineData("VMaxF32", 0x7FC00000u, 0x3F800000u, 0u, true, 0x3F800000u)]
+    [InlineData("VMin3F32", 0x7F800001u, 0x3F800000u, 0x40000000u, true, 0x40000000u)]
+    [InlineData("VMaxF16", 0x00000000u, 0x00008000u, 0u, false, 0xABCD0000u)]
+    [InlineData("VMinF16", 0x00000000u, 0x00008000u, 0u, false, 0xABCD8000u)]
+    [InlineData("VMed3F16", 0x00000000u, 0x00008000u, 0x00008000u, false, 0xABCD8000u)]
+    [InlineData("VMaxF16", 0x00007C01u, 0x00003C00u, 0u, true, 0xABCD7E01u)]
+    [InlineData("VMax3F16", 0x0000BC00u, 0x00008000u, 0x00000000u, false, 0xABCD0000u)]
+    public void MinMaxFollowTheIsaZeroAndNanRules(string opcode, uint a, uint b, uint c, bool ieee, uint expected)
+    {
+        var old = opcode.EndsWith("F16", StringComparison.Ordinal) ? 0xABCD5678u : 0u;
+        var shader = Compile([Vop3(opcode, V012)], a, b, c, old, ieee);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
+    [Theory]
+    [InlineData("VPkMaxF16", 0x80000000u, 0x00008000u, 0x00000000u)]
+    [InlineData("VPkMinF16", 0x80000000u, 0x00008000u, 0x80008000u)]
+    public void PackedMinMaxOrderNegativeZeroBelowPositiveZero(string opcode, uint a, uint b, uint expected)
+    {
+        var shader = Compile([Vop3(opcode, [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], new Gen5Vop3pControl(0, 3, 0, 0, false))], a, b);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
     // v3 = VCC ? 1 : 0
     private static Gen5ShaderInstruction CndmaskVcc() =>
         new(28, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [], [Gen5Operand.Source(128), Gen5Operand.Source(129)], [Gen5Operand.Vector(3)], null);
@@ -106,15 +146,16 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         return BinaryPrimitives.ReadUInt32LittleEndian(result);
     }
 
-    private static Gen5MslShader Compile(Gen5ShaderInstruction[] inserted, uint a, uint b, uint c = 0, uint old = 0)
+    private static Gen5MslShader Compile(Gen5ShaderInstruction[] inserted, uint a, uint b, uint c = 0, uint old = 0,
+        bool ieee = false)
     {
-        Assert.True(TryCompile(inserted, a, b, c, old, out var shader, out var error), error);
+        Assert.True(TryCompile(inserted, a, b, c, old, out var shader, out var error, ieee), error);
         return shader!;
     }
 
     // v0 = a, v1 = b, v2 = c, v3 = old; the inserted instructions run before v3 is stored.
     private static bool TryCompile(Gen5ShaderInstruction[] inserted, uint a, uint b, uint c, uint old,
-        out Gen5MslShader? shader, out string error)
+        out Gen5MslShader? shader, out string error, bool ieee = false)
     {
         var fixture = new Gen5ComputeFixture("float-semantics", [
             0x7E0002FF, a, 0x7E0202FF, b, 0x7E0402FF, c, 0x7E0602FF, old,
@@ -122,7 +163,7 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
         var instructions = program.Instructions.ToList();
         instructions.InsertRange(4, inserted);
-        var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute);
+        var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute, ieeeMode: ieee);
         var compiled = Gen5MslTranslator.TryCompileProgram(request, out var result, out error);
         shader = compiled ? result : null;
         return compiled;
