@@ -29,6 +29,30 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         Assert.Equal(expected, Execute(shader));
     }
 
+    // A 16-bit float operand reads an integer inline constant as its bit pattern (129 is the
+    // denormal 0x0001, 193 is 0xFFFF) and 248 as the f16 1/(2*pi), 0x3118.
+    [Theory]
+    [InlineData("VAddF16", 129u, 0x0001u, 0xABCD0002u)]
+    [InlineData("VMulF16", 248u, 0x3C00u, 0xABCD3118u)]
+    [InlineData("VMinF16", 130u, 0x0003u, 0xABCD0002u)]
+    [InlineData("VMaxF16", 192u, 0x0003u, 0xABCD0040u)]
+    public void HalfOperandsReadIntegerInlineConstantsAsBits(string opcode, uint constant, uint b, uint expected)
+    {
+        var shader = Compile([Vop3(opcode, [Gen5Operand.Source(constant), Gen5Operand.Vector(1)])], 0u, b, 0u, 0xABCD5678u);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
+    [Fact]
+    public void FmaMixReadsAHalfSelectedInlineConstantAsF16()
+    {
+        // fma_mix(src0 = 1 as f16 (0x0001), src1 = v1 as f32 2^24, src2 = v2 as f32 0) = 1.0
+        var shader = Compile([Vop3("VFmaMixF32", [Gen5Operand.Source(129), Gen5Operand.Vector(1), Gen5Operand.Vector(2)],
+            new Gen5Vop3pControl(0, 1, 0, 0, false))], 0u, 0x4B800000u, 0u);
+        if (!RequireDevice()) return;
+        Assert.Equal(0x3F800000u, Execute(shader));
+    }
+
     private static Gen5ShaderInstruction Vop3(string opcode, Gen5Operand[] sources, Gen5InstructionControl? control = null) =>
         new(28, Gen5ShaderEncoding.Vop3, opcode, [], sources, [Gen5Operand.Vector(3)], control ?? new Gen5Vop3Control(0, 0, 0, false, 0, null));
 

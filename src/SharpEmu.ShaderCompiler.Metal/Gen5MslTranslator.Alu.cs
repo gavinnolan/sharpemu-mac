@@ -1248,14 +1248,20 @@ public static partial class Gen5MslTranslator
             // constant keeps its f32 value either way. A half-selected literal is an f16
             // bit pattern: Silent Hill's luminance weights 0x34CD/0x38B8/0x2F0A read as
             // f32 denormals made the luminance zero and the lighting divided by it.
-            var readAsHalf = ((control.OpSelHiMask >> index) & 1) != 0 &&
+            var halfSource = ((control.OpSelHiMask >> index) & 1) != 0;
+            var readAsHalf = halfSource &&
                 operand.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister or
                     Gen5OperandKind.LiteralConstant;
+            // An f16 source given an inline constant takes the constant's f16 value: an
+            // integer one is a bit pattern (1 is the denormal 0x0001) and 1/(2*pi) is 0x3118.
             var value = readAsHalf
                 ? HalfToFloat(
                     Temp("uint", RawSource(instruction, index)),
                     ((control.OpSelMask >> index) & 1) != 0)
-                : F(instruction, index);
+                : halfSource && operand.Kind == Gen5OperandKind.EncodedConstant &&
+                    TryHalfInlineConstant(operand.Value, out var halfBits)
+                    ? $"(float)as_type<half>((ushort){FormatUInt(halfBits)})"
+                    : F(instruction, index);
 
             // abs first, then negate — the order the hardware applies them in.
             if (((control.NegHiMask >> index) & 1) != 0)
@@ -2918,20 +2924,45 @@ public static partial class Gen5MslTranslator
             return expression;
         }
 
+        /// <summary>The 16-bit value an inline constant gives a 16-bit float operand. The integer
+        /// constants 128..208 are their two's-complement bit patterns, as they are for f32
+        /// operands (`v_add_f16 v0, 1, v1` adds the denormal 0x0001; `1.0` is constant 242), and
+        /// 240..248 are the f16 encodings of 0.5, -0.5, 1, -1, 2, -2, 4, -4 and 1/(2*pi),
+        /// whose f16 form 0x3118 is not the f32 1/(2*pi) rounded.</summary>
+        private static bool TryHalfInlineConstant(uint encoded, out uint bits)
+        {
+            bits = encoded switch
+            {
+                >= 128 and <= 192 => encoded - 128,
+                >= 193 and <= 208 => (0x10000u - (encoded - 192)) & 0xFFFFu,
+                240 => 0x3800u,
+                241 => 0xB800u,
+                242 => 0x3C00u,
+                243 => 0xBC00u,
+                244 => 0x4000u,
+                245 => 0xC000u,
+                246 => 0x4400u,
+                247 => 0xC400u,
+                248 => 0x3118u,
+                _ => uint.MaxValue,
+            };
+            return bits != uint.MaxValue;
+        }
+
         /// <summary>Reads the selected 16-bit half as a widened float.</summary>
         private string F16(Gen5ShaderInstruction instruction, int sourceIndex)
         {
             var operand = instruction.Sources[sourceIndex];
             string expression;
             if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                TryHalfInlineConstant(operand.Value, out var halfBits))
+            {
+                expression = $"(float)as_type<half>((ushort){FormatUInt(halfBits)})";
+            }
+            else if (operand.Kind == Gen5OperandKind.EncodedConstant &&
                 Gen5InlineConstants.TryDecode(operand.Value, out var inline))
             {
-                expression = operand.Value switch
-                {
-                    >= 128 and <= 192 => $"{operand.Value - 128}.0f",
-                    >= 193 and <= 208 => $"(-{operand.Value - 192}.0f)",
-                    _ => AsFloat(FormatUInt(inline)),
-                };
+                expression = AsFloat(FormatUInt(inline));
             }
             else
             {
@@ -2998,15 +3029,14 @@ public static partial class Gen5MslTranslator
             var operand = instruction.Sources[sourceIndex];
             string bits;
             if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                TryHalfInlineConstant(operand.Value, out var halfBits))
+            {
+                bits = FormatUInt(halfBits);
+            }
+            else if (operand.Kind == Gen5OperandKind.EncodedConstant &&
                 Gen5InlineConstants.TryDecode(operand.Value, out var inline))
             {
-                var number = operand.Value switch
-                {
-                    >= 128 and <= 192 => (float)(operand.Value - 128),
-                    >= 193 and <= 208 => -(float)(operand.Value - 192),
-                    _ => BitConverter.UInt32BitsToSingle(inline),
-                };
-                bits = FormatUInt(BitConverter.HalfToUInt16Bits((Half)number));
+                bits = FormatUInt(BitConverter.HalfToUInt16Bits((Half)BitConverter.UInt32BitsToSingle(inline)));
             }
             else
             {
