@@ -140,7 +140,7 @@ internal static partial class RegisterWriters
 
         for (var offset = PaClUserClipPlane0X; offset <= PaClUserClipPlane5W; offset++)
         {
-            indirect[offset] = DisabledUserClipPlaneEntry;
+            indirect[offset] = UserClipPlaneEntry;
         }
 
         for (var offset = PaClGbVertClipAdj; offset <= PaClGbHorzDiscAdj; offset++)
@@ -708,13 +708,9 @@ internal static partial class RegisterWriters
         }
     }
 
-    private static void DisabledUserClipPlaneEntry(RegisterBanks banks, uint offset, uint value)
-    {
-        if (value != 0 || banks.Context.Clip.UserClipPlanes != 0)
-        {
-            throw banks.Fatal($"User clip planes are not supported: offset=0x{offset:X4} value=0x{value:X8} enabled=0x{banks.Context.Clip.UserClipPlanes:X2}.");
-        }
-    }
+    // A plane only clips while PA_CL_CLIP_CNTL.UCP_ENA_n enables it; the draw reads it then.
+    private static void UserClipPlaneEntry(RegisterBanks banks, uint offset, uint value) =>
+        banks.UserClipPlanesForWrite[offset - PaClUserClipPlane0X] = RegisterField.AsFloat(value);
 
     private static void GuardBandEntry(RegisterBanks banks, uint offset, uint value)
     {

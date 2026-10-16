@@ -148,6 +148,11 @@ public readonly record struct ClipSpaceTransform(
     public bool ZPreDivided { get; init; }
     public bool WReciprocal { get; init; }
 
+    // The enabled user clip planes (PA_CL_UCP_n, four floats each), clipped in the program;
+    // UCP_CULL_ONLY_ENA culls with them instead.
+    public float[]? UserClipPlanes { get; init; }
+    public bool UserClipPlanesCullOnly { get; init; }
+
     // The program maps depth onto the host's viewport range: z' = z * DepthScale + w * DepthOffset.
     public bool DepthRemap { get; init; }
     public float DepthScale { get; init; }

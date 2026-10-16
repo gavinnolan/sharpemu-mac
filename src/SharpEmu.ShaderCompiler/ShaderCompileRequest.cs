@@ -81,6 +81,13 @@ public readonly record struct ShaderClipSpaceTransform(
     // clips with clip distances computed from the exported position.
     public ShaderDepthPlanes DepthPlanes { get; init; }
 
+    // The enabled user clip planes (PA_CL_UCP_n_{X,Y,Z,W}, four floats each): the guest keeps
+    // the side where dot(plane, position) >= 0 of its clip-space position. The program
+    // clips with clip distances, or with UserClipPlanesCullOnly (UCP_CULL_ONLY_ENA) culls a
+    // primitive whose vertices are all outside one plane.
+    public float[]? UserClipPlanes { get; init; }
+    public bool UserClipPlanesCullOnly { get; init; }
+
     // The exported x and y (PA_CL_VTE_CNTL.VTX_XY_FMT), or z (VTX_Z_FMT), are already
     // divided by w; the exported w is 1 / w (VTX_W0_FMT clear). The host divides by w and
     // interpolates with it, so the program multiplies the divided ones back and takes the
@@ -98,7 +105,8 @@ public readonly record struct ShaderClipSpaceTransform(
 
     // Conventions only the program can apply: no Vulkan pipeline state carries them.
     public bool HasProgramOnlyConventions =>
-        PositionXMirror || DepthPlanes != ShaderDepthPlanes.None || XyPreDivided || ZPreDivided || WReciprocal || DepthRemap;
+        PositionXMirror || DepthPlanes != ShaderDepthPlanes.None || UserClipPlanes is { Length: > 0 } ||
+        XyPreDivided || ZPreDivided || WReciprocal || DepthRemap;
 }
 
 // One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer

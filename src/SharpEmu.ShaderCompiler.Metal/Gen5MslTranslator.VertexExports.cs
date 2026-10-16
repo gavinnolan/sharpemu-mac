@@ -209,6 +209,17 @@ public static partial class Gen5MslTranslator
                 distances.Add($"{position}.w - {position}.z");
             }
 
+            var user = _request.ClipSpace.UserClipPlanes ?? [];
+            for (var plane = 0; plane + 3 < user.Length; plane += 4)
+            {
+                var distance =
+                    $"dot({position}, float4({FloatBits(user[plane])}, {FloatBits(user[plane + 1])}, " +
+                    $"{FloatBits(user[plane + 2])}, {FloatBits(user[plane + 3])}))";
+                distances.Add(_request.ClipSpace.UserClipPlanesCullOnly
+                    ? $"{distance} < 0.0f ? -1.0f : {CullPassDistance}"
+                    : distance);
+            }
+
             return distances;
         }
 
