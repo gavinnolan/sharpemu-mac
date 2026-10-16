@@ -72,10 +72,18 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
 
     // ---- references ----
 
-    private static uint LegacyFma(uint a, uint b, uint? c) =>
-        IsZero(a) || IsZero(b)
-            ? F(0.0f + (c is { } addend ? Fv(addend) : 0.0f))
-            : F(c is { } value ? MathF.FusedMultiplyAdd(Fv(a), Fv(b), Fv(value)) : Fv(a) * Fv(b));
+    // V_MUL/MAD/MAC_LEGACY_F32: 0 * anything is 0, and the MAD forms round the product before
+    // the add (LLVM selects V_MAD_LEGACY_F32 for fadd(fmul_legacy)).
+    private static uint LegacyMad(uint a, uint b, uint? c)
+    {
+        if (IsZero(a) || IsZero(b))
+        {
+            return F(0.0f + (c is { } addend ? Fv(addend) : 0.0f));
+        }
+
+        var product = Fv(a) * Fv(b);
+        return F(c is { } value ? product + Fv(value) : product);
+    }
 
     private static (uint Mantissa, uint Exponent) FrexpF32(uint bits)
     {
@@ -229,17 +237,17 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
             (inf, 0x80000000, 0x80000000),
             (F(1.5f), F(-0.25f), F(0.125f)),
             (0x7F7FFFFF, F(2), 0),
-            (0x3F800001, 0x3F7FFFFF, 0xBF800000), // fused: -2^-46, unfused would be 0
+            (0x3F800001, 0x3F7FFFFF, 0xBF800000), // the product rounds to 1: +0 (fused: 2^-24 - 2^-47)
         ];
         var cases = new List<Case>();
         foreach (var (a, b, c) in values)
         {
             var tag = $"{a:X8},{b:X8},{c:X8}";
-            cases.Add(Vector($"mul_legacy {tag}", mulLegacy, [a, b], LegacyFma(a, b, null)));
-            cases.Add(Vector($"mul_legacy -src0 {tag}", mulLegacyNeg, [a, b], LegacyFma(a ^ 0x80000000u, b, null)));
-            cases.Add(Vector($"mullit {tag}", mullit, [a, b, c], LegacyFma(a, b, null)));
-            cases.Add(Vector($"mad_legacy {tag}", madLegacy, [a, b, c], LegacyFma(a, b, c)));
-            cases.Add(Vector($"mac_legacy {tag}", macLegacy, [a, b, c], LegacyFma(a, b, c), result: 2));
+            cases.Add(Vector($"mul_legacy {tag}", mulLegacy, [a, b], LegacyMad(a, b, null)));
+            cases.Add(Vector($"mul_legacy -src0 {tag}", mulLegacyNeg, [a, b], LegacyMad(a ^ 0x80000000u, b, null)));
+            cases.Add(Vector($"mullit {tag}", mullit, [a, b, c], LegacyMad(a, b, null)));
+            cases.Add(Vector($"mad_legacy {tag}", madLegacy, [a, b, c], LegacyMad(a, b, c)));
+            cases.Add(Vector($"mac_legacy {tag}", macLegacy, [a, b, c], LegacyMad(a, b, c), result: 2));
         }
 
         Run("legacy", cases);
