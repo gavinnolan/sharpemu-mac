@@ -724,7 +724,7 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        HostPlatform.Current.Input.SetRumble(parameter[0], parameter[1]);
+        PadHaptics.SetVibration(parameter[0], parameter[1]);
         return ctx.SetReturn(0);
     }
 
