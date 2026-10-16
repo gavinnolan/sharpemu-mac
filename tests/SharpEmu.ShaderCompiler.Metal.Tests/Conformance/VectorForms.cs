@@ -9,9 +9,10 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests.Conformance;
 internal enum FormKind { E32, E64, Sdwa, Dpp16, Dpp8, Packed }
 
 /// <summary>SDWA selects (ISA 13.3.7): 0..3 a byte, 4 word 0, 5 word 1, 6 the dword.
-/// DST_UNUSED: 0 pad with zeros, 1 sign-extend upper, 2 preserve.</summary>
+/// DST_UNUSED: 0 pad with zeros, 1 sign-extend upper, 2 preserve. A compare's SDWAB word names its
+/// mask destination (ISA 13.3.8): VCC (SD = 0, <see cref="VccDestination"/>) or the SGPR s24/s[24:25].</summary>
 internal sealed record SdwaControl(int DstSel = 6, int DstUnused = 0, int Src0Sel = 6, int Src1Sel = 6,
-    bool Src0Sext = false, bool Src1Sext = false)
+    bool Src0Sext = false, bool Src1Sext = false, bool VccDestination = false)
 {
     public static string SelName(int select) => select switch
     {
@@ -127,6 +128,7 @@ internal sealed record VectorForm(VectorOp Op, FormKind Kind)
 
     public string Asm(int wave)
     {
+        if (Op.Assembly is { } assembly) return assembly(wave);
         var vcc = wave == 32 ? "vcc_lo" : "vcc";
         var sdst = wave == 32 ? "s24" : "s[24:25]";
         var suffix = Kind switch
@@ -141,7 +143,8 @@ internal sealed record VectorForm(VectorOp Op, FormKind Kind)
         var compareExec = Op.Has(VectorFlags.CompareExec);
         if (Op.Has(VectorFlags.Compare))
         {
-            operands.Add(Kind is FormKind.E32 or FormKind.Dpp16 or FormKind.Dpp8 ? vcc : sdst);
+            operands.Add(Kind is FormKind.E32 or FormKind.Dpp16 or FormKind.Dpp8 ||
+                (Kind == FormKind.Sdwa && Sdwa is { VccDestination: true }) ? vcc : sdst);
         }
         else if (!compareExec)
         {
