@@ -131,12 +131,12 @@ public readonly record struct HostViewportTransform(
         var planes = (near ? clip.DirectXClipSpace ? ShaderDepthPlanes.NearAtZero : ShaderDepthPlanes.NearAtNegativeW : 0) |
             (far ? ShaderDepthPlanes.Far : 0);
         var identity = (control & (ZScaleEnable | ZOffsetEnable | ZFormat | W0Format)) == (ZScaleEnable | ZOffsetEnable | W0Format);
-        if (identity)
+        var minDepth = viewport.ZOffset - (clip.DirectXClipSpace ? 0f : viewport.ZScale);
+        var maxDepth = viewport.ZScale + viewport.ZOffset;
+        if (identity && ClampMatchesTransform(context, Math.Min(minDepth, maxDepth), Math.Max(minDepth, maxDepth), near, far))
         {
             // The host's viewport range is the guest's transform, and z' is z (or (z + w) / 2
             // for a [-w, w] depth), so the host's planes are the guest's.
-            var minDepth = viewport.ZOffset - (clip.DirectXClipSpace ? 0f : viewport.ZScale);
-            var maxDepth = viewport.ZScale + viewport.ZOffset;
             if (near == far)
             {
                 return new DepthTransform(minDepth, maxDepth, near, ShaderDepthPlanes.None, !clip.DirectXClipSpace);
@@ -147,7 +147,8 @@ public readonly record struct HostViewportTransform(
             return new DepthTransform(minDepth, maxDepth, false, planes, !clip.DirectXClipSpace);
         }
 
-        // Anything else the program maps: z' = z_w * scale' + w' * offset', where z_w is z
+        // Anything else (a disabled z scale or offset, VTX_Z_FMT, a reciprocal w, or a depth
+        // clamp the transform's range does not do) the program maps: z' = z_w * scale' + w' * offset', where z_w is z
         // (z * w' when VTX_Z_FMT says z is already divided), puts the guest's depth on the
         // host's viewport range, which is the guest's own depth clamp. The host clamps to
         // it and the program clips the guest's enabled planes from the exported position.
@@ -164,6 +165,31 @@ public readonly record struct HostViewportTransform(
             true,
             span == 0f ? 0f : scale / span,
             span == 0f ? 0f : (offset - clampMin) / span);
+    }
+
+    // Whether the host's viewport range [low, high] (the guest's transform) also does the
+    // guest's depth clamp. The DB clamps every fragment's depth, interpolated or exported, to
+    // PA_SC_VPORT_ZMIN/ZMAX. Clipped at both planes the depth stays inside the transform,
+    // so a clamp range around it never bites; any unclipped side reaches the host's clamp,
+    // which is to its viewport range, so the two ranges have to be the same.
+    private static bool ClampMatchesTransform(ContextRegisters context, float low, float high, bool near, bool far)
+    {
+        if (!(low >= 0f && high <= 1f))
+        {
+            // The host's viewport depth is inside [0, 1].
+            return false;
+        }
+
+        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
+        if (context.DepthRenderOverride.DisableViewportClamp)
+        {
+            return (near && far) ||
+                (low == 0f && high == 1f && context.DepthTarget.DepthFormat != GuestDepthFormat.Z32Float);
+        }
+
+        return near && far
+            ? viewport.MinDepth <= low && high <= viewport.MaxDepth
+            : viewport.MinDepth == low && high == viewport.MaxDepth;
     }
 
     // The range the DB clamps the guest's depth to: PA_SC_VPORT_ZMIN/ZMAX, or with
