@@ -448,10 +448,14 @@ public static partial class KernelMemoryCompatExports
 
     private static int RunMappingTransaction(Func<int> transaction, Func<bool>? onlyAddsOutsideGpuMemory = null)
     {
+        // A nested transaction (a batch entry) runs inside its batch's: the batch already holds
+        // the mapping lock when it runs on the guest thread, so this test comes first.
+        if (_insideMappingTransaction)
+            return transaction();
         // GPU handoff must precede locks needed by image and buffer reads.
         if (Monitor.IsEntered(_memoryGate))
             throw new InvalidOperationException("Cannot start a mapping transaction while holding the mapping lock.");
-        if (_insideMappingTransaction || GuestGpuMemoryHook.Current is not { } memory)
+        if (GuestGpuMemoryHook.Current is not { } memory)
             return transaction();
 
         // A transaction that only places new mappings in address space the GPU has never been given

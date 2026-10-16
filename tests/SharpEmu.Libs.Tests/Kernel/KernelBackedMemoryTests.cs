@@ -815,6 +815,91 @@ public sealed class KernelBackedMemoryTests
             KernelMemoryCompatExports.SetFlexibleBackingForTests(previous);
         }
     }
+
+    // Unreal titles batch-map direct memory into a fresh reservation at boot. With the GPU
+    // attached, the batch runs on the guest thread under the mapping lock and each entry runs
+    // as a nested transaction; that entry must run inline, not fail on the lock its own batch
+    // holds.
+    [NativePageProtectionFact]
+    public void BatchMapIntoUntouchedReservationRunsItsEntriesInsideTheBatchTransaction()
+    {
+        using var test = new BackedKernelMemory();
+        using var gpu = new GuestGpuMemory(test.Memory);
+        GuestGpuMemoryHook.Attach(gpu);
+        try
+        {
+            test.Allocate(0, 0x20000);
+            var address = test.Reserve(0x20000);
+            var entries = test.Output + 0x200;
+            for (var index = 0; index < 2; index++)
+            {
+                var entry = entries + (ulong)index * 32;
+                Assert.True(test.Context.TryWriteUInt64(entry, address + (ulong)index * 0x10000));
+                Assert.True(test.Context.TryWriteUInt64(entry + 8, (ulong)index * 0x10000));
+                Assert.True(test.Context.TryWriteUInt64(entry + 16, 0x10000));
+                Assert.True(test.Context.TryWriteUInt64(entry + 24, 0x33));
+            }
+            test.Context[CpuRegister.Rdi] = entries;
+            test.Context[CpuRegister.Rsi] = 2;
+            test.Context[CpuRegister.Rdx] = test.Output + 0x300;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelBatchMap(test.Context));
+            Assert.True(test.Context.TryReadUInt32(test.Output + 0x300, out var processed));
+            Assert.Equal(2u, processed);
+            Assert.True(test.Memory.IsBackedRange(address, 0x20000));
+            Assert.True(gpu.Covers(address, 0x20000));
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+    }
+
+    // The same state where no GPU can be attached (hosts with 16 KiB pages): the direct path
+    // marks the thread as inside a transaction and holds the mapping lock while the batch runs.
+    [Fact]
+    public void BatchMapEntriesRunInlineInsideADirectTransactionHoldingTheMappingLock()
+    {
+        using var test = new BackedKernelMemory();
+        test.Allocate(0, 0x20000);
+        var address = test.Reserve(0x20000);
+        var entries = test.Output + 0x200;
+        for (var index = 0; index < 2; index++)
+        {
+            var entry = entries + (ulong)index * 32;
+            Assert.True(test.Context.TryWriteUInt64(entry, address + (ulong)index * 0x10000));
+            Assert.True(test.Context.TryWriteUInt64(entry + 8, (ulong)index * 0x10000));
+            Assert.True(test.Context.TryWriteUInt64(entry + 16, 0x10000));
+            Assert.True(test.Context.TryWriteUInt64(entry + 24, 0x33));
+        }
+        test.Context[CpuRegister.Rdi] = entries;
+        test.Context[CpuRegister.Rsi] = 2;
+        test.Context[CpuRegister.Rdx] = test.Output + 0x300;
+
+        const System.Reflection.BindingFlags Static =
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        var type = typeof(KernelMemoryCompatExports);
+        var gate = type.GetField("_memoryGate", Static)!.GetValue(null)!;
+        var inside = type.GetField("_insideMappingTransaction", Static)!;
+        var direct = type.GetField("_directMappingTransaction", Static)!;
+        int result;
+        inside.SetValue(null, true);
+        direct.SetValue(null, true);
+        try
+        {
+            lock (gate)
+                result = KernelMemoryCompatExports.KernelBatchMap(test.Context);
+        }
+        finally
+        {
+            inside.SetValue(null, false);
+            direct.SetValue(null, false);
+        }
+
+        Assert.Equal(0, result);
+        Assert.True(test.Context.TryReadUInt32(test.Output + 0x300, out var processed));
+        Assert.Equal(2u, processed);
+        Assert.True(test.Memory.IsBackedRange(address, 0x20000));
+    }
 }
 
 internal sealed class BackedKernelMemory : IDisposable
