@@ -679,6 +679,11 @@ internal static unsafe partial class VulkanVideoPresenter
         public void SetDynamicState(in DynamicDrawState state)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStateRecording);
+            if (state.DepthBiasPerFace)
+            {
+                throw GpuFatal.Fatal("The draw's front and back faces take different polygon offsets, which this host does not split.");
+            }
+
             var command = BeginBatchedGuestCommands();
             // Every guest pipeline keeps these states dynamic, so they persist across its binds;
             // only what changed since the last draw in this command buffer is set again.

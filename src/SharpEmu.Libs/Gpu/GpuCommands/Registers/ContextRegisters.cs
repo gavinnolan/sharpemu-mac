@@ -123,6 +123,7 @@ public struct RasterModeRegisters
     public byte BackPolygonType;
     public bool PolygonOffsetFrontEnable;
     public bool PolygonOffsetBackEnable;
+    public bool PolygonOffsetParaEnable;
     public bool VertexWindowOffsetEnable;
     public bool ProvokingVertexLast;
     public bool PerspectiveCorrectionDisable;
@@ -137,6 +138,7 @@ public struct RasterModeRegisters
         BackPolygonType = (byte)RegisterField.Get(value, 8, 0x7),
         PolygonOffsetFrontEnable = RegisterField.Bit(value, 11),
         PolygonOffsetBackEnable = RegisterField.Bit(value, 12),
+        PolygonOffsetParaEnable = RegisterField.Bit(value, 13),
         VertexWindowOffsetEnable = RegisterField.Bit(value, 16),
         ProvokingVertexLast = RegisterField.Bit(value, 19),
         PerspectiveCorrectionDisable = RegisterField.Bit(value, 20),

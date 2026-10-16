@@ -89,18 +89,25 @@ public sealed partial class RenderExecutor
         var depthFormat = depthTarget.Target.Format;
         var mode = context.RasterMode;
         var polygonOffset = context.PolygonOffset;
-        var useFront = mode.PolygonOffsetFrontEnable && !mode.CullFront;
-        var useBack = mode.PolygonOffsetBackEnable && !mode.CullBack;
-        var depthBiasEnabled = useFront || useBack;
-        var depthBiasConstant = 0f;
-        var depthBiasSlope = 0f;
-        if (depthBiasEnabled)
-        {
-            // One host bias serves both faces; a visible front face wins.
-            var guestConstant = useFront ? polygonOffset.FrontOffset : polygonOffset.BackOffset;
-            depthBiasConstant = DepthBiasConstantFactor(guestConstant, in polygonOffset, depthFormat);
-            depthBiasSlope = (useFront ? polygonOffset.FrontScale : polygonOffset.BackScale) / 16f;
-        }
+        // A front-facing triangle takes the front offset under POLY_OFFSET_FRONT_ENABLE, a
+        // back-facing one the back offset under POLY_OFFSET_BACK_ENABLE, and points and lines
+        // the front offset under POLY_OFFSET_PARA_ENABLE; a face whose enable is off is not
+        // biased. A host sets one bias per draw, so a draw whose two visible faces differ is
+        // marked per-face and the host draws each face with its own.
+        var frontOffset = mode.PolygonOffsetFrontEnable || mode.PolygonOffsetParaEnable
+            ? (DepthBiasConstantFactor(polygonOffset.FrontOffset, in polygonOffset, depthFormat), polygonOffset.FrontScale / 16f)
+            : (0f, 0f);
+        var front = mode.PolygonOffsetFrontEnable ? frontOffset : (0f, 0f);
+        var back = mode.PolygonOffsetBackEnable
+            ? (DepthBiasConstantFactor(polygonOffset.BackOffset, in polygonOffset, depthFormat), polygonOffset.BackScale / 16f)
+            : (0f, 0f);
+        var pointLine = mode.PolygonOffsetParaEnable ? frontOffset : (0f, 0f);
+        var frontVisible = !mode.CullFront;
+        var backVisible = !mode.CullBack;
+        var depthBiasPerFace = frontVisible && backVisible && front != back;
+        var (depthBiasConstant, depthBiasSlope) = frontVisible ? front : back;
+        var depthBiasEnabled = (frontVisible && mode.PolygonOffsetFrontEnable) ||
+            (backVisible && mode.PolygonOffsetBackEnable) || mode.PolygonOffsetParaEnable;
 
         byte colorWriteMask = 0;
         for (var i = 0; i < state.ColorCount; i++)
@@ -139,7 +146,12 @@ public sealed partial class RenderExecutor
             depthState.FrontMasks,
             depthState.BackMasks,
             state.ColorCount,
-            colorWriteMask);
+            colorWriteMask,
+            depthBiasPerFace,
+            depthBiasPerFace ? back.Item1 : 0f,
+            depthBiasPerFace ? back.Item2 : 0f,
+            pointLine.Item1,
+            pointLine.Item2);
     }
 
     // The screen, window, generic, viewport and clip rectangles intersected and clamped to the extent.

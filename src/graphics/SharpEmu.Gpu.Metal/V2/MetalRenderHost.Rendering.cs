@@ -1288,15 +1288,20 @@ internal sealed partial class MetalRenderHost
             _boundBlendAlpha = _dynamicState.BlendAlpha;
         }
 
-        var biasConstant = _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasConstantFactor : 0f;
-        var biasSlope = _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasSlopeFactor : 0f;
-        var biasClamp = _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasClamp : 0f;
-        if (_boundBiasConstant != biasConstant || _boundBiasSlope != biasSlope || _boundBiasClamp != biasClamp)
+        // Points and lines take their own bias; triangles the front one, which a draw split
+        // by facing (FacePassCount) replaces with the back one for its back faces.
+        if (!_dynamicState.DepthBiasEnabled)
         {
-            MetalV2Native.SendDepthBias(_renderEncoder, SelSetDepthBias, biasConstant, biasSlope, biasClamp);
-            _boundBiasConstant = biasConstant;
-            _boundBiasSlope = biasSlope;
-            _boundBiasClamp = biasClamp;
+            SetDepthBias(0f, 0f, 0f);
+        }
+        else if (RasterizesTriangles(entry))
+        {
+            SetDepthBias(_dynamicState.DepthBiasConstantFactor, _dynamicState.DepthBiasSlopeFactor, _dynamicState.DepthBiasClamp);
+        }
+        else
+        {
+            SetDepthBias(
+                _dynamicState.DepthBiasPointLineConstantFactor, _dynamicState.DepthBiasPointLineSlopeFactor, _dynamicState.DepthBiasClamp);
         }
 
         if (_dynamicState.StencilTestEnabled &&
@@ -1331,6 +1336,79 @@ internal sealed partial class MetalRenderHost
         }
 
         ApplyStageBindings(graphics: true);
+    }
+
+    private void SetDepthBias(float constant, float slope, float clamp)
+    {
+        if (_boundBiasConstant != constant || _boundBiasSlope != slope || _boundBiasClamp != clamp)
+        {
+            MetalV2Native.SendDepthBias(_renderEncoder, SelSetDepthBias, constant, slope, clamp);
+            _boundBiasConstant = constant;
+            _boundBiasSlope = slope;
+            _boundBiasClamp = clamp;
+        }
+    }
+
+    // Whether the pipeline's rasterizer sees triangles (a rectangle list's patches tessellate
+    // to triangles), the only primitives with a facing.
+    private static bool RasterizesTriangles(MetalPipelineEntry entry) =>
+        entry.Mesh is { } mesh
+            ? mesh.Topology == Gen5MslMeshTopology.Triangle
+            : entry.RectangleStates is not null ||
+                entry.PrimitiveType is Mtl.PrimitiveTriangle or Mtl.PrimitiveTriangleStrip;
+
+    // How many times the draw is sent: twice when its front and back faces take different
+    // polygon offsets, which Metal's one bias per draw cannot express - once for the front
+    // faces under a host cull of the back ones with the front bias, then once for the back
+    // faces under a cull of the front ones with the back bias. The cull follows the
+    // pipeline's own front-face winding, so each pass keeps exactly the triangles the
+    // guest's facing gives that bias. Once otherwise.
+    private int FacePassCount(MetalPipelineEntry entry)
+    {
+        if (!_dynamicState.DepthBiasPerFace || !_dynamicState.DepthBiasEnabled || !RasterizesTriangles(entry) ||
+            MetalV2Diagnostics.IgnoreFragmentTests)
+        {
+            return 1;
+        }
+
+        if (entry.RectangleStates is not null)
+        {
+            throw Fatal(
+                "A rectangle list's front and back faces take different polygon offsets, and a rectangle's facing is not " +
+                $"modelled: pipeline={entry.Id} {entry.Profile}.");
+        }
+
+        if (entry.CullMode != Mtl.CullModeNone || entry.CullsEverything)
+        {
+            throw Fatal(
+                "A draw split by facing for its polygon offsets has a pipeline that culls a face: " +
+                $"pipeline={entry.Id} cull={entry.CullMode} all={entry.CullsEverything}.");
+        }
+
+        return 2;
+    }
+
+    // Sets the cull and the bias of one pass of a draw split by facing (pass 0: front faces).
+    private void SelectFacePass(int pass)
+    {
+        MetalV2Native.SendVoidValue(_renderEncoder, SelSetCullMode, (nuint)(pass == 0 ? Mtl.CullModeBack : Mtl.CullModeFront));
+        if (pass == 0)
+        {
+            SetDepthBias(_dynamicState.DepthBiasConstantFactor, _dynamicState.DepthBiasSlopeFactor, _dynamicState.DepthBiasClamp);
+        }
+        else
+        {
+            SetDepthBias(_dynamicState.DepthBiasBackConstantFactor, _dynamicState.DepthBiasBackSlopeFactor, _dynamicState.DepthBiasClamp);
+        }
+    }
+
+    // Restores the pipeline's own cull after a draw split by facing.
+    private void EndFacePasses(MetalPipelineEntry entry, int passes)
+    {
+        if (passes > 1)
+        {
+            MetalV2Native.SendVoidValue(_renderEncoder, SelSetCullMode, (nuint)entry.CullMode);
+        }
     }
 
     // Guests program a negative viewport height to get y-up rendering out of
@@ -1451,20 +1529,31 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        MetalV2Native.SendDrawPrimitivesBaseInstance(
-            _renderEncoder,
-            SelDrawPrimitives,
-            entry.PrimitiveType,
-            firstVertex,
-            vertexCount,
-            Math.Max(instanceCount, 1),
-            firstInstance);
-        for (var repeat = 1; _tinyPass && repeat < PpRepeat; repeat++)
+        var passes = FacePassCount(entry);
+        for (var pass = 0; pass < passes; pass++)
         {
+            if (passes > 1)
+            {
+                SelectFacePass(pass);
+            }
+
             MetalV2Native.SendDrawPrimitivesBaseInstance(
-                _renderEncoder, SelDrawPrimitives, entry.PrimitiveType, firstVertex, vertexCount,
-                Math.Max(instanceCount, 1), firstInstance);
+                _renderEncoder,
+                SelDrawPrimitives,
+                entry.PrimitiveType,
+                firstVertex,
+                vertexCount,
+                Math.Max(instanceCount, 1),
+                firstInstance);
+            for (var repeat = 1; _tinyPass && repeat < PpRepeat; repeat++)
+            {
+                MetalV2Native.SendDrawPrimitivesBaseInstance(
+                    _renderEncoder, SelDrawPrimitives, entry.PrimitiveType, firstVertex, vertexCount,
+                    Math.Max(instanceCount, 1), firstInstance);
+            }
         }
+
+        EndFacePasses(entry, passes);
 
         CountDraw(started);
         ProfileWork(entry, "draw", WorkShape.Vertices(vertexCount, instanceCount));
@@ -1498,24 +1587,35 @@ internal sealed partial class MetalRenderHost
         }
 
         var indexBytes = _indexType == Mtl.IndexTypeUInt32 ? 4UL : 2UL;
-        MetalV2Native.SendDrawIndexedBaseVertex(
-            _renderEncoder,
-            SelDrawIndexedPrimitives,
-            entry.PrimitiveType,
-            indexCount,
-            _indexType,
-            _indexBuffer,
-            (nuint)(_indexOffset + (firstIndex * indexBytes)),
-            Math.Max(instanceCount, 1),
-            vertexOffset,
-            firstInstance);
-        for (var repeat = 1; _tinyPass && repeat < PpRepeat; repeat++)
+        var passes = FacePassCount(entry);
+        for (var pass = 0; pass < passes; pass++)
         {
+            if (passes > 1)
+            {
+                SelectFacePass(pass);
+            }
+
             MetalV2Native.SendDrawIndexedBaseVertex(
-                _renderEncoder, SelDrawIndexedPrimitives, entry.PrimitiveType, indexCount, _indexType, _indexBuffer,
-                (nuint)(_indexOffset + (firstIndex * indexBytes)), Math.Max(instanceCount, 1), vertexOffset,
+                _renderEncoder,
+                SelDrawIndexedPrimitives,
+                entry.PrimitiveType,
+                indexCount,
+                _indexType,
+                _indexBuffer,
+                (nuint)(_indexOffset + (firstIndex * indexBytes)),
+                Math.Max(instanceCount, 1),
+                vertexOffset,
                 firstInstance);
+            for (var repeat = 1; _tinyPass && repeat < PpRepeat; repeat++)
+            {
+                MetalV2Native.SendDrawIndexedBaseVertex(
+                    _renderEncoder, SelDrawIndexedPrimitives, entry.PrimitiveType, indexCount, _indexType, _indexBuffer,
+                    (nuint)(_indexOffset + (firstIndex * indexBytes)), Math.Max(instanceCount, 1), vertexOffset,
+                    firstInstance);
+            }
         }
+
+        EndFacePasses(entry, passes);
 
         CountDraw(started);
         ProfileWork(entry, "draw-indexed", WorkShape.Indices(indexCount, instanceCount));
@@ -1544,12 +1644,23 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        MetalV2Native.SendDrawIndirect(
-            _renderEncoder,
-            SelDrawIndirect,
-            entry.PrimitiveType,
-            (nint)arguments.Handle,
-            (nuint)arguments.Offset);
+        var passes = FacePassCount(entry);
+        for (var pass = 0; pass < passes; pass++)
+        {
+            if (passes > 1)
+            {
+                SelectFacePass(pass);
+            }
+
+            MetalV2Native.SendDrawIndirect(
+                _renderEncoder,
+                SelDrawIndirect,
+                entry.PrimitiveType,
+                (nint)arguments.Handle,
+                (nuint)arguments.Offset);
+        }
+
+        EndFacePasses(entry, passes);
         Interlocked.Increment(ref _indirectGpuDraws);
         CountDraw(started);
         ProfileWork(entry, "draw-indirect", "indirect");
@@ -1584,15 +1695,26 @@ internal sealed partial class MetalRenderHost
                 $"pipeline={entry.Id} {entry.Profile}.");
         }
 
-        MetalV2Native.SendDrawIndexedIndirect(
-            _renderEncoder,
-            SelDrawIndexedIndirect,
-            entry.PrimitiveType,
-            _indexType,
-            _indexBuffer,
-            (nuint)_indexOffset,
-            (nint)arguments.Handle,
-            (nuint)arguments.Offset);
+        var passes = FacePassCount(entry);
+        for (var pass = 0; pass < passes; pass++)
+        {
+            if (passes > 1)
+            {
+                SelectFacePass(pass);
+            }
+
+            MetalV2Native.SendDrawIndexedIndirect(
+                _renderEncoder,
+                SelDrawIndexedIndirect,
+                entry.PrimitiveType,
+                _indexType,
+                _indexBuffer,
+                (nuint)_indexOffset,
+                (nint)arguments.Handle,
+                (nuint)arguments.Offset);
+        }
+
+        EndFacePasses(entry, passes);
         Interlocked.Increment(ref _indirectGpuDraws);
         CountDraw(started);
         ProfileWork(entry, "draw-indexed-indirect", "indirect");
@@ -1847,12 +1969,24 @@ internal sealed partial class MetalRenderHost
             PassProfileNoteGroups((ulong)subgroups * instanceCount);
         }
 
-        MetalNative.SendDrawMesh(
-            _renderEncoder,
-            SelDrawMeshThreadgroups,
-            new MtlSize { Width = subgroups, Height = instanceCount, Depth = 1 },
-            new MtlSize { Width = 1, Height = 1, Depth = 1 },
-            new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
+        var entry = _boundGraphicsPipeline!;
+        var passes = FacePassCount(entry);
+        for (var pass = 0; pass < passes; pass++)
+        {
+            if (passes > 1)
+            {
+                SelectFacePass(pass);
+            }
+
+            MetalNative.SendDrawMesh(
+                _renderEncoder,
+                SelDrawMeshThreadgroups,
+                new MtlSize { Width = subgroups, Height = instanceCount, Depth = 1 },
+                new MtlSize { Width = 1, Height = 1, Depth = 1 },
+                new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
+        }
+
+        EndFacePasses(entry, passes);
     }
 
     private MetalMeshletCache? _meshletCache;

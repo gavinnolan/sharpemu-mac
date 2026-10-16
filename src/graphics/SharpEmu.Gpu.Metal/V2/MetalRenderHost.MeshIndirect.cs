@@ -436,13 +436,24 @@ internal sealed partial class MetalRenderHost
                 _renderEncoder, SelSetMeshBuffer, _guestMemory.MeshLdsPool, 0, Gen5MslMeshInfo.LdsPoolBufferIndex);
         }
 
-        MetalV2Native.SendDrawMeshIndirect(
-            _renderEncoder,
-            SelDrawMeshIndirect,
-            slot.Buffer,
-            (nuint)(slot.Offset + Gen5MslMeshLaunch.GridByteOffset),
-            new MtlSize { Width = 1, Height = 1, Depth = 1 },
-            new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
+        var passes = FacePassCount(entry);
+        for (var pass = 0; pass < passes; pass++)
+        {
+            if (passes > 1)
+            {
+                SelectFacePass(pass);
+            }
+
+            MetalV2Native.SendDrawMeshIndirect(
+                _renderEncoder,
+                SelDrawMeshIndirect,
+                slot.Buffer,
+                (nuint)(slot.Offset + Gen5MslMeshLaunch.GridByteOffset),
+                new MtlSize { Width = 1, Height = 1, Depth = 1 },
+                new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
+        }
+
+        EndFacePasses(entry, passes);
         Interlocked.Increment(ref _indirectGpuDraws);
     }
 

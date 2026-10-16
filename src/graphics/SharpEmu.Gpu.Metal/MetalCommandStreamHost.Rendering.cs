@@ -875,7 +875,15 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         }
     }
 
-    void IRenderHost.SetDynamicState(in DynamicDrawState state) => _dynamicState = state;
+    void IRenderHost.SetDynamicState(in DynamicDrawState state)
+    {
+        if (state.DepthBiasPerFace)
+        {
+            throw Fatal("The draw's front and back faces take different polygon offsets, which this host does not split.");
+        }
+
+        _dynamicState = state;
+    }
 
     void IRenderHost.BeginRendering(in RenderingState state)
     {

@@ -333,7 +333,16 @@ public sealed partial class RenderExecutor
             _host.NoteIndexSource(indexSource.HostData is null ? indexSource.Address : 0, indexSource.Size);
         }
 
-        _host.SetDynamicState(BuildDynamicState(context, in state));
+        var dynamicState = BuildDynamicState(context, in state);
+        if (dynamicState.DepthBiasPerFace && DrawWritesMemory(vertexInput.Stage))
+        {
+            // The host draws each face separately, which runs the vertex stage twice.
+            throw _host.Fatal(
+                "A draw whose front and back faces take different polygon offsets writes memory from its vertex stage: " +
+                $"vertex=0x{vertexInput.Stage.Program?.Hash ?? 0:X16}.");
+        }
+
+        _host.SetDynamicState(dynamicState);
         if (setAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x400);

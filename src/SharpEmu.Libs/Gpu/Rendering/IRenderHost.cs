@@ -63,7 +63,16 @@ public readonly record struct DynamicDrawState(
     StencilMasks FrontStencil,
     StencilMasks BackStencil,
     uint ColorWriteCount,
-    byte ColorWriteEnableMask);
+    byte ColorWriteEnableMask,
+    // Set when front- and back-facing triangles take different biases: DepthBiasConstantFactor
+    // and DepthBiasSlopeFactor then bias the front faces only, and these two the back faces.
+    bool DepthBiasPerFace = false,
+    float DepthBiasBackConstantFactor = 0f,
+    float DepthBiasBackSlopeFactor = 0f,
+    // The bias of points and lines, which take the front offset under POLY_OFFSET_PARA_ENABLE
+    // whatever the triangle faces take.
+    float DepthBiasPointLineConstantFactor = 0f,
+    float DepthBiasPointLineSlopeFactor = 0f);
 
 // The host-side descriptors of one shader stage, prepared before the draw or dispatch records.
 public interface IPreparedBindings

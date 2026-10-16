@@ -120,13 +120,19 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.False(state.DepthWriteEnabled);
     }
 
+    // The front offset biases front faces and the back offset back faces; a face whose
+    // enable is off takes none, and two visible faces with different biases split the draw.
     [Theory]
-    [InlineData(true, false, false, false, true, 2f)]
-    [InlineData(false, true, false, false, true, 4f)]
-    [InlineData(true, false, true, false, false, 0f)]
-    [InlineData(true, true, true, false, true, 4f)]
-    [InlineData(false, false, false, false, false, 0f)]
-    public void DynamicState_DepthBiasFollowsTheEnabledUncooledFace(bool frontEnable, bool backEnable, bool cullFront, bool cullBack, bool expectedEnabled, float expectedConstant)
+    [InlineData(true, false, false, false, true, 2f, true, 0f)]
+    [InlineData(false, true, false, false, true, 0f, true, 4f)]
+    [InlineData(true, true, false, false, true, 2f, true, 4f)]
+    [InlineData(true, false, true, false, false, 0f, false, 0f)]
+    [InlineData(true, true, true, false, true, 4f, false, 0f)]
+    [InlineData(false, true, false, true, false, 0f, false, 0f)]
+    [InlineData(false, false, false, false, false, 0f, false, 0f)]
+    public void DynamicState_DepthBiasFollowsTheEnabledUncooledFace(
+        bool frontEnable, bool backEnable, bool cullFront, bool cullBack, bool expectedEnabled, float expectedConstant,
+        bool expectedPerFace, float expectedBackConstant)
     {
         var banks = Banks(withDepth: true);
         banks.Context.RasterMode = new RasterModeRegisters { PolygonOffsetFrontEnable = frontEnable, PolygonOffsetBackEnable = backEnable, CullFront = cullFront, CullBack = cullBack };
@@ -135,8 +141,26 @@ public sealed class RenderExecutorStateTests : IDisposable
 
         Assert.Equal(expectedEnabled, state.DepthBiasEnabled);
         Assert.Equal(expectedConstant, state.DepthBiasConstantFactor);
-        Assert.Equal(expectedEnabled ? (frontEnable && !cullFront ? 2f : 4f) : 0f, state.DepthBiasSlopeFactor);
+        Assert.Equal(expectedConstant, state.DepthBiasSlopeFactor);
         Assert.Equal(expectedEnabled ? 0.5f : 0f, state.DepthBiasClamp);
+        Assert.Equal(expectedPerFace, state.DepthBiasPerFace);
+        Assert.Equal(expectedBackConstant, state.DepthBiasBackConstantFactor);
+        Assert.Equal(expectedBackConstant, state.DepthBiasBackSlopeFactor);
+    }
+
+    // Points and lines take the front offset under POLY_OFFSET_PARA_ENABLE alone.
+    [Theory]
+    [InlineData(false, true, 2f)]
+    [InlineData(true, false, 0f)]
+    public void DynamicState_PointAndLineBiasFollowsTheParaEnable(bool frontEnable, bool paraEnable, float expected)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.RasterMode = new RasterModeRegisters { PolygonOffsetFrontEnable = frontEnable, PolygonOffsetParaEnable = paraEnable };
+        banks.Context.PolygonOffset = new PolygonOffsetRegisters { FrontOffset = 2f, BackOffset = 4f, FrontScale = 32f, BackScale = 64f };
+        var state = DrawAndTakeState(banks);
+
+        Assert.Equal(expected, state.DepthBiasPointLineConstantFactor);
+        Assert.Equal(expected, state.DepthBiasPointLineSlopeFactor);
     }
 
     [Theory]
