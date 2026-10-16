@@ -1499,6 +1499,15 @@ public static partial class Gen5MslTranslator
                 return TryEmitInterpolationParameter(instruction, interpolation, destination, out error);
             }
 
+            if (IsHalfInterpolation(instruction.Opcode) ||
+                interpolation.Modifiers is { } modifiers && ((modifiers.AbsoluteMask | modifiers.NegateMask) & 0x6u) != 0)
+            {
+                // Fixed-function interpolation cannot split a 32-bit parameter into halves or
+                // weight it with modified barycentrics.
+                error = $"{instruction.Opcode} of attribute {interpolation.Attribute} needs per-vertex pixel inputs";
+                return false;
+            }
+
             if (_perVertexSourcedAttributes.TryGetValue(interpolation.Attribute, out var flatSource))
             {
                 EmitPerVertexSourcedInterpolation(interpolation, destination, flatSource);
@@ -1507,7 +1516,8 @@ public static partial class Gen5MslTranslator
 
             StoreVector(
                 destination,
-                AsUInt($"{PixelInputField(interpolation.Attribute)}[{interpolation.Channel}]"));
+                AsUInt(ApplyInterpolationOutputModifiers(
+                    interpolation, $"{PixelInputField(interpolation.Attribute)}[{interpolation.Channel}]")));
             return true;
         }
 
@@ -1564,7 +1574,8 @@ public static partial class Gen5MslTranslator
             Advance(4, 2);  // LINEAR_SAMPLE
             Advance(5, 2);  // LINEAR_CENTER
             Advance(6, 2);  // LINEAR_CENTROID
-            Advance(7, 1);  // LINE_STIPPLE
+            // LINE_STIPPLE_TEX reads 0: line stipple is not emulated (as AnyPS5).
+            Input(7, "0u");
             Input(8, $"as_type<uint>({fragCoord}.x)");
             Input(9, $"as_type<uint>({fragCoord}.y)");
             Input(10, $"as_type<uint>({fragCoord}.z)");

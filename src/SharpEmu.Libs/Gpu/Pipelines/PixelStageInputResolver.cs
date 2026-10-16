@@ -119,6 +119,7 @@ public static class PixelStageInputResolver
             PositionZ = (activeInputs & InputPositionZ) != 0,
             PositionW = (activeInputs & InputPositionW) != 0,
             FrontFace = (activeInputs & InputFrontFace) != 0,
+            FrontFaceAllBits = ((shaderInterface.BarycentricControl >> 24) & 1u) != 0,
             SampleShading = (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
             NoPerspective = (activeInputs & InputLinearCenter) != 0,
             KillEnable = control.KillEnable,

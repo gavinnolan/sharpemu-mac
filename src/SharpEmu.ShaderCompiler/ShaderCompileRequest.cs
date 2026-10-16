@@ -209,6 +209,9 @@ public sealed class ShaderCompileRequest
     // fragment's coverage.
     public bool PixelSampleMaskExportEnable { get; init; }
     public uint PixelInputEnable { get; init; }
+
+    // SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS: FRONT_FACE reads 0xFFFFFFFF/0 instead of +1.0/-1.0.
+    public bool PixelFrontFaceAllBits { get; init; }
     public uint PixelCustomInterpolationMask { get; init; }
 
     // False when the device cannot read one vertex's value of a pixel input (PerVertexKHR).

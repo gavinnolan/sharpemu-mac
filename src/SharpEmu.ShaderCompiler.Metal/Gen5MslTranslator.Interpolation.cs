@@ -53,10 +53,7 @@ public static partial class Gen5MslTranslator
         {
             foreach (var attribute in _pixelAttributes)
             {
-                if (!_request.Program.Instructions.Any(instruction =>
-                        instruction.Opcode == "VInterpMovF32" &&
-                        instruction.Control is Gen5InterpolationControl control &&
-                        control.Attribute == attribute))
+                if (!NeedsVertexValues(attribute))
                 {
                     continue;
                 }
@@ -78,6 +75,7 @@ public static partial class Gen5MslTranslator
             bool IsFlatSlot(uint attribute) =>
                 (PixelInputControl(attribute) & 0x400u) != 0 ||
                 _flatParameterAttributes.Contains(attribute);
+
             foreach (var group in _pixelAttributes.GroupBy(attribute =>
                          PixelInputControl(attribute) & 0x1Fu))
             {
@@ -99,6 +97,8 @@ public static partial class Gen5MslTranslator
                         continue;
                     }
 
+                    // Smooth slots of one parameter share one input, interpolated where the
+                    // first of them is: the vertex program writes the location once.
                     var flat = IsFlatSlot(attribute);
                     if (owners.TryGetValue(flat, out var owner))
                     {
@@ -156,11 +156,11 @@ public static partial class Gen5MslTranslator
                     continue;
                 }
 
-                var flat = (PixelInputControl(attribute) & 0x400u) != 0 ||
+                var qualifier = (PixelInputControl(attribute) & 0x400u) != 0 ||
                     _flatParameterAttributes.Contains(attribute)
                     ? ", flat"
-                    : string.Empty;
-                source.AppendLine($"    float4 attr{attribute} [[user(locn{locations[index]}){flat}]];");
+                    : InterpolationQualifier(attribute) is { } mode ? $", {mode}" : string.Empty;
+                source.AppendLine($"    float4 attr{attribute} [[user(locn{locations[index]}){qualifier}]];");
             }
 
             if (_perspectiveBarycentric is not null)
@@ -238,33 +238,174 @@ public static partial class Gen5MslTranslator
                     : value;
             }
 
-            string result;
-            if (instruction.Opcode == "VInterpMovF32")
+            // The f16 forms read one half of each vertex's 32-bit parameter (HIGH picks the
+            // upper one). P10/P20 are the vertex differences rounded to f16, as AnyPS5 reads
+            // them; a custom-interpolated slot hands the raw vertex halves instead.
+            var half = interpolation.High ? 1 : 0;
+            string HalfVertex(uint vertex) =>
+                $"(float)as_type<half2>(as_type<uint>({VertexValue(field, vertex, interpolation.Channel)}))[{half}]";
+            string HalfParameter(uint mode)
             {
-                var mode = interpolation.Parameter;
-                if (mode >= 3)
+                var value = HalfVertex((mode + 1) % 3);
+                return !custom && mode < 2 ? $"(float)half({value} - {HalfVertex(0)})" : value;
+            }
+
+            string result;
+            switch (instruction.Opcode)
+            {
+                case "VInterpMovF32":
                 {
-                    error = "reserved interpolation parameter selector";
-                    return false;
+                    var mode = interpolation.Parameter;
+                    if (mode >= 3)
+                    {
+                        error = "reserved interpolation parameter selector";
+                        return false;
+                    }
+
+                    result = Parameter(mode);
+                    break;
                 }
 
-                result = Parameter(mode);
-            }
-            else if (instruction.Opcode is "VInterpP1F32" or "VInterpP2F32")
-            {
-                var firstPhase = instruction.Opcode == "VInterpP1F32";
-                var source = AsFloat(SourceExpression(instruction.Sources[0], instruction));
-                result = $"({Parameter(firstPhase ? 0u : 1u)} * {source} + " +
-                    $"{(firstPhase ? Parameter(2) : AsFloat($"v[{destination}]"))})";
-            }
-            else
-            {
-                error = $"unsupported interpolation opcode {instruction.Opcode}";
-                return false;
+                case "VInterpP1F32" or "VInterpP2F32":
+                {
+                    var firstPhase = instruction.Opcode == "VInterpP1F32";
+                    var source = InterpolationSource(instruction, interpolation, 0);
+                    result = $"({Parameter(firstPhase ? 0u : 1u)} * {source} + " +
+                        $"{(firstPhase ? Parameter(2) : AsFloat($"v[{destination}]"))})";
+                    break;
+                }
+
+                // P10 * I + P0 (or + S2's half), rounded once to f32 (AnyPS5 measured RDNA2).
+                case "VInterpP1llF16":
+                    result = $"fma({HalfParameter(0)}, {InterpolationSource(instruction, interpolation, 0)}, {HalfParameter(2)})";
+                    break;
+                case "VInterpP1lvF16":
+                {
+                    var origin = InterpolationSourceModifiers(interpolation, 1,
+                        $"(float)as_type<half2>({SourceExpression(instruction.Sources[1], instruction)})[{half}]");
+                    result = $"fma({HalfParameter(0)}, {InterpolationSource(instruction, interpolation, 0)}, {origin})";
+                    break;
+                }
+
+                // P20 * J + S2.f32, rounded to f16 into the low half (the high one with
+                // op_sel[3]); the other half is kept, like the other f16 VOP3 results.
+                case "VInterpP2F16":
+                {
+                    var sum = $"fma({HalfParameter(1)}, {InterpolationSource(instruction, interpolation, 0)}, " +
+                        $"{InterpolationSource(instruction, interpolation, 1)})";
+                    var packed = $"(uint)as_type<ushort>(half({ApplyInterpolationOutputModifiers(interpolation, sum)}))";
+                    StoreVector(destination, ((interpolation.Modifiers?.OperandSelect ?? 0) & 8) != 0
+                        ? $"((v[{destination}] & 0x0000FFFFu) | ({packed} << 16))"
+                        : $"((v[{destination}] & 0xFFFF0000u) | {packed})");
+                    return true;
+                }
+
+                default:
+                    error = $"unsupported interpolation opcode {instruction.Opcode}";
+                    return false;
             }
 
-            StoreVector(destination, AsUInt(result));
+            StoreVector(destination, AsUInt(ApplyInterpolationOutputModifiers(interpolation, result)));
             return true;
+        }
+
+        private static bool IsHalfInterpolation(string opcode) =>
+            opcode is "VInterpP1llF16" or "VInterpP1lvF16" or "VInterpP2F16";
+
+        // A slot needs every vertex's value when a program reads its parameters (V_INTERP_MOV),
+        // its 16-bit halves (the f16 forms), or modifies the I/J it is interpolated with.
+        private bool NeedsVertexValues(uint attribute) =>
+            _request.Program.Instructions.Any(instruction =>
+                instruction.Control is Gen5InterpolationControl control &&
+                control.Attribute == attribute &&
+                (instruction.Opcode == "VInterpMovF32" || IsHalfInterpolation(instruction.Opcode) ||
+                 control.Modifiers is { } modifiers && ((modifiers.AbsoluteMask | modifiers.NegateMask) & 0x6u) != 0));
+
+        // Source operand index (0: I/J, 1: S2) as a float with its VOP3 abs/neg, which count
+        // from src1 because src0 holds the attribute.
+        private string InterpolationSource(Gen5ShaderInstruction instruction, Gen5InterpolationControl interpolation, int index) =>
+            InterpolationSourceModifiers(interpolation, index,
+                AsFloat(SourceExpression(instruction.Sources[index], instruction)));
+
+        private static string InterpolationSourceModifiers(Gen5InterpolationControl interpolation, int index, string value)
+        {
+            var bit = 1u << (index + 1);
+            if (interpolation.Modifiers is not { } modifiers)
+            {
+                return value;
+            }
+
+            if ((modifiers.AbsoluteMask & bit) != 0)
+            {
+                value = $"fabs({value})";
+            }
+
+            return (modifiers.NegateMask & bit) != 0 ? $"(-{value})" : value;
+        }
+
+        // The VOP3 forms' omod (ignored under IEEE mode, RDNA2 ISA 6.2.2) and clamp.
+        private string ApplyInterpolationOutputModifiers(Gen5InterpolationControl interpolation, string expression)
+        {
+            if (interpolation.Modifiers is not { } modifiers)
+            {
+                return expression;
+            }
+
+            expression = (_request.IeeeMode ? 0u : modifiers.OutputModifier) switch
+            {
+                1 => $"(({expression}) * 2.0f)",
+                2 => $"(({expression}) * 4.0f)",
+                3 => $"(({expression}) * 0.5f)",
+                _ => expression,
+            };
+            return modifiers.Clamp ? $"clamp({expression}, 0.0f, 1.0f)" : expression;
+        }
+
+        // The interpolation location of a host-interpolated slot: which barycentric input the
+        // I/J VGPR of its V_INTERP_P1/P2 is. SPI_PS_INPUT_ADDR lays those out in bit order
+        // (PERSP_SAMPLE/CENTER/CENTROID two VGPRs each, PULL_MODEL three, LINEAR_SAMPLE/
+        // CENTER/CENTROID two each). PERSP_SAMPLE and LINEAR_SAMPLE interpolate at the
+        // sample, which on a single-sample target is the pixel center. Null for the pixel
+        // center with perspective, Metal's default (and the pull model's).
+        private string? InterpolationQualifier(uint attribute)
+        {
+            foreach (var instruction in _request.Program.Instructions)
+            {
+                if (instruction.Control is not Gen5InterpolationControl control || control.Attribute != attribute ||
+                    instruction.Opcode is not ("VInterpP1F32" or "VInterpP2F32") ||
+                    instruction.Sources.Count == 0 || instruction.Sources[0].Kind != Gen5OperandKind.VectorRegister)
+                {
+                    continue;
+                }
+
+                var vgpr = instruction.Sources[0].Value;
+                var start = 0u;
+                for (var bit = 0; bit < 7; bit++)
+                {
+                    if ((_pixelInputAddress & (1u << bit)) == 0)
+                    {
+                        continue;
+                    }
+
+                    var count = bit == 3 ? 3u : 2u;
+                    if (vgpr >= start && vgpr < start + count)
+                    {
+                        return bit switch
+                        {
+                            0 => "sample_perspective",
+                            2 => "centroid_perspective",
+                            4 => "sample_no_perspective",
+                            5 => "center_no_perspective",
+                            6 => "centroid_no_perspective",
+                            _ => null,
+                        };
+                    }
+
+                    start += count;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -296,13 +437,16 @@ public static partial class Gen5MslTranslator
             return [$"{field}.y", $"{field}.z"];
         }
 
-        // Front facing reads as 1.0f and back facing as 0, which satisfies both the float
-        // greater-than and the integer not-equal tests compilers emit for it.
-        // ANCILLARY carries the render target array index in bits [28:16]. POS_FIXED_PT
-        // holds the integer pixel position: x in bits [15:0] and y in bits [31:16].
-        private static string? PixelSystemInput(int bit) => bit switch
+        // FRONT_FACE is 0xFFFFFFFF for a front face and 0 for a back face with
+        // SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS (Mesa's RADV sets it and ACO tests the input with
+        // v_cmp_lg_u32 0), and +1.0/-1.0 without it (Mesa's fgt 0 and fsign reads), as AnyPS5
+        // reads both. ANCILLARY carries the render target array index in bits [28:16].
+        // POS_FIXED_PT holds the integer pixel position: x in bits [15:0] and y in bits [31:16].
+        private string? PixelSystemInput(int bit) => bit switch
         {
-            12 => "(sharpemu_in.sharpemu_front_facing ? 0x3F800000u : 0u)",
+            12 => _request.PixelFrontFaceAllBits
+                ? "(sharpemu_in.sharpemu_front_facing ? 0xFFFFFFFFu : 0u)"
+                : "(sharpemu_in.sharpemu_front_facing ? 0x3F800000u : 0xBF800000u)",
             13 => "(sharpemu_in.sharpemu_layer << 16)",
             14 => "sharpemu_in.sharpemu_sample_mask",
             15 => "((uint(sharpemu_in.sharpemu_frag_coord.x) & 0xFFFFu) | " +

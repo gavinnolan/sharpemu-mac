@@ -172,6 +172,8 @@ public sealed class PixelInputInfo
     public bool PositionZ { get; init; }
     public bool PositionW { get; init; }
     public bool FrontFace { get; init; }
+    // SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS: FRONT_FACE is 0xFFFFFFFF/0 rather than +1.0/-1.0.
+    public bool FrontFaceAllBits { get; init; }
     public bool NoPerspective { get; init; }
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }

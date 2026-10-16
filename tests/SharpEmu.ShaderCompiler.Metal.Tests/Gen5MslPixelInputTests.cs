@@ -54,7 +54,7 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         Assert.Contains("uint sharpemu_sample_mask [[sample_mask]];", shader.Source, StringComparison.Ordinal);
 
         // PERSP_CENTER holds v0/v1, so the system inputs follow from v2 in bit order.
-        Assert.Contains("v2 = (sharpemu_in.sharpemu_front_facing ? 0x3F800000u : 0u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v2 = (sharpemu_in.sharpemu_front_facing ? 0x3F800000u : 0xBF800000u);", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v3 = (sharpemu_in.sharpemu_layer << 16);", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v4 = sharpemu_in.sharpemu_sample_mask;", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v5 = ((uint(sharpemu_in.sharpemu_frag_coord.x) & 0xFFFFu) | " +
@@ -235,15 +235,17 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         }
         """;
 
-    [Fact]
-    public void SystemInputsRenderTheirHardwareEncodings()
+    [Theory]
+    [InlineData(false, 0x3F800000u, 0xBF800000u)]
+    [InlineData(true, 0xFFFFFFFFu, 0u)]
+    public void SystemInputsRenderTheirHardwareEncodings(bool frontFaceAllBits, uint front, uint back)
     {
         if (SkipWithoutMetalDevice("the pixel system input render test")) return;
 
         var inputs = PerspCenter | PosW | FrontFace | Ancillary | SampleCoverage | PosFixedPoint;
         // v0/v1 PERSP_CENTER, v2 POS_W, v3 FRONT_FACE, v4 ANCILLARY, v5 SAMPLE_COVERAGE, v6 POS_FIXED_PT.
         var first = Render(SystemInputVertexSource, "system_vs", 6, ExportAndEnd(2, 3, 5, 6), inputs,
-            Gen5PixelOutputKind.Uint, languageVersion: null);
+            Gen5PixelOutputKind.Uint, languageVersion: null, frontFaceAllBits: frontFaceAllBits);
         var second = Render(SystemInputVertexSource, "system_vs", 6, ExportAndEnd(4, 4, 4, 4), inputs,
             Gen5PixelOutputKind.Uint, languageVersion: null);
 
@@ -254,10 +256,10 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         Assert.Equal(BitConverter.SingleToUInt32Bits(2.0f), Texel(first, leftX, y, 0));
         Assert.Equal(BitConverter.SingleToUInt32Bits(2.0f), Texel(first, rightX, y, 0));
 
-        // FRONT_FACE is 1.0f on the front-facing triangle and 0 on the other.
+        // FRONT_FACE is +1.0/-1.0, or all ones/zero with FRONT_FACE_ALL_BITS.
         var faces = new[] { Texel(first, leftX, y, 1), Texel(first, rightX, y, 1) };
-        Assert.Contains(0x3F800000u, faces);
-        Assert.Contains(0u, faces);
+        Assert.Contains(front, faces);
+        Assert.Contains(back, faces);
 
         // A single-sample target covers sample 0.
         Assert.Equal(1u, Texel(first, leftX, y, 2));
@@ -391,9 +393,12 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         uint inputs,
         Gen5PixelOutputKind outputKind,
         nuint? languageVersion,
-        uint[]? cntl = null)
+        uint[]? cntl = null,
+        bool frontFaceAllBits = false,
+        uint customMask = 0)
     {
-        var shader = Compile(pixelWords, inputs, cntl: cntl ?? [0, 1], outputKind: outputKind);
+        var shader = Compile(pixelWords, inputs, cntl: cntl ?? [0, 1], outputKind: outputKind,
+            frontFaceAllBits: frontFaceAllBits, customMask: customMask);
         Assert.True(MetalNative.TryCompileLibrary(vertexSource, out var vertexLibrary, out var error), error);
         nint fragmentLibrary;
         Assert.True(
@@ -419,6 +424,259 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         return texels;
     }
 
+    // ---- VOP3 and f16 interpolation, interpolation locations ----
+
+    // VOP3 interpolation: src0 = attr | chan << 6 | HIGH << 8, src1 = the I/J VGPR (or
+    // V_INTERP_MOV's parameter), src2 = S2 (encodings as llvm-mc -mcpu=gfx1030 emits them).
+    private static uint[] Vop3Interp(uint opcode, uint vdst, uint attribute, uint channel, uint src1, uint src2 = 0,
+        bool high = false, uint abs = 0, uint neg = 0, uint omod = 0, bool clamp = false) =>
+    [
+        0xD4000000u | (opcode << 16) | (clamp ? 0x8000u : 0u) | (abs << 8) | vdst,
+        attribute | (channel << 6) | (high ? 0x100u : 0u) | (src1 << 9) | (src2 << 18) | (omod << 27) | (neg << 29),
+    ];
+
+    private const uint OpP1F32 = 0x200, OpP2F32 = 0x201, OpMovF32 = 0x202;
+    private const uint OpP1llF16 = 0x342, OpP1lvF16 = 0x343, OpP2F16 = 0x35A;
+    private const uint V0 = 256, V1 = 257, V3 = 259;
+
+    [Theory]
+    [InlineData(1u, false, false, "* 2.0f")]
+    [InlineData(3u, true, false, "* 0.5f")]
+    [InlineData(0u, true, false, "clamp(")]
+    [InlineData(1u, false, true, null)]
+    public void Vop3Interpolation_AppliesItsOutputModifiers(uint omod, bool clamp, bool ieee, string? expected)
+    {
+        var shader = Compile(
+            [.. Vop3Interp(OpP1F32, 4, 1, 0, V0), .. Vop3Interp(OpP2F32, 4, 1, 0, V1, omod: omod, clamp: clamp), .. ExportAndEnd(4, 4, 4, 4)],
+            PerspCenter, cntl: [0, 1], ieeeMode: ieee);
+        Assert.False(shader.UsesPerVertexInputs);
+        var store = shader.Source.Split('\n').Last(line => line.Contains("sharpemu_in.attr1[0]", StringComparison.Ordinal));
+        if (expected is null)
+        {
+            // Output modifiers are ignored under IEEE mode.
+            Assert.DoesNotContain("* 2.0f", store, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains(expected, store, StringComparison.Ordinal);
+        }
+
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void Vop3ParameterMove_ReadsItsParameterFromSrc1()
+    {
+        var shader = Compile([.. Vop3Interp(OpMovF32, 4, 1, 2, 1), .. ExportAndEnd(4, 4, 4, 4)], PerspCenter, cntl: [0, 1]);
+        Assert.True(shader.UsesPerVertexInputs);
+        Assert.Contains("(sharpemu_in.attr1.get(vertex_index::third)[2] - sharpemu_in.attr1.get(vertex_index::first)[2])",
+            shader.Source, StringComparison.Ordinal);
+
+        var provoking = Compile([.. Vop3Interp(OpMovF32, 4, 1, 0, 2), .. ExportAndEnd(4, 4, 4, 4)], PerspCenter, cntl: [0, 1]);
+        Assert.Contains("float4 attr1 [[user(locn1), flat]];", provoking.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 1)]
+    public void HalfInterpolation_ReadsOneHalfOfEachVertex(bool high, int half)
+    {
+        var shader = Compile(
+            [.. Vop3Interp(OpP1llF16, 4, 1, 0, V0, high: high), .. Vop3Interp(OpP2F16, 5, 1, 0, V1, 260, high: high),
+             .. ExportAndEnd(4, 5, 4, 4)],
+            PerspCenter, cntl: [0, 1]);
+        Assert.True(shader.UsesPerVertexInputs);
+        Assert.Contains($"(float)as_type<half2>(as_type<uint>(sharpemu_in.attr1.get(vertex_index::second)[0]))[{half}]",
+            shader.Source, StringComparison.Ordinal);
+        // P2_F16 rounds into the low half and keeps the high one.
+        Assert.Contains("((v[5] & 0xFFFF0000u) | (uint)as_type<ushort>(half(fma(", shader.Source.Replace("v5", "v[5]"), StringComparison.Ordinal);
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void HalfInterpolationWithS2_TakesTheSelectedHalfAndItsModifiers()
+    {
+        var shader = Compile(
+            [.. Vop3Interp(OpP1lvF16, 4, 1, 0, V0, V3, high: true, abs: 4, neg: 2), .. ExportAndEnd(4, 4, 4, 4)],
+            PerspCenter, cntl: [0, 1]);
+        Assert.Contains("fabs((float)as_type<half2>(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(")[1])", shader.Source, StringComparison.Ordinal);
+        AssertCompiles(shader);
+    }
+
+    [Theory]
+    [InlineData(OpP1llF16)]
+    [InlineData(OpP2F16)]
+    public void HalfInterpolation_NeedsPerVertexInputs(uint opcode)
+    {
+        var request = Request([.. Vop3Interp(opcode, 4, 1, 0, V0, 260), .. ExportAndEnd(4, 4, 4, 4)],
+            PerspCenter, PerspCenter, [0, 1], 0, supportsPerVertex: false);
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("needs per-vertex pixel inputs", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NegatedBarycentric_IsInterpolatedFromTheVertices()
+    {
+        uint[] words = [.. Vop3Interp(OpP1F32, 4, 1, 0, V0, neg: 2), .. Vop3Interp(OpP2F32, 4, 1, 0, V1), .. ExportAndEnd(4, 4, 4, 4)];
+        var shader = Compile(words, PerspCenter, cntl: [0, 1]);
+        Assert.True(shader.UsesPerVertexInputs);
+        Assert.Contains("(-as_type<float>(", shader.Source, StringComparison.Ordinal);
+
+        var request = Request(words, PerspCenter, PerspCenter, [0, 1], 0, supportsPerVertex: false);
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("needs per-vertex pixel inputs", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // SPI_PS_INPUT_ADDR bit, the VGPR of its I, and the Metal location.
+    [InlineData(1u << 0, 0u, "sample_perspective")]
+    [InlineData(1u << 2, 0u, "centroid_perspective")]
+    [InlineData(1u << 4, 0u, "sample_no_perspective")]
+    [InlineData(1u << 5, 0u, "center_no_perspective")]
+    [InlineData(1u << 6, 0u, "centroid_no_perspective")]
+    [InlineData((1u << 1) | (1u << 5), 2u, "center_no_perspective")]
+    [InlineData((1u << 1) | (1u << 5), 0u, null)]
+    [InlineData((1u << 3) | (1u << 6), 3u, "centroid_no_perspective")]
+    public void InterpolatedSlot_TakesTheLocationOfItsBarycentrics(uint inputs, uint vgpr, string? qualifier)
+    {
+        var shader = Compile([Interp(4, 0, 1, 0, vgpr), Interp(4, 1, 1, 0, vgpr + 1), .. ExportAndEnd(4, 4, 4, 4)],
+            inputs, cntl: [0, 1]);
+        Assert.Contains(qualifier is null ? "float4 attr1 [[user(locn1)]];" : $"float4 attr1 [[user(locn1), {qualifier}]];",
+            shader.Source, StringComparison.Ordinal);
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void SlotsOfOneParameterWithDifferentLocations_ShareTheFirstSlotsInput()
+    {
+        // Slot 1 interpolates with PERSP_CENTER (v0/v1), slot 2 the same parameter with
+        // LINEAR_CENTER (v2/v3). The vertex program writes the location once, so both read
+        // slot 1's input, interpolated where slot 1 is.
+        var shader = Compile(
+            [Interp(4, 0, 1, 0, 0), Interp(4, 1, 1, 0, 1), Interp(5, 0, 2, 0, 2), Interp(5, 1, 2, 0, 3), .. ExportAndEnd(4, 5, 4, 4)],
+            (1u << 1) | (1u << 5), cntl: [0, 1, 1]);
+        Assert.Contains("float4 attr1 [[user(locn1)]];", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("attr2", shader.Source, StringComparison.Ordinal);
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void LineStipple_ReadsZero()
+    {
+        // PERSP_CENTER holds v0/v1 and LINE_STIPPLE_TEX v2.
+        var shader = Compile(ExportAndEnd(2, 2, 2, 2), PerspCenter | (1u << 7));
+        Assert.Contains("v2 = 0u;", shader.Source, StringComparison.Ordinal);
+    }
+
+    // One triangle whose vertices sit at w = 1, 2 and 4 (clip xyz scaled with it), with
+    // param0.x = 10, 20, 40 and param1.x the two halves (value, 2 * value) of each.
+    private const string PerspectiveVertexSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct VsOut
+        {
+            float4 position [[position]];
+            float4 param0 [[user(locn0)]];
+            float4 param1 [[user(locn1)]];
+        };
+        vertex VsOut perspective_vs(uint id [[vertex_id]])
+        {
+            const float2 corners[3] = { float2(-1.0, -1.0), float2(-1.0, 3.0), float2(3.0, -1.0) };
+            const float values[3] = { 10.0, 20.0, 40.0 };
+            const float w[3] = { 1.0, 2.0, 4.0 };
+            VsOut out;
+            out.position = float4(corners[id] * w[id], 0.5 * w[id], w[id]);
+            out.param0 = float4(values[id], 0.0, 0.0, 1.0);
+            out.param1 = float4(as_type<float>(half2(half(values[id]), half(2.0 * values[id]))), 0.0, 0.0, 1.0);
+            return out;
+        }
+        """;
+
+    [Theory]
+    [InlineData(1u << 1, false)]
+    [InlineData(1u << 5, true)]
+    public void LinearBarycentricsInterpolateInScreenSpace(uint inputs, bool linear)
+    {
+        if (SkipWithoutMetalDevice("the interpolation location render test")) return;
+
+        // VINTRP P1 then the VOP3 P2 with div:2 (omod 3) over v0/v1.
+        uint[] words = [Interp(4, 0, 0, 0, 0), .. Vop3Interp(OpP2F32, 4, 0, 0, V1, omod: 3), .. ExportAndEnd(4, 4, 4, 4)];
+        var texels = Render(PerspectiveVertexSource, "perspective_vs", 3, words, inputs, Gen5PixelOutputKind.Float,
+            languageVersion: null);
+
+        var vertices = new (double X, double Y)[] { (0, TargetHeight * 1.0), (0, -TargetHeight * 1.0), (TargetWidth * 2.0, TargetHeight * 1.0) };
+        double[] values = [10, 20, 40];
+        double[] inverseW = [1, 0.5, 0.25];
+        foreach (var (x, y) in new (uint, uint)[] { (1, 1), (7, 3), (12, 6) })
+        {
+            var value = BitConverter.UInt32BitsToSingle(texels[(((y * TargetWidth) + x) * 4) + 0]);
+            var screen = Interpolate(vertices, values, x + 0.5, y + 0.5);
+            var perspective = Interpolate(vertices, values.Select((v, i) => v * inverseW[i]).ToArray(), x + 0.5, y + 0.5) /
+                Interpolate(vertices, inverseW, x + 0.5, y + 0.5);
+            var expected = (linear ? screen : perspective) * 0.5;
+            Assert.True(Math.Abs(value - expected) < 1e-3, $"({x},{y}): {value} != {expected} (linear={linear})");
+        }
+    }
+
+    [Fact]
+    public void HalfInterpolationRendersEachHalf()
+    {
+        if (SkipWithoutMetalDevice("the f16 interpolation render test")) return;
+        if (!MetalNative.SupportsPerVertexPixelInputs)
+        {
+            output.WriteLine("Per-vertex pixel inputs need MSL 4.0 on an Apple10 GPU; the f16 render test skipped.");
+            return;
+        }
+
+        // v4 = P1LL(low half) then v4.lo = P2_F16 over it; v5 = P1LV(high half, S2 = P0 from
+        // a V_INTERP_MOV) then v5.lo = P2_F16(high).
+        uint[] words =
+        [
+            .. Vop3Interp(OpP1llF16, 4, 1, 0, V0),
+            .. Vop3Interp(OpP2F16, 4, 1, 0, V1, 260),
+            .. Vop3Interp(OpMovF32, 6, 1, 0, 2),
+            .. Vop3Interp(OpP1lvF16, 5, 1, 0, V0, 262, high: true),
+            .. Vop3Interp(OpP2F16, 5, 1, 0, V1, 261, high: true),
+            .. ExportAndEnd(4, 5, 4, 4),
+        ];
+        var texels = Render(PerVertexHalfSource, "per_vertex_half_vs", 3, words, PerspCenter, Gen5PixelOutputKind.Uint,
+            Gen5MslShader.PerVertexInputsLanguageVersion);
+
+        var vertices = new (double X, double Y)[] { (0, TargetHeight * 1.0), (0, -TargetHeight * 1.0), (TargetWidth * 2.0, TargetHeight * 1.0) };
+        double[] values = [10, 20, 40];
+        foreach (var (x, y) in new (uint, uint)[] { (1, 1), (7, 3), (12, 6) })
+        {
+            float Half(int component) =>
+                (float)BitConverter.UInt16BitsToHalf((ushort)texels[(((y * TargetWidth) + x) * 4) + component]);
+
+            var expected = Interpolate(vertices, values, x + 0.5, y + 0.5);
+            Assert.True(Math.Abs(Half(0) - expected) < 0.05, $"({x},{y}): {Half(0)} != {expected}");
+            Assert.True(Math.Abs(Half(1) - (2 * expected)) < 0.1, $"({x},{y}): {Half(1)} != {2 * expected}");
+        }
+    }
+
+    private const string PerVertexHalfSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct VsOut
+        {
+            float4 position [[position]];
+            float4 param0 [[user(locn0)]];
+            float4 param1 [[user(locn1)]];
+        };
+        vertex VsOut per_vertex_half_vs(uint id [[vertex_id]])
+        {
+            const float2 corners[3] = { float2(-1.0, -1.0), float2(-1.0, 3.0), float2(3.0, -1.0) };
+            const float values[3] = { 10.0, 20.0, 40.0 };
+            VsOut out;
+            out.position = float4(corners[id], 0.5, 1.0);
+            out.param0 = float4(values[id], 0.0, 0.0, 1.0);
+            out.param1 = float4(as_type<float>(half2(half(values[id]), half(2.0 * values[id]))), 0.0, 0.0, 1.0);
+            return out;
+        }
+        """;
+
     // ---- helpers ----
 
     private void AssertCompiles(Gen5MslShader shader)
@@ -441,9 +699,12 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         uint[]? cntl = null,
         uint customMask = 0,
         bool supportsPerVertex = true,
-        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float)
+        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
+        bool frontFaceAllBits = false,
+        bool ieeeMode = false)
     {
-        var request = Request(words, inputs, enable ?? inputs, cntl ?? [], customMask, supportsPerVertex, outputKind);
+        var request = Request(words, inputs, enable ?? inputs, cntl ?? [], customMask, supportsPerVertex, outputKind,
+            frontFaceAllBits, ieeeMode);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader;
     }
@@ -455,7 +716,9 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         uint[] cntl,
         uint customMask,
         bool supportsPerVertex,
-        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float)
+        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
+        bool frontFaceAllBits = false,
+        bool ieeeMode = false)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("pixel-inputs", words, 0, 0));
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x5049_5850_494E_5055, 0, 16);
@@ -475,6 +738,8 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
             PixelInputCntl = cntl,
             PixelCustomInterpolationMask = customMask,
             SupportsPerVertexPixelInputs = supportsPerVertex,
+            PixelFrontFaceAllBits = frontFaceAllBits,
+            IeeeMode = ieeeMode,
         };
     }
 

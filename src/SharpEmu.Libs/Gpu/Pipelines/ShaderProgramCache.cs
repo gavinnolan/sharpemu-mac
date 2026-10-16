@@ -831,6 +831,7 @@ internal sealed class ShaderProgramCache
                     PixelStencilExportEnable = info.StencilExportEnable,
                     PixelSampleMaskExportEnable = info.SampleMaskExportEnable,
                     PixelInputEnable = options.PixelInputEnable,
+                    PixelFrontFaceAllBits = info.FrontFaceAllBits,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
                     SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,
                     PixelInputAddress = options.PixelInputAddress,
