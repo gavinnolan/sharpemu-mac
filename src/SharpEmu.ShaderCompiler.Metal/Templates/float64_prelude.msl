@@ -910,77 +910,59 @@ static inline uint sharpemu_f64_to_u32(ulong a)
 // document's pseudocode for the first two does not agree with itself: DIV_SCALE
 // scales by 2^+-128 (F64) / 2^+-64 (F32) while DIV_FMAS unscales by a fixed 2^64 /
 // 2^32, and its "1/d denormal and n/d denormal" case scales a d above 2^1022 up by
-// 2^128, which overflows. These helpers keep the document's cases and constants for
-// DIV_SCALE but scale that one case's d down instead, and DIV_FMAS undoes whichever
+// 2^128, which overflows. DIV_SCALE here follows the hardware, which decides the cases
+// on the exponent fields (see sharpemu_f64_div_scale), and DIV_FMAS undoes whichever
 // scaling VCC reports: a scaled quotient that was pushed up out of the denormal range
 // is small (|q| < 2), one pulled down from the overflow range is not, so the last FMA
 // scales by 2^-K or 2^+K accordingly, with its one rounding. The sequence then gives
 // the correctly rounded quotient, denormal results included.
 
-// |n / d| < 2^limit for finite nonzero n and d, decided exactly from the exponents
-// and significands.
-static inline bool sharpemu_f64_quotient_below(ulong n, ulong d, int limit)
+// V_DIV_SCALE_F64: s0 is d or n, the operand this instance scales. The cases are decided on
+// the biased exponent fields alone, e = exp(n) - exp(d), as the hardware does (the RDNA2 ISA
+// 12.12 pseudo-code states them as properties of the values, which agree away from the
+// edges): VCC is set for e >= 768 (n / d near the top of the range) or, with d not
+// denormal, e <= -768 (a quotient that will be denormal). A zero d or n gives a NaN. A NaN s0
+// is never scaled. Otherwise s0 is scaled by 2^128 when e >= 768 and s0 is d, when d is
+// denormal, when e <= -768 and s0 is not d, or when n is tiny (exp(n) <= 53) and nothing
+// above applied; by 2^-128 when exp(d) >= 2045 unless e <= -768 and s0 is not d.
+static inline ulong sharpemu_f64_div_scale(ulong s0, ulong d, ulong n, thread bool& vcc)
 {
     int exponentN = (int)((n >> 52) & 0x7FFul);
     int exponentD = (int)((d >> 52) & 0x7FFul);
-    ulong significandN = n & sharpemu_f64_fraction;
-    ulong significandD = d & sharpemu_f64_fraction;
-    if (exponentN == 0)
-    {
-        sharpemu_f64_normalize(exponentN, significandN);
-    }
-    if (exponentD == 0)
-    {
-        sharpemu_f64_normalize(exponentD, significandD);
-    }
     int difference = exponentN - exponentD;
-    return difference < limit ||
-        (difference == limit && (significandN & sharpemu_f64_fraction) < (significandD & sharpemu_f64_fraction));
-}
-
-// V_DIV_SCALE_F64: s0 is d or n, the operand this instance scales.
-static inline ulong sharpemu_f64_div_scale(ulong s0, ulong d, ulong n, thread bool& vcc)
-{
-    vcc = false;
-    ulong magnitudeD = d & 0x7FFFFFFFFFFFFFFFul;
-    ulong magnitudeN = n & 0x7FFFFFFFFFFFFFFFul;
-    if (magnitudeD >= 0x7FF0000000000000ul || magnitudeN >= 0x7FF0000000000000ul)
-    {
-        // Infinities and NaNs are V_DIV_FIXUP's to answer.
-        return sharpemu_f64_is_nan(s0) ? sharpemu_f64_quiet(s0) : s0;
-    }
-    if (magnitudeD == 0ul || magnitudeN == 0ul)
+    bool nearMax = difference >= 768;
+    bool nearMin = difference <= -768;
+    vcc = nearMax || (exponentD != 0 && nearMin);
+    if ((d & 0x7FFFFFFFFFFFFFFFul) == 0ul || (n & 0x7FFFFFFFFFFFFFFFul) == 0ul)
     {
         return sharpemu_f64_default_nan;
     }
-    int exponentN = (int)(magnitudeN >> 52);
-    int exponentD = (int)(magnitudeD >> 52);
-    if (exponentN - exponentD >= 768)
+    if (sharpemu_f64_is_nan(s0))
     {
-        vcc = true;
-        return s0 == d ? sharpemu_f64_ldexp(s0, 128) : s0;
+        return s0;
     }
-    if (exponentD == 0)
+    int scale = 0;
+    if (nearMax)
     {
-        return sharpemu_f64_ldexp(s0, 128);
+        scale = s0 == d ? 128 : 0;
     }
-    bool reciprocalDenormal = magnitudeD > 0x7FD0000000000000ul;
-    bool quotientDenormal = sharpemu_f64_quotient_below(n, d, -1022);
-    if (reciprocalDenormal && quotientDenormal)
+    else if (exponentD == 0)
     {
-        vcc = true;
-        return s0 == d ? sharpemu_f64_ldexp(s0, -128) : s0;
+        scale = 128;
     }
-    if (reciprocalDenormal)
+    else if (exponentD >= 2045)
     {
-        return sharpemu_f64_ldexp(s0, -128);
+        scale = (!nearMin || s0 == d) ? -128 : 0;
     }
-    if (quotientDenormal)
+    else if (nearMin)
     {
-        vcc = true;
-        return s0 == n ? sharpemu_f64_ldexp(s0, 128) : s0;
+        scale = s0 == d ? 0 : 128;
     }
-    return exponentN <= 53 ? sharpemu_f64_ldexp(s0, 128) : s0;
+    else if (exponentN <= 53)
+    {
+        scale = 128;
+    }
+    return scale == 0 ? s0 : sharpemu_f64_ldexp(s0, scale);
 }
 
 // V_DIV_FMAS_F64: a * b + c, unscaled when VCC is set, rounded once.
@@ -995,49 +977,46 @@ static inline uint sharpemu_f32_ldexp(uint a, int n)
     return sharpemu_f64_to_f32(sharpemu_f64_ldexp(sharpemu_f64_from_f32(a), n));
 }
 
-// V_DIV_SCALE_F32, as the F64 form with 2^+-64.
+// V_DIV_SCALE_F32, as the F64 form on the exponent fields with 2^+-64 and the thresholds
+// 96, 253 and 24.
 static inline uint sharpemu_f32_div_scale(uint s0, uint d, uint n, thread bool& vcc)
 {
-    vcc = false;
-    uint magnitudeD = d & 0x7FFFFFFFu;
-    uint magnitudeN = n & 0x7FFFFFFFu;
-    if (magnitudeD >= 0x7F800000u || magnitudeN >= 0x7F800000u)
-    {
-        return (s0 & 0x7FFFFFFFu) > 0x7F800000u ? s0 | 0x00400000u : s0;
-    }
-    if (magnitudeD == 0u || magnitudeN == 0u)
+    int exponentN = (int)((n >> 23) & 0xFFu);
+    int exponentD = (int)((d >> 23) & 0xFFu);
+    int difference = exponentN - exponentD;
+    bool nearMax = difference >= 96;
+    bool nearMin = difference <= -96;
+    vcc = nearMax || (exponentD != 0 && nearMin);
+    if ((d & 0x7FFFFFFFu) == 0u || (n & 0x7FFFFFFFu) == 0u)
     {
         return 0x7FC00000u;
     }
-    int exponentN = (int)(magnitudeN >> 23);
-    int exponentD = (int)(magnitudeD >> 23);
-    if (exponentN - exponentD >= 96)
+    if ((s0 & 0x7FFFFFFFu) > 0x7F800000u)
     {
-        vcc = true;
-        return s0 == d ? sharpemu_f32_ldexp(s0, 64) : s0;
+        return s0;
     }
-    if (exponentD == 0)
+    int scale = 0;
+    if (nearMax)
     {
-        return sharpemu_f32_ldexp(s0, 64);
+        scale = s0 == d ? 64 : 0;
     }
-    bool reciprocalDenormal = magnitudeD > 0x7E800000u;
-    bool quotientDenormal = sharpemu_f64_quotient_below(
-        sharpemu_f64_from_f32(n), sharpemu_f64_from_f32(d), -126);
-    if (reciprocalDenormal && quotientDenormal)
+    else if (exponentD == 0)
     {
-        vcc = true;
-        return s0 == d ? sharpemu_f32_ldexp(s0, -64) : s0;
+        scale = 64;
     }
-    if (reciprocalDenormal)
+    else if (exponentD >= 253)
     {
-        return sharpemu_f32_ldexp(s0, -64);
+        scale = (!nearMin || s0 == d) ? -64 : 0;
     }
-    if (quotientDenormal)
+    else if (nearMin)
     {
-        vcc = true;
-        return s0 == n ? sharpemu_f32_ldexp(s0, 64) : s0;
+        scale = s0 == d ? 0 : 64;
     }
-    return exponentN <= 23 ? sharpemu_f32_ldexp(s0, 64) : s0;
+    else if (exponentN <= 24)
+    {
+        scale = 64;
+    }
+    return scale == 0 ? s0 : sharpemu_f32_ldexp(s0, scale);
 }
 
 // V_DIV_FMAS_F32: one fused multiply-add and unscale, rounded once to F32.
