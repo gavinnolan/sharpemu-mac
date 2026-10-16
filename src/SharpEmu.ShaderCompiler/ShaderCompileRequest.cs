@@ -45,6 +45,17 @@ public sealed record ShaderVertexInput(
     }
 }
 
+/// <summary>The guest's depth clip planes a program emulates with clip distances, in the
+/// guest's clip space: near at z = 0 (or z = -w for a [-w, w] depth) and far at z = w.</summary>
+[Flags]
+public enum ShaderDepthPlanes : byte
+{
+    None = 0,
+    NearAtZero = 1,
+    NearAtNegativeW = 2,
+    Far = 4,
+}
+
 public readonly record struct ShaderClipSpaceTransform(
     bool Enabled,
     float ScaleX,
@@ -66,8 +77,12 @@ public readonly record struct ShaderClipSpaceTransform(
     // takes no negative width, is not: the program negates x.
     public bool PositionXMirror { get; init; }
 
+    // The guest depth planes the host does not clip (it clamps depth instead) and the program
+    // clips with clip distances computed from the exported position.
+    public ShaderDepthPlanes DepthPlanes { get; init; }
+
     // Conventions only the program can apply: no Vulkan pipeline state carries them.
-    public bool HasProgramOnlyConventions => PositionXMirror;
+    public bool HasProgramOnlyConventions => PositionXMirror || DepthPlanes != ShaderDepthPlanes.None;
 }
 
 // One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer

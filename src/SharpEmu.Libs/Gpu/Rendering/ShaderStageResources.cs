@@ -138,6 +138,9 @@ public readonly record struct ClipSpaceTransform(
     // A negative guest x scale: the host viewport keeps a positive width and the program
     // negates the position's x.
     public bool PositionXMirror { get; init; }
+
+    // The guest depth planes the host clamps instead of clipping, which the program clips.
+    public SharpEmu.ShaderCompiler.ShaderDepthPlanes DepthPlanes { get; init; }
 }
 
 public sealed class VertexInputInfo

@@ -51,7 +51,7 @@ public static class StageStaticKey
         }
 
         key.Add(Bit(info.ClipSpace.DepthNegativeOneToOne) | (Bit(info.ClipSpace.PositionYDown) << 1) |
-            (Bit(info.ClipSpace.PositionXMirror) << 2));
+            (Bit(info.ClipSpace.PositionXMirror) << 2) | ((uint)info.ClipSpace.DepthPlanes << 3));
 
         key.Add((uint)requiredOutputCount);
         key.Add(Bit(primitiveShader.HasValue));

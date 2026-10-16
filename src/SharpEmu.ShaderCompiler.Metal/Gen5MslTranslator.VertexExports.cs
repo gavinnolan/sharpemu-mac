@@ -39,9 +39,11 @@ public static partial class Gen5MslTranslator
         private uint _clipDistanceCount;
         private uint _cullDistanceCount;
         private uint _invalidPositionClipDistance = uint.MaxValue;
+        private uint _hostPlaneClipDistance = uint.MaxValue;
 
         /// <summary>The host clip-distance planes this program writes: guest clip planes,
-        /// the zero-position plane, then the emulated cull planes.</summary>
+        /// the zero-position plane, the fixed-function planes the host does not clip, then
+        /// the emulated cull planes.</summary>
         private uint HostClipDistanceCount =>
             Math.Min(_clipDistanceCount + _cullDistanceCount, MaxHostClipDistances);
 
@@ -162,8 +164,63 @@ public static partial class Gen5MslTranslator
                 _invalidPositionClipDistance = clipCount++;
             }
 
+            var hostPlanes = (uint)HostPlaneDistances("p").Count;
+            if (hostPlanes != 0)
+            {
+                // The guest clips these planes in fixed function; the host only through clip
+                // distances, which a program that exports no position cannot write.
+                if (!_request.SupportsClipDistance ||
+                    !_request.Program.Instructions.Any(static instruction =>
+                        instruction.Control is Gen5ExportControl { Target: 12, EnableMask: not 0 }) ||
+                    clipCount + hostPlanes + cullCount > MaxHostClipDistances)
+                {
+                    throw new NotSupportedException(
+                        $"the guest clip planes ({_request.ClipSpace}) need {hostPlanes} host clip distances beside " +
+                        $"{clipCount} clip and {cullCount} cull distances: clip distances " +
+                        $"{(_request.SupportsClipDistance ? "available" : "unsupported")}, at most {MaxHostClipDistances}");
+                }
+
+                _hostPlaneClipDistance = clipCount;
+                clipCount += hostPlanes;
+            }
+
             _clipDistanceCount = clipCount;
             _cullDistanceCount = cullCount;
+        }
+
+        /// <summary>The clip distance of every fixed-function plane the program clips, from
+        /// the guest's exported position <paramref name="position"/> in its own clip space.</summary>
+        private List<string> HostPlaneDistances(string position)
+        {
+            var planes = _request.ClipSpace.DepthPlanes;
+            var distances = new List<string>();
+            if ((planes & ShaderDepthPlanes.NearAtZero) != 0)
+            {
+                distances.Add($"{position}.z");
+            }
+
+            if ((planes & ShaderDepthPlanes.NearAtNegativeW) != 0)
+            {
+                distances.Add($"{position}.z + {position}.w");
+            }
+
+            if ((planes & ShaderDepthPlanes.Far) != 0)
+            {
+                distances.Add($"{position}.w - {position}.z");
+            }
+
+            return distances;
+        }
+
+        /// <summary>The fixed-function plane distances of the guest position in
+        /// <paramref name="position"/>, written into the output <paramref name="output"/>.</summary>
+        private IEnumerable<string> HostPlaneStatements(string position, string output)
+        {
+            var distances = HostPlaneDistances(position);
+            for (var index = 0; index < distances.Count; index++)
+            {
+                yield return $"{output}.sharpemu_clip_distance[{_hostPlaneClipDistance + (uint)index}] = {distances[index]};";
+            }
         }
 
         /// <summary>The auxiliary fields of the vertex output struct (the vertex stage's
@@ -211,15 +268,22 @@ public static partial class Gen5MslTranslator
             _request.ClipSpace.DepthNegativeOneToOne;
 
         /// <summary>The exported POS0 <paramref name="position"/> in Metal's clip space, held in
-        /// a temporary when anything changes.</summary>
+        /// a temporary when anything changes, after the fixed-function plane distances are
+        /// taken from the guest's position.</summary>
         private string ToHostClipSpace(string position)
         {
-            if (!ConvertsPositionToHostClipSpace)
+            var planes = _hostPlaneClipDistance != uint.MaxValue;
+            if (!ConvertsPositionToHostClipSpace && !planes)
             {
                 return position;
             }
 
             var converted = Temp("float4", position);
+            foreach (var statement in HostPlaneStatements(converted, "sharpemu_out"))
+            {
+                Line(ExecGuarded(statement));
+            }
+
             foreach (var statement in HostClipSpaceStatements(converted))
             {
                 Line(statement);

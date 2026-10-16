@@ -47,6 +47,12 @@ public static partial class Gen5MslTranslator
             IReadOnlyList<Gen5ShaderInstruction> instructions,
             ShaderClipSpaceTransform clip)
         {
+            if (clip.DepthPlanes != ShaderDepthPlanes.None)
+            {
+                // The program clips planes these positions do not describe.
+                return null;
+            }
+
             var positions = new float[ConstantPositionVertices * 4];
             for (uint vertex = 0; vertex < ConstantPositionVertices; vertex++)
             {
