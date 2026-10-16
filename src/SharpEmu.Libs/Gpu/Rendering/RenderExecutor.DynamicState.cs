@@ -55,7 +55,7 @@ public sealed partial class RenderExecutor
         // The pipeline cache keyed the vertex program on the other half of this transform.
         var viewport = HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
 
-        // A line draw of any other width was refused; no other primitive reads the width.
+        // The host draws lines one pixel wide; validation warned once about a wider guest line.
         const float lineWidth = 1f;
 
         var depthTarget = state.Depth.HasTarget ? state.Depth.Target : default;

@@ -12,6 +12,8 @@ public sealed partial class RenderExecutor
     private const uint DccControlOverwriteCombinerDisable = 1u << 0;
     private const uint DccControlKeyClearEnable = 1u << 1;
 
+    private static int _wideLineWarningShown;
+
     // The register state a draw cannot run with; the target builders check the rest when they resolve.
     private void ValidateDrawRegisters(RegisterBanks banks)
     {
@@ -29,11 +31,14 @@ public sealed partial class RenderExecutor
             throw _host.Fatal("Line stipple is not supported.");
         }
 
-        // Metal rasterises lines one pixel wide. (A polygon mode drawing lines is refused below.)
+        // Metal rasterises lines one pixel wide, the nearest it has to a wider guest line; the
+        // first such draw says so. (A polygon mode drawing lines is refused below.)
         if ((GuestPrimitiveType)banks.UserConfig.PrimitiveType is GuestPrimitiveType.LineList or GuestPrimitiveType.LineStrip &&
-            context.LineWidth != 1f)
+            context.LineWidth != 1f && Interlocked.Exchange(ref _wideLineWarningShown, 1) == 0)
         {
-            throw _host.Fatal($"Wide lines are not supported: PA_SU_LINE_CNTL width={context.LineWidth:R} pixels.");
+            Console.Error.WriteLine(
+                $"[GPU][WARN] Wide lines are drawn one pixel wide: PA_SU_LINE_CNTL width={context.LineWidth:R} pixels " +
+                "(Metal has no wide lines; reported once).");
         }
 
         var clip = context.Clip;

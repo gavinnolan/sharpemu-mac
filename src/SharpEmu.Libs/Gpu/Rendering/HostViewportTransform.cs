@@ -3,7 +3,6 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -39,6 +38,9 @@ public readonly record struct HostViewportTransform(
     private const uint ZFormat = 1u << 9;
     private const uint W0Format = 1u << 10;
     private const uint XyEnables = XScaleEnable | XOffsetEnable | YScaleEnable | YOffsetEnable;
+
+    private static int _unclampedFloatWarningShown;
+    private static int _clampRangeWarningShown;
 
     /// <param name="maxWidth">The largest host viewport width, at most <see cref="MaxViewportDimension"/>.</param>
     /// <param name="maxHeight">The largest host viewport height, at most <see cref="MaxViewportDimension"/>.</param>
@@ -226,25 +228,34 @@ public readonly record struct HostViewportTransform(
         if (context.DepthRenderOverride.DisableViewportClamp)
         {
             // A unorm depth holds [0, 1] whatever the clamp; a float one keeps any value,
-            // which no host viewport range does.
-            if (context.DepthTarget.DepthFormat == GuestDepthFormat.Z32Float)
+            // which no host viewport range does: the host's [0, 1] is the nearest.
+            if (context.DepthTarget.DepthFormat == GuestDepthFormat.Z32Float && Interlocked.Exchange(ref _unclampedFloatWarningShown, 1) == 0)
             {
-                throw GpuFatal.Fatal(
-                    "An unclamped 32-bit float depth (DB_RENDER_OVERRIDE.DISABLE_VIEWPORT_CLAMP) cannot be mapped onto the host's " +
-                    $"[0, 1] viewport depth range: PA_CL_VTE_CNTL=0x{context.ScreenViewport.TransformControl:X8} " +
-                    $"zScale={viewport.ZScale:R} zOffset={viewport.ZOffset:R}.");
+                Console.Error.WriteLine(
+                    "[GPU][WARN] An unclamped 32-bit float depth (DB_RENDER_OVERRIDE.DISABLE_VIEWPORT_CLAMP) is clamped to the " +
+                    $"host's [0, 1] viewport depth: PA_CL_VTE_CNTL=0x{context.ScreenViewport.TransformControl:X8} " +
+                    $"zScale={viewport.ZScale:R} zOffset={viewport.ZOffset:R} (reported once).");
             }
 
             return (0f, 1f);
         }
 
-        if (!(viewport.MinDepth >= 0f && viewport.MinDepth <= viewport.MaxDepth && viewport.MaxDepth <= 1f))
+        if (viewport.MinDepth >= 0f && viewport.MinDepth <= viewport.MaxDepth && viewport.MaxDepth <= 1f)
         {
-            throw GpuFatal.Fatal(
-                "The guest's depth clamp range is not an ordered range inside the host's [0, 1] viewport depth: " +
-                $"PA_SC_VPORT_ZMIN={viewport.MinDepth:R} PA_SC_VPORT_ZMAX={viewport.MaxDepth:R}.");
+            return (viewport.MinDepth, viewport.MaxDepth);
         }
 
-        return (viewport.MinDepth, viewport.MaxDepth);
+        // The host's viewport depth is an ordered range inside [0, 1]; the nearest to the
+        // guest's is its ends clamped into [0, 1] and put in order.
+        if (Interlocked.Exchange(ref _clampRangeWarningShown, 1) == 0)
+        {
+            Console.Error.WriteLine(
+                "[GPU][WARN] The depth clamp range is not an ordered range inside [0, 1]; the host clamps to the nearest one: " +
+                $"PA_SC_VPORT_ZMIN={viewport.MinDepth:R} PA_SC_VPORT_ZMAX={viewport.MaxDepth:R} (reported once).");
+        }
+
+        var low = Math.Clamp(viewport.MinDepth, 0f, 1f);
+        var high = Math.Clamp(viewport.MaxDepth, 0f, 1f);
+        return float.IsNaN(low) || float.IsNaN(high) ? (0f, 1f) : (Math.Min(low, high), Math.Max(low, high));
     }
 }
