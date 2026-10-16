@@ -444,7 +444,7 @@ public sealed partial class RenderExecutor
 
         return (GuestPrimitiveType)userConfig.PrimitiveType switch
         {
-            GuestPrimitiveType.RectangleListLegacy or GuestPrimitiveType.QuadListLegacy => (4, emission.FirstVertex),
+            GuestPrimitiveType.QuadListLegacy => (4, emission.FirstVertex),
             _ => (draw.Count, emission.FirstVertex),
         };
     }
@@ -461,6 +461,7 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.TriangleStrip:
             case GuestPrimitiveType.Polygon:
             case GuestPrimitiveType.RectangleList:
+            case GuestPrimitiveType.RectangleListLegacy:
                 if (emission.Indexed)
                 {
                     _host.DrawIndexed(draw.Count, draw.InstanceCount, 0, emission.VertexOffset, emission.FirstInstance);
@@ -470,19 +471,6 @@ public sealed partial class RenderExecutor
                     _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                 }
 
-                break;
-            case GuestPrimitiveType.RectangleListLegacy:
-                if (emission.Indexed)
-                {
-                    throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
-                }
-
-                if (draw.Count != 3 || vertexInput.Buffers.Length != 0)
-                {
-                    throw _host.Fatal($"A legacy rectangle list needs three vertices and no vertex buffers: count={draw.Count} buffers={vertexInput.Buffers.Length}.");
-                }
-
-                _host.Draw(4, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                 break;
             case GuestPrimitiveType.QuadListLegacy:
                 if ((draw.Count & 0x3) != 0)

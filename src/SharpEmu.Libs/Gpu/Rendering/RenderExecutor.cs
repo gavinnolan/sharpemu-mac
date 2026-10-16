@@ -151,6 +151,7 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.TriangleFan:
             case GuestPrimitiveType.Polygon:
             case GuestPrimitiveType.RectangleList:
+            case GuestPrimitiveType.RectangleListLegacy:
                 break;
             default:
                 return false;
@@ -257,7 +258,7 @@ public sealed partial class RenderExecutor
         }
 
         ValidateDrawRegisters(banks);
-        if (!ResolveTopology(userConfig, autoDraw: false, out var topology))
+        if (!ResolveTopology(userConfig, out var topology))
         {
             return;
         }
@@ -335,7 +336,7 @@ public sealed partial class RenderExecutor
         if (arguments.IndirectArgumentsAddress != 0 &&
             (!_host.TakesIndirectDrawArguments(
                     state.Programs.Vertex, arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) ||
-                ((GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.RectangleList &&
+                (IsRectangleList(banks.UserConfig.PrimitiveType) &&
                     !_host.TakesIndirectRectangleListArguments)))
         {
             // The backend runs this program as a mesh pipeline, or this rectangle list as
@@ -397,6 +398,7 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.TriangleFan:
             case GuestPrimitiveType.Polygon:
             case GuestPrimitiveType.RectangleList:
+            case GuestPrimitiveType.RectangleListLegacy:
                 return true;
             default:
                 return false;
@@ -481,7 +483,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (!ResolveTopology(userConfig, autoDraw: true, out var topology))
+        if (!ResolveTopology(userConfig, out var topology))
         {
             TraceDrawDisposition(banks, in draw, "no-primitive-topology");
             _host.ResetBindings();
@@ -502,7 +504,7 @@ public sealed partial class RenderExecutor
         if (arguments.IndirectArgumentsAddress != 0 &&
             (!_host.TakesIndirectDrawArguments(
                     state.Programs.Vertex, arguments.IndirectArgumentsAddress, AutoIndirectArgumentsSize) ||
-                ((GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.RectangleList &&
+                (IsRectangleList(banks.UserConfig.PrimitiveType) &&
                     !_host.TakesIndirectAutoRectangleListArguments(
                         state.Programs.VertexInput, arguments.IndirectArgumentsAddress, AutoIndirectArgumentsSize))))
         {
@@ -735,7 +737,13 @@ public sealed partial class RenderExecutor
         return mode is ColorModeEliminateFastClear or ColorModeFmaskDecompress or ColorModeDccDecompress;
     }
 
-    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out GpuPrimitiveTopology topology)
+    // DI_PT_2D_RECTANGLE (7) and DI_PT_RECTLIST (17) are both rectangle lists: three
+    // vertices per rectangle, the fourth corner completed by the rasterizer. The AGC
+    // names them kRectList and kRectListLegacy, and they draw through the same path.
+    private static bool IsRectangleList(uint primitiveType) =>
+        (GuestPrimitiveType)primitiveType is GuestPrimitiveType.RectangleList or GuestPrimitiveType.RectangleListLegacy;
+
+    public bool ResolveTopology(UserConfigRegisters userConfig, out GpuPrimitiveTopology topology)
     {
         topology = GpuPrimitiveTopology.PointList;
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
@@ -762,15 +770,8 @@ public sealed partial class RenderExecutor
                 topology = GpuPrimitiveTopology.TriangleStrip;
                 break;
             case GuestPrimitiveType.RectangleList:
-                topology = GpuPrimitiveTopology.PatchList;
-                break;
             case GuestPrimitiveType.RectangleListLegacy:
-                if (!autoDraw)
-                {
-                    throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
-                }
-
-                topology = GpuPrimitiveTopology.TriangleStrip;
+                topology = GpuPrimitiveTopology.PatchList;
                 break;
             case GuestPrimitiveType.QuadListLegacy:
                 topology = GpuPrimitiveTopology.TriangleFan;

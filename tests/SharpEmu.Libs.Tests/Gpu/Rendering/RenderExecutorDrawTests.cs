@@ -548,23 +548,20 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [InlineData(5u, GpuPrimitiveTopology.TriangleFan)]
     [InlineData(6u, GpuPrimitiveTopology.TriangleStrip)]
     [InlineData(7u, GpuPrimitiveTopology.PatchList)]
+    [InlineData(17u, GpuPrimitiveTopology.PatchList)]
     [InlineData(19u, GpuPrimitiveTopology.TriangleFan)]
     public void ResolveTopology_MapsEveryPrimitiveType(uint primitiveType, GpuPrimitiveTopology expected)
     {
         var userConfig = new UserConfigRegisters { PrimitiveType = primitiveType };
-        Assert.True(_executor.ResolveTopology(userConfig, autoDraw: false, out var topology));
+        Assert.True(_executor.ResolveTopology(userConfig, out var topology));
         Assert.Equal(expected, topology);
     }
 
     [Fact]
-    public void ResolveTopology_HandlesNoneAndTheLegacyRectangleList()
+    public void ResolveTopology_HandlesNoneAndRejectsAnUnknownType()
     {
-        Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 0 }, autoDraw: false, out _));
-        Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
-        Assert.Equal(GpuPrimitiveTopology.TriangleStrip, topology);
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: false, out _));
-        Assert.Contains("primitiveType=17", fatal.Message);
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, autoDraw: true, out _));
+        Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 0 }, out _));
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, out _));
         Assert.Contains("primitiveType=9", fatal.Message);
     }
 
@@ -863,16 +860,13 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void LegacyRectangleList_DrawsFourVerticesAndRejectsOtherShapes()
+    public void LegacyRectangleList_DrawsAsARectangleListOfEveryRectangle()
     {
-        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(3, instances: 2));
-        Assert.Contains("draw 4 2 0 0", _host.Calls);
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6, instances: 2));
+        Assert.Contains("draw 6 2 0 0", _host.Calls);
 
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6)));
-        Assert.Contains("count=6 buffers=0", fatal.Message);
-
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(3)));
-        Assert.Contains("primitiveType=17", fatal.Message);
+        _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(6, baseVertex: 1));
+        Assert.Contains("draw_indexed 6 1 0 1 0", _host.Calls);
     }
 
     [Fact]
