@@ -1586,14 +1586,15 @@ public static partial class Gen5MslTranslator
                     "Eq" => ("==", false),
                     "Le" => ("<=", false),
                     "Gt" => (">", false),
-                    "Lg" => ("!=", false),
+                    // Less-or-greater: ordered, so false on NaN (C's != is true there).
+                    "Lg" => ("<>", false),
                     "Ge" => (">=", false),
                     "Neq" => ("==", true),
                     "Nlt" => ("<", true),
                     "Nle" => ("<=", true),
                     "Ngt" => (">", true),
                     "Nge" => (">=", true),
-                    "Nlg" => ("!=", true),
+                    "Nlg" => ("<>", true),
                     _ => (string.Empty, false),
                 };
                 if (op.Length == 0)
@@ -1608,7 +1609,9 @@ public static partial class Gen5MslTranslator
                 var right = opcode.EndsWith("F16", StringComparison.Ordinal)
                     ? F16(instruction, 1)
                     : F(instruction, 1);
-                var comparison = $"({left} {op} {right})";
+                var comparison = op == "<>"
+                    ? $"({left} < {right} || {left} > {right})"
+                    : $"({left} {op} {right})";
                 condition = unordered ? $"(!{comparison})" : comparison;
             }
             else
