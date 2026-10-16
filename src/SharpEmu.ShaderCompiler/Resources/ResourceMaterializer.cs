@@ -1092,7 +1092,10 @@ public static class ResourceMaterializer
                 ConversionFormat = conversionFormat,
                 ShaderSwizzle = shaderSwizzle,
                 NumericClass = numericClass,
-                EmulatedCompareFunction = !storage && baseImage.DepthCompare && !GuestImageFormat.HasDepthEquivalent(format)
+                // Only 2D, 2D-array and cube views of a depth-equivalent format get a host depth
+                // binding; every other compare access tests texels with the S# function in the shader.
+                EmulatedCompareFunction = !storage && baseImage.DepthCompare &&
+                    (!GuestImageFormat.HasDepthEquivalent(format) || dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
                     ? SamplerCompareFunction(info, snapshot, baseIndex)
                     : -1,
             };

@@ -257,12 +257,14 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void OneDimensionalGatherLz_IsEmulatedFromTwoSamples()
+    public void OneDimensionalGatherLz_IsEmulatedFromFourSamplesOfOneRow()
     {
+        // A 1D image is a height-one 2D texture: the footprint's two rows are its one row.
         var shader = Gen5ImageFixtures.CompileOrThrow("ImageGather4Lz", Gen5ImageFixtures.ImageType1D);
         Assert.DoesNotContain(".gather(", shader.Source);
-        Assert.Equal(2, Lines(shader.Source, ".sample(").Count);
+        Assert.Equal(4, Lines(shader.Source, ".sample(").Count);
         Assert.Contains("floor(", shader.Source);
+        Assert.Contains(".y = 0.0f;", shader.Source);
     }
 
     [Fact]
@@ -316,8 +318,10 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     public void CoarseDerivativeSamplesReadGradientsWithoutMistakingCdForACompare(
         string opcode, bool gradients, bool compare)
     {
-        var shader = Gen5ImageFixtures.CompileOrThrow(opcode, Gen5ImageFixtures.ImageType2D);
-        Assert.Equal(gradients, shader.Source.Contains("gradient2d(", StringComparison.Ordinal));
+        // S# word 0 DEPTH_COMPARE_FUNC (bits 14:12) = 3, less-or-equal.
+        Assert.True(Gen5ImageFixtures.TryCompile(opcode, Gen5ImageFixtures.ImageType2D, out var shader, out var error,
+            samplerWords: [3u << 12, 0, 0, 0]), error);
+        Assert.Equal(gradients, shader!.Source.Contains("gradient2d(", StringComparison.Ordinal));
         // A colour-format image compares the filtered value, so the reference
         // shows up as the comparison rather than as a sample_compare argument.
         Assert.Equal(compare, shader.Source.Contains("<= (float)", StringComparison.Ordinal));
@@ -506,6 +510,60 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
         Assert.True(
             MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
             $"[{opcode} on {Gen5ImageFixtures.TypeName(descriptorType)}] Metal rejected the emitted MSL: {error}\n{shader.Source}");
+    }
+
+    // Every sample and gather opcode of the gfx10.3 table, in a compute kernel (explicit
+    // levels) and a fragment function (implicit levels and biases), over color and depth
+    // formats for the compare forms: 71 is a four-channel float, 22 the R32 float a host
+    // depth view backs.
+    public static TheoryData<string, uint, ShaderStage, uint> EverySampleAndGatherVariant()
+    {
+        var data = new TheoryData<string, uint, ShaderStage, uint>();
+        foreach (var (_, name, flags) in Gen5ImageOpcodes.All)
+        {
+            if ((flags & (Gen5ImageOp.Sample | Gen5ImageOp.Gather)) == 0)
+            {
+                continue;
+            }
+
+            uint[] types = (flags & Gen5ImageOp.Horizontal) != 0
+                ? [Gen5ImageFixtures.ImageType2D, Gen5ImageFixtures.ImageType2DArray]
+                : (flags & Gen5ImageOp.Gather) != 0
+                    ? [Gen5ImageFixtures.ImageType1D, Gen5ImageFixtures.ImageType2DArray, Gen5ImageFixtures.ImageTypeCube]
+                    : [Gen5ImageFixtures.ImageType1D, Gen5ImageFixtures.ImageType2DArray, Gen5ImageFixtures.ImageTypeCube, Gen5ImageFixtures.ImageType3D];
+            uint[] formats = (flags & Gen5ImageOp.Compare) != 0 ? [71u, 22u] : [71u];
+            foreach (var stage in new[] { ShaderStage.Compute, ShaderStage.Pixel })
+            foreach (var type in types)
+            foreach (var format in formats)
+            {
+                data.Add(name, type, stage, format);
+            }
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(EverySampleAndGatherVariant))]
+    public void EverySampleAndGatherVariantCompilesWithTheRuntimeMetalCompiler(
+        string opcode, uint descriptorType, ShaderStage stage, uint format)
+    {
+        Assert.True(
+            Gen5ImageFixtures.TryCompile(opcode, descriptorType, out var shader, out var error,
+                dmask: Gen5ImageOpcodes.Has(opcode, Gen5ImageOp.Gather) ? 2u : 0xFu,
+                unifiedFormat: format, stage: stage, samplerWords: [6u << 12, 0, 0, 0]),
+            $"[{opcode} on {Gen5ImageFixtures.TypeName(descriptorType)}, {stage}] MSL emit failed: {error}");
+        if (!MetalNative.IsAvailable)
+        {
+            Assert.False(
+                OperatingSystem.IsMacOS() && Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1",
+                "The required gate cannot compile MSL without a Metal device.");
+            return;
+        }
+
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader!.Source, out _, out error),
+            $"[{opcode} on {Gen5ImageFixtures.TypeName(descriptorType)}, {stage}] Metal rejected the emitted MSL: {error}\n{shader.Source}");
     }
 
     private static List<string> Lines(string source, string marker) =>

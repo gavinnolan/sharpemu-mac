@@ -74,7 +74,10 @@ internal static class Gen5ImageFixtures
         bool storeResults = false,
         uint[]? storeValues = null,
         bool glc = false,
-        bool unorm = false)
+        bool unorm = false,
+        uint[]? samplerWords = null,
+        int resultRegisters = 4,
+        Func<Gen5ImageControl, Gen5ImageControl>? configure = null)
     {
         var isArray = arrayed ?? descriptorType is ImageType1DArray or ImageType2DArray or ImageTypeCube or ImageType2DMsaaArray;
         var dimension = instructionDimension ?? descriptorType switch
@@ -109,6 +112,11 @@ internal static class Gen5ImageFixtures
         {
             Unorm = unorm,
         };
+        if (configure is not null)
+        {
+            control = configure(control);
+        }
+
         var imageInstruction = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Mimg, opcode, [], [], [], control);
         var end = new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [SEndpgm], [], [], null);
         var instructions = new List<Gen5ShaderInstruction>();
@@ -135,7 +143,7 @@ internal static class Gen5ImageFixtures
         pc += 8;
         if (storeResults)
         {
-            for (uint component = 0; component < 4; component++)
+            for (uint component = 0; component < resultRegisters; component++)
             {
                 var stores = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("image-result-store",
                     [0xE0700000u | component * 4, 0x80000000u | ((16 + component) << 8), SEndpgm], 0, 16));
@@ -150,10 +158,11 @@ internal static class Gen5ImageFixtures
         var userData = new uint[UserDataCount];
         WriteDescriptor(userData, descriptorType, unifiedFormat, dstSelect);
         if (addressValues is not null) userData[18] = 1u << 26;
+        if (samplerWords is not null) samplerWords.CopyTo(userData.AsSpan(16));
         if (storeResults)
         {
             userData[0] = 0x80;
-            userData[2] = 16;
+            userData[2] = (uint)resultRegisters * 4;
             userData[3] = 0x00038FAC;
         }
         var snapshot = new ResourceSnapshot();

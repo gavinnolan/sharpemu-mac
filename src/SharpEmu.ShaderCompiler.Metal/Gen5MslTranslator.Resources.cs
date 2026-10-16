@@ -1781,10 +1781,12 @@ public static partial class Gen5MslTranslator
             out MslImageClass resolved,
             out uint dstSelect,
             out string mipLevel,
+            out int compareFunction,
             out string error,
             (uint Resource, uint Element)? fixedElement = null)
         {
             error = string.Empty;
+            compareFunction = -1;
             texture = string.Empty;
             samplerName = string.Empty;
             resolved = default;
@@ -1875,6 +1877,9 @@ public static partial class Gen5MslTranslator
             }
 
             dstSelect = imageInfo.ShaderSwizzle;
+            // A compare access of a format with no host depth view tests the texel in the
+            // shader with the paired S#'s function, which the materializer recorded.
+            compareFunction = imageInfo.EmulatedCompareFunction;
             return true;
         }
 
