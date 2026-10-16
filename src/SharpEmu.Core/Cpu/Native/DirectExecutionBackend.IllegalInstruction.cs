@@ -37,6 +37,12 @@ public sealed partial class DirectExecutionBackend
 
     private unsafe bool TryRecoverIllegalInstruction(void* contextRecord, ulong rip)
     {
+        // A ud2 the loader put over a raw syscall (GuestSyscallPatcher).
+        if (TryRecoverPatchedSyscall(contextRecord, rip))
+        {
+            return true;
+        }
+
         if (!TryReadFaultingInstruction(rip, out var instruction))
         {
             return false;

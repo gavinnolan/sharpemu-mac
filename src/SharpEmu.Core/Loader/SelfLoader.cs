@@ -302,6 +302,7 @@ public sealed class SelfLoader : ISelfLoader
             imageBase,
             effectiveImportStubs,
             runtimeSymbols);
+        _ = GuestSyscallPatcher.Patch(virtualMemory, programHeaders, imageBase, effectiveImportStubs, _moduleManager);
         var finalizedImportStubs = effectiveImportStubs.Count == 0
             ? EmptyImportStubs
             : effectiveImportStubs;
