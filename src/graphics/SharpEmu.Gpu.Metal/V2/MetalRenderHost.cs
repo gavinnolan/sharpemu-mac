@@ -122,7 +122,8 @@ internal sealed partial class MetalRenderHost :
         _memory = memory;
         _backing = backing;
         _relay = relay;
-        PerVertexPixelInputsSupported = SupportsPerVertexPixelInputs(device);
+        PerVertexPixelInputsSupported = SupportsApple10Features(device);
+        DepthBoundsTestSupported = SupportsApple10Features(device);
         _sharedEvent = MetalNative.Send(device, SelNewSharedEvent);
         if (_sharedEvent == 0)
         {
@@ -228,9 +229,14 @@ internal sealed partial class MetalRenderHost :
     // source but get() returns garbage, so nothing older may claim it.
     public bool PerVertexPixelInputsSupported { get; }
 
+    // The encoder's depth bounds test (setDepthTestMinBound:maxBound:, macOS 26) is listed
+    // for Apple10 only. An M4 (Apple9) driver answers respondsToSelector: yes but its
+    // implementation is a trap (brk #1), so the family decides, not the selector.
+    public bool DepthBoundsTestSupported { get; }
+
     private const nint GpuFamilyApple10 = 1010;
 
-    private static bool SupportsPerVertexPixelInputs(nint device)
+    private static bool SupportsApple10Features(nint device)
     {
         var supportsFamily = MetalNative.Selector("supportsFamily:");
         return OperatingSystem.IsMacOSVersionAtLeast(26) &&

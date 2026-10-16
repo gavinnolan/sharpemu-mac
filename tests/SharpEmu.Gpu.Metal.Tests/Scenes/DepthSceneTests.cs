@@ -532,9 +532,19 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
     // 6. Depth bounds -----------------------------------------------------------------------------------------
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void DepthBoundsDiscardPixelsWhoseStoredDepthIsOutside(bool boundsEnable)
+    [InlineData(true, 0.5f, 1f)]
+    [InlineData(false, 0.5f, 1f)]
+    // Both ends are inclusive: a stored depth exactly at a bound passes.
+    [InlineData(true, 0.2f, 0.6f)]
+    [InlineData(true, 0.2f, 0.5f)]
+    [InlineData(true, 0.3f, 0.6f)]
+    // Bounds beyond [0, 1] hold every stored depth.
+    [InlineData(true, -1f, 2f)]
+    // An empty range (inverted, or wholly beyond [0, 1]) holds no stored depth: every pixel is discarded.
+    [InlineData(true, 0.7f, 0.3f)]
+    [InlineData(true, 1.5f, 2f)]
+    [InlineData(true, -1f, -0.5f)]
+    public void DepthBoundsDiscardPixelsWhoseStoredDepthIsOutside(bool boundsEnable, float min, float max)
     {
         using var rig = CreateRig();
         if (rig is null) return;
@@ -542,19 +552,30 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
         d.Draw(d.State().DepthControl(true, true, CompareFunc.Always), d.Rect(0.2f, 1, 0, 0, 0, 0, 32, 64));
         d.Draw(d.State().DepthControl(true, true, CompareFunc.Always), d.Rect(0.6f, 1, 0, 0, 32, 0, 64, 64));
         var state = d.State().DepthControl(true, true, CompareFunc.Always, bounds: boundsEnable);
-        state.Context[Cx.DbDepthBoundsMin] = SceneState.F(0.5f);
-        state.Context[Cx.DbDepthBoundsMax] = SceneState.F(1f);
+        state.Context[Cx.DbDepthBoundsMin] = SceneState.F(min);
+        state.Context[Cx.DbDepthBoundsMax] = SceneState.F(max);
         d.Draw(state, d.Full(0.1f, 0, 1, 0));
         var depth = d.QueueDepthReadback();
         var colour = d.QueueColorReadback();
+        // A range the host test has to take (anything but [0, 1] or empty once clamped to it)
+        // needs Metal's depth bounds test; a device without it must refuse loudly.
+        var needsHostTest = boundsEnable && Math.Max(min, 0f) <= Math.Min(max, 1f) &&
+            (Math.Max(min, 0f) != 0f || Math.Min(max, 1f) != 1f);
+        if (needsHostTest && !rig.Host.DepthBoundsTestSupported)
+        {
+            Assert.Throws<SceneFatalException>(() => rig.Submit(d.Pm4));
+            return;
+        }
+
         rig.Submit(d.Pm4);
         var depths = depth();
         var colours = colour();
-        // Left stored 0.2 is outside [0.5, 1] (discarded when enabled); right stored 0.6 is inside.
-        Assert.Equal(boundsEnable ? Red : Green, colours[(32 * Size) + 8]);
-        Assert.Equal(boundsEnable ? 0.2f : 0.1f, depths[(32 * Size) + 8]);
-        Assert.Equal(Green, colours[(32 * Size) + 56]);
-        Assert.Equal(0.1f, depths[(32 * Size) + 56]);
+        // Left stored 0.2 and right stored 0.6 (both drawn red) each pass when inside [min, max] or the test is off.
+        bool Passes(float stored) => !boundsEnable || (min <= stored && stored <= max);
+        Assert.Equal(Passes(0.2f) ? Green : Red, colours[(32 * Size) + 8]);
+        Assert.Equal(Passes(0.2f) ? 0.1f : 0.2f, depths[(32 * Size) + 8]);
+        Assert.Equal(Passes(0.6f) ? Green : Red, colours[(32 * Size) + 56]);
+        Assert.Equal(Passes(0.6f) ? 0.1f : 0.6f, depths[(32 * Size) + 56]);
     }
 
     // 7. Stencil ----------------------------------------------------------------------------------------------

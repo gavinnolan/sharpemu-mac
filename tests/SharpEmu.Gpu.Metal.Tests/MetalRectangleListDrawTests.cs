@@ -292,7 +292,7 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
                 host.BindPipeline(GpuBindPoint.Graphics, pipeline);
                 host.SetDynamicState(new DynamicDrawState(
                     0, 0, Width, Height, 0, 1, new ScissorRectangle(0, 0, (int)Width, (int)Height), 1,
-                    0, 0, 0, 0, false, false, GpuCompareOp.Always, false, 0, 0, 0, false, default, default, 1, 0xF));
+                    0, 0, 0, 0, false, false, GpuCompareOp.Always, false, 0, 0, 0, false, 0, 1, false, default, default, 1, 0xF));
                 if (_fetched)
                 {
                     var positions = Buffer(MemoryMarshal.AsBytes(Positions.AsSpan()));

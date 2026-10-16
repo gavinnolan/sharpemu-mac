@@ -58,6 +58,7 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelSetTriangleFillMode = MetalNative.Selector("setTriangleFillMode:");
     private static readonly nint SelSetBlendColor = MetalNative.Selector("setBlendColorRed:green:blue:alpha:");
     private static readonly nint SelSetDepthBias = MetalNative.Selector("setDepthBias:slopeScale:clamp:");
+    private static readonly nint SelSetDepthTestBounds = MetalNative.Selector("setDepthTestMinBound:maxBound:");
     private static readonly nint SelSetStencilReferences =
         MetalNative.Selector("setStencilFrontReferenceValue:backReferenceValue:");
     private static readonly nint SelSetVertexBuffer = MetalNative.Selector("setVertexBuffer:offset:atIndex:");
@@ -275,6 +276,11 @@ internal sealed partial class MetalRenderHost
     private float _boundBiasConstant = float.NaN;
     private float _boundBiasSlope = float.NaN;
     private float _boundBiasClamp = float.NaN;
+
+    // A new encoder starts with the bounds test off, which Metal spells [0, 1], so a
+    // draw without the test never has to send it.
+    private float _boundDepthMinBound;
+    private float _boundDepthMaxBound = 1f;
     private uint _boundStencilFront = uint.MaxValue;
     private uint _boundStencilBack = uint.MaxValue;
     private readonly nint[] _boundVertexBuffers = new nint[MaxVertexBufferSlots];
@@ -304,6 +310,8 @@ internal sealed partial class MetalRenderHost
         _boundBiasConstant = float.NaN;
         _boundBiasSlope = float.NaN;
         _boundBiasClamp = float.NaN;
+        _boundDepthMinBound = 0f;
+        _boundDepthMaxBound = 1f;
         _boundStencilFront = uint.MaxValue;
         _boundStencilBack = uint.MaxValue;
         Array.Clear(_boundVertexBuffers);
@@ -690,6 +698,7 @@ internal sealed partial class MetalRenderHost
         var rejects =
             (depthAttached && depthStencil.HasDepth && _dynamicState.DepthTestEnabled &&
                 _dynamicState.DepthCompare != GpuCompareOp.Always) ||
+            (depthAttached && depthStencil.HasDepth && _dynamicState.DepthBoundsTestEnabled) ||
             (depthAttached && depthStencil.HasStencil && _dynamicState.StencilTestEnabled);
         var viewport = HostViewport(in _dynamicState);
         var scissor = _dynamicState.Scissor;
@@ -1303,6 +1312,8 @@ internal sealed partial class MetalRenderHost
             SetDepthBias(
                 _dynamicState.DepthBiasPointLineConstantFactor, _dynamicState.DepthBiasPointLineSlopeFactor, _dynamicState.DepthBiasClamp);
         }
+
+        ApplyDepthBounds(entry);
 
         if (_dynamicState.StencilTestEnabled &&
             (_boundStencilFront != _dynamicState.FrontStencil.Reference ||
@@ -2478,6 +2489,56 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendBool(resource, SelRespondsToSelector, SelParentTexture);
 
     private static readonly nint SelRespondsToSelector = MetalNative.Selector("respondsToSelector:");
+
+    // DB_DEPTH_CONTROL.DEPTH_BOUNDS_ENABLE: the DB discards a fragment whose stored depth
+    // lies outside [DB_DEPTH_BOUNDS_MIN, DB_DEPTH_BOUNDS_MAX], both ends inclusive, the
+    // registers being raw floats the DB compares as written. Metal's encoder test is the
+    // same compare on the stored depth but takes only bounds within [0, 1] with min <= max.
+    // A stored depth is itself within [0, 1], so a bound beyond that range compares the
+    // same as the range's end; a range that holds no stored depth at all (min > max after
+    // that, which includes min > 1 and max < 0) discards every fragment, which the encoder
+    // cannot express; the executor drops such a draw when that leaves nothing observable,
+    // so one reaching here stores to memory or clears.
+    private void ApplyDepthBounds(MetalPipelineEntry entry)
+    {
+        var minBound = 0f;
+        var maxBound = 1f;
+        if (_dynamicState.DepthBoundsTestEnabled && entry.HasDepth && !MetalV2Diagnostics.IgnoreFragmentTests)
+        {
+            var guestMin = _dynamicState.DepthMinBounds;
+            var guestMax = _dynamicState.DepthMaxBounds;
+            if (float.IsNaN(guestMin) || float.IsNaN(guestMax))
+            {
+                throw Fatal($"A draw tests depth bounds that are not numbers: min={guestMin} max={guestMax}.");
+            }
+
+            minBound = Math.Max(guestMin, 0f);
+            maxBound = Math.Min(guestMax, 1f);
+            if (minBound > maxBound)
+            {
+                throw Fatal(
+                    $"A draw that stores to memory or clears tests depth bounds that hold no stored depth, which " +
+                    $"discards every fragment and which Metal's depth bounds test cannot express: " +
+                    $"min={guestMin} max={guestMax}.");
+            }
+        }
+
+        if (_boundDepthMinBound == minBound && _boundDepthMaxBound == maxBound)
+        {
+            return;
+        }
+
+        if (!DepthBoundsTestSupported)
+        {
+            throw Fatal(
+                $"A draw tests depth bounds, but this Metal device has no depth bounds test " +
+                $"(setDepthTestMinBound:maxBound:, GPU family Apple10): min={minBound} max={maxBound}.");
+        }
+
+        MetalV2Native.SendDepthTestBounds(_renderEncoder, SelSetDepthTestBounds, minBound, maxBound);
+        _boundDepthMinBound = minBound;
+        _boundDepthMaxBound = maxBound;
+    }
 
     /// <summary>
     /// Hands the pass about to begin every waiting clear it can perform itself, as a

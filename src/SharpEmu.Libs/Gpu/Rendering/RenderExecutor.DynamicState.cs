@@ -152,6 +152,11 @@ public sealed partial class RenderExecutor
             depthBiasConstant,
             depthBiasEnabled ? polygonOffset.Clamp : 0f,
             depthBiasSlope,
+            // The bounds test reads the stored depth, so without a depth target there is
+            // nothing to test (depthState is the default then).
+            depthState.DepthBoundsTestEnabled,
+            depthState.DepthMinBounds,
+            depthState.DepthMaxBounds,
             depthState.StencilTestEnabled,
             depthState.FrontMasks,
             depthState.BackMasks,

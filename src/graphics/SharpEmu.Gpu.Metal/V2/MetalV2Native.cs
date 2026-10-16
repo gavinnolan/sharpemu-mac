@@ -439,6 +439,10 @@ internal static partial class MetalV2Native
         float slopeScale,
         float clamp);
 
+    // -setDepthTestMinBound:maxBound:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDepthTestBounds(nint receiver, nint selector, float minBound, float maxBound);
+
     // -setStencilFrontReferenceValue:backReferenceValue:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendStencilReferences(nint receiver, nint selector, uint front, uint back);
