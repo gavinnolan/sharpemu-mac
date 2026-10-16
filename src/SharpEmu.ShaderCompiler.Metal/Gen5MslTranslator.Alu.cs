@@ -1013,9 +1013,9 @@ public static partial class Gen5MslTranslator
 
         private string EmitCvtPkU8F32(Gen5ShaderInstruction instruction)
         {
-            // flt32_to_uint8 saturates to 0..255 and maps NaN to 0.
+            // flt32_to_uint8 saturates to 0..255, maps NaN to 0 and rounds to nearest even.
             var source = Temp("float", F(instruction, 0));
-            var converted = Temp("uint", $"(uint)clamp(isnan({source}) ? 0.0f : {source}, 0.0f, 255.0f)");
+            var converted = Temp("uint", $"(uint)rint(clamp(isnan({source}) ? 0.0f : {source}, 0.0f, 255.0f))");
             var offset = Temp("uint", $"(({RawSource(instruction, 1)}) & 3u) << 3");
             var baseValue = Temp("uint", RawSource(instruction, 2));
             return $"(({baseValue} & ~(0xFFu << {offset})) | (({converted} & 0xFFu) << {offset}))";
