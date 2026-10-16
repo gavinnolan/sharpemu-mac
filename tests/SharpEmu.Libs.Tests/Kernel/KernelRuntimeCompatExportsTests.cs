@@ -612,6 +612,39 @@ public sealed class KernelRuntimeCompatExportsTests
         }
     }
 
+    [Fact]
+    public void Sysmodule_LoadIsRefcountedAndReportsSdkErrors()
+    {
+        const ushort id = 0x7AB1; // not a real module id; ids are not table-checked
+        var memory = new FakeCpuMemory(0x1_0000, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        int Call(Func<CpuContext, int> export, ulong id)
+        {
+            ctx[CpuRegister.Rdi] = id;
+            var result = export(ctx);
+            Assert.Equal(unchecked((ulong)(long)result), ctx[CpuRegister.Rax]);
+            return result;
+        }
+
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded, Call(KernelRuntimeCompatExports.SysmoduleUnloadModule, id));
+
+        // Upper register bits are not part of the uint16 id.
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleLoadModule, 0xDEAD_0000_0000_0000UL | id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleLoadModule, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleUnloadModule, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleUnloadModule, id));
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorInvalidValue, Call(KernelRuntimeCompatExports.SysmoduleLoadModule, 0));
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorInvalidValue, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, 0x1_0000));
+        Assert.Equal(unchecked((int)0x805A1000), KernelRuntimeCompatExports.SceSysmoduleErrorInvalidValue);
+        Assert.Equal(unchecked((int)0x805A1001), KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded);
+    }
+
     [Theory]
     [InlineData("malloc", new[] { "malloc", "gQX+4GDQjpM" })]
     [InlineData("gQX+4GDQjpM#C#A", new[] { "gQX+4GDQjpM" })]

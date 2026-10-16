@@ -71,7 +71,14 @@ public static class KernelRuntimeCompatExports
     private static ulong _applicationHeapApiAddress;
     private static ulong _processProcParamAddress;
     private static uint _gpoStateBits;
-    private static readonly HashSet<int> _loadedSysmodules = new();
+    // sceSysmodule load counts by module id (Load increments, Unload
+    // decrements; IsLoaded is "count > 0").
+    private static readonly Dictionary<uint, int> _sysmoduleLoadCounts = new();
+
+    // SDK error_table.csv: 0x805A1000 "tried to load an unknown PRX",
+    // 0x805A1001 "unloaded a PRX already unloaded, or the module is not loaded".
+    internal const int SceSysmoduleErrorInvalidValue = unchecked((int)0x805A1000);
+    internal const int SceSysmoduleErrorUnloaded = unchecked((int)0x805A1001);
     private static readonly object _prtApertureGate = new();
     private static readonly (ulong Base, ulong Size)[] _prtApertures = new (ulong Base, ulong Size)[3];
     private static int _stackChkFailCount;
@@ -1436,17 +1443,80 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceSysmoduleLoadModule",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSysmodule")]
-    public static int SysmoduleLoadModule(CpuContext ctx)
+    public static int SysmoduleLoadModule(CpuContext ctx) =>
+        SysmoduleResult(ctx, LoadSysmodule(unchecked((ushort)ctx[CpuRegister.Rdi])));
+
+    /// <summary>
+    /// One load of a system module: 0, or INVALID_VALUE for id 0. Ids are
+    /// not otherwise validated: no id table is available here, so an unknown
+    /// id loads as an HLE module (deviations.md).
+    /// </summary>
+    internal static int LoadSysmodule(uint moduleId)
     {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
-        _ = KernelModuleRegistry.MarkSysmoduleLoaded(moduleId);
-        lock (_stateGate)
+        if ((moduleId & 0x7FFFFFFF) == 0)
         {
-            _loadedSysmodules.Add(moduleId);
+            return SceSysmoduleErrorInvalidValue;
         }
 
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        // A module already mapped from the title's sce_module keeps its real
+        // handle (KernelModuleRegistry.MarkSysmoduleLoaded); otherwise the
+        // HLE library stands in under a synthetic handle.
+        _ = KernelModuleRegistry.MarkSysmoduleLoaded(unchecked((int)moduleId));
+        lock (_stateGate)
+        {
+            _sysmoduleLoadCounts[moduleId] = _sysmoduleLoadCounts.GetValueOrDefault(moduleId) + 1;
+        }
+
+        return 0;
+    }
+
+    /// <summary>One unload: 0, INVALID_VALUE for id 0, UNLOADED when not loaded.</summary>
+    internal static int UnloadSysmodule(uint moduleId)
+    {
+        if ((moduleId & 0x7FFFFFFF) == 0)
+        {
+            return SceSysmoduleErrorInvalidValue;
+        }
+
+        lock (_stateGate)
+        {
+            if (!_sysmoduleLoadCounts.TryGetValue(moduleId, out var count) || count < 1)
+            {
+                return SceSysmoduleErrorUnloaded;
+            }
+
+            if (count == 1)
+            {
+                _sysmoduleLoadCounts.Remove(moduleId);
+                KernelModuleRegistry.MarkSysmoduleUnloaded(unchecked((int)moduleId));
+            }
+            else
+            {
+                _sysmoduleLoadCounts[moduleId] = count - 1;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>0 when loaded, INVALID_VALUE for id 0, otherwise UNLOADED.</summary>
+    internal static int QuerySysmodule(uint moduleId)
+    {
+        if ((moduleId & 0x7FFFFFFF) == 0)
+        {
+            return SceSysmoduleErrorInvalidValue;
+        }
+
+        lock (_stateGate)
+        {
+            return _sysmoduleLoadCounts.GetValueOrDefault(moduleId) > 0 ? 0 : SceSysmoduleErrorUnloaded;
+        }
+    }
+
+    private static int SysmoduleResult(CpuContext ctx, int result)
+    {
+        ctx[CpuRegister.Rax] = unchecked((ulong)(long)result);
+        return result;
     }
 
     [SysAbiExport(
@@ -1607,18 +1677,8 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceSysmoduleUnloadModule",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSysmodule")]
-    public static int SysmoduleUnloadModule(CpuContext ctx)
-    {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
-        KernelModuleRegistry.MarkSysmoduleUnloaded(moduleId);
-        lock (_stateGate)
-        {
-            _loadedSysmodules.Remove(moduleId);
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
+    public static int SysmoduleUnloadModule(CpuContext ctx) =>
+        SysmoduleResult(ctx, UnloadSysmodule(unchecked((ushort)ctx[CpuRegister.Rdi])));
 
     [SysAbiExport(
         Nid = "hHrGoGoNf+s",
@@ -1627,12 +1687,13 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libSceSysmodule")]
     public static int SysmoduleLoadModuleInternalWithArg(CpuContext ctx)
     {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
+        // Internal ids are 32-bit (0x80000000 | id).
+        var moduleId = unchecked((uint)ctx[CpuRegister.Rdi]);
         var resultAddress = ctx[CpuRegister.R8];
-        _ = KernelModuleRegistry.MarkSysmoduleLoaded(moduleId);
-        lock (_stateGate)
+        var result = LoadSysmodule(moduleId);
+        if (result != 0)
         {
-            _loadedSysmodules.Add(moduleId);
+            return SysmoduleResult(ctx, result);
         }
 
         if (resultAddress != 0 && !TryWriteInt32(ctx, resultAddress, 0))
@@ -1659,15 +1720,7 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libSceSysmodule")]
     public static int SysmoduleIsLoaded(CpuContext ctx)
     {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
-        var loaded = KernelModuleRegistry.IsSysmoduleLoaded(moduleId);
-        lock (_stateGate)
-        {
-            loaded |= _loadedSysmodules.Contains(moduleId);
-        }
-
-        ctx[CpuRegister.Rax] = loaded ? 0UL : unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return SysmoduleResult(ctx, QuerySysmodule(unchecked((ushort)ctx[CpuRegister.Rdi])));
     }
 
     [SysAbiExport(

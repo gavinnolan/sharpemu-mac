@@ -107,3 +107,9 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
   DT_INIT runs (no DT_PREINIT_ARRAY/DT_INIT_ARRAY/module_start arguments).
   Fini and module_stop are not run at exit. The PS5 rtld order of DT_INIT
   against module_start is not established.
+- **sceSysmodule ids** — only id 0 is rejected (INVALID_VALUE 0x805A1000).
+  No id-to-PRX table is available outside GPL sources, so any other id
+  "loads" as its HLE library, or as the title's mapped module when one of the
+  few known names is preloaded. Load and unload are reference-counted.
+  Unloading or querying a module that is not loaded gives UNLOADED
+  (0x805A1001).
