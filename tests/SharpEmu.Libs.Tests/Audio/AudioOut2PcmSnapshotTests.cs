@@ -29,6 +29,8 @@ public sealed class AudioOut2PcmSnapshotTests : IDisposable
     public AudioOut2PcmSnapshotTests()
     {
         AudioOut2Exports.ResetForTests();
+        // A vibration port's push drives the pad; keep it off the real host.
+        SharpEmu.Libs.Pad.PadHaptics.SetHostInputForTests(new SharpEmu.Libs.Tests.Pad.RecordingHostInput());
         _ctx = new CpuContext(_memory, Generation.Gen5);
     }
 
@@ -174,7 +176,11 @@ public sealed class AudioOut2PcmSnapshotTests : IDisposable
         Assert.Equal(secondPcm, AudioOut2Exports.GetPortPcmSnapshotForTests(secondPort));
     }
 
-    public void Dispose() => AudioOut2Exports.ResetForTests();
+    public void Dispose()
+    {
+        AudioOut2Exports.ResetForTests();
+        SharpEmu.Libs.Pad.PadHaptics.ResetForTests();
+    }
 
     private ulong CreateContext(uint grainSamples)
     {

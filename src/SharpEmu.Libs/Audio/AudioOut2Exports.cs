@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Pad;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -249,6 +250,7 @@ public static class AudioOut2Exports
     private static ulong PrimaryContextHandle;
     private static readonly object HostSubmitGate = new();
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
+    private static int _chatEnabled;
 
     [SysAbiExport(
         Nid = "g2tViFIohHE",
@@ -274,6 +276,47 @@ public static class AudioOut2Exports
     {
         return SetReturn(ctx, 0);
     }
+
+    // ABI: int32_t sceAudioOut2MasteringTerm(void). Pairs with
+    // sceAudioOut2MasteringInit; titles call Init/Term once per audio device they
+    // create, possibly overlapping, and there is no mastering stage to tear down.
+    [SysAbiExport(
+        Nid = "2bbBBOkH4CY",
+        ExportName = "sceAudioOut2MasteringTerm",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2MasteringTerm(CpuContext ctx)
+    {
+        return SetReturn(ctx, 0);
+    }
+
+    // ABI: int32_t sceAudioOut2EnableChat(void) / sceAudioOut2DisableChat(void):
+    // allow (or stop allowing) system chat audio alongside the title's own.
+    // The host mixes no chat audio, so the state is only recorded; repeated
+    // calls are accepted.
+    [SysAbiExport(
+        Nid = "oiOi7vgPfAY",
+        ExportName = "sceAudioOut2EnableChat",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2EnableChat(CpuContext ctx)
+    {
+        Volatile.Write(ref _chatEnabled, 1);
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "vzvznsnpjKM",
+        ExportName = "sceAudioOut2DisableChat",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2DisableChat(CpuContext ctx)
+    {
+        Volatile.Write(ref _chatEnabled, 0);
+        return SetReturn(ctx, 0);
+    }
+
+    internal static bool ChatEnabled => Volatile.Read(ref _chatEnabled) != 0;
 
     [SysAbiExport(
         Nid = "v8iOE+j8a5o",
@@ -511,6 +554,8 @@ public static class AudioOut2Exports
         {
             Producers[producer] = context;
         }
+
+        DrivePadVibrationPorts(ctx, context);
 
         // Host Submit already blocks on the output queue; software pacing covers grains with nothing
         // queued, once per grain whichever of Advance and Push comes first.
@@ -1132,6 +1177,11 @@ public static class AudioOut2Exports
     {
         var portHandle = ctx[CpuRegister.Rdi];
         var removed = Ports.TryRemove(portHandle, out var port);
+        if (removed && IsPadVibrationPort(port!.PortType))
+        {
+            PadHaptics.ReleaseAudioHaptics();
+        }
+
         var n = Interlocked.Increment(ref _portDestroyTraceCount);
         if (n <= 8 || n % 500 == 0)
         {
@@ -1360,6 +1410,62 @@ public static class AudioOut2Exports
         return context.ClockQueuedGrains();
     }
 
+    // Pad vibration ports (type 0x6, mono or stereo) carry the DualSense
+    // actuator waveform: channel 0 left, channel 1 right. Each push reduces the
+    // grain the port's PCM attribute points at to actuator intensities for the
+    // host pad (PadHaptics); the waveform is never mixed into the speakers
+    // (RoutesToSpeakers excludes type 0x6). Several vibration ports in one
+    // context combine at the stronger level per actuator.
+    private static void DrivePadVibrationPorts(CpuContext ctx, ContextState context)
+    {
+        var frames = checked((int)context.GrainSamples);
+        var found = false;
+        byte left = 0;
+        byte right = 0;
+        foreach (var port in Ports.Values)
+        {
+            if (port.ContextHandle != context.Handle ||
+                !IsPadVibrationPort(port.PortType) ||
+                !TryDecodeDataFormat(port.DataFormat, out var channels, out var bytesPerSample, out var isFloat) ||
+                channels is not (1 or 2))
+            {
+                continue;
+            }
+
+            found = true;
+            if (port.PcmAddress == 0 || frames <= 0)
+            {
+                continue;
+            }
+
+            var byteLength = frames * channels * bytesPerSample;
+            var pcm = ArrayPool<byte>.Shared.Rent(byteLength);
+            try
+            {
+                if (!ctx.Memory.TryRead(port.PcmAddress, pcm.AsSpan(0, byteLength)))
+                {
+                    continue;
+                }
+
+                var (portLeft, portRight) = PadHaptics.IntensityFromPcm(
+                    pcm.AsSpan(0, byteLength), frames, channels, bytesPerSample, isFloat, port.Gain);
+                left = Math.Max(left, portLeft);
+                right = Math.Max(right, portRight);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(pcm);
+            }
+        }
+
+        if (found)
+        {
+            PadHaptics.SubmitAudioHaptics(left, right);
+        }
+    }
+
+    private static bool IsPadVibrationPort(ushort portType) => portType == AudioOut2PortTypeVibration;
+
     private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context)
     {
         var frames = checked((int)context.GrainSamples);
@@ -1524,6 +1630,7 @@ public static class AudioOut2Exports
         }
 
         Volatile.Write(ref _streamFactoryForTests, null);
+        Volatile.Write(ref _chatEnabled, 0);
     }
 
     private static bool IsMainOrBgmPort(ushort portType)
