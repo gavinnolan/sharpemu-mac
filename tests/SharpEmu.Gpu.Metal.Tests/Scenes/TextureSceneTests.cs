@@ -1058,7 +1058,7 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
     [InlineData("Rgba8Srgb")]
     [InlineData("Rgb10A2Unorm")]
     [InlineData("R11G11B10Float")]
-    [InlineData("Float11_11_10", Skip = "IMG_FORMAT 43 (11_11_10_FLOAT, R in the low ten bits) has no Metal pixel format; the emulator refuses it")]
+    [InlineData("Float11_11_10", Skip = "IMG_FORMAT 43 (11_11_10_FLOAT, R in the low ten bits) has no Metal pixel format; the emulator binds it as a null texture with a one-time warning (ResourceMaterializer, the unsupported-format fallback)")]
     [InlineData("Rgba16Float")]
     [InlineData("Rg16Snorm")]
     [InlineData("R32Float")]
