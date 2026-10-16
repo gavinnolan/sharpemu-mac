@@ -104,6 +104,50 @@ public sealed class CommandProcessorWriteOrderTests
         Assert.True(fill.Deferred);
     }
 
+    private static uint[] ZPassDump(ulong address) =>
+        StreamRunner.Packet(PacketOpcode.EventWrite, 0x39 | (1u << 8), StreamRunner.Low(address), StreamRunner.High(address));
+
+    // UE4 zeroes an occlusion query's 16 depth-block pairs with WRITE_DATA right before the
+    // begin dump. Dumps written as parsed reached memory first, and the deferred clear then
+    // wiped them, so every query read as not ready with no samples and the props it tested
+    // (Poppy Playtime's TV, monitor, VCR) were culled.
+    [Fact]
+    public void OcclusionDumpsLandInOrderAfterTheClearRecordedBeforeThem()
+    {
+        var runner = OrderedRunner();
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(
+            WriteData(Data, new uint[64]),
+            ZPassDump(Data),
+            ZPassDump(Data + 8)));
+
+        Assert.Equal(0UL, runner.Host.ReadQword(Data));
+        Assert.Equal(1 + 32, runner.Host.CommandProcessorWrites.Count);
+        foreach (var (_, address, bytes) in runner.Host.CommandProcessorWrites)
+        {
+            Assert.True(runner.Host.GuestMemory.TryWrite(address, bytes));
+        }
+
+        const ulong ready = 1UL << 63;
+        for (var block = 0UL; block < 16; block++)
+        {
+            var begin = runner.Host.ReadQword(Data + (block * 16));
+            var end = runner.Host.ReadQword(Data + (block * 16) + 8);
+            Assert.NotEqual(0UL, begin & ready);
+            Assert.NotEqual(0UL, end & ready);
+            Assert.True((end & ~ready) > (begin & ~ready));
+        }
+    }
+
+    [Fact]
+    public void TheParseOptOutWritesOcclusionDumpsAsParsed()
+    {
+        var runner = OrderedRunner(ordered: false);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(ZPassDump(Data)));
+
+        Assert.NotEqual(0UL, runner.Host.ReadQword(Data) & (1UL << 63));
+        Assert.Empty(runner.Host.CommandProcessorWrites);
+    }
+
     // GTA V's culling queue writes each mesh's descriptor table with WRITE_DATA into memory
     // an earlier dispatch of the same queue stores into. Written as parsed, the table was in
     // place before that dispatch ran, and its stores then landed over the descriptors.

@@ -99,7 +99,9 @@ public sealed class OcclusionSceneTests(ITestOutputHelper output) : SceneTestBas
     [InlineData(true, false, true)]
     [InlineData(true, true, true)]
     [InlineData(false, false, false)]
-    [InlineData(false, true, false)]
+    // The dumps land in order with the GPU work before them, so right after the end dump the
+    // results are still outstanding, and the no-wait hint runs the draw unpredicated.
+    [InlineData(false, true, true)]
     public void AVisibleQueryRunsDrawIfVisibleAndSkipsDrawIfNotVisible(bool drawIfVisible, bool noWaitHint, bool expectDrawn)
     {
         var scene = Create();
