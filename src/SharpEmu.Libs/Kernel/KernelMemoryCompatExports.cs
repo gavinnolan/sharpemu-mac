@@ -115,7 +115,6 @@ public static partial class KernelMemoryCompatExports
     private static readonly Dictionary<ulong, LibcHeapAllocation> _libcAllocations = new();
     // Keep mappings in address order for range and virtual-memory queries.
     private static readonly MappedRegionTable _mappedRegions = new();
-    private static readonly Dictionary<ulong, string> _mappedRegionNames = new();
     private static readonly Dictionary<string, string> _guestMounts = new(StringComparer.OrdinalIgnoreCase);
     // Registered mounts that reject mutation (e.g. a save data mount opened with
     // SCE_SAVE_DATA_MOUNT_MODE_RDONLY). Guarded by _guestMountGate.
@@ -219,8 +218,6 @@ public static partial class KernelMemoryCompatExports
     }
 
     private readonly record struct LibcHeapAllocation(nint BaseAddress, nuint Size, nuint Alignment);
-    private readonly record struct MappedRegion(ulong Address, ulong Length, int Protection, bool IsFlexible,
-        bool IsDirect, ulong DirectStart, ulong BackingOffset = 0, bool IsReserved = false);
     private readonly record struct BatchMapEntry(ulong Start, ulong Offset, ulong Length, byte Protection, byte Type, int Operation);
 
     public static void RegisterGuestPathMount(string guestMountPoint, string hostRoot) =>
@@ -3508,11 +3505,13 @@ public static partial class KernelMemoryCompatExports
         // The "2" variant inserts a memoryType argument (rdx) ahead of v1's
         // protection, shifting protection/flags/directMemoryStart down one
         // register each and pushing alignment onto the stack (the 7th argument,
-        // at [rsp + 8], above the return address). The memoryType only selects
-        // cache/GPU access attributes, which this HLE does not model per
-        // mapping, so it is accepted but does not affect placement.
-        ulong alignment = 0;
-        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out alignment);
+        // at [rsp + 8], above the return address). The type applies to this
+        // mapping only.
+        if (!ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out var alignment))
+            return MemoryFault;
+        var memoryType = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (!IsValidMemoryType(memoryType))
+            return MemoryInvalidArgument;
 
         return MapDirectMemoryCore(
             ctx,
@@ -3521,13 +3520,15 @@ public static partial class KernelMemoryCompatExports
             protection: unchecked((int)ctx[CpuRegister.Rcx]),
             flags: ctx[CpuRegister.R8],
             directMemoryStart: ctx[CpuRegister.R9],
-            alignment: alignment);
+            alignment: alignment,
+            memoryType: memoryType);
     }
 
     private static int MapDirectMemoryCore(CpuContext ctx, ulong inOutAddressPointer, ulong length,
-        int protection, ulong flags, ulong directMemoryStart, ulong alignment)
+        int protection, ulong flags, ulong directMemoryStart, ulong alignment, int? memoryType = null, string? name = null)
         => RunMappingTransaction(
-            () => MapDirectMemoryTransaction(ctx, inOutAddressPointer, length, protection, flags, directMemoryStart, alignment),
+            () => MapDirectMemoryTransaction(ctx, inOutAddressPointer, length, protection, flags, directMemoryStart,
+                alignment, memoryType, name),
             () => IsNewMappingOutsideGpuMemory(ctx, inOutAddressPointer, length, flags));
 
     // A kernel-placed mapping lands in free space; a fixed one must target untouched space.
@@ -3535,8 +3536,11 @@ public static partial class KernelMemoryCompatExports
         (flags & OrbisKernelMapFixed) == 0 ||
         (ctx.TryReadUInt64(inOutAddressPointer, out var requested) && IsUntouchedByGpu(requested, length));
 
+    private static MappingTraits TraitsFromMapFlags(ulong flags) =>
+        (flags & OrbisKernelMapNoCoalesce) != 0 ? MappingTraits.NoCoalesce : MappingTraits.None;
+
     private static int MapDirectMemoryTransaction(CpuContext ctx, ulong inOutAddressPointer, ulong length,
-        int protection, ulong flags, ulong directMemoryStart, ulong alignment)
+        int protection, ulong flags, ulong directMemoryStart, ulong alignment, int? memoryType, string? name)
     {
         if (inOutAddressPointer == 0)
             return MemoryFault;
@@ -3576,8 +3580,12 @@ public static partial class KernelMemoryCompatExports
                     Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=host-view reason={failure} address=0x{address:X} size=0x{length:X} offset=0x{directMemoryStart:X} protection=0x{protection:X}");
                 return MemoryNoSpace;
             }
+            // v1 maps with the type the allocation was made with.
+            var type = memoryType ??
+                (TryFindDirectAllocationLocked(directMemoryStart, out var allocation) ? allocation.MemoryType : 0);
             ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, protection,
-                false, true, directMemoryStart, directMemoryStart));
+                false, true, directMemoryStart, directMemoryStart, MemoryType: type, Name: name,
+                Traits: TraitsFromMapFlags(flags)));
             GuestGpuMemoryHook.NoteMapped(address, length, mode);
             if (!ctx.TryWriteUInt64(inOutAddressPointer, address))
                 return MemoryFault;
@@ -3596,7 +3604,26 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelMapNamedDirectMemory(CpuContext ctx)
     {
-        return KernelMapDirectMemory(ctx);
+        // The name is the 7th argument, the first stack slot above the return address.
+        string? name = null;
+        if (!ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out var nameAddress))
+            return MemoryFault;
+        if (nameAddress != 0)
+        {
+            var nameResult = TryReadRangeName(ctx, nameAddress, out name);
+            if (nameResult != 0)
+                return nameResult;
+        }
+
+        return MapDirectMemoryCore(
+            ctx,
+            inOutAddressPointer: ctx[CpuRegister.Rdi],
+            length: ctx[CpuRegister.Rsi],
+            protection: unchecked((int)ctx[CpuRegister.Rdx]),
+            flags: ctx[CpuRegister.Rcx],
+            directMemoryStart: ctx[CpuRegister.R8],
+            alignment: ctx[CpuRegister.R9],
+            name: name);
     }
 
     [SysAbiExport(
@@ -3605,9 +3632,22 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMapNamedFlexibleMemory(CpuContext ctx)
-        => RunMappingTransaction(() => MapFlexibleMemoryCore(ctx));
+    {
+        string? name = null;
+        var nameAddress = ctx[CpuRegister.R8];
+        if (nameAddress != 0)
+        {
+            var nameResult = TryReadRangeName(ctx, nameAddress, out name);
+            if (nameResult != 0)
+                return nameResult;
+        }
+        return MapFlexibleMemory(ctx, name);
+    }
 
-    private static int MapFlexibleMemoryCore(CpuContext ctx)
+    private static int MapFlexibleMemory(CpuContext ctx, string? name)
+        => RunMappingTransaction(() => MapFlexibleMemoryCore(ctx, name));
+
+    private static int MapFlexibleMemoryCore(CpuContext ctx, string? name)
     {
         var pointer = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
@@ -3635,7 +3675,7 @@ public static partial class KernelMemoryCompatExports
                 return MemoryNoSpace;
             foreach (var block in blocks)
                 ReplaceMappedRegionRangeLocked(new MappedRegion(block.Address, block.Size, protection,
-                    true, false, 0, block.Offset));
+                    true, false, 0, block.Offset, Name: name, Traits: TraitsFromMapFlags(flags)));
             GuestGpuMemoryHook.NoteMapped(address, length, mode);
             return ctx.TryWriteUInt64(pointer, address) ? 0 : MemoryFault;
         }
@@ -3646,10 +3686,7 @@ public static partial class KernelMemoryCompatExports
         ExportName = "sceKernelMapFlexibleMemory",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelMapFlexibleMemory(CpuContext ctx)
-    {
-        return KernelMapNamedFlexibleMemory(ctx);
-    }
+    public static int KernelMapFlexibleMemory(CpuContext ctx) => MapFlexibleMemory(ctx, name: null);
 
     [SysAbiExport(
         Nid = "4h6F1LLbTiw",
@@ -3682,31 +3719,6 @@ public static partial class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
-        Nid = "yDBwVAolDgg",
-        ExportName = "sceKernelIsStack",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelIsStack(CpuContext ctx)
-    {
-        _ = ctx[CpuRegister.Rdi];
-        var startAddress = ctx[CpuRegister.Rsi];
-        var endAddress = ctx[CpuRegister.Rdx];
-
-        // The queried ranges used by libc's VM allocator are ordinary heap
-        // mappings. The kernel still initializes both outputs when a mapping
-        // is not a pthread stack; leaving them untouched makes libc consume
-        // stale stack values and issue invalid fixed-range reservations.
-        if ((startAddress != 0 && !ctx.TryWriteUInt64(startAddress, 0)) ||
-            (endAddress != 0 && !ctx.TryWriteUInt64(endAddress, 0)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
         Nid = "cQke9UuBQOk",
         ExportName = "sceKernelMunmap",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -3726,11 +3738,11 @@ public static partial class KernelMemoryCompatExports
             if (!MappingsCoverRange(regions, address, length))
                 return MemoryAccessDenied;
             var space = ResolveBackingSpace(ctx);
-            if (space is null && regions.Any(region => region.IsDirect || region.IsFlexible || region.IsReserved))
+            if (space is null && regions.Any(region => region.IsBacked || region.IsReserved))
                 return MemoryAccessDenied;
             foreach (var region in regions)
             {
-                if (region.IsDirect || region.IsFlexible || region.IsReserved)
+                if (region.IsBacked || region.IsReserved)
                 {
                     if (!TryUnmapViews(space!, [region]))
                         return MemoryAccessDenied;
@@ -3745,200 +3757,6 @@ public static partial class KernelMemoryCompatExports
             }
             return 0;
         }
-    }
-
-    [SysAbiExport(
-        Nid = "DGMG3JshrZU",
-        ExportName = "sceKernelSetVirtualRangeName",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelSetVirtualRangeName(CpuContext ctx)
-    {
-        var address = ctx[CpuRegister.Rdi];
-        var length = ctx[CpuRegister.Rsi];
-        var nameAddress = ctx[CpuRegister.Rdx];
-        if (nameAddress == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        if (!TryReadCString(ctx, nameAddress, OrbisKernelMaximumNameLength, out var nameBytes))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        var name = Encoding.UTF8.GetString(nameBytes);
-        lock (_memoryGate)
-        {
-            if (!TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) ||
-                length > region.Length ||
-                address < region.Address ||
-                length > region.Address + region.Length - address)
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            _mappedRegionNames[region.Address] = name;
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "mkgXxsoxWHg",
-        ExportName = "sceKernelClearVirtualRangeName",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelClearVirtualRangeName(CpuContext ctx)
-    {
-        var address = ctx[CpuRegister.Rdi];
-        var length = ctx[CpuRegister.Rsi];
-
-        lock (_memoryGate)
-        {
-            if (!TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) ||
-                length > region.Length ||
-                address < region.Address ||
-                length > region.Address + region.Length - address)
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            _mappedRegionNames.Remove(region.Address);
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "rVjRvHJ0X6c",
-        ExportName = "sceKernelVirtualQuery",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelVirtualQuery(CpuContext ctx)
-    {
-        var queryAddress = ctx[CpuRegister.Rdi];
-        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
-        var infoAddress = ctx[CpuRegister.Rdx];
-        var infoSize = ctx[CpuRegister.Rcx];
-        if (infoAddress == 0 || infoSize < OrbisVirtualQueryInfoSize)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        MappedRegion region;
-        var memoryType = 0;
-        lock (_memoryGate)
-        {
-            if (!TryFindVirtualQueryRegionLocked(queryAddress, findNext: (flags & 0x1) != 0, out region))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            if (region.IsDirect && TryFindDirectAllocationLocked(region.DirectStart, out var allocation))
-            {
-                memoryType = allocation.MemoryType;
-            }
-        }
-
-        Span<byte> payload = stackalloc byte[OrbisVirtualQueryInfoSize];
-        payload.Clear();
-
-        var regionEnd = TryAddU64(region.Address, region.Length, out var exclusiveEnd)
-            ? exclusiveEnd
-            : ulong.MaxValue;
-        var stateFlags = 0u;
-        if (region.IsFlexible)
-        {
-            stateFlags |= 0x01u;
-        }
-
-        if (region.IsDirect)
-        {
-            stateFlags |= 0x02u;
-        }
-
-        if (!region.IsReserved)
-        {
-            stateFlags |= 0x10u;
-        }
-
-        BinaryPrimitives.WriteUInt64LittleEndian(payload[0..8], region.Address);
-        BinaryPrimitives.WriteUInt64LittleEndian(payload[8..16], regionEnd);
-        BinaryPrimitives.WriteUInt64LittleEndian(payload[16..24], region.DirectStart);
-        BinaryPrimitives.WriteInt32LittleEndian(payload[24..28], region.Protection);
-        BinaryPrimitives.WriteInt32LittleEndian(payload[28..32], memoryType);
-        payload[32] = unchecked((byte)stateFlags);
-
-        string name;
-        lock (_memoryGate)
-        {
-            name = _mappedRegionNames.GetValueOrDefault(region.Address)
-                ?? (region.IsDirect
-                    ? "direct"
-                    : region.IsFlexible
-                        ? "flexible"
-                        : string.Empty);
-        }
-        if (!string.IsNullOrEmpty(name))
-        {
-            var nameBytes = Encoding.ASCII.GetBytes(name);
-            nameBytes.AsSpan(0, Math.Min(nameBytes.Length, OrbisKernelMaximumNameLength))
-                .CopyTo(payload.Slice(33, OrbisKernelMaximumNameLength));
-        }
-
-        if (!TryWriteCompat(ctx, infoAddress, payload))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "WFcfL2lzido",
-        ExportName = "sceKernelQueryMemoryProtection",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelQueryMemoryProtection(CpuContext ctx)
-    {
-        var queryAddress = ctx[CpuRegister.Rdi];
-        var startOut = ctx[CpuRegister.Rsi];
-        var endOut = ctx[CpuRegister.Rdx];
-        var protectionOut = ctx[CpuRegister.Rcx];
-
-        lock (_memoryGate)
-        {
-            foreach (var region in _mappedRegions.Values)
-            {
-                if (queryAddress < region.Address || queryAddress >= region.Address + region.Length)
-                {
-                    continue;
-                }
-
-                if (startOut != 0 && !ctx.TryWriteUInt64(startOut, region.Address))
-                {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-                }
-
-                if (endOut != 0 && !ctx.TryWriteUInt64(endOut, region.Address + region.Length - 1))
-                {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-                }
-
-                if (protectionOut != 0 && !TryWriteInt32(ctx, protectionOut, region.Protection))
-                {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-                }
-
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-            }
-        }
-
-        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
@@ -4052,8 +3870,10 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMtypeprotect(CpuContext ctx) =>
-        ProtectMappedRange(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi],
-            unchecked((int)ctx[CpuRegister.Rcx]), unchecked((int)ctx[CpuRegister.Rdx]));
+        IsValidMemoryType(unchecked((int)ctx[CpuRegister.Rdx]))
+            ? ProtectMappedRange(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi],
+                unchecked((int)ctx[CpuRegister.Rcx]), unchecked((int)ctx[CpuRegister.Rdx]))
+            : MemoryInvalidArgument;
 
     private static int KernelRtldThreadAtexitAdjust(CpuContext ctx, int delta)
     {
@@ -6481,74 +6301,25 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
+    // Protection and memory type are per mapping: a sub-range change splits the record and
+    // leaves the physical allocation, and every other alias of it, untouched.
     private static bool TryApplyMappedRegionProtectionLocked(
         ulong address,
         ulong length,
         int protection,
         int? memoryType = null)
     {
-        if (length == 0 || !TryAddU64(address, length, out var endAddress))
-        {
+        if (length == 0 || !TryAddU64(address, length, out _))
             return false;
-        }
-
-        var affected = new List<MappedRegion>();
-        var cursor = address;
-        // Visit mappings in address order to check for gaps before any change.
-        foreach (var region in _mappedRegions.Values)
-        {
-            if (!TryAddU64(region.Address, region.Length, out var regionEnd) || regionEnd <= cursor)
-            {
-                continue;
-            }
-
-            if (region.Address > cursor)
-            {
-                return false;
-            }
-
-            affected.Add(region);
-            cursor = regionEnd >= endAddress ? endAddress : regionEnd;
-            if (cursor == endAddress)
-            {
-                break;
-            }
-        }
-
-        if (cursor != endAddress)
-        {
+        var slices = GetMappingSlices(address, length);
+        if (!MappingsCoverRange(slices, address, length))
             return false;
-        }
-
-        foreach (var region in affected)
-        {
-            _mappedRegions.Remove(region.Address);
-        }
-
-        foreach (var region in affected)
-        {
-            var regionEnd = region.Address + region.Length;
-            var protectStart = Math.Max(region.Address, address);
-            var protectEnd = Math.Min(regionEnd, endAddress);
-
-            if (region.Address < protectStart)
+        foreach (var slice in slices)
+            ReplaceMappedRegionRangeLocked(slice with
             {
-                AddMappedRegionSliceLocked(region, region.Address, protectStart, region.Protection);
-            }
-
-            AddMappedRegionSliceLocked(region, protectStart, protectEnd, protection);
-
-            if (protectEnd < regionEnd)
-            {
-                AddMappedRegionSliceLocked(region, protectEnd, regionEnd, region.Protection);
-            }
-
-            if (memoryType.HasValue && region.IsDirect && TryFindDirectAllocationLocked(region.DirectStart, out var allocation))
-            {
-                _directAllocations.SetMemoryType(allocation.Start, memoryType.Value);
-            }
-        }
-
+                Protection = protection,
+                MemoryType = memoryType ?? slice.MemoryType,
+            });
         return true;
     }
 
@@ -6649,7 +6420,7 @@ public static partial class KernelMemoryCompatExports
             Length = end - start,
             Protection = protection,
             DirectStart = directStart,
-            BackingOffset = source.IsDirect || source.IsFlexible
+            BackingOffset = source.IsBacked
                 ? source.BackingOffset + start - source.Address : 0,
         };
     }

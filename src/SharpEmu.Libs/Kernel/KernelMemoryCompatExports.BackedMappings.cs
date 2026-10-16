@@ -85,7 +85,6 @@ public static partial class KernelMemoryCompatExports
             foreach (var region in _mappedRegions.Values)
                 GuestGpuMemoryHook.NoteUnmapped(region.Address, region.Length);
             _mappedRegions.Clear();
-            _mappedRegionNames.Clear();
             _directAllocations.Reset();
             _flexibleBacking.Reset();
             _nextVirtualAddress = 0;
@@ -127,7 +126,7 @@ public static partial class KernelMemoryCompatExports
         Address = start,
         Length = end - start,
         DirectStart = region.IsDirect ? region.DirectStart + start - region.Address : 0,
-        BackingOffset = region.IsDirect || region.IsFlexible ? region.BackingOffset + start - region.Address : 0,
+        BackingOffset = region.IsBacked ? region.BackingOffset + start - region.Address : 0,
     };
 
     // Empty or reserved-only address space that no GPU-registered span reaches.
@@ -206,7 +205,7 @@ public static partial class KernelMemoryCompatExports
         {
             if (region.IsReserved)
                 continue;
-            if ((!region.IsDirect && !region.IsFlexible) || !space.IsBackedView(region.Address))
+            if (!region.IsBacked || !space.IsBackedView(region.Address))
                 return false;
         }
         foreach (var region in regions)
@@ -551,7 +550,7 @@ public static partial class KernelMemoryCompatExports
         lock (_memoryGate)
         {
             var regions = GetMappingSlices(start, size);
-            var backed = regions.Any(region => region.IsDirect || region.IsFlexible);
+            var backed = regions.Any(region => region.IsBacked);
             if (backed)
             {
                 start = address & ~(OrbisPageSize - 1);

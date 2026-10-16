@@ -298,8 +298,12 @@ public sealed class KernelBackedMemoryTests
         Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(test.Context));
         Assert.True(test.Context.TryReadUInt64(test.Output, out var second));
         Assert.True(second >= first + size);
-        Assert.Equal((first, first + size), test.Query(first));
-        Assert.Equal((second, second + 0x10000), test.Query(second));
+        // Neighbouring reservations coalesce into one map entry, as the kernel reports them.
+        var expected = second == first + size
+            ? (first, second + 0x10000UL)
+            : (first, first + size);
+        Assert.Equal(expected, test.Query(first));
+        Assert.Equal(second == first + size ? expected : (second, second + 0x10000UL), test.Query(second));
     }
 
     // Reserves 512 GiB, which does not reliably fit beside anything else on a

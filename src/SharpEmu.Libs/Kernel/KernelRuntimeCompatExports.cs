@@ -843,6 +843,18 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    internal static bool OverlapsPrtAperture(ulong address, ulong size)
+    {
+        if (size == 0)
+            return false;
+        var end = address > ulong.MaxValue - size ? ulong.MaxValue : address + size;
+        lock (_prtApertureGate)
+        {
+            return _prtApertures.Any(aperture => aperture.Size != 0 &&
+                aperture.Base < end && address < aperture.Base + aperture.Size);
+        }
+    }
+
     internal static bool ContainsPrtRange(ulong address, ulong size)
     {
         if (size == 0 || address > ulong.MaxValue - size)

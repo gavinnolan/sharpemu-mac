@@ -290,9 +290,12 @@ public sealed class KernelMappingRangeTests
             }
         }
 
+        // Later optional fields (memory type, name, traits) keep their defaults.
         private static object CreateNativeRecord(MappingRecord record) => RegionConstructor.Invoke(
-            [record.Address, record.Length, record.Protection, record.IsFlexible,
-                record.IsDirect, record.DirectStart, record.BackingOffset, record.IsReserved]);
+            new object?[] { record.Address, record.Length, record.Protection, record.IsFlexible,
+                record.IsDirect, record.DirectStart, record.BackingOffset, record.IsReserved }
+            .Concat(RegionConstructor.GetParameters().Skip(8).Select(parameter => parameter.DefaultValue))
+            .ToArray());
 
         public void Dispose()
         {
