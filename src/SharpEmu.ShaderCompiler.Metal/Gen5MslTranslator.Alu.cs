@@ -315,8 +315,11 @@ public static partial class Gen5MslTranslator
                 "VCvtF32I32" => FloatResult(instruction, $"(float)as_type<int>({RawSource(instruction, 0)})"),
                 "VCvtF32U32" => FloatResult(instruction, $"(float)({RawSource(instruction, 0)})"),
                 "VCvtU32F32" => SaturatedFloatToUint(Temp("float", F(instruction, 0))),
-                "VCvtU16F16" =>
-                    $"(uint)clamp(trunc(isnan({F16(instruction, 0)}) ? 0.0f : {F16(instruction, 0)}), 0.0f, 65535.0f)",
+                // gfx10 16-bit results keep the other half of the VGPR (LLVM zeroesHigh16BitsOfDest).
+                "VCvtU16F16" => Int16Result(
+                    instruction,
+                    destination,
+                    $"(uint)clamp(trunc(isnan({F16(instruction, 0)}) ? 0.0f : {F16(instruction, 0)}), 0.0f, 65535.0f)"),
                 "VCvtI32F32" => SaturatedFloatToInt(Temp("float", F(instruction, 0))),
                 // u16/i16 -> f16 rounds to nearest even (65520 and up become +inf, as IEEE does).
                 "VCvtF16U16" => Float16Result(instruction, destination, $"(float)({Int16Source(instruction, 0, signed: false)})"),
@@ -341,11 +344,10 @@ public static partial class Gen5MslTranslator
                 "VCvtF32Ubyte1" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 8) & 0xFFu)"),
                 "VCvtF32Ubyte2" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 16) & 0xFFu)"),
                 "VCvtF32Ubyte3" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 24) & 0xFFu)"),
-                // Clamp and omod apply to the f32 result before it is rounded to f16.
-                // The VOP3 form's op_sel[3] puts the half into the high half, keeping the low one.
-                "VCvtF16F32" => instruction.Control is Gen5Vop3Control { OperandSelect: >= 8 }
-                    ? $"((v[{destination}] & 0x0000FFFFu) | ((uint)as_type<ushort>(half({ApplyFloatOutputModifiers(instruction, F(instruction, 0))})) << 16))"
-                    : $"((uint)as_type<ushort>(half({ApplyFloatOutputModifiers(instruction, F(instruction, 0))})))",
+                // Clamp and omod apply to the f32 result before it is rounded to f16. The half
+                // goes to the op_sel[3]-selected half and, as for every gfx10 16-bit result,
+                // the other half of the VGPR is kept.
+                "VCvtF16F32" => Float16Result(instruction, destination, F(instruction, 0)),
                 // The source is a half: an SDWA or VOP3 negate flips its sign bit 15, not
                 // bit 31 of the register, and VOP3 op_sel can pick the high half.
                 "VCvtF32F16" => FloatResult(instruction, F16(instruction, 0)),

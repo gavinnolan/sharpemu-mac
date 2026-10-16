@@ -145,6 +145,22 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         Assert.Equal(0u, Execute(shader));
     }
 
+    // gfx10 16-bit results keep the other half of the destination VGPR, in VOP1 and VOP3 forms.
+    [Theory]
+    [InlineData("VCvtF16F32", Gen5ShaderEncoding.Vop1, 0x3F800000u, 0xABCD3C00u)]
+    [InlineData("VCvtF16F32", Gen5ShaderEncoding.Vop3, 0x3F800000u, 0xABCD3C00u)]
+    [InlineData("VCvtU16F16", Gen5ShaderEncoding.Vop1, 0x00004500u, 0xABCD0005u)]
+    [InlineData("VCvtU16F16", Gen5ShaderEncoding.Vop3, 0x00004500u, 0xABCD0005u)]
+    public void HalfResultsKeepTheUpperHalf(string opcode, Gen5ShaderEncoding encoding, uint a, uint expected)
+    {
+        var shader = Compile([
+            new Gen5ShaderInstruction(28, encoding, opcode, [], [Gen5Operand.Vector(0)], [Gen5Operand.Vector(3)],
+                encoding == Gen5ShaderEncoding.Vop3 ? new Gen5Vop3Control(0, 0, 0, false, 0, null) : null),
+        ], a, 0u, 0u, 0xABCD5678u);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
     // v3 = VCC ? 1 : 0
     private static Gen5ShaderInstruction CndmaskVcc() =>
         new(28, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [], [Gen5Operand.Source(128), Gen5Operand.Source(129)], [Gen5Operand.Vector(3)], null);
