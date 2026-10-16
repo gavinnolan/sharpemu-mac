@@ -1022,6 +1022,40 @@ public static class ResourceMaterializer
         return 0;
     }
 
+    // Each plan sampler's specialization, or an empty list when all are the default. The
+    // LOD_BIAS is word 2 bits 13:0, signed 6.8. LOD_BIAS_SEC (bits 19:14) is scaled by the
+    // T#'s PERF_MOD in a way the ISA does not specify, so a sampler that sets it is refused.
+    private static bool SpecializeSamplers(ShaderResourceInfo info, MaterializedSnapshot snapshot, out List<SamplerSpecialization> samplers)
+    {
+        samplers = [];
+        var specialized = new SamplerSpecialization[info.Samplers.Count];
+        var any = false;
+        for (var index = 0; index < info.Samplers.Count && index < snapshot.Samplers.Length; index++)
+        {
+            var words = snapshot.Samplers[index];
+            if (words.Length < 4)
+            {
+                continue;
+            }
+
+            var secondary = (words[2] >> 14) & 0x3F;
+            if (secondary != 0)
+            {
+                return Fail($"sampler descriptor {index} sets LOD_BIAS_SEC 0x{secondary:X2}, whose PERF_MOD scaling is not modelled");
+            }
+
+            specialized[index] = new SamplerSpecialization((int)(words[2] << 18) >> 18);
+            any |= specialized[index] != default;
+        }
+
+        if (any)
+        {
+            samplers.AddRange(specialized);
+        }
+
+        return true;
+    }
+
     private static uint StorageMipCount(ImageResource image, ReadOnlySpan<uint> descriptor)
     {
         if (image.MipMode != ImageMipMode.DynamicStorage || NullImageDescriptor(descriptor))
@@ -1540,6 +1574,11 @@ public static class ResourceMaterializer
             bufferCursor += table.Descriptors.Count;
         }
 
+        if (!SpecializeSamplers(info, snapshot, out var samplers))
+        {
+            return false;
+        }
+
         specialization = new ResourceSpecialization
         {
             BaseBufferCount = baseBufferCount,
@@ -1548,6 +1587,7 @@ public static class ResourceMaterializer
             BufferCandidateTables = candidateTables,
             ImageDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Images),
             SamplerDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Samplers.Take(info.Samplers.Count).ToArray()),
+            Samplers = samplers,
         };
         specializedSnapshot = snapshot;
         return true;
@@ -1885,6 +1925,19 @@ public static class ResourceMaterializer
             throw new ResourcePlanException($"shader resource specialization exceeds the sampler limit: hash=0x{plan.Hash:X16}");
         }
 
+        if (specialization.Samplers.Count != 0)
+        {
+            if (specialization.Samplers.Count != source.Samplers.Count)
+            {
+                throw new ResourcePlanException($"shader resource specialization does not match the plan's samplers: hash=0x{plan.Hash:X16}");
+            }
+
+            for (var index = 0; index < source.Samplers.Count; index++)
+            {
+                info.Samplers[index].LodBias = specialization.Samplers[index].LodBias;
+            }
+        }
+
         for (var index = 0; index < source.Samplers.Count; index++)
         {
             var target = samplerPlan.PointSampler[index];
@@ -1899,7 +1952,7 @@ public static class ResourceMaterializer
             }
             else
             {
-                var sampler = source.Samplers[index].Clone();
+                var sampler = info.Samplers[index].Clone();
                 sampler.ForcePointFiltering = true;
                 info.Samplers.Add(sampler);
             }

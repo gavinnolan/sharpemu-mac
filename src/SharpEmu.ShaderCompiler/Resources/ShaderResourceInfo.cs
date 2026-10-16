@@ -107,6 +107,10 @@ public sealed class SamplerResource
     public bool ForcePointFiltering { get; set; }
     public bool DepthCompare { get; set; }
 
+    // The paired S#'s LOD_BIAS (word 2 bits 13:0), signed 6.8 fixed point, which the
+    // emitter adds to every LOD the sampler computes or is given; zero for most samplers.
+    public int LodBias { get; set; }
+
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
 

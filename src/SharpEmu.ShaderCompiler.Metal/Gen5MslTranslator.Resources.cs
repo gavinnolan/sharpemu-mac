@@ -1940,11 +1940,13 @@ public static partial class Gen5MslTranslator
             out string mipLevel,
             out int compareFunction,
             out uint packedFormat,
+            out SamplerResource? samplerInfo,
             out string error,
             (uint Resource, uint Element)? fixedElement = null)
         {
             error = string.Empty;
             compareFunction = -1;
+            samplerInfo = null;
             packedFormat = DescriptorConstants.InvalidFormat;
             texture = string.Empty;
             samplerName = string.Empty;
@@ -2048,6 +2050,7 @@ public static partial class Gen5MslTranslator
                 var samplerElement = request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.ToList()
                     .IndexOf(info.SamplerBinding(samplerIndex));
                 samplerName = Temp("sampler", $"{ResourcesName}.samplers[{samplerElement}]");
+                samplerInfo = info.Samplers[(int)samplerIndex];
             }
 
             dstSelect = imageInfo.ShaderSwizzle;

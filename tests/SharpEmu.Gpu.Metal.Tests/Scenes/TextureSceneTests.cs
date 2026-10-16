@@ -320,6 +320,9 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
         // Explicit lod 1 plus S# bias 2.
         cases.Add(("explicit lod 1 + S# bias 2", 3, Draw(rig, pm4, 16, 16, SampleL, MipTexture(chain), Descriptors.Sampler(mipFilter: 1, lodBias: 2f),
             UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 1f)));
+        // Gradient lod 1 (2 texels per pixel) plus S# bias 2.
+        cases.Add(("gradient lod 1 + S# bias 2", 3, Draw(rig, pm4, 16, 16, SampleD, MipTexture(chain), Descriptors.Sampler(mipFilter: 1, lodBias: 2f),
+            UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 2f / 64, 0, 0, 2f / 64)));
         rig.Submit(pm4);
         var check = new Check();
         foreach (var (name, level, draw) in cases)

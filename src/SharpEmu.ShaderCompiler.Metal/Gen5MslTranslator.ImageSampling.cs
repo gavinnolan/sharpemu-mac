@@ -180,6 +180,9 @@ public static partial class Gen5MslTranslator
         }
 
         // A mip index from a float level: nearest, inside the view's levels.
+        // An S# LOD_BIAS (signed 6.8 fixed point) as an exact float expression.
+        private static string SamplerLodBiasLiteral(int bias) => $"({bias}.0f / 256.0f)";
+
         private string NearestMip(string level, string texture) =>
             Temp("uint", $"min((uint)max(rint({level}), 0.0f), {texture}.get_num_mip_levels() - 1u)");
 
@@ -218,6 +221,7 @@ public static partial class Gen5MslTranslator
             string samplerName,
             MslImageClass imageClass,
             int compareFunction,
+            SamplerResource? samplerInfo,
             out string sampled,
             out string error)
         {
@@ -253,6 +257,17 @@ public static partial class Gen5MslTranslator
             var bias = hasBias ? Temp("float", SampleBias(image, address)) : "0.0f";
             var reference = hasCompare ? Temp("float", SampleReference(image, address)) : "0.0f";
 
+            // The S# LOD_BIAS adds to every LOD the sampler computes or is given (_L), before the
+            // _CL and MIN/MAX_LOD clamps; _LZ forces level 0 and unnormalized coordinates force
+            // mip 0, so neither is biased.
+            var samplerLodBias = samplerInfo?.LodBias ?? 0;
+            var samplerBias = samplerLodBias != 0 && !unorm && !hasZeroLod ? SamplerLodBiasLiteral(samplerLodBias) : null;
+            if (samplerBias is not null && !hasGradients && !hasLod && _stage == Gen5MslStage.Pixel)
+            {
+                bias = hasBias ? Temp("float", $"{bias} + {samplerBias}") : samplerBias;
+                hasBias = true;
+            }
+
             // Derivatives are one host-spatial vector per screen axis, with no array layer and
             // no cube bias: they have no coordinate origin.
             var gradientType = spatialComponents == 3 ? "gradient3d" : "gradient2d";
@@ -272,6 +287,14 @@ public static partial class Gen5MslTranslator
 
                 gradientX = Gradients(0);
                 gradientY = Gradients(1);
+                if (samplerBias is not null)
+                {
+                    // Scaling both derivatives by 2^bias raises the LOD they give by the bias
+                    // and leaves the anisotropy ratio alone; a gradient sample takes no bias.
+                    var scale = Temp("float", $"metal::exp2({samplerBias})");
+                    gradientX = Temp(spatialComponents == 1 ? "float" : imageClass.FloatCoordinateType, $"{gradientX} * {scale}");
+                    gradientY = Temp(spatialComponents == 1 ? "float" : imageClass.FloatCoordinateType, $"{gradientY} * {scale}");
+                }
             }
 
             var coordinates = SampleCoordinates(image, address, imageClass);
@@ -285,7 +308,9 @@ public static partial class Gen5MslTranslator
             var lod = hasZeroLod || unorm
                 ? "0.0f"
                 : hasLod
-                    ? Temp("float", ImageFloatAddress(image, address.Trailing))
+                    ? Temp("float", samplerBias is null
+                        ? ImageFloatAddress(image, address.Trailing)
+                        : $"{ImageFloatAddress(image, address.Trailing)} + {samplerBias}")
                     : explicitLod
                         ? "0.0f"
                         : bias;
@@ -386,6 +411,7 @@ public static partial class Gen5MslTranslator
             string samplerName,
             MslImageClass imageClass,
             int compareFunction,
+            SamplerResource? samplerInfo,
             out string sampled,
             out string error)
         {
@@ -460,6 +486,12 @@ public static partial class Gen5MslTranslator
                 else if (_stage == Gen5MslStage.Pixel)
                 {
                     level = Temp("float", $"{texture}.calculate_unclamped_lod({samplerName}, {planar}) + {bias}");
+                }
+
+                // The S# LOD_BIAS raises the given or computed LOD, as for a sample.
+                if (level is not null && samplerInfo is { LodBias: not 0 } biased)
+                {
+                    level = Temp("float", $"{level} + {SamplerLodBiasLiteral(biased.LodBias)}");
                 }
 
                 if ((flags & Gen5ImageOp.Clamp) != 0)
