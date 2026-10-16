@@ -1304,6 +1304,8 @@ internal sealed partial class MetalRenderHost
                 mipFilter = 1;
             }
 
+            RequireExactAddressModes(in words, magnify, minify);
+
             MetalV2Native.SendVoidValue(
                 descriptor,
                 MetalNative.Selector("setMinFilter:"),
@@ -1371,6 +1373,33 @@ internal sealed partial class MetalRenderHost
         finally
         {
             MetalNative.SendVoid(descriptor, SelRelease);
+        }
+    }
+
+    // CLAMP_HALF_BORDER and MIRROR_ONCE_HALF_BORDER have no host address mode and no
+    // exactly derivable edge behaviour, so they are refused. MIRROR_ONCE_BORDER samples
+    // mirror-once-to-edge and the shader substitutes the border colour past the mirrored
+    // copy, which is exact only while no filter blends a texel with the border.
+    private void RequireExactAddressModes(in SamplerDescriptorWords words, uint magnify, uint minify)
+    {
+        foreach (var (axis, mode) in new[] { ('X', words.ClampX), ('Y', words.ClampY), ('Z', words.ClampZ) })
+        {
+            if (mode is 4 or 5)
+            {
+                throw Fatal(
+                    $"The sampler address mode has no exact host form: clamp{axis}={mode} " +
+                    $"words={words[0]:X8},{words[1]:X8},{words[2]:X8},{words[3]:X8}.");
+            }
+        }
+
+        var pointXy = magnify == 0 && minify == 0;
+        var zFilter = (words[2] >> 24) & 0x3;
+        var pointZ = zFilter == 1 || (zFilter == 0 && pointXy);
+        if (((words.ClampX == 7 || words.ClampY == 7) && !pointXy) || (words.ClampZ == 7 && !pointZ))
+        {
+            throw Fatal(
+                $"A MIRROR_ONCE_BORDER sampler filters across the border, which has no exact host form: " +
+                $"words={words[0]:X8},{words[1]:X8},{words[2]:X8},{words[3]:X8}.");
         }
     }
 

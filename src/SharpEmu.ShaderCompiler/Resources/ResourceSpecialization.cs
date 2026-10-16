@@ -18,7 +18,9 @@ public readonly record struct BufferCandidateTableSpecialization(
     uint SearchIterations);
 
 // The module-affecting state of one guest S# that a host sampler state cannot carry.
-public readonly record struct SamplerSpecialization(int LodBias);
+// MirrorOnceBorderAxes has bit 0, 1, 2 set for a CLAMP_X, _Y, _Z of MIRROR_ONCE_BORDER;
+// BorderColorType is the S# BORDER_COLOR_TYPE when any is set.
+public readonly record struct SamplerSpecialization(int LodBias, uint MirrorOnceBorderAxes = 0, uint BorderColorType = 0);
 
 public readonly record struct ImageSpecialization(
     ImageNumericClass NumericClass,

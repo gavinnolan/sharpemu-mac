@@ -180,6 +180,59 @@ public static partial class Gen5MslTranslator
         }
 
         // A mip index from a float level: nearest, inside the view's levels.
+        // MIRROR_ONCE_BORDER (S# clamp 7) has no host address mode. The host samples
+        // mirror-once-to-edge, which matches it inside the mirrored copy, and texel index
+        // floor(u * size) leaves that copy, [-size, size - 1], exactly when the normalized
+        // coordinate is below -1 or at least 1, at every level; the S# border colour is
+        // substituted there. That is exact only where each result is one texel: the host
+        // sampler refuses filtering across the edge, and offsets (which move the edge per
+        // level), compares, cubes and register-table border colours are refused here.
+        private bool TryMirrorOnceBorderTest(
+            string opcode, SamplerResource? samplerInfo, MslImageClass imageClass, string coordinates, bool offsetOrCompare,
+            out string? pastMirror, out string error)
+        {
+            pastMirror = null;
+            error = string.Empty;
+            var spatialComponents = imageClass.SpatialComponents;
+            var axes = (samplerInfo?.MirrorOnceBorderAxes ?? 0) & ((1u << spatialComponents) - 1);
+            if (axes == 0)
+            {
+                return true;
+            }
+
+            if (imageClass.Cube || offsetOrCompare || imageClass.DepthCompare || samplerInfo!.BorderColorType == 3)
+            {
+                error = $"{opcode} through a MIRROR_ONCE_BORDER sampler is not supported with a cube, an offset, a compare or a border colour table";
+                return false;
+            }
+
+            var tests = new List<string>(3);
+            for (var axis = 0; axis < spatialComponents; axis++)
+            {
+                if ((axes & (1u << axis)) != 0)
+                {
+                    var component = spatialComponents == 1 ? coordinates : $"{coordinates}.{"xyz"[axis]}";
+                    tests.Add($"{component} < -1.0f || {component} >= 1.0f");
+                }
+            }
+
+            pastMirror = Temp("bool", string.Join(" || ", tests));
+            return true;
+        }
+
+        // The S# BORDER_COLOR_TYPE constant colours: transparent black, opaque black, opaque white.
+        private static string BorderColour(string kind, uint type)
+        {
+            var one = kind == "float" ? "1.0f" : "1";
+            var zero = kind == "float" ? "0.0f" : "0";
+            return type switch
+            {
+                0 => $"{VectorLiteral(kind)}({zero}, {zero}, {zero}, {zero})",
+                1 => $"{VectorLiteral(kind)}({zero}, {zero}, {zero}, {one})",
+                _ => $"{VectorLiteral(kind)}({one}, {one}, {one}, {one})",
+            };
+        }
+
         // An S# LOD_BIAS (signed 6.8 fixed point) as an exact float expression.
         private static string SamplerLodBiasLiteral(int bias) => $"({bias}.0f / 256.0f)";
 
@@ -329,6 +382,11 @@ public static partial class Gen5MslTranslator
                 coordinates = NormalizeUnnormalizedCoordinates(coordinates, texture, imageClass);
             }
 
+            if (!TryMirrorOnceBorderTest(opcode, samplerInfo, imageClass, coordinates, offset is not null || hasCompare, out var pastMirror, out error))
+            {
+                return false;
+            }
+
             var offsetArgument = string.Empty;
             if (offset is not null)
             {
@@ -380,6 +438,11 @@ public static partial class Gen5MslTranslator
             sampled = Temp(
                 $"vec<{kind}, 4>",
                 $"{texture}.sample({samplerName}, {coordinates}{layerArgument}{samplerArguments}{offsetArgument})");
+            if (pastMirror is not null)
+            {
+                sampled = Temp($"vec<{kind}, 4>", $"{pastMirror} ? {BorderColour(kind, samplerInfo!.BorderColorType)} : {sampled}");
+            }
+
             if (hasCompare)
             {
                 // A color format has no host depth view: its first channel is compared with
@@ -463,6 +526,12 @@ public static partial class Gen5MslTranslator
             if (imageClass.DepthCompare && !hasCompare)
             {
                 error = $"{opcode} gathers depth from a depth-compare binding";
+                return false;
+            }
+
+            if ((samplerInfo?.MirrorOnceBorderAxes ?? 0) != 0)
+            {
+                error = $"{opcode} through a MIRROR_ONCE_BORDER sampler is not supported";
                 return false;
             }
 

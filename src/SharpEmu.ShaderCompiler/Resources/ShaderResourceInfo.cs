@@ -111,6 +111,13 @@ public sealed class SamplerResource
     // emitter adds to every LOD the sampler computes or is given; zero for most samplers.
     public int LodBias { get; set; }
 
+    // The axes (bit 0 X, 1 Y, 2 Z) whose S# clamp is MIRROR_ONCE_BORDER, which no host
+    // address mode is: the host samples mirror-once-to-edge and the emitter substitutes the
+    // S# border colour (BorderColorType) past the mirrored copy.
+    public uint MirrorOnceBorderAxes { get; set; }
+
+    public uint BorderColorType { get; set; }
+
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
 

@@ -1044,7 +1044,12 @@ public static class ResourceMaterializer
                 return Fail($"sampler descriptor {index} sets LOD_BIAS_SEC 0x{secondary:X2}, whose PERF_MOD scaling is not modelled");
             }
 
-            specialized[index] = new SamplerSpecialization((int)(words[2] << 18) >> 18);
+            const uint MirrorOnceBorder = 7;
+            var axes = (words[0] & 0x7) == MirrorOnceBorder ? 1u : 0u;
+            axes |= ((words[0] >> 3) & 0x7) == MirrorOnceBorder ? 2u : 0u;
+            axes |= ((words[0] >> 6) & 0x7) == MirrorOnceBorder ? 4u : 0u;
+            specialized[index] = new SamplerSpecialization(
+                (int)(words[2] << 18) >> 18, axes, axes != 0 ? words[3] >> 30 : 0);
             any |= specialized[index] != default;
         }
 
@@ -1935,6 +1940,8 @@ public static class ResourceMaterializer
             for (var index = 0; index < source.Samplers.Count; index++)
             {
                 info.Samplers[index].LodBias = specialization.Samplers[index].LodBias;
+                info.Samplers[index].MirrorOnceBorderAxes = specialization.Samplers[index].MirrorOnceBorderAxes;
+                info.Samplers[index].BorderColorType = specialization.Samplers[index].BorderColorType;
             }
         }
 
