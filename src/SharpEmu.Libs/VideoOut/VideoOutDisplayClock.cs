@@ -26,7 +26,10 @@ internal sealed class VideoOutDisplayClock(long openedAt, ulong processCounter, 
     public long LastTimestamp { get; private set; }
     public ulong ProcessCounter { get; private set; }
     public ulong TimestampCounter { get; private set; }
-    public ulong ProcessMicroseconds => (ulong)((UInt128)ProcessCounter * 1_000_000 / (ulong)Stopwatch.Frequency);
+    // The process-time counter runs at the fixed libkernel frequency, not at
+    // the host Stopwatch rate.
+    public ulong ProcessMicroseconds => (ulong)((UInt128)ProcessCounter * 1_000_000 /
+        Kernel.KernelRuntimeCompatExports.ProcessTimeCounterFrequency);
 
     /// <summary>The origin of the current vblank grid, for flip pacing.</summary>
     public long AnchorTimestamp => _anchorTimestamp;
@@ -40,7 +43,8 @@ internal sealed class VideoOutDisplayClock(long openedAt, ulong processCounter, 
         Count = count;
         LastTimestamp = _anchorTimestamp + checked((long)(count - _anchorCount) * interval);
         var elapsed = (ulong)Math.Max(0, LastTimestamp - openedAt);
-        ProcessCounter = processCounter + elapsed;
+        ProcessCounter = processCounter + (ulong)((UInt128)elapsed *
+            Kernel.KernelRuntimeCompatExports.ProcessTimeCounterFrequency / (ulong)Stopwatch.Frequency);
         TimestampCounter = timestampCounter + (ulong)((UInt128)elapsed * timestampFrequency / (ulong)Stopwatch.Frequency);
     }
 

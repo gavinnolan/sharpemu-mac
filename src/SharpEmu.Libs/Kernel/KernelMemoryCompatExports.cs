@@ -2971,20 +2971,20 @@ public static partial class KernelMemoryCompatExports
     {
         var clockId = unchecked((int)ctx[CpuRegister.Rdi]);
         var timespecAddress = ctx[CpuRegister.Rsi];
-        if (timespecAddress == 0)
+        var errno = KernelClocks.TryGetTime(clockId, out var seconds, out var nanoseconds);
+        if (errno != 0)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return KernelErrno.Posix(ctx, errno);
         }
 
-        KernelRuntimeCompatExports.GetClockTime(clockId, out var seconds, out var nanoseconds);
-        if (!ctx.TryWriteUInt64(timespecAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timespecAddress + sizeof(long), unchecked((ulong)nanoseconds)))
+        if (timespecAddress == 0 ||
+            !KernelClocks.TryWriteTimespec(ctx, timespecAddress, seconds, nanoseconds))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            return KernelErrno.Posix(ctx, OrbisErrno.EFAULT);
         }
 
         ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return 0;
     }
 
     [SysAbiExport(
@@ -2994,27 +2994,24 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int ClockGetres(CpuContext ctx)
     {
+        var clockId = unchecked((int)ctx[CpuRegister.Rdi]);
         var timespecAddress = ctx[CpuRegister.Rsi];
-
-        // POSIX allows a null resolution pointer: the call then only validates
-        // the clock id, which every id a title passes here does.
-        if (timespecAddress == 0)
+        var errno = KernelClocks.TryGetResolution(clockId, out var seconds, out var nanoseconds);
+        if (errno != 0)
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            return KernelErrno.Posix(ctx, errno);
         }
 
-        // The realtime clock has a 100 ns tick. Report that conservative value
-        // for every supported clock.
-        const ulong ResolutionNanoseconds = 100;
-        if (!ctx.TryWriteUInt64(timespecAddress, 0) ||
-            !ctx.TryWriteUInt64(timespecAddress + sizeof(long), ResolutionNanoseconds))
+        // POSIX allows a null resolution pointer: the call then only validates
+        // the clock id.
+        if (timespecAddress != 0 &&
+            !KernelClocks.TryWriteTimespec(ctx, timespecAddress, seconds, nanoseconds))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            return KernelErrno.Posix(ctx, OrbisErrno.EFAULT);
         }
 
         ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return 0;
     }
 
     [SysAbiExport(

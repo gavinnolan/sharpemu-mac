@@ -19,6 +19,16 @@ namespace SharpEmu.Libs.Kernel;
 public static class KernelRuntimeCompatExports
 {
     private const ulong TlsErrnoOffset = 0x40;
+
+    /// <summary>
+    /// The guest's pid. A console title runs as a small fixed pid in its own
+    /// process namespace, not the host's; getpid, sysctl kern.proc.* and kill
+    /// all agree on this value (docs/deviations.md, "Process ids").
+    /// </summary>
+    internal const int GuestProcessId = 74;
+
+    /// <summary>The guest's parent pid (the console's SceSysCore-style launcher).</summary>
+    internal const int GuestParentProcessId = 1;
     private const ulong TlsStackChkGuardBaseOffset = 0x800;
     private const ulong StackChkGuardFieldOffset = 0x10;
     private const ulong TlsProcParamOffset = 0x100;
@@ -238,13 +248,16 @@ public static class KernelRuntimeCompatExports
         var timeAddress = ctx[CpuRegister.Rsi];
         if (timeAddress == 0)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return KernelErrno.Sce(OrbisErrno.EFAULT);
         }
 
-        GetClockTime(clockId, out var seconds, out var nanoseconds);
+        var errno = KernelClocks.TryGetTime(clockId, out var seconds, out var nanoseconds);
+        if (errno != 0)
+        {
+            return KernelErrno.Sce(errno);
+        }
 
-        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)nanoseconds)))
+        if (!KernelClocks.TryWriteTimespec(ctx, timeAddress, seconds, nanoseconds))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -253,30 +266,59 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "wRYVA5Zolso",
+        ExportName = "sceKernelClockGetres",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelClockGetres(CpuContext ctx)
+    {
+        var clockId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var resolutionAddress = ctx[CpuRegister.Rsi];
+        var errno = KernelClocks.TryGetResolution(clockId, out var seconds, out var nanoseconds);
+        if (errno != 0)
+        {
+            return KernelErrno.Sce(errno);
+        }
+
+        if (resolutionAddress != 0 &&
+            !KernelClocks.TryWriteTimespec(ctx, resolutionAddress, seconds, nanoseconds))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// Reads a clock for an internal deadline computation (condvar timed
+    /// waits). An id the guest could not have validated falls back to the
+    /// monotonic clock instead of failing the wait.
+    /// </summary>
     internal static void GetClockTime(int clockId, out long seconds, out long nanoseconds)
     {
-        if (clockId == 0)
+        if (KernelClocks.TryGetTime(clockId, out seconds, out nanoseconds) != 0)
         {
-            var now = DateTimeOffset.UtcNow;
-            seconds = now.ToUnixTimeSeconds();
-            nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
+            ReadMonotonicSinceStart(out seconds, out nanoseconds);
+        }
+    }
+
+    internal static void ReadMonotonicSinceStart(out long seconds, out long nanoseconds)
+    {
+        var processStartCounter = _processStartCounter;
+        var elapsedTicks = Stopwatch.GetTimestamp() - processStartCounter;
+        if (_stopwatchTicksAreNanoseconds)
+        {
+            // Constant divisors let the JIT strength-reduce the division;
+            // games call this thousands of times per second.
+            seconds = elapsedTicks / 1_000_000_000L;
+            nanoseconds = elapsedTicks - seconds * 1_000_000_000L;
         }
         else
         {
-            var processStartCounter = _processStartCounter;
-            var elapsedTicks = Stopwatch.GetTimestamp() - processStartCounter;
-            if (_stopwatchTicksAreNanoseconds)
-            {
-                // Constant divisors let the JIT strength-reduce the division;
-                // games call this thousands of times per second.
-                seconds = elapsedTicks / 1_000_000_000L;
-                nanoseconds = elapsedTicks - seconds * 1_000_000_000L;
-            }
-            else
-            {
-                seconds = elapsedTicks / Stopwatch.Frequency;
-                nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
-            }
+            seconds = elapsedTicks / Stopwatch.Frequency;
+            nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
         }
     }
 
@@ -323,14 +365,14 @@ public static class KernelRuntimeCompatExports
             (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
              !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)microseconds))))
         {
-            return -1;
+            return KernelErrno.Posix(ctx, OrbisErrno.EFAULT);
         }
 
         if (timezoneAddress != 0 &&
             (!TryWriteInt32(ctx, timezoneAddress, 0) ||
              !TryWriteInt32(ctx, timezoneAddress + sizeof(int), 0)))
         {
-            return -1;
+            return KernelErrno.Posix(ctx, OrbisErrno.EFAULT);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -398,9 +440,31 @@ public static class KernelRuntimeCompatExports
 
     internal static ulong ReadProcessTimeCounterAt(long timestamp)
     {
-        var elapsedTicks = timestamp - _processStartCounter;
-        return unchecked((ulong)Math.Max(0, elapsedTicks));
+        var elapsedTicks = Math.Max(0, timestamp - _processStartCounter);
+        if (_stopwatchTicksAreNanoseconds)
+        {
+            return unchecked((ulong)elapsedTicks);
+        }
+
+        var whole = elapsedTicks / Stopwatch.Frequency;
+        var remainder = elapsedTicks % Stopwatch.Frequency;
+        return unchecked((ulong)(whole * (long)ProcessTimeCounterFrequency +
+            remainder * (long)ProcessTimeCounterFrequency / Stopwatch.Frequency));
     }
+
+    /// <summary>
+    /// <c>sceKernelGetProcessTimeCounterFrequency</c>: a fixed 1 GHz on every
+    /// host (docs/deviations.md, "Process-time counter"). The counter is
+    /// scaled to it, so counter / frequency stays real seconds.
+    /// </summary>
+    internal const ulong ProcessTimeCounterFrequency = 1_000_000_000UL;
+
+    /// <summary>
+    /// True when the host Stopwatch already ticks in nanoseconds, so a native
+    /// stub reading the raw host counter agrees with
+    /// <see cref="ProcessTimeCounterFrequency"/>.
+    /// </summary>
+    public static bool HostCounterMatchesProcessTimeFrequency => _stopwatchTicksAreNanoseconds;
 
     [SysAbiExport(
         Nid = "BNowx2l588E",
@@ -409,7 +473,7 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelGetProcessTimeCounterFrequency(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = unchecked((ulong)Stopwatch.Frequency);
+        ctx[CpuRegister.Rax] = ProcessTimeCounterFrequency;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -454,6 +518,37 @@ public static class KernelRuntimeCompatExports
 
         ctx[CpuRegister.Rax] = address;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // SceProcParam header: u64 size, u32 magic, u32 entry count, u64 SDK
+    // version (0xMMmmppxx, e.g. 0x04000031 for SDK 4.00).
+    private const ulong ProcParamSdkVersionOffset = 0x10;
+    private const ulong ProcParamMinimumSizeWithSdkVersion = 0x18;
+
+    /// <summary>
+    /// The SDK version the title was built with, from its PT_SCE_PROCPARAM
+    /// segment. False when the title has no proc param or it is too short.
+    /// </summary>
+    internal static bool TryGetProcessSdkVersion(CpuContext ctx, out uint sdkVersion)
+    {
+        sdkVersion = 0;
+        ulong address;
+        lock (_stateGate)
+        {
+            address = _processProcParamAddress;
+        }
+
+        if (address == 0 ||
+            !ctx.TryReadUInt64(address, out var size) ||
+            size < ProcParamMinimumSizeWithSdkVersion ||
+            !ctx.TryReadUInt64(address + ProcParamSdkVersionOffset, out var version) ||
+            version == 0)
+        {
+            return false;
+        }
+
+        sdkVersion = unchecked((uint)version);
+        return true;
     }
 
     public static void ConfigureProcessProcParamAddress(ulong procParamAddress)
@@ -2230,7 +2325,7 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int GetProcessId(CpuContext ctx)
     {
-        var processId = Environment.ProcessId;
+        var processId = GuestProcessId;
         ctx[CpuRegister.Rax] = unchecked((uint)processId);
         return processId;
     }

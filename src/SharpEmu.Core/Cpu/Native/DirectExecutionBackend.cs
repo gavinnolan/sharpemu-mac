@@ -1817,6 +1817,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 			return false;
 		}
 
+		// The process-time counter is reported at a fixed 1 GHz; a stub reading the raw
+		// host counter only agrees with that when the host counter ticks in nanoseconds.
+		if (nid == "fgxnMeTNUtY" &&
+			!SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.HostCounterMatchesProcessTimeFrequency)
+		{
+			address = 0;
+			return false;
+		}
+
 		ReadOnlySpan<byte> code = nid switch
 		{
 			"-2IRUCO--PM" =>

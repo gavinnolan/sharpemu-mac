@@ -28,7 +28,21 @@ public static class KernelExports
         LibraryName = "libKernel")]
     public static int KernelGetCompiledSdkVersion(CpuContext ctx)
     {
-        _ = ctx;
+        // int sceKernelGetCompiledSdkVersion(int *sdkVersion): the version
+        // recorded in the title's PT_SCE_PROCPARAM.
+        var outputAddress = ctx[CpuRegister.Rdi];
+        if (outputAddress == 0 ||
+            !KernelRuntimeCompatExports.TryGetProcessSdkVersion(ctx, out var sdkVersion))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!ctx.TryWriteUInt32(outputAddress, sdkVersion))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
