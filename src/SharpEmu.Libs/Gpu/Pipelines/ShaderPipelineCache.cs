@@ -827,6 +827,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         parameters.CullBack = !rectangleList && mode.CullBack;
         parameters.CullFront = !rectangleList && mode.CullFront;
         parameters.FrontFaceClockwise = mode.FrontFaceClockwise;
+        parameters.AlphaToCoverageEnable = AlphaToCoverageEnabled(colors, context, pixelActive);
         for (var index = 0; index < colors.Length; index++)
         {
             var slot = colors[index].Slot;
@@ -844,6 +845,26 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         FillVertexInputState(vertexInput, vertexState);
         return (vertexStage, pixelStage);
+    }
+
+    // DB_ALPHA_TO_MASK turns the alpha of MRT0's export into sample coverage unless the pixel
+    // program opts out (DB_SHADER_CONTROL.ALPHA_TO_MASK_DISABLE). The host takes the alpha of
+    // its first color output, so that output has to be the one export 0 feeds.
+    private static bool AlphaToCoverageEnabled(ReadOnlySpan<ColorTargetState> colors, ContextRegisters context, bool pixelActive)
+    {
+        if (!pixelActive || (context.AlphaToMask & 1u) == 0 || context.ShaderInterface.DepthShaderControl.AlphaToMaskDisable)
+        {
+            return false;
+        }
+
+        if (colors.Length == 0 || PixelExportRouting.ExportForSlot(context.ShaderInterface, colors[0].Slot) != 0)
+        {
+            throw GpuFatal.Fatal(
+                $"Alpha to coverage needs MRT0's export at the first color attachment: attachments={colors.Length} " +
+                $"firstSlot={(colors.Length == 0 ? -1 : (int)colors[0].Slot)} dbAlphaToMask=0x{context.AlphaToMask:X8}.");
+        }
+
+        return true;
     }
 
     internal static GraphicsPipelineKey KeyOf(GraphicsPipelineDescription description) => new()

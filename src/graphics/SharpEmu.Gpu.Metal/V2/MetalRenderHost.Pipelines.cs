@@ -448,6 +448,12 @@ internal sealed partial class MetalRenderHost
             {
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), pixelModule.Function);
             }
+
+            if (parameters.AlphaToCoverageEnable)
+            {
+                MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setAlphaToCoverageEnabled:"), true);
+            }
+
             var colorAttachments = MetalNative.Send(descriptor, SelColorAttachments);
             for (var index = 0; index < description.Rendering.ColorCount; index++)
             {

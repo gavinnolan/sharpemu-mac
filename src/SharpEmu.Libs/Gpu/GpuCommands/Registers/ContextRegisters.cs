@@ -378,6 +378,9 @@ public sealed class ContextRegisters
     public ColorTargetWords[] ColorTargets = new ColorTargetWords[ColorTargetCount];
     public uint[] ColorClearWord1 = new uint[ColorTargetCount];
     public uint RenderTargetMask;
+
+    // DB_ALPHA_TO_MASK: bit 0 enables alpha to coverage, the offsets and OFFSET_ROUND set its dither.
+    public uint AlphaToMask;
     public ScreenViewportRegisters ScreenViewport = new();
     public ClipControlRegisters Clip;
     public ColorControlRegisters ColorControl = new();
