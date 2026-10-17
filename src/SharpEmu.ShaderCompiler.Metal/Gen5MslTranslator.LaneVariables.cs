@@ -109,7 +109,8 @@ public static partial class Gen5MslTranslator
         {
             var valid = (bool[])validAtEntry.Clone();
             var source = _blockText[block];
-            var text = rewrite ? new StringBuilder(source.Length) : null;
+            var hasSentinel = rewrite && source.Contains(LaneBitMarker, StringComparison.Ordinal);
+            var text = rewrite && (hasSentinel || !IsNormalizedText(source)) ? new StringBuilder(source.Length) : null;
             var start = 0;
             var depth = 0;
             while (start < source.Length)
@@ -138,7 +139,7 @@ public static partial class Gen5MslTranslator
                 ApplyLaneVariableEffects(line, lineDepth, valid, rewrite);
             }
 
-            resolved = text?.ToString() ?? string.Empty;
+            resolved = text?.ToString() ?? (rewrite ? source : string.Empty);
             return valid;
         }
 

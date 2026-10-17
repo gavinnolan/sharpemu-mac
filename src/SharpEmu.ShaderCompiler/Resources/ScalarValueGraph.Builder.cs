@@ -227,17 +227,17 @@ public sealed partial class ScalarValueGraph
 
             for (var register = 0; register < ScalarRegisterCount; register++)
             {
-                merged.Scalars[register] = MergeSlot(block, register, visited, pending, state => state.Scalars[register]);
+                merged.Scalars[register] = MergeSlot(block, register, visited, pending, SlotKind.Scalar, register);
             }
 
             for (var register = 0; register < VectorRegisterCount; register++)
             {
-                merged.Vectors[register] = MergeSlot(block, ScalarRegisterCount + register, visited, pending, state => state.Vectors[register]);
+                merged.Vectors[register] = MergeSlot(block, ScalarRegisterCount + register, visited, pending, SlotKind.Vector, register);
             }
 
-            merged.Exec = MergeSlot(block, RegisterState.ExecSlot, visited, pending, state => state.Exec);
-            merged.Vcc = MergeSlot(block, RegisterState.VccSlot, visited, pending, state => state.Vcc);
-            merged.Scc = MergeSlot(block, RegisterState.SccSlot, visited, pending, state => state.Scc);
+            merged.Exec = MergeSlot(block, RegisterState.ExecSlot, visited, pending, SlotKind.Exec);
+            merged.Vcc = MergeSlot(block, RegisterState.VccSlot, visited, pending, SlotKind.Vcc);
+            merged.Scc = MergeSlot(block, RegisterState.SccSlot, visited, pending, SlotKind.Scc);
 
             var laneKeys = new HashSet<(uint Register, uint Lane)>(visited[0].State.Lanes.Keys);
             foreach (var (_, state) in visited.Skip(1))
@@ -247,7 +247,7 @@ public sealed partial class ScalarValueGraph
 
             foreach (var key in laneKeys)
             {
-                var value = MergeSlot(block, RegisterState.LaneSlot(key.Register, key.Lane), visited, pending, state => state.Lanes[key]);
+                var value = MergeSlot(block, RegisterState.LaneSlot(key.Register, key.Lane), visited, pending, SlotKind.Lane, (int)key.Register, key.Lane);
                 if (!value.IsUndefined)
                 {
                     merged.Lanes[key] = value;
@@ -262,7 +262,7 @@ public sealed partial class ScalarValueGraph
 
             foreach (var key in maskKeys)
             {
-                var value = MergeSlot(block, RegisterState.MaskSlot(key), visited, pending, state => state.ThreadBits[key]);
+                var value = MergeSlot(block, RegisterState.MaskSlot(key), visited, pending, SlotKind.Mask, (int)key);
                 if (!value.IsUndefined)
                 {
                     merged.ThreadBits[key] = value;
@@ -363,13 +363,15 @@ public sealed partial class ScalarValueGraph
             int slot,
             List<(int Block, RegisterState State)> visited,
             bool pending,
-            Func<RegisterState, ScalarValue> read)
+            SlotKind kind,
+            int index = 0,
+            uint lane = 0)
         {
-            var first = read(visited[0].State);
+            var first = ReadSlot(visited[0].State, kind, index, lane);
             var same = true;
             foreach (var (_, state) in visited)
             {
-                var value = read(state);
+                var value = ReadSlot(state, kind, index, lane);
                 if (value.IsUndefined)
                 {
                     return _graph.Undefined(first.Type);
@@ -385,8 +387,8 @@ public sealed partial class ScalarValueGraph
 
             if (_uniformJoin is { } join)
             {
-                var taken = read(visited.First(entry => entry.Block == join.TakenPredecessor).State);
-                var other = read(visited.First(entry => entry.Block != join.TakenPredecessor).State);
+                var taken = ReadSlot(visited.First(entry => entry.Block == join.TakenPredecessor).State, kind, index, lane);
+                var other = ReadSlot(visited.First(entry => entry.Block != join.TakenPredecessor).State, kind, index, lane);
                 return _graph.Select(join.Taken, taken, other);
             }
 
@@ -399,15 +401,28 @@ public sealed partial class ScalarValueGraph
             var predecessors = _graph.ControlFlow.Predecessors[block];
             var order = block == 0 ? new[] { -1 }.Concat(predecessors).ToArray() : predecessors.ToArray();
             var operands = new ScalarValue[order.Length];
-            for (var index = 0; index < order.Length; index++)
+            for (var position = 0; position < order.Length; position++)
             {
-                var source = visited.FirstOrDefault(entry => entry.Block == order[index]);
-                operands[index] = source.State is null ? phi : read(source.State);
+                var source = visited.FirstOrDefault(entry => entry.Block == order[position]);
+                operands[position] = source.State is null ? phi : ReadSlot(source.State, kind, index, lane);
             }
 
             phi.SetPhiOperands(order, operands);
             return phi;
         }
+
+        private enum SlotKind { Scalar, Vector, Exec, Vcc, Scc, Lane, Mask }
+
+        private static ScalarValue ReadSlot(RegisterState state, SlotKind kind, int index, uint lane) => kind switch
+        {
+            SlotKind.Scalar => state.Scalars[index],
+            SlotKind.Vector => state.Vectors[index],
+            SlotKind.Exec => state.Exec,
+            SlotKind.Vcc => state.Vcc,
+            SlotKind.Scc => state.Scc,
+            SlotKind.Lane => state.Lanes[((uint)index, lane)],
+            _ => state.ThreadBits[(uint)index],
+        };
 
         private RegisterState Transfer(int block, RegisterState state)
         {
