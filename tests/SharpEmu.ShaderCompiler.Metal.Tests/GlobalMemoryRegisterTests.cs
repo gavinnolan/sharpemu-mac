@@ -114,9 +114,9 @@ public sealed class GlobalMemoryRegisterTests
     public void AddressRangeLookup_CoversTheWholeTable()
     {
         var source = Compile(12u);
-        Assert.Contains($"min(sharpemu_resources.address_range_count, {Gen5MslTranslator.MaxAddressRangeCount}u)", source);
+        Assert.Contains($"min(sharpemu_resources.address_range_count & 0x7FFFFFFFu, {Gen5MslTranslator.MaxAddressRangeCount}u)", source);
         Assert.Contains($"step < {Gen5MslTranslator.AddressRangeSearchSteps}u", source);
-        Assert.Contains("min(sharpemu_resources.address_range_count, 16384u)", source);
+        Assert.Contains("min(sharpemu_resources.address_range_count & 0x7FFFFFFFu, 16384u)", source);
         Assert.Contains("step < 15u", source);
     }
 
