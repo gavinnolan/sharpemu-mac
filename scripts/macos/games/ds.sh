@@ -12,8 +12,9 @@
 #   title   skip the intro movie and stop at the title menu
 #   boot    no input (load-time measurements)
 #
-# Key times are relative to the guest's "[MSG-Init] Starting main loop" log line, so they
-# hold however long shader prewarm and boot take. The save is copied from
+# Key times are relative to the first "Bink IO" guest thread (the intro movie, which only
+# starts once the logos have drawn), so they hold however long shader prewarm, boot and a
+# cold shader cache's first compiles take. The save is copied from
 # artifacts/saves/ds-golden (seeded from the user's SharpEmu savedata on first use) into
 # the run's own directory, so runs never write the user's real saves and always start
 # from the same place. SHARPEMU_DS_SAVE=<dir> picks another golden save root.
@@ -36,20 +37,20 @@ SAVES="$(mktemp -d "${TMPDIR:-/tmp}/ds-saves.XXXXXX")"
 trap 'rm -rf "$SAVES"' EXIT
 cp -R "$GOLDEN/PPSA01342" "$SAVES/"
 
-# Seconds after "Starting main loop": Cross held through the logos and the intro movie,
+# Seconds after the intro movie starts: Cross held through the movie,
 # then single presses for "press any button", CONTINUE and "Continue Offline".
 case "$MODE" in
   ingame)
-    PLAN="10:enter:2,20:enter:2,30:enter:2,40:enter:2,50:enter:2,60:enter:2,70:enter:2,80:enter:2"
-    PLAN+=",90:enter,98:enter,106:enter,114:enter,122:enter,130:enter,138:enter" ;;
+    PLAN="0:enter:2,10:enter:2,20:enter:2,30:enter:2,40:enter:2,48:enter:2"
+    PLAN+=",58:enter,66:enter,74:enter,82:enter,90:enter,98:enter,106:enter" ;;
   title)
-    PLAN="10:enter:2,20:enter:2,30:enter:2,40:enter:2,50:enter:2,60:enter:2,70:enter:2,80:enter:2,90:enter" ;;
+    PLAN="0:enter:2,10:enter:2,20:enter:2,30:enter:2,40:enter:2,48:enter:2,58:enter" ;;
   boot) PLAN="-" ;;
   *) echo "unknown mode $MODE (ingame|title|boot)" >&2; exit 2 ;;
 esac
 
 export SHARPEMU_GAME_ENTRY_RUN=1
-export SHARPEMU_INPUT_START_AFTER_LOG="${SHARPEMU_INPUT_START_AFTER_LOG:-Starting main loop}"
+export SHARPEMU_INPUT_START_AFTER_LOG="${SHARPEMU_INPUT_START_AFTER_LOG:-Scheduled guest thread 'Bink IO'}"
 export SHARPEMU_MEM_LIMIT_MB="${SHARPEMU_MEM_LIMIT_MB:-18000}"
 "$REPO_ROOT/scripts/macos/run-game.sh" ds "$TAG" "$SECONDS_LIMIT" "$PLAN" \
   SHARPEMU_SAVEDATA_DIR="$SAVES" SHARPEMU_LOG_VIDEOOUT_FPS=1 "$@"
