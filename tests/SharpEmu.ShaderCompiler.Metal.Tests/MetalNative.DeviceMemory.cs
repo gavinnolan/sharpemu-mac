@@ -19,23 +19,37 @@ internal static partial class MetalNative
 
     /// <summary>The address-range table and fault bitmap mapping one guest range onto a
     /// shared buffer holding <paramref name="guestBytes"/>, as the v2 host builds them
-    /// (Gen5AddressRange: first page, page count, host pointer; 16 KB pages).</summary>
-    public static (IReadOnlyList<DeviceTable> Tables, nint Faults) CreateGuestMapping(ulong guestBase, byte[] guestBytes, uint faultWords)
+    /// (Gen5AddressRange: first page, page count, host pointer; 16 KB pages).
+    /// <paramref name="trailingRanges"/> one-page entries on the pages after the guest
+    /// range follow it, so the guest range is the first of that many more entries.</summary>
+    public static (IReadOnlyList<DeviceTable> Tables, nint Faults) CreateGuestMapping(
+        ulong guestBase, byte[] guestBytes, uint faultWords, uint trailingRanges = 0)
     {
         var pageBytes = 1ul << DeviceAddressPaging.PageBits;
         if (guestBase % pageBytes != 0 || (ulong)guestBytes.Length % pageBytes != 0)
             throw new ArgumentException("the guest range has to cover whole pages");
 
         var memory = SharedBuffer(guestBytes);
-        var range = new byte[24];
-        BinaryPrimitives.WriteUInt64LittleEndian(range, guestBase >> DeviceAddressPaging.PageBits);
-        BinaryPrimitives.WriteUInt64LittleEndian(range.AsSpan(8), (ulong)guestBytes.Length / pageBytes);
-        BinaryPrimitives.WriteUInt64LittleEndian(range.AsSpan(16), SendULong(memory, Selector("gpuAddress")));
-        var ranges = SharedBuffer(range);
+        var gpuAddress = SendULong(memory, Selector("gpuAddress"));
+        var firstPage = guestBase >> DeviceAddressPaging.PageBits;
+        var pageCount = (ulong)guestBytes.Length / pageBytes;
+        var table = new byte[24 * (trailingRanges + 1)];
+        BinaryPrimitives.WriteUInt64LittleEndian(table, firstPage);
+        BinaryPrimitives.WriteUInt64LittleEndian(table.AsSpan(8), pageCount);
+        BinaryPrimitives.WriteUInt64LittleEndian(table.AsSpan(16), gpuAddress);
+        for (var index = 1u; index <= trailingRanges; index++)
+        {
+            var entry = table.AsSpan((int)(index * 24));
+            BinaryPrimitives.WriteUInt64LittleEndian(entry, firstPage + pageCount + index);
+            BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], 1);
+            BinaryPrimitives.WriteUInt64LittleEndian(entry[16..], gpuAddress);
+        }
+
+        var ranges = SharedBuffer(table);
         var faults = SharedBuffer(new byte[faultWords * sizeof(uint)]);
         return (
             [
-                new DeviceTable(DescriptorBindingKind.DeviceAddressPageTable, ranges, 1, [memory]),
+                new DeviceTable(DescriptorBindingKind.DeviceAddressPageTable, ranges, trailingRanges + 1, [memory]),
                 new DeviceTable(DescriptorBindingKind.FaultBuffer, faults, faultWords, []),
             ],
             faults);

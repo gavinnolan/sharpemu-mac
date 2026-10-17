@@ -116,8 +116,8 @@ public sealed class GlobalMemoryRegisterTests
         var source = Compile(12u);
         Assert.Contains($"min(sharpemu_resources.address_range_count, {Gen5MslTranslator.MaxAddressRangeCount}u)", source);
         Assert.Contains($"step < {Gen5MslTranslator.AddressRangeSearchSteps}u", source);
-        Assert.Contains("min(sharpemu_resources.address_range_count, 4096u)", source);
-        Assert.Contains("step < 13u", source);
+        Assert.Contains("min(sharpemu_resources.address_range_count, 16384u)", source);
+        Assert.Contains("step < 15u", source);
     }
 
     [Fact]
