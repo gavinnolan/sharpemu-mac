@@ -47,7 +47,9 @@ trap 'rm -rf "$SAVES"' EXIT
 case "$MODE" in
   ingame)
     PLAN="0:enter:2,10:enter:2,20:enter:2,30:enter:2,40:enter:2,48:enter:2"
-    PLAN+=",58:enter,66:enter,74:enter,82:enter,90:enter,98:enter,106:enter" ;;
+    # Cross keeps coming every 8 s for a while: the menus' timing moves with machine load,
+    # and in gameplay Cross only interacts, which the starting spot has nothing to.
+    PLAN+="$(printf ',%d:enter' $(seq 58 8 202))" ;;
   title)
     PLAN="0:enter:2,10:enter:2,20:enter:2,30:enter:2,40:enter:2,48:enter:2,58:enter" ;;
   boot) PLAN="-" ;;
