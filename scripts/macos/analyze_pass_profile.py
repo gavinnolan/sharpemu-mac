@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Aggregate SharpEmu Metal V2 [METAL-V2][PASS-PROF] encoder lines from a game.log.
 
 Usage: python3 -I analyze_pass_profile.py <game.log | run-dir> [--from-frame N] [--to-frame M] [--top N]

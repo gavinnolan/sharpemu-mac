@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Analyse a DSTRACE run (spec: INSTRUMENTATION.md section 10).
 
 Usage

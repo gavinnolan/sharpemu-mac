@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Read a stopped process's fixed native trace; report unpublished/missing tail."""
 import argparse
 import json

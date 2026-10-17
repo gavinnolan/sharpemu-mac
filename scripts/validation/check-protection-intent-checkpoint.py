@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Source/command manifest for a separately authorized protection-intent stage.
 
 Does not execute a build, test, native process or game. --verify-source checks

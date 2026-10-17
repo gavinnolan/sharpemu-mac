@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Offline schema compatibility and fatal-tail tests; no application/device."""
 import importlib.util
 import pathlib
