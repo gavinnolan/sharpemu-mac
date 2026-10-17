@@ -203,6 +203,17 @@ peak_fp_mb=0
 # SHARPEMU_FOOTPRINT_AT="60,120" records footprint -v and vmmap at the first sample at or after each second.
 footprint_at=()
 [[ -n "${SHARPEMU_FOOTPRINT_AT:-}" ]] && IFS=, read -r -a footprint_at <<< "$SHARPEMU_FOOTPRINT_AT"
+# Load-time evidence at chosen seconds since launch (comma lists, each fires at the first
+# sample at or after its second, in the background so the run keeps its pace):
+#   SHARPEMU_SAMPLE_AT     native call stacks, `sample <pid> SHARPEMU_SAMPLE_SECONDS (5)`
+#   SHARPEMU_STACKS_AT     managed stacks of every thread (dotnet-stack, x64 runtime)
+#   SHARPEMU_FS_USAGE_AT   file-system calls with sizes and latencies, `sudo fs_usage -w -f filesys`
+#                          for SHARPEMU_FS_USAGE_SECONDS (5); needs passwordless sudo
+sample_at=(); stacks_at=(); fs_usage_at=()
+[[ -n "${SHARPEMU_SAMPLE_AT:-}" ]] && IFS=, read -r -a sample_at <<< "$SHARPEMU_SAMPLE_AT"
+[[ -n "${SHARPEMU_STACKS_AT:-}" ]] && IFS=, read -r -a stacks_at <<< "$SHARPEMU_STACKS_AT"
+[[ -n "${SHARPEMU_FS_USAGE_AT:-}" ]] && IFS=, read -r -a fs_usage_at <<< "$SHARPEMU_FS_USAGE_AT"
+EVIDENCE_PIDS=()
 status=""
 while :; do
   now=$(( $(date +%s) - start ))
@@ -219,6 +230,23 @@ while :; do
       vmmap "$GPID" > "$OUT/vmmap-$now.txt" 2>&1 ) &
     footprint_at=("${footprint_at[@]:1}")
   fi
+  if (( ${#sample_at[@]} > 0 )) && (( now >= sample_at[0] )); then
+    sample "$GPID" "${SHARPEMU_SAMPLE_SECONDS:-5}" -file "$OUT/sample-$(printf %04d "$now").txt" >/dev/null 2>&1 &
+    EVIDENCE_PIDS+=($!)
+    sample_at=("${sample_at[@]:1}")
+  fi
+  if (( ${#stacks_at[@]} > 0 )) && (( now >= stacks_at[0] )); then
+    DOTNET_ROOT="${SHARPEMU_X64_DOTNET_ROOT:-$HOME/.dotnet-x64}" timeout 60 \
+      "$HOME/.dotnet/tools/dotnet-stack" report -p "$GPID" > "$OUT/stacks-$(printf %04d "$now").txt" 2>&1 &
+    EVIDENCE_PIDS+=($!)
+    stacks_at=("${stacks_at[@]:1}")
+  fi
+  if (( ${#fs_usage_at[@]} > 0 )) && (( now >= fs_usage_at[0] )); then
+    sudo -n "$(command -v timeout)" "${SHARPEMU_FS_USAGE_SECONDS:-5}" fs_usage -w -f filesys "$GPID" \
+      > "$OUT/fs_usage-$(printf %04d "$now").txt" 2>&1 &
+    EVIDENCE_PIDS+=($!)
+    fs_usage_at=("${fs_usage_at[@]:1}")
+  fi
   if (( fp_mb > MEM_LIMIT_MB )); then status="memory limit footprint ${fp_mb}MB > ${MEM_LIMIT_MB}MB at ${now}s"; break; fi
   if (( now >= next_shot )); then shot "$OUT/shot-$(printf %04d "$now").png"; next_shot=$(( now + shot_every )); fi
   if [[ -n "$INPUT_PID" ]] && ! kill -0 "$INPUT_PID" 2>/dev/null; then
@@ -228,6 +256,7 @@ while :; do
   fi
   sleep 1
 done
+for p in "${EVIDENCE_PIDS[@]}"; do wait "$p" 2>/dev/null; done
 if [[ -n "$GPID" ]]; then
   shot "$OUT/shot-final.png"
   status="${status:-alive at ${SECONDS_LIMIT}s}"
