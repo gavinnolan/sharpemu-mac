@@ -26,6 +26,24 @@ public sealed partial class MetalShaderCacheSizeTests
             Read());
     }
 
+    // Metal turns its shader cache off at 4 GiB and above, so the default must stay below it.
+    [Fact]
+    public void TheDefaultSizeKeepsTheShaderCacheOn()
+    {
+        var text = MetalNative.DefaultShaderCacheBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Assert.False(MetalNative.DisablesShaderCache(text));
+    }
+
+    [Theory]
+    [InlineData("4294967295", false)]
+    [InlineData("3221225472", false)]
+    [InlineData("4294967296", true)]
+    [InlineData("8589934592", true)]
+    [InlineData("not a size", false)]
+    [InlineData(null, false)]
+    public void SizesOfFourGibibytesOrMoreDisableTheShaderCache(string? value, bool disables) =>
+        Assert.Equal(disables, MetalNative.DisablesShaderCache(value));
+
     private static string? Read() => Marshal.PtrToStringUTF8(getenv("MTL_SHADER_CACHE_SIZE"));
 
     [LibraryImport("/usr/lib/libSystem.dylib", StringMarshalling = StringMarshalling.Utf8)]

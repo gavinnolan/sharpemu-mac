@@ -130,7 +130,7 @@ internal static partial class MetalNative
 
     /// <summary>
     /// The size SharpEmu gives macOS's per-app Metal shader cache, in bytes, unless
-    /// MTL_SHADER_CACHE_SIZE is already set: 4 GiB.
+    /// MTL_SHADER_CACHE_SIZE is already set: 3 GiB.
     /// </summary>
     /// <remarks>
     /// The cache keeps the compiled form of every MSL library and evicts the oldest past its
@@ -141,16 +141,40 @@ internal static partial class MetalNative
     /// a second each, drawing nothing for 45 s (runs 20261016-174800-ds-base-2,
     /// 20261016-180157-ds-fixA-1). Metal reads the variable when it first opens the cache,
     /// so it is set before the first device; Environment.SetEnvironmentVariable would not
-    /// reach the native environment.
+    /// reach the native environment. The size must stay below
+    /// <see cref="FirstShaderCacheSizeThatDisablesTheCache"/>.
     /// </remarks>
-    internal const long DefaultShaderCacheBytes = 4L << 30;
+    internal const long DefaultShaderCacheBytes = 3L << 30;
+
+    /// <summary>
+    /// The smallest MTL_SHADER_CACHE_SIZE that turns the Metal shader cache off: 4 GiB.
+    /// </summary>
+    /// <remarks>
+    /// Measured on macOS 27.2 with a standalone app compiling the same salted DS compute
+    /// shader in two processes: 1, 2, 3 GiB and 4294967295 bytes hit in the second process
+    /// (~1 ms); 4294967296 and 8 GiB compiled cold in both (~760 ms) and never wrote the cache
+    /// file. A 4 GiB default made every SharpEmu start compile every shader cold: the warm
+    /// Demon's Souls boot took 55 s of prewarm and drew its first frame at 154 s
+    /// (run 20261017-031602-ds-main-2). Processes with 3 GiB and with the default size
+    /// share one cache in both directions.
+    /// </remarks>
+    internal const long FirstShaderCacheSizeThatDisablesTheCache = 1L << 32;
 
     private const string ShaderCacheSizeVariable = "MTL_SHADER_CACHE_SIZE";
 
     private static void ApplyShaderCacheSize()
     {
-        if (getenv(ShaderCacheSizeVariable) != 0)
+        var configured = getenv(ShaderCacheSizeVariable);
+        if (configured != 0)
         {
+            var text = Marshal.PtrToStringUTF8(configured);
+            if (DisablesShaderCache(text))
+            {
+                Console.Error.WriteLine(
+                    $"[METAL][WARN] {ShaderCacheSizeVariable}={text} is 4 GiB or more, which turns macOS's " +
+                    "Metal shader cache off: every start compiles every shader again. Use a smaller size.");
+            }
+
             return;
         }
 
@@ -162,6 +186,11 @@ internal static partial class MetalNative
                 "the Metal shader cache keeps its default size.");
         }
     }
+
+    /// <summary>Whether a MTL_SHADER_CACHE_SIZE value turns the Metal shader cache off.</summary>
+    internal static bool DisablesShaderCache(string? value) =>
+        ulong.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var bytes) &&
+        bytes >= FirstShaderCacheSizeThatDisablesTheCache;
 
     [LibraryImport("/usr/lib/libSystem.dylib", StringMarshalling = StringMarshalling.Utf8)]
     private static partial nint getenv(string name);
