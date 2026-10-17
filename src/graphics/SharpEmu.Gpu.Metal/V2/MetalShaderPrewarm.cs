@@ -280,6 +280,12 @@ internal static class MetalShaderPrewarm
             {
                 while (!_stopping && work.TryDequeue(out var item))
                 {
+                    if (!item.Held && Thread.CurrentThread.Priority != ThreadPriority.BelowNormal)
+                    {
+                        // The guest runs again: what is left compiles behind its threads.
+                        Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                    }
+
                     PrewarmComputePipeline(item.Record, item.Code, compiler, device);
                     _completed.Enqueue(ShaderPrewarmList.Identity(item.Record));
                     if (item.Held && Gate.Advance() == held && held < pending.Count)
@@ -304,9 +310,12 @@ internal static class MetalShaderPrewarm
                 }
             })
             {
-                // Normal priority: the driver's compiler service runs a request at the
-                // requesting thread's priority, and from below-normal threads the same 300
-                // cold Demon's Souls computes took 88 s instead of 34 s (ShaderCompileBench).
+                // Normal priority while the guest is held for these compiles: the driver's
+                // compiler service runs a request at the requester's priority, and from
+                // below-normal threads each compile took about a fifth longer even on an idle
+                // machine (ShaderCompileBench, 200 cold Demon's Souls computes) and fell far
+                // behind under load from other processes. The computes the guest is not
+                // held for compile below normal (see the loop above).
                 IsBackground = true,
                 Name = $"SharpEmu shader prewarm {index}",
             };
