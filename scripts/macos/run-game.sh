@@ -206,12 +206,13 @@ footprint_at=()
 # Load-time evidence at chosen seconds since launch (comma lists, each fires at the first
 # sample at or after its second, in the background so the run keeps its pace):
 #   SHARPEMU_SAMPLE_AT     native call stacks, `sample <pid> SHARPEMU_SAMPLE_SECONDS (5)`
-#   SHARPEMU_STACKS_AT     managed stacks of every thread (dotnet-stack, x64 runtime)
+#   SHARPEMU_TRACE_AT      managed sampled stacks of every thread for SHARPEMU_TRACE_SECONDS (10),
+#                          dotnet-trace cpu-sampling -> trace-<t>.nettrace + .speedscope.json
 #   SHARPEMU_FS_USAGE_AT   file-system calls with sizes and latencies, `sudo fs_usage -w -f filesys`
 #                          for SHARPEMU_FS_USAGE_SECONDS (5); needs passwordless sudo
-sample_at=(); stacks_at=(); fs_usage_at=()
+sample_at=(); trace_at=(); fs_usage_at=()
 [[ -n "${SHARPEMU_SAMPLE_AT:-}" ]] && IFS=, read -r -a sample_at <<< "$SHARPEMU_SAMPLE_AT"
-[[ -n "${SHARPEMU_STACKS_AT:-}" ]] && IFS=, read -r -a stacks_at <<< "$SHARPEMU_STACKS_AT"
+[[ -n "${SHARPEMU_TRACE_AT:-}" ]] && IFS=, read -r -a trace_at <<< "$SHARPEMU_TRACE_AT"
 [[ -n "${SHARPEMU_FS_USAGE_AT:-}" ]] && IFS=, read -r -a fs_usage_at <<< "$SHARPEMU_FS_USAGE_AT"
 EVIDENCE_PIDS=()
 status=""
@@ -235,11 +236,13 @@ while :; do
     EVIDENCE_PIDS+=($!)
     sample_at=("${sample_at[@]:1}")
   fi
-  if (( ${#stacks_at[@]} > 0 )) && (( now >= stacks_at[0] )); then
-    DOTNET_ROOT="${SHARPEMU_X64_DOTNET_ROOT:-$HOME/.dotnet-x64}" timeout 60 \
-      "$HOME/.dotnet/tools/dotnet-stack" report -p "$GPID" > "$OUT/stacks-$(printf %04d "$now").txt" 2>&1 &
+  if (( ${#trace_at[@]} > 0 )) && (( now >= trace_at[0] )); then
+    trace="$OUT/trace-$(printf %04d "$now")"
+    ( "$HOME/.dotnet/tools/dotnet-trace" collect -p "$GPID" \
+        --duration "00:00:$(printf %02d "${SHARPEMU_TRACE_SECONDS:-10}")" -o "$trace.nettrace" > "$trace.log" 2>&1
+      "$HOME/.dotnet/tools/dotnet-trace" convert "$trace.nettrace" --format Speedscope -o "$trace" >> "$trace.log" 2>&1 ) &
     EVIDENCE_PIDS+=($!)
-    stacks_at=("${stacks_at[@]:1}")
+    trace_at=("${trace_at[@]:1}")
   fi
   if (( ${#fs_usage_at[@]} > 0 )) && (( now >= fs_usage_at[0] )); then
     sudo -n "$(command -v timeout)" "${SHARPEMU_FS_USAGE_SECONDS:-5}" fs_usage -w -f filesys "$GPID" \
