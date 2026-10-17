@@ -39,16 +39,6 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal((long)int.MaxValue, SpinNapRuntime.TicksFor(100_000, 100_000_000_000));
     }
 
-    [Theory]
-    [InlineData(5, 0, 10, true)]
-    [InlineData(15, 0, 10, false)]
-    [InlineData(25, 0, 10, true)]
-    [InlineData(125, 100, 10, true)]
-    public void AbPhaseAlternatesFromTheEpoch(long now, long epoch, long period, bool expected)
-    {
-        Assert.Equal(expected, SpinNapRuntime.IsNapPhase(now, epoch, period));
-    }
-
     [Fact]
     public void PatchesAPauseInABackwardLoopAndStaysTransparent()
     {
@@ -152,6 +142,46 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal(lockedProbe, image.ReadAbsolute(probe, lockedProbe.Length));
 
         Assert.Equal(12u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    // The probe runs in the middle of arbitrary guest code, not at a call boundary, so a nap must
+    // hand back every vector register too. A nap that called into the host without saving them
+    // returned to guest code with XMM0-15 holding whatever the host left there.
+    [Fact]
+    public void NappingLockedProbePreservesVectorRegisters()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // mov rax,C ; movq xmm0,rax ; movq xmm15,rax ; mov ecx,4
+        // loop: mov eax,3 ; lock xadd [rip+data],eax ; dec ecx ; jnz loop
+        // movq rax,xmm0 ; movq rdx,xmm15 ; add rax,rdx ; ret
+        byte[] function =
+        [
+            0x48, 0xB8, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // 0: mov rax, 0x0102030405060708
+            0x66, 0x48, 0x0F, 0x6E, 0xC0,       // 10: movq xmm0, rax
+            0x66, 0x4C, 0x0F, 0x6E, 0xF8,       // 15: movq xmm15, rax
+            0xB9, 0x04, 0x00, 0x00, 0x00,       // 20: mov ecx, 4
+            0xB8, 0x03, 0x00, 0x00, 0x00,       // 25: loop: mov eax, 3
+            0xF0, 0x0F, 0xC1, 0x05, 0, 0, 0, 0, // 30: lock xadd [rip+data], eax (next ip 38)
+            0xFF, 0xC9,                         // 38: dec ecx
+            0x75, 0xEF,                         // 40: jnz loop (42 - 17 = 25)
+            0x66, 0x48, 0x0F, 0x7E, 0xC0,       // 42: movq rax, xmm0
+            0x66, 0x4C, 0x0F, 0x7E, 0xFA,       // 47: movq rdx, xmm15
+            0x48, 0x01, 0xD0,                   // 52: add rax, rdx
+            0xC3,                               // 55: ret
+        ];
+        Rel32(function, 34, 38);
+
+        using var image = SpinImage.Create(
+            function, locked: true, lockedProbe: SpinNapRuntime.BuildNappingLockedProbeForTest(1_000_000_000));
+        Assert.Equal(1, image.Result.LockedSites);
+        Assert.Equal(0xE9, image.ReadByte(30));
+
+        var napsBefore = SpinNapRuntime.LockedNapCount;
+        Assert.Equal(0x020406080A0C0E10UL, ((delegate* unmanaged<ulong>)image.Base)());
+        // Four hits: the first opens the window, each later one naps.
+        Assert.Equal(3, SpinNapRuntime.LockedNapCount - napsBefore);
     }
 
     [Fact]
@@ -278,7 +308,7 @@ public sealed unsafe class SpinLoopNapPatcherTests
 
         public GuestRedZonePatcher.SpinPatchResult Result { get; }
 
-        public static SpinImage Create(byte[] function, bool locked = false)
+        public static SpinImage Create(byte[] function, bool locked = false, byte[]? lockedProbe = null)
         {
             var memory = new PhysicalVirtualMemory();
             const ulong holeSize = 0x4000000;
@@ -302,7 +332,7 @@ public sealed unsafe class SpinLoopNapPatcherTests
             ];
 
             var probe = SpinNapRuntime.EnsureProbeBytes(1_000_000_000);
-            var lockedProbe = locked ? SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000) : [];
+            lockedProbe ??= locked ? SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000) : [];
             var result = GuestRedZonePatcher.PatchSpinLoops(memory, memory, headers, imageBase, ImageSize, probe, "test", lockedProbe);
             return new SpinImage(memory, imageBase, result);
         }

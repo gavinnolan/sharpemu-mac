@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Iced.Intel;
 using static Iced.Intel.AssemblerRegisters;
@@ -14,10 +13,13 @@ namespace SharpEmu.Core.Loader;
 /// probe this class emits. The probe keys a direct-mapped table on the guest stack pointer
 /// (<c>rsp &gt;&gt; 26</c>, one bucket per 64&#160;MiB guest stack, computed without a memory read so it
 /// can never fault), tracks how long the thread has spun without interruption, and once that
-/// passes the idle threshold calls <see cref="SpinNap"/> (a real short host sleep). A gap between
-/// two <c>pause</c>es longer than the reset window restarts the streak, so a lock backoff that
-/// resolves quickly never sleeps. The probe saves and restores every register and the flags, so
-/// it is transparent to the guest. The managed-call pattern mirrors the POSIX signal trampoline.
+/// passes the idle threshold naps (a real short host sleep). A gap between two <c>pause</c>es
+/// longer than the reset window restarts the streak, so a lock backoff that resolves quickly never
+/// sleeps. The probe saves and restores every general register and the flags, and around a nap the
+/// x87/SSE state, so it is transparent to the guest: it runs in the middle of guest code, not at a
+/// call boundary. A nap calls the host's sleep function directly and never managed code, because
+/// the probe runs on the guest stack and managed code only runs on the host stack (the import
+/// thunks and the fault bridge switch to it first).
 /// </summary>
 internal static unsafe class SpinNapRuntime
 {
@@ -52,18 +54,32 @@ internal static unsafe class SpinNapRuntime
     private const int BucketStride = 32; // key(8) epoch(8) last(8) pad(8)
     internal const int StackKeyShift = 26; // 64 MiB guest stacks
 
+    // Native state the probes share (qword slots): the A/B epoch in TSC ticks (0 until the first
+    // nap) and the nap counters the reporter logs.
+    private const int ControlAbEpoch = 0;
+    private const int ControlLockedNaps = 1;
+    private const int ControlSlots = 2;
+
+    // fxsave64 image of the x87/SSE state: 512 bytes, 16-byte aligned.
+    private const int FxSaveBytes = 512;
+
     private static readonly object Gate = new();
     private static byte[]? _probeBytes;
     private static byte* _table;
-    private static uint _napMicroseconds;
 
     private static byte[]? _lockedProbeBytes;
     private static byte* _lockedTable;
     private static long* _lockedGenerations;
-    private static long _lockedNapCount;
 
-    private static long _abPeriodTicks;
-    private static long _abEpoch;
+    private static NapTarget? _napTarget;
+    private static long* _control;
+    private static Timer? _reporter;
+    private static bool _abEpochReported;
+    private static long _reportedLockedNaps;
+
+    /// <summary>What a nap calls and with which argument, plus the A/B period in TSC ticks (0 = off).
+    /// <paramref name="Control"/> is the shared native state (see ControlAbEpoch).</summary>
+    private sealed record NapTarget(ulong SleepAddress, uint SleepArgument, int AbSeconds, long AbPeriodTicks, ulong Control);
 
     internal static bool IsEnabled =>
         !string.Equals(Environment.GetEnvironmentVariable(EnvironmentVariable), "0", StringComparison.Ordinal);
@@ -101,21 +117,15 @@ internal static unsafe class SpinNapRuntime
             }
 
             var table = (byte*)NativeMemory.AllocZeroed((nuint)(BucketCount * BucketStride));
-            if (table == null)
+            if (table == null || EnsureNapTargetLocked(tscFrequency) is not { } target)
             {
                 return [];
             }
 
-            _napMicroseconds = NapMicroseconds;
-            _abPeriodTicks =
-                int.TryParse(Environment.GetEnvironmentVariable(AbEnvironmentVariable), out var abSeconds) && abSeconds > 0
-                    ? abSeconds * Stopwatch.Frequency
-                    : 0;
-
             var thresholdTicks = TicksFor(IdleMicroseconds, tscFrequency);
             var gapTicks = TicksFor(GapMicroseconds, tscFrequency);
             _table = table;
-            _probeBytes = BuildProbe((ulong)table, thresholdTicks, gapTicks);
+            _probeBytes = BuildProbe((ulong)table, thresholdTicks, gapTicks, target);
             return _probeBytes;
         }
     }
@@ -136,16 +146,11 @@ internal static unsafe class SpinNapRuntime
 
             var table = (byte*)NativeMemory.AllocZeroed((nuint)(LockedBucketCount * LockedBucketStride));
             var generations = (long*)NativeMemory.AllocZeroed((nuint)(LockedBucketCount * sizeof(long)));
-            if (table == null || generations == null)
+            if (table == null || generations == null || EnsureNapTargetLocked(tscFrequency) is not { } target)
             {
                 return [];
             }
 
-            _napMicroseconds = NapMicroseconds;
-            _abPeriodTicks =
-                int.TryParse(Environment.GetEnvironmentVariable(AbEnvironmentVariable), out var abSeconds) && abSeconds > 0
-                    ? abSeconds * Stopwatch.Frequency
-                    : 0;
             _lockedTable = table;
             _lockedGenerations = generations;
             _lockedProbeBytes = BuildLockedProbe(
@@ -154,8 +159,90 @@ internal static unsafe class SpinNapRuntime
                 TicksFor(IdleMicroseconds, tscFrequency),
                 TicksFor(GapMicroseconds, tscFrequency),
                 TicksFor(ReadMicroseconds(LockedDensityEnvironmentVariable, DefaultLockedDensityMicroseconds), tscFrequency),
-                LockedSiteLimit);
+                LockedSiteLimit,
+                target);
             return _lockedProbeBytes;
+        }
+    }
+
+    // Resolves the host sleep a nap calls, allocates the shared native state and, when there is
+    // something to report (A/B phases or locked-op naps), starts the reporter. Caller holds Gate.
+    private static NapTarget? EnsureNapTargetLocked(ulong tscFrequency)
+    {
+        if (_napTarget is not null)
+        {
+            return _napTarget;
+        }
+
+        var control = (long*)NativeMemory.AllocZeroed((nuint)(ControlSlots * sizeof(long)));
+        if (control == null || !TryResolveHostSleep(NapMicroseconds, out var sleepAddress, out var sleepArgument))
+        {
+            return null;
+        }
+
+        var abSeconds =
+            int.TryParse(Environment.GetEnvironmentVariable(AbEnvironmentVariable), out var seconds) && seconds > 0 ? seconds : 0;
+        var abPeriodTicks = (long)UInt128.Min((UInt128)(uint)abSeconds * tscFrequency, long.MaxValue);
+        _control = control;
+        _napTarget = new NapTarget(sleepAddress, sleepArgument, abSeconds, abPeriodTicks, (ulong)control);
+        if (abPeriodTicks != 0 || LockedEnabled)
+        {
+            _reporter = new Timer(static _ => Report(), null, 100, 100);
+        }
+
+        return _napTarget;
+    }
+
+    // usleep(us) on POSIX; Sleep(ms) on Windows, where Sleep counts whole timer periods (with
+    // timeBeginPeriod(1) a sub-millisecond nap rounds to about 1 ms, which an idle worker can afford).
+    private static bool TryResolveHostSleep(uint microseconds, out ulong address, out uint argument)
+    {
+        address = 0;
+        argument = microseconds;
+        nint library;
+        nint export;
+        if (OperatingSystem.IsWindows())
+        {
+            argument = Math.Max(1, (microseconds + 999) / 1000);
+            if (!NativeLibrary.TryLoad("kernel32.dll", out library) ||
+                !NativeLibrary.TryGetExport(library, "Sleep", out export))
+            {
+                return false;
+            }
+        }
+        else if (!NativeLibrary.TryLoad("libc", typeof(SpinNapRuntime).Assembly, null, out library) ||
+                 !NativeLibrary.TryGetExport(library, "usleep", out export))
+        {
+            return false;
+        }
+
+        address = (ulong)export;
+        return true;
+    }
+
+    // The probes never call managed code, so the A/B epoch and the nap count are logged from here.
+    private static void Report()
+    {
+        var target = _napTarget;
+        var control = _control;
+        if (target is null || control == null)
+        {
+            return;
+        }
+
+        var epoch = Volatile.Read(ref control[ControlAbEpoch]);
+        if (target.AbPeriodTicks != 0 && epoch != 0 && !_abEpochReported)
+        {
+            _abEpochReported = true;
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] spin nap A/B: epoch_ts={epoch} period_s={target.AbSeconds} (even phases nap)");
+        }
+
+        var naps = Volatile.Read(ref control[ControlLockedNaps]);
+        if (naps != 0 && (_reportedLockedNaps == 0 || naps / 100_000 != _reportedLockedNaps / 100_000))
+        {
+            _reportedLockedNaps = naps;
+            Console.Error.WriteLine($"[SPIN-NAP] locked-op naps={naps}");
         }
     }
 
@@ -171,13 +258,29 @@ internal static unsafe class SpinNapRuntime
         }
     }
 
+    // Test hook: a locked-op probe over a fresh table whose thresholds are zero, so it naps on
+    // every hit after the first.
+    internal static byte[] BuildNappingLockedProbeForTest(ulong tscFrequency)
+    {
+        var table = (byte*)NativeMemory.AllocZeroed((nuint)(LockedBucketCount * LockedBucketStride));
+        var generations = (long*)NativeMemory.AllocZeroed((nuint)(LockedBucketCount * sizeof(long)));
+        lock (Gate)
+        {
+            var target = EnsureNapTargetLocked(tscFrequency) ?? throw new InvalidOperationException("No host sleep to nap with.");
+            return BuildLockedProbe((ulong)table, (ulong)generations, 0, int.MaxValue, int.MaxValue, MaxLockedSites, target);
+        }
+    }
+
+    /// <summary>Naps the locked-op probes have taken so far, across modules.</summary>
+    internal static long LockedNapCount => _control == null ? 0 : Volatile.Read(ref _control[ControlLockedNaps]);
+
     internal static long TicksFor(uint microseconds, ulong tscFrequency) =>
         (long)UInt128.Min((UInt128)microseconds * tscFrequency / 1_000_000, int.MaxValue);
 
     // The probe, assembled position-independently (absolute imm64 operands, only self-relative
     // internal branches). Entered by `call` from a site trampoline whose rsp already sits below
     // the guest red zone; it preserves every register and flag.
-    private static byte[] BuildProbe(ulong tableAddress, long thresholdTicks, long gapTicks)
+    private static byte[] BuildProbe(ulong tableAddress, long thresholdTicks, long gapTicks, NapTarget target)
     {
         var a = new Assembler(64);
         var newStreak = a.CreateLabel();
@@ -240,12 +343,7 @@ internal static unsafe class SpinNapRuntime
         a.jb(done);
 
         // Spun past the threshold: nap. Keep the epoch so it keeps napping while it stays idle.
-        a.mov(rbp, rsp);
-        a.and(rsp, -16);
-        a.sub(rsp, 32); // Win64 shadow space; harmless on SysV
-        a.mov(rax, (ulong)(nint)(delegate* unmanaged<void>)&SpinNap);
-        a.call(rax);
-        a.mov(rsp, rbp);
+        EmitNap(a, target, napCounter: -1, skip: done);
         a.jmp(done);
 
         a.Label(ref newStreak);
@@ -284,7 +382,8 @@ internal static unsafe class SpinNapRuntime
     // "other"). Once the window is thresholdTicks old: nap if hits are dense (hits * densityTicks
     // >= elapsed) and concentrated (other * 10 <= hits); either way start a fresh window.
     private static byte[] BuildLockedProbe(
-        ulong tableAddress, ulong generationsAddress, long thresholdTicks, long gapTicks, long densityTicks, int siteLimit)
+        ulong tableAddress, ulong generationsAddress, long thresholdTicks, long gapTicks, long densityTicks, int siteLimit,
+        NapTarget target)
     {
         var a = new Assembler(64);
         var reset = a.CreateLabel();
@@ -378,12 +477,7 @@ internal static unsafe class SpinNapRuntime
         a.cmp(rcx, __qword_ptr[rbx + 24]);
         a.ja(restart); // under 90% of hits from the tracked sites
 
-        a.mov(rbp, rsp);
-        a.and(rsp, -16);
-        a.sub(rsp, 32);
-        a.mov(rax, (ulong)(nint)(delegate* unmanaged<void>)&SpinNapLocked);
-        a.call(rax);
-        a.mov(rsp, rbp);
+        EmitNap(a, target, ControlLockedNaps, skip: restart);
 
         a.Label(ref restart);
         a.mov(__qword_ptr[rbx + 8], r10);
@@ -429,81 +523,65 @@ internal static unsafe class SpinNapRuntime
         return stream.ToArray();
     }
 
-    [UnmanagedCallersOnly]
-    private static void SpinNapLocked()
+    // A nap, emitted inline in a probe. On entry r10 = now (TSC) and the probe has already saved
+    // every general register; rbx and r10 survive it. SHARPEMU_SPIN_NAP_AB_S=N (diagnostic): the
+    // first nap anywhere sets the shared epoch, and naps are skipped in odd N-second periods from
+    // it, so one run carries interleaved nap/spin phases over the same scenes. The host sleep is a
+    // plain C call: x87/SSE state saved with fxsave64 (the guest is mid-function, so no vector
+    // register is the callee's to clobber), DF clear, stack 16-byte aligned. With napCounter >= 0
+    // the nap is counted in that control slot. A skipped nap jumps to `skip`; a taken one falls
+    // through.
+    private static void EmitNap(Assembler a, NapTarget target, int napCounter, Label skip)
     {
-        if (_abPeriodTicks != 0 && !AbNapPhase())
+        a.mov(rsi, target.Control);
+        if (target.AbPeriodTicks != 0)
         {
-            return;
+            var haveEpoch = a.CreateLabel();
+            var napPhase = a.CreateLabel();
+            a.mov(rdx, __qword_ptr[rsi + ControlAbEpoch * sizeof(long)]);
+            a.test(rdx, rdx);
+            a.jnz(haveEpoch);
+            a.xor(eax, eax);
+            a.@lock.cmpxchg(__qword_ptr[rsi + ControlAbEpoch * sizeof(long)], r10); // first nap: epoch = now
+            a.mov(rdx, r10);
+            a.test(rax, rax);
+            a.cmovne(rdx, rax); // another thread set it first
+            a.Label(ref haveEpoch);
+            a.mov(rax, r10);
+            a.sub(rax, rdx);
+            a.jb(napPhase); // this core's TSC is a hair behind the epoch: still period 0
+            a.xor(edx, edx);
+            a.mov(rcx, (ulong)target.AbPeriodTicks);
+            a.div(rcx);
+            a.test(al, 1);
+            a.jnz(skip); // odd period: spin
+            a.Label(ref napPhase);
         }
 
-        var naps = Interlocked.Increment(ref _lockedNapCount);
-        if (naps == 1 || naps % 100_000 == 0)
+        if (napCounter >= 0)
         {
-            Console.Error.WriteLine($"[SPIN-NAP] locked-op naps={naps}");
+            a.@lock.inc(__qword_ptr[rsi + napCounter * sizeof(long)]);
         }
 
-        Sleep(_napMicroseconds);
-    }
-
-    [UnmanagedCallersOnly]
-    private static void SpinNap()
-    {
-        if (_abPeriodTicks != 0 && !AbNapPhase())
-        {
-            return;
-        }
-
-        Sleep(_napMicroseconds);
-    }
-
-    /// <summary>Blocks the calling thread for about <paramref name="microseconds"/>.</summary>
-    internal static void Sleep(uint microseconds)
-    {
-        if (microseconds == 0)
-        {
-            return;
-        }
-
-        if (OperatingSystem.IsWindows())
-        {
-            // Sleep counts whole timer periods; with timeBeginPeriod(1) a sub-millisecond nap
-            // rounds to about 1 ms, which an idle worker can afford.
-            Thread.Sleep((int)Math.Max(1, (microseconds + 999) / 1000));
-            return;
-        }
-
-        _ = HostUsleep(microseconds);
-    }
-
-    internal static bool IsNapPhase(long now, long epoch, long periodTicks) =>
-        (now - epoch) / periodTicks % 2 == 0;
-
-    // SHARPEMU_SPIN_NAP_AB_S=N (diagnostic): naps and pure spins alternate every N seconds from
-    // the first nap, so one run carries interleaved A/B phases over the same scenes.
-    private static bool AbNapPhase()
-    {
-        var now = Stopwatch.GetTimestamp();
-        var epoch = Volatile.Read(ref _abEpoch);
-        if (epoch == 0)
-        {
-            var prior = Interlocked.CompareExchange(ref _abEpoch, now, 0);
-            epoch = prior != 0 ? prior : now;
-            if (prior == 0)
-            {
-                Console.Error.WriteLine(
-                    $"[LOADER][INFO] spin nap A/B: epoch_ts={now} period_s={_abPeriodTicks / Stopwatch.Frequency} (even phases nap)");
-            }
-        }
-
-        return IsNapPhase(now, epoch, _abPeriodTicks);
+        a.mov(r13, r10);
+        a.mov(rbp, rsp);
+        a.and(rsp, -16);
+        a.sub(rsp, FxSaveBytes);
+        a.fxsave64(__[rsp]);
+        a.mov(r12, rsp);
+        a.sub(rsp, 32); // Win64 shadow space; harmless on SysV
+        a.cld();
+        a.mov(edi, target.SleepArgument); // SysV first argument
+        a.mov(ecx, target.SleepArgument); // Win64 first argument
+        a.mov(rax, target.SleepAddress);
+        a.call(rax);
+        a.fxrstor64(__[r12]);
+        a.mov(rsp, rbp);
+        a.mov(r10, r13);
     }
 
     private static uint ReadMicroseconds(string variable, uint fallback) =>
         uint.TryParse(Environment.GetEnvironmentVariable(variable), out var value) && value is > 0 and <= 100_000
             ? value
             : fallback;
-
-    [DllImport("libc", EntryPoint = "usleep")]
-    private static extern int HostUsleep(uint microseconds);
 }
