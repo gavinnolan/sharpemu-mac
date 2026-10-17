@@ -550,6 +550,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 continue;
             }
 
+            NoteForeignStencilShare(depth, image);
             var (start, end) = image.OverlapWithin(depth.Description.Stencil.Address, depth.Description.Stencil.Size);
             if (depth.IsGpuModified)
             {
@@ -583,6 +584,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 continue;
             }
 
+            NoteForeignStencilShare(image, other);
             if (other.IsGpuModified)
             {
                 // The depth plane is written out first so the reload keeps it, and the
@@ -603,6 +605,27 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     }
 
     private long _stencilPlanePublishes;
+
+    // The plane read on purpose is an 8-bit depth-tiled image at DB_STENCIL_*_BASE. Any
+    // other surface over it is memory the title reuses, which the hand-over above treats
+    // like any alias; said once per pair, since a whole-plane publish into such a surface
+    // is the first thing to rule out when bands of garbage cross a frame.
+    private static void NoteForeignStencilShare(MetalCachedImage depth, MetalCachedImage other)
+    {
+        ref readonly var plane = ref depth.Description.Stencil;
+        ref readonly var data = ref other.Description.Data;
+        if (data.Address == plane.Address && other.Description.BytesPerBlock == 1 &&
+            other.Description.TileMode == GuestTileMode.Depth)
+        {
+            return;
+        }
+
+        MetalV2Diagnostics.WarnOnce(
+            $"stencil-plane-foreign:{plane.Address:X}:{data.Address:X}:{other.Description.PixelFormat}",
+            $"A surface that is not a view of a stencil plane shares its bytes: plane=0x{plane.Address:X16}+0x{plane.Size:X} " +
+            $"surface=0x{data.Address:X16}+0x{data.Size:X} {other.Description.Extent.Width}x{other.Description.Extent.Height} " +
+            $"format={other.Description.PixelFormat} tile={other.Description.TileMode}.");
+    }
 
     // SHARPEMU_METAL_V2_STENCIL_PLANES=0 leaves stencil planes unsynchronised again, for a
     // comparison.
