@@ -335,7 +335,10 @@ internal static class MetalShaderPrewarm
         list.AppendProgress(stamp, batch);
     }
 
-    private static string StampPart(Type type) => type.Assembly.ManifestModule.ModuleVersionId.ToString("N");
+    // The translators' code, not their build: every commit gives every assembly a new
+    // module version id, and keying on it threw away the library list and the learned
+    // device data loads at the first start after any commit (AssemblyCodeIdentity).
+    private static string StampPart(Type type) => AssemblyCodeIdentity.Of(type.Assembly);
 
     // The translators decide the MSL; the device and the OS decide what the driver's
     // compiler makes of it.
