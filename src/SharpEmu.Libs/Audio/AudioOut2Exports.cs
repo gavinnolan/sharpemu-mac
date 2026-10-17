@@ -237,6 +237,10 @@ public static class AudioOut2Exports
 
         public byte[]? PcmData;
 
+        // The last snapshot the mixer finished with, kept so the next PortSetAttributes (a few
+        // thousand a second) refills it instead of allocating a grain-sized array.
+        public byte[]? SparePcm;
+
     }
 
     // Two host streams: primary FMOD context (menus) and everything else
@@ -800,7 +804,12 @@ public static class AudioOut2Exports
                     return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
                 }
 
-                pcmData = new byte[byteLength];
+                pcmData = Interlocked.Exchange(ref port.SparePcm, null);
+                if (pcmData is null || pcmData.Length != byteLength)
+                {
+                    pcmData = new byte[byteLength];
+                }
+
                 if (!ctx.Memory.TryRead(pcmAddress, pcmData))
                 {
                     return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -808,7 +817,11 @@ public static class AudioOut2Exports
             }
 
             port.PcmAddress = pcmAddress;
-            Volatile.Write(ref port.PcmData, pcmData);
+            var replaced = Interlocked.Exchange(ref port.PcmData, pcmData);
+            if (replaced is not null && !ReferenceEquals(replaced, pcmData))
+            {
+                port.SparePcm = replaced;
+            }
             var n = Interlocked.Increment(ref _attributePcmTraceCount);
             if (n <= 8 || n % 500 == 0)
             {
@@ -1496,39 +1509,46 @@ public static class AudioOut2Exports
                         continue;
                     }
 
-                    if (!TryGetStereoGains(
-                            port.PortType,
+                    try
+                    {
+                        if (!TryGetStereoGains(
+                                port.PortType,
+                                ch,
+                                port.Gain,
+                                port.Ambisonics,
+                                port.Passthrough,
+                                out var leftGain,
+                                out var rightGain))
+                        {
+                            continue;
+                        }
+
+                        var byteLength = checked(frames * ch * bps);
+                        if (byteLength <= 0 || byteLength > checked(frames * 16 * sizeof(float)))
+                        {
+                            continue;
+                        }
+
+                        if (pcmData.Length < byteLength)
+                        {
+                            continue;
+                        }
+
+                        MixPortIntoStereo(
+                            pcmData.AsSpan(0, byteLength),
+                            mix.AsSpan(0, frames * 2),
+                            frames,
                             ch,
-                            port.Gain,
-                            port.Ambisonics,
-                            port.Passthrough,
-                            out var leftGain,
-                            out var rightGain))
-                    {
-                        continue;
+                            bps,
+                            isFloat,
+                            leftGain,
+                            rightGain);
+                        mixedPorts++;
                     }
-
-                    var byteLength = checked(frames * ch * bps);
-                    if (byteLength <= 0 || byteLength > checked(frames * 16 * sizeof(float)))
+                    finally
                     {
-                        continue;
+                        port.SparePcm = pcmData;
                     }
-
-                    if (pcmData.Length < byteLength)
-                    {
-                        continue;
-                    }
-
-                    MixPortIntoStereo(
-                        pcmData.AsSpan(0, byteLength),
-                        mix.AsSpan(0, frames * 2),
-                        frames,
-                        ch,
-                        bps,
-                        isFloat,
-                        leftGain,
-                        rightGain);
-                    mixedPorts++;
                 }
 
                 if (mixedPorts == 0)

@@ -106,6 +106,19 @@ Keys deliberately absent:
 		</dict>
 	</array>
 
+	<!-- Gen0 budget of the managed GC. The runtime sizes it from the L3 cache, which under
+	     Rosetta 2 measured 10-20 MB, and the emulator allocates tens of MB a second on
+	     its HLE and GPU threads: that is several gen0 collections a second, each stopping
+	     every guest thread that is inside an import. 64 MB cuts the count about 8x on an
+	     allocation microbenchmark. GCgen0size has no runtimeconfig.json form, only the
+	     environment, so it is set here (LaunchServices launches) and in
+	     scripts/macos/run-game.sh (direct launches). -->
+	<key>LSEnvironment</key>
+	<dict>
+		<key>DOTNET_GCgen0size</key>
+		<string>0x4000000</string>
+	</dict>
+
 	<!-- Opening a game by dragging an eboot.bin onto the icon is not wired up
 	     yet (it needs the AppKit open-request handling in plan W26), so the
 	     bundle claims no document types on purpose rather than claiming some

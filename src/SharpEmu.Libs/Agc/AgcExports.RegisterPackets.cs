@@ -33,56 +33,69 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        var registers = new RegisterDefaultValue[registerCount];
-        for (uint index = 0; index < registerCount; index++)
+        // One bulk read of the (offset, value) list and one write per contiguous run, instead of
+        // two reads per register and a write per dword: each guest access pays the memory
+        // admission machinery. The register array is rented, not allocated, because this runs
+        // every frame.
+        var registerPool = System.Buffers.ArrayPool<RegisterDefaultValue>.Shared;
+        var registers = registerPool.Rent((int)registerCount);
+        uint[]? packet = null;
+        try
         {
-            var entryAddress = registersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var offset) ||
-                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
+            if (!ctx.Memory.TryRead(
+                    registersAddress,
+                    System.Runtime.InteropServices.MemoryMarshal.AsBytes(registers.AsSpan(0, (int)registerCount))))
             {
                 return ReturnPointer(ctx, 0);
             }
 
-            registers[index] = new RegisterDefaultValue(offset, value);
-        }
-
-        Array.Sort(registers, static (left, right) => left.Offset.CompareTo(right.Offset));
-        ulong firstCommandAddress = 0;
-        var startIndex = 0;
-        while (startIndex < registers.Length)
-        {
-            var endIndex = startIndex + 1;
-            while (endIndex < registers.Length &&
-                   registers[endIndex].Offset == registers[endIndex - 1].Offset + 1)
+            registers.AsSpan(0, (int)registerCount).Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
+            ulong firstCommandAddress = 0;
+            var startIndex = 0;
+            var count = (int)registerCount;
+            while (startIndex < count)
             {
-                endIndex++;
-            }
+                var endIndex = startIndex + 1;
+                while (endIndex < count &&
+                       registers[endIndex].Offset == registers[endIndex - 1].Offset + 1)
+                {
+                    endIndex++;
+                }
 
-            var valueCount = (uint)(endIndex - startIndex);
-            var packetDwords = valueCount + 2;
-            if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-                !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0)) ||
-                !TryWriteUInt32(ctx, commandAddress + 4, registers[startIndex].Offset & 0xFFFFu))
-            {
-                return ReturnPointer(ctx, 0);
-            }
-
-            firstCommandAddress = firstCommandAddress == 0 ? commandAddress : firstCommandAddress;
-            for (var index = startIndex; index < endIndex; index++)
-            {
-                if (!TryWriteUInt32(
-                        ctx,
-                        commandAddress + 8 + ((ulong)(index - startIndex) * sizeof(uint)),
-                        registers[index].Value))
+                var valueCount = (uint)(endIndex - startIndex);
+                var packetDwords = valueCount + 2;
+                if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress))
                 {
                     return ReturnPointer(ctx, 0);
                 }
+
+                packet ??= System.Buffers.ArrayPool<uint>.Shared.Rent(count + 2);
+                packet[0] = Pm4(packetDwords, ItSetShReg, 0);
+                packet[1] = registers[startIndex].Offset & 0xFFFFu;
+                for (var index = startIndex; index < endIndex; index++)
+                {
+                    packet[2 + index - startIndex] = registers[index].Value;
+                }
+
+                if (!TryWriteCommandDwords(ctx, commandAddress, packet.AsSpan(0, (int)packetDwords)))
+                {
+                    return ReturnPointer(ctx, 0);
+                }
+
+                firstCommandAddress = firstCommandAddress == 0 ? commandAddress : firstCommandAddress;
+                startIndex = endIndex;
             }
 
-            startIndex = endIndex;
+            return ReturnPointer(ctx, firstCommandAddress);
         }
-
-        return ReturnPointer(ctx, firstCommandAddress);
+        finally
+        {
+            registerPool.Return(registers);
+            if (packet is not null)
+            {
+                System.Buffers.ArrayPool<uint>.Shared.Return(packet);
+            }
+        }
     }
 
     [SysAbiExport(

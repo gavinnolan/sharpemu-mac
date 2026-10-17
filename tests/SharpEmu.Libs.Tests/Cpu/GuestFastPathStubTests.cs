@@ -298,12 +298,41 @@ public sealed unsafe class GuestFastPathStubTests
         Assert.Equal(original, buffer);
     }
 
+    [Fact]
+    public void MemorySetStub_FillsEveryLengthAndLeavesTheEdgesCasesToTheManagedExport()
+    {
+        if (!CanRunStubs())
+        {
+            return;
+        }
+
+        using var stub = new MemoryCopyStub(memset: true);
+        var buffer = new byte[96];
+        fixed (byte* pointer = buffer)
+        {
+            foreach (var length in new[] { 0, 1, 15, 16, 17, 31, 32, 33, 47, 64 })
+            {
+                Array.Fill(buffer, (byte)0xEE);
+                Assert.Equal((ulong)(pointer + 3), stub.Call(pointer + 3, (byte*)0xAB, (nuint)length));
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    var inside = i >= 3 && i < 3 + length;
+                    Assert.Equal(inside ? (byte)0xAB : (byte)0xEE, buffer[i]);
+                }
+            }
+
+            Assert.Equal(MemoryCopySlowPathMarker, stub.Call((byte*)0x1000, (byte*)0, 16));
+            Assert.Equal(MemoryCopySlowPathMarker, stub.Call((byte*)0xFFFF_FFFF_FFFF_0000UL, (byte*)0, 16));
+            Assert.Equal(MemoryCopySlowPathMarker, stub.Call(pointer, (byte*)0, 0x100001));
+        }
+    }
+
     /// <summary>The memcpy stub called with the platform (SysV) convention the guest uses.</summary>
     private sealed class MemoryCopyStub : IDisposable
     {
         private readonly byte* _page;
 
-        public MemoryCopyStub()
+        public MemoryCopyStub(bool memset = false)
         {
             _page = (byte*)HostMemory.Alloc(
                 null,
@@ -318,7 +347,9 @@ public sealed unsafe class GuestFastPathStubTests
             *(ulong*)(_page + 0x102) = MemoryCopySlowPathMarker;
             _page[0x10A] = 0xC3;
 
-            var stub = DirectExecutionBackend.EmitGuestMemoryCopyStub((nint)(_page + 0x100));
+            var stub = memset
+                ? DirectExecutionBackend.EmitGuestMemorySetStub((nint)(_page + 0x100))
+                : DirectExecutionBackend.EmitGuestMemoryCopyStub((nint)(_page + 0x100));
             for (var i = 0; i < stub.Count; i++)
             {
                 _page[i] = stub[i];

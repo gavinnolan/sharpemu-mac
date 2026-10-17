@@ -46,6 +46,8 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        AllocationProfiler.StartIfRequested();
+
         // Must precede anything that can touch HostPlatform/HostViewMemory.
         HostComposition.Register();
 

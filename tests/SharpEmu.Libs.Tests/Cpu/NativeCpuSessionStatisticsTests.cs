@@ -24,7 +24,7 @@ public sealed class NativeCpuSessionStatisticsTests
     {
         var counters = new NativeImportSessionCounters();
 
-        counters.Record("first-nid");
+        counters.Record(0, "first-nid");
 
         Assert.Equal(new NativeCpuSessionStatistics(1, 1), counters.Snapshot());
     }
@@ -34,8 +34,8 @@ public sealed class NativeCpuSessionStatisticsTests
     {
         var counters = new NativeImportSessionCounters();
 
-        counters.Record("same-nid");
-        counters.Record("same-nid");
+        counters.Record(0, "same-nid");
+        counters.Record(0, "same-nid");
 
         Assert.Equal(new NativeCpuSessionStatistics(2, 1), counters.Snapshot());
     }
@@ -45,8 +45,8 @@ public sealed class NativeCpuSessionStatisticsTests
     {
         var counters = new NativeImportSessionCounters();
 
-        counters.Record("first-nid");
-        counters.Record("second-nid");
+        counters.Record(0, "first-nid");
+        counters.Record(1, "second-nid");
 
         Assert.Equal(new NativeCpuSessionStatistics(2, 2), counters.Snapshot());
     }
@@ -58,7 +58,7 @@ public sealed class NativeCpuSessionStatisticsTests
         const int uniqueNidCount = 17;
         var counters = new NativeImportSessionCounters();
 
-        Parallel.For(0, dispatchCount, index => counters.Record($"nid-{index % uniqueNidCount}"));
+        Parallel.For(0, dispatchCount, index => counters.Record(index % uniqueNidCount, $"nid-{index % uniqueNidCount}"));
 
         Assert.Equal(
             new NativeCpuSessionStatistics(dispatchCount, uniqueNidCount),
