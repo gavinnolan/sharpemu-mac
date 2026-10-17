@@ -505,6 +505,71 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
     }
 
     [Theory]
+    [InlineData(0u, false, "attr1_v1", true)]
+    [InlineData(1u, false, "attr1_v2", true)]
+    [InlineData(0u, true, "attr1_v1", false)]
+    [InlineData(1u, true, "attr1_v2", false)]
+    public void ParameterMoveFromPrimitive_ReadsTheVertexCopiesOfItsParam(
+        uint selector, bool custom, string vertex, bool subtractOrigin)
+    {
+        // Slot 1 reads param 3 (SPI_PS_INPUT_CNTL.OFFSET), flat-shaded as a custom slot is.
+        var shader = Compile([Interp(4, 2, 1, 2, selector), .. ExportAndEnd(4, 4, 4, 4)], PerspCenter,
+            cntl: [0, 0x403], customMask: custom ? 2u : 0u, supportsPerVertex: false, fromPrimitive: true);
+
+        // Per-primitive data needs no MSL 4.0 and no vertex_value.
+        Assert.False(shader.UsesPerVertexInputs);
+        Assert.DoesNotContain("vertex_value", shader.Source, StringComparison.Ordinal);
+        for (var index = 0; index < 3; index++)
+        {
+            Assert.Contains($"float4 attr1_v{index} [[user(locn3_v{index})]];", shader.Source, StringComparison.Ordinal);
+        }
+
+        Assert.Contains($"sharpemu_in.{vertex}[2]", shader.Source, StringComparison.Ordinal);
+        Assert.Equal(subtractOrigin, shader.Source.Contains("- sharpemu_in.attr1_v0[2]", StringComparison.Ordinal));
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void ManualInterpolationFromPrimitive_SeedsTheBarycentricsOfTheVertexOrder()
+    {
+        // P10 and P20 read by hand, then weighted with the I/J VGPRs (v0/v1) the way the
+        // guest compiler interpolates a packed parameter itself.
+        var shader = Compile(
+            [Interp(4, 2, 1, 0, 2), Interp(5, 2, 1, 0, 0), Interp(6, 2, 1, 0, 1), .. ExportAndEnd(4, 5, 6, 0)],
+            PerspCenter, cntl: [0, 0x401], customMask: 2u, supportsPerVertex: false, fromPrimitive: true);
+        Assert.Contains("float3 sharpemu_bary_persp [[barycentric_coord, center_perspective]];", shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains("as_type<uint>(sharpemu_in.sharpemu_bary_persp.y)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("as_type<uint>(sharpemu_in.sharpemu_bary_persp.z)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_in.attr1_v0[0]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_in.attr1_v1[0]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_in.attr1_v2[0]", shader.Source, StringComparison.Ordinal);
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void HalfInterpolationFromPrimitive_ReadsOneHalfOfEachVertexCopy()
+    {
+        var shader = Compile(
+            [.. Vop3Interp(OpP1llF16, 4, 1, 0, V0, high: true), .. Vop3Interp(OpP2F16, 5, 1, 0, V1, 260, high: true),
+             .. ExportAndEnd(4, 5, 4, 4)],
+            PerspCenter, cntl: [0, 1], supportsPerVertex: false, fromPrimitive: true);
+        Assert.False(shader.UsesPerVertexInputs);
+        Assert.Contains("(float)as_type<half2>(as_type<uint>(sharpemu_in.attr1_v1[0]))[1]", shader.Source,
+            StringComparison.Ordinal);
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void ProvokingVertexMoveFromPrimitive_StaysAFlatInput()
+    {
+        var shader = Compile([Interp(4, 2, 1, 0, 2), .. ExportAndEnd(4, 4, 4, 4)], PerspCenter,
+            cntl: [0, 1], supportsPerVertex: false, fromPrimitive: true);
+        Assert.Contains("float4 attr1 [[user(locn1), flat]];", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("attr1_v0", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(OpP1llF16)]
     [InlineData(OpP2F16)]
     public void HalfInterpolation_NeedsPerVertexInputs(uint opcode)
@@ -701,10 +766,11 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         bool supportsPerVertex = true,
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
         bool frontFaceAllBits = false,
-        bool ieeeMode = false)
+        bool ieeeMode = false,
+        bool fromPrimitive = false)
     {
         var request = Request(words, inputs, enable ?? inputs, cntl ?? [], customMask, supportsPerVertex, outputKind,
-            frontFaceAllBits, ieeeMode);
+            frontFaceAllBits, ieeeMode, fromPrimitive);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader;
     }
@@ -718,7 +784,8 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         bool supportsPerVertex,
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
         bool frontFaceAllBits = false,
-        bool ieeeMode = false)
+        bool ieeeMode = false,
+        bool fromPrimitive = false)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("pixel-inputs", words, 0, 0));
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x5049_5850_494E_5055, 0, 16);
@@ -738,6 +805,7 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
             PixelInputCntl = cntl,
             PixelCustomInterpolationMask = customMask,
             SupportsPerVertexPixelInputs = supportsPerVertex,
+            PixelPerVertexInputsFromPrimitive = fromPrimitive,
             PixelFrontFaceAllBits = frontFaceAllBits,
             IeeeMode = ieeeMode,
         };

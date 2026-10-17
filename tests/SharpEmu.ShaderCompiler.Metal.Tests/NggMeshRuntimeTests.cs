@@ -72,6 +72,103 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
     }
 
+    [Fact]
+    public void APassthroughProgramThatHandsVertexValuesIsAMeshFunction()
+    {
+        var plain = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Passthrough());
+        Assert.Equal(Gen5MslStage.Vertex, plain.Stage);
+
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Passthrough(), meshPerVertexParameterMask: 1);
+        Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+        for (var vertex = 0; vertex < 3; vertex++)
+        {
+            Assert.Contains($"float4 param0_v{vertex} [[user(locn0_v{vertex})]];", shader.Source, StringComparison.Ordinal);
+            Assert.Contains($"primitive.param0_v{vertex} = sharpemu_mesh_param0[min(indices[{vertex}]", shader.Source,
+                StringComparison.Ordinal);
+        }
+
+        if (SkipWithoutMetalDevice("the per-vertex mesh compile")) return;
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
+            $"Metal rejected the emitted mesh MSL: {error}\n{shader.Source}");
+    }
+
+    [Fact]
+    public void HandedVertexValuesShrinkTheMeshToTheOutputBudget()
+    {
+        // 256 vertices of eight params and 256 primitives of three handed params would
+        // declare 112 KB of mesh output; Apple GPUs refuse anything above 32 KB.
+        var stageInfo = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 256,
+            PrimitivesPerSubgroup = 256,
+            MaxOutputPerSubgroup = 256,
+            OutputPrimitiveType = Gen5NggExports.OutputPrimitiveTriangleStrip,
+        };
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Passthrough(), stageInfo, requiredVertexOutputCount: 8, meshPerVertexParameterMask: 0b111);
+        var mesh = shader.MeshInfo!;
+        const uint vertexBytes = 16 + (8 * 16) + 48;
+        const uint primitiveBytes = (3 * 48) + 16;
+        Assert.True((mesh.MaxVertices * vertexBytes) + (mesh.MaxPrimitives * primitiveBytes) <= 32768,
+            $"max_v={mesh.MaxVertices} max_p={mesh.MaxPrimitives}");
+        Assert.True(mesh.MaxVertices >= 3);
+        Assert.Equal(mesh.ThreadsPerThreadgroup, ((Math.Max(mesh.MaxVertices, mesh.MaxPrimitives) + 31) / 32) * 32);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HandedVertexValuesReachTheFragmentInPrimitiveOrder(bool passthrough)
+    {
+        if (SkipWithoutMetalDevice("the per-vertex mesh execution test")) return;
+
+        // The triangle's vertices 0/1/2 export param0.x = 0/1/2. Each fragment must see
+        // exactly those three values in the primitive's vertex order, and the barycentric
+        // components must weight them in the same order: their dot product is the value
+        // Metal interpolates for param0 itself. The passthrough program exports the
+        // primitive the prologue packed into v0.
+        var shader = passthrough
+            ? Gen5NggFixtures.CompileOrThrow(
+                Gen5NggFixtures.PassthroughTriangle(), Gen5NggFixtures.PassthroughStageInfo, meshPerVertexParameterMask: 1)
+            : Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle(), meshPerVertexParameterMask: 1);
+        Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+        var mesh = shader.MeshInfo!;
+        var source = shader.Source + PerVertexFragmentSource;
+        if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+        {
+            throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+        }
+
+        Assert.True(
+            MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_per_vertex_fs",
+                [
+                    (BuildArgumentBuffer(shader), 0u),
+                    (new byte[64], 1u),
+                    (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
+                    (new byte[16], mesh.IndexBufferIndex),
+                ],
+                threadgroups: 1,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var renderError),
+            $"the mesh draw failed: {renderError}");
+
+        var center = (((TargetSize / 2) * TargetSize) + (TargetSize / 2)) * 4;
+        Assert.Equal(0.0f, pixels[center]);
+        Assert.Equal(1.0f, pixels[center + 1]);
+        Assert.Equal(2.0f, pixels[center + 2]);
+        Assert.Equal(0.0f, pixels[center + 3], 4);
+
+        // Outside the triangle the clear survives.
+        Assert.Equal(0.0f, Green(pixels, 1, 1), 3);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -549,6 +646,27 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         fragment float4 gen5_mesh_test_fs(Gen5MeshTestIn in [[stage_in]])
         {
             return float4(in.param0.x, 1.0f, 0.0f, 1.0f);
+        }
+        """;
+
+    // Reads param0's three vertex values the way a translated pixel program built with
+    // ShaderCompileRequest.PixelPerVertexInputsFromPrimitive declares them.
+    private const string PerVertexFragmentSource = """
+
+        struct Gen5MeshPerVertexIn
+        {
+            float4 position [[position]];
+            float4 param0 [[user(locn0)]];
+            float4 param0_v0 [[user(locn0_v0)]];
+            float4 param0_v1 [[user(locn0_v1)]];
+            float4 param0_v2 [[user(locn0_v2)]];
+            float3 bary [[barycentric_coord, center_perspective]];
+        };
+
+        fragment float4 gen5_mesh_per_vertex_fs(Gen5MeshPerVertexIn in [[stage_in]])
+        {
+            const float3 values = float3(in.param0_v0.x, in.param0_v1.x, in.param0_v2.x);
+            return float4(values, dot(in.bary, values) - in.param0.x);
         }
         """;
 

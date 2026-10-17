@@ -488,7 +488,7 @@ public static partial class Gen5MslTranslator
                     WritesLayer: _writesLayer,
                     WritesViewportIndex: _writesViewportIndex)
                 {
-                    UsesPerVertexInputs = UsesPerVertexPixelInputs,
+                    UsesPerVertexInputs = UsesVertexValueInputs,
                     ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition
                         ? EvaluateConstantPositions(_request.Program.Instructions, _request.ClipSpace)
                         : null,

@@ -393,6 +393,51 @@ internal static class Gen5NggFixtures
         return new Gen5ShaderProgram(0, instructions);
     }
 
+    /// <summary>NGG passthrough mode (VGT_SHADER_STAGES_EN.PRIMGEN_PASSTHRU_EN).</summary>
+    public static Gen5NggStageInfo PassthroughStageInfo { get; } = StageInfo with { Passthrough = true };
+
+    /// <summary>A passthrough-mode primitive shader as the guest compiler emits one: no LDS,
+    /// no barrier, and the primitive exported straight from v0, which the geometry engine
+    /// packs. Vertex n of the draw sits at the CullingTriangle corner n and exports
+    /// param0.x = n.</summary>
+    public static Gen5ShaderProgram PassthroughTriangle()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new Gen5ShaderInstruction(
+                pc, encoding, opcode, [word], sources, destinations, control));
+            pc += sizeof(uint);
+        }
+
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(AllocationRequest)], [Scalar(124)]);
+        Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(0), Vector(0), Vector(0), Vector(0)], [],
+            new Gen5ExportControl(Gen5NggExports.PrimitiveTarget, 0x1, false, true, false));
+
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(Gen5NggExports.EsVertexIndexRegister)], [Vector(15)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(0.8f)), Vector(15)], [Vector(16)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(16)], [Vector(16)]);
+        Add("VAndB32", Gen5ShaderEncoding.Vop2, [Inline(1), Vector(Gen5NggExports.EsVertexIndexRegister)], [Vector(17)]);
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(17)], [Vector(18)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(1.6f)), Vector(18)], [Vector(19)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(19)], [Vector(19)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Inline(0)], [Vector(20)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(1.0f))], [Vector(21)]);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(16), Vector(19), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(15), Vector(20), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstParameterTarget, 0xF, false, true, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
     /// <summary>The same program with its vertex positions fetched the way the ES part of a
     /// real primitive shader does: <c>buffer_load_format_xyzw</c> indexed by the vertex
     /// index, over a V# the geometry stage's user data carries. That fetch is exactly what
@@ -426,7 +471,8 @@ internal static class Gen5NggFixtures
         int requiredVertexOutputCount = 1,
         ResourceRuntimeInputs? runtimeInputs = null,
         uint positionExportControl = 0,
-        ShaderClipSpaceTransform clipSpace = default) =>
+        ShaderClipSpaceTransform clipSpace = default,
+        uint meshPerVertexParameterMask = 0) =>
         Gen5ComputeFixtures.RequestOrThrow(
             program,
             ShaderStage.Vertex,
@@ -435,7 +481,8 @@ internal static class Gen5NggFixtures
             primitiveShader: stageInfo ?? StageInfo,
             userDataBase: VertexUserDataBase,
             positionExportControl: positionExportControl,
-            clipSpace: clipSpace);
+            clipSpace: clipSpace,
+            meshPerVertexParameterMask: meshPerVertexParameterMask);
 
     public static Gen5MslShader CompileOrThrow(
         Gen5ShaderProgram program,
@@ -443,9 +490,11 @@ internal static class Gen5NggFixtures
         int requiredVertexOutputCount = 1,
         ResourceRuntimeInputs? runtimeInputs = null,
         uint positionExportControl = 0,
-        ShaderClipSpaceTransform clipSpace = default)
+        ShaderClipSpaceTransform clipSpace = default,
+        uint meshPerVertexParameterMask = 0)
     {
-        var request = Request(program, stageInfo, requiredVertexOutputCount, runtimeInputs, positionExportControl, clipSpace);
+        var request = Request(program, stageInfo, requiredVertexOutputCount, runtimeInputs, positionExportControl, clipSpace,
+            meshPerVertexParameterMask);
         if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
             throw new InvalidOperationException($"NGG mesh emit failed: {error}");

@@ -12,7 +12,9 @@ public static partial class Gen5MslTranslator
     {
         // Pixel input slots V_INTERP_MOV reads one vertex of (P10/P20, or P1/P2 over
         // them), declared as metal::vertex_value<float4>: MSL 4.0 (macOS 26) on an Apple10
-        // GPU. The request says whether the host can run that.
+        // GPU. The request says whether the host can run that. Paired with a mesh function
+        // that hands the vertex values over (PixelPerVertexInputsFromPrimitive), a slot is
+        // instead three float4 inputs of per-primitive data, which every Apple7+ GPU reads.
         private readonly HashSet<uint> _perVertexAttributes = [];
 
         // Slots read only through P0, the provoking vertex, which a flat input gives.
@@ -34,8 +36,14 @@ public static partial class Gen5MslTranslator
 
         private static readonly string[] VertexIndexNames = ["first", "second", "third"];
 
-        /// <summary>True when the program declares a vertex_value input, which only MSL 4.0 compiles.</summary>
+        /// <summary>True when the program reads every vertex's value of some input.</summary>
         private bool UsesPerVertexPixelInputs => _perVertexAttributes.Count != 0;
+
+        /// <summary>True when those values come from per-primitive data, not vertex_value.</summary>
+        private bool PerVertexInputsFromPrimitive => _request.PixelPerVertexInputsFromPrimitive;
+
+        /// <summary>True when the program declares a vertex_value input, which only MSL 4.0 compiles.</summary>
+        private bool UsesVertexValueInputs => UsesPerVertexPixelInputs && !PerVertexInputsFromPrimitive;
 
         private uint EnabledPixelInputs => _pixelInputAddress & _pixelInputEnable;
 
@@ -62,7 +70,7 @@ public static partial class Gen5MslTranslator
                 {
                     _flatParameterAttributes.Add(attribute);
                 }
-                else if (_request.SupportsPerVertexPixelInputs)
+                else if (_request.SupportsPerVertexPixelInputs || PerVertexInputsFromPrimitive)
                 {
                     _perVertexAttributes.Add(attribute);
                 }
@@ -149,6 +157,20 @@ public static partial class Gen5MslTranslator
             for (var index = 0; index < attributes.Length; index++)
             {
                 var attribute = attributes[index];
+                if (_perVertexAttributes.Contains(attribute) && PerVertexInputsFromPrimitive)
+                {
+                    // Named by the param the slot reads (SPI_PS_INPUT_CNTL.OFFSET), as the
+                    // mesh function names the primitive's copies of it.
+                    for (var vertex = 0u; vertex < 3u; vertex++)
+                    {
+                        source.AppendLine(
+                            $"    float4 attr{attribute}_v{vertex} " +
+                            $"[[user({PerVertexInputName(PixelInputControl(attribute) & 0x1Fu, vertex)})]];");
+                    }
+
+                    continue;
+                }
+
                 if (_perVertexAttributes.Contains(attribute))
                 {
                     source.AppendLine(
@@ -195,8 +217,9 @@ public static partial class Gen5MslTranslator
         private string PixelInputField(uint attribute) =>
             $"sharpemu_in.attr{(_sharedPixelInputs.TryGetValue(attribute, out var owner) ? owner : attribute)}";
 
-        private static string VertexValue(string field, uint vertex, uint channel) =>
-            $"{field}.get(vertex_index::{VertexIndexNames[vertex]})[{channel}]";
+        private string VertexValue(string field, uint vertex, uint channel) => PerVertexInputsFromPrimitive
+            ? $"{field}_v{vertex}[{channel}]"
+            : $"{field}.get(vertex_index::{VertexIndexNames[vertex]})[{channel}]";
 
         // A smooth or flat slot read from a per-vertex input: the vertices weighted by the
         // perspective barycentrics, or vertex 0 (the provoking vertex) for a flat slot.

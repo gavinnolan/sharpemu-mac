@@ -68,11 +68,13 @@ public static partial class Gen5MslTranslator
     private const uint MeshIndexBufferIndex = 3;
 
     /// <summary>True when this request must be emitted as a mesh function: the draw selected
-    /// the NGG primitive-shader stage and the program is not a passthrough one.</summary>
+    /// the NGG primitive-shader stage and the program is not a passthrough one, or its pixel
+    /// program reads per-vertex values only a mesh primitive can carry on this host.</summary>
     public static bool RequiresMeshEmission(ShaderCompileRequest request) =>
         request.Stage == ShaderStage.Vertex &&
         request.PrimitiveShader is not null &&
-        ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(request.Program);
+        (request.MeshPerVertexParameterMask != 0 ||
+         ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(request.Program));
 
     // The subgroup budget the geometry-engine registers describe, clamped to what a Metal
     // mesh threadgroup can carry.
@@ -95,6 +97,18 @@ public static partial class Gen5MslTranslator
         {
             vertices = MeshWaveLanes;
             primitives = MeshWaveLanes;
+        }
+        else if (request.MeshPerVertexParameterMask != 0)
+        {
+            // Three vertex values per handed parameter make each primitive heavy, so the
+            // extents shrink until the declared outputs fit what the device accepts.
+            var fit = MeshOutputBudgetBytes / ((vertices * MeshVertexBytesBound(request)) +
+                (primitives * MeshPrimitiveBytesBound(request)));
+            if (fit < 1.0)
+            {
+                vertices = Math.Max((uint)(vertices * fit), Math.Max(perPrimitive, 1u));
+                primitives = Math.Max((uint)(primitives * fit), 1u);
+            }
         }
 
         var waves = Clamp((Math.Max(vertices, primitives) + MeshWaveLanes - 1) / MeshWaveLanes, 1, MeshMaxWaves);
@@ -122,6 +136,40 @@ public static partial class Gen5MslTranslator
             Wave64: ngg.IsWave64,
             LdsBytes: ldsDwords * sizeof(uint));
     }
+
+    // Apple GPUs refuse a mesh pipeline whose declared vertex and primitive outputs exceed
+    // 32 KB ("Total mesh size exceeds the maximum mesh size allowed (32768)").
+    private const double MeshOutputBudgetBytes = 32768;
+
+    // The most one Gen5MeshVertex can take: the position, every param the program exports
+    // or the pixel program reads, and the point size and clip distances rounded to 16.
+    private static uint MeshVertexBytesBound(ShaderCompileRequest request)
+    {
+        var parameters = new HashSet<uint>();
+        for (var location = 0u; location < (uint)Math.Max(request.RequiredVertexOutputCount, 0); location++)
+        {
+            parameters.Add(location);
+        }
+
+        foreach (var instruction in request.Program.Instructions)
+        {
+            if (instruction.Control is Gen5ExportControl { Target: >= 32 and < 64 } export)
+            {
+                parameters.Add(export.Target - 32);
+            }
+        }
+
+        return 16u + (16u * (uint)parameters.Count) + 48u;
+    }
+
+    // One Gen5MeshPrimitive: three float4 per handed parameter, then the layer and viewport.
+    private static uint MeshPrimitiveBytesBound(ShaderCompileRequest request) =>
+        (48u * (uint)System.Numerics.BitOperations.PopCount(request.MeshPerVertexParameterMask)) + 16u;
+
+    /// <summary>The [[user]] name of one vertex's value of a param a mesh primitive hands
+    /// the pixel stage (<see cref="ShaderCompileRequest.MeshPerVertexParameterMask"/>);
+    /// vertex 0..2 are P0, P1 and P2 of the guest's V_INTERP.</summary>
+    internal static string PerVertexInputName(uint location, uint vertex) => $"locn{location}_v{vertex}";
 
     /// <summary>True when the program is a wave64 primitive shader without a GS half. The
     /// Metal wave is 32 lanes, so the guest's upper 32 lanes are modelled as architecturally
@@ -210,9 +258,10 @@ public static partial class Gen5MslTranslator
             source.AppendLine("};");
             source.AppendLine();
 
-            // The layer and viewport index are per-primitive in a Metal mesh.
+            // The layer and viewport index are per-primitive in a Metal mesh, and so are the
+            // three vertex values of a param the pixel program reads per vertex.
             var primitiveType = "void";
-            if (MeshWritesPrimitiveOutputs)
+            if (MeshHasPrimitiveData)
             {
                 primitiveType = MeshPrimitiveStructName;
                 source.AppendLine($"struct {MeshPrimitiveStructName}");
@@ -225,6 +274,15 @@ public static partial class Gen5MslTranslator
                 if (_writesViewportIndex)
                 {
                     source.AppendLine("    uint sharpemu_viewport [[viewport_array_index]];");
+                }
+
+                foreach (var location in MeshPerVertexLocations)
+                {
+                    for (var vertex = 0u; vertex < 3u; vertex++)
+                    {
+                        source.AppendLine(
+                            $"    float4 param{location}_v{vertex} [[user({PerVertexInputName(location, vertex)})]];");
+                    }
                 }
 
                 source.AppendLine("};");
@@ -349,6 +407,13 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint sharpemu_mesh_layer = 0u;");
                 source.AppendLine("    uint sharpemu_mesh_viewport = 0u;");
                 source.AppendLine($"    threadgroup uint2 sharpemu_mesh_vertex_target[{mesh.MaxVertices}];");
+            }
+
+            // Every vertex's value of each param handed per vertex, for the epilogue to
+            // gather by the primitive's indices.
+            foreach (var location in MeshPerVertexLocations)
+            {
+                source.AppendLine($"    threadgroup float4 sharpemu_mesh_param{location}[{mesh.MaxVertices}];");
             }
 
             if (mesh.HasGeometryHalf)
@@ -620,20 +685,40 @@ public static partial class Gen5MslTranslator
                     "    const uint sharpemu_mesh_prim_packed = sharpemu_meshlets_on && sharpemu_tg_index < (sharpemu_ml.w >> 16u)");
                 source.AppendLine(
                     $"        ? {MeshletBufferName}[{MeshDrawInfoName}.meshlet_prim_base + sharpemu_ml.y + sharpemu_tg_index] : 0u;");
-                source.AppendLine(
-                    $"    v[{Gen5NggExports.GsVertexOffset01Register}] = sharpemu_meshlets_on");
-                source.AppendLine(
-                    "        ? (((sharpemu_mesh_prim_packed & 0xFFu) << 2u) | (((sharpemu_mesh_prim_packed >> 8u) & 0xFFu) << 18u))");
-                source.AppendLine(
-                    "        : (((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |");
-                source.AppendLine(
-                    "           ((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u));");
-                source.AppendLine(
-                    $"    v[{Gen5NggExports.GsVertexOffset23Register}] = sharpemu_meshlets_on");
-                source.AppendLine(
-                    "        ? (((sharpemu_mesh_prim_packed >> 16u) & 0xFFu) << 2u)");
-                source.AppendLine(
-                    "        : (((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu);");
+                if (_request.PrimitiveShader is { Passthrough: true })
+                {
+                    // Passthrough mode: v0 is the primitive export itself, one 10-bit field
+                    // per vertex, so the program's EXP prim v0 names the lane's own triangle.
+                    var stride = Gen5NggExports.PrimitiveIndexStride;
+                    source.AppendLine(
+                        $"    v[{Gen5NggExports.GsVertexOffset01Register}] = sharpemu_meshlets_on");
+                    source.AppendLine(
+                        $"        ? ((sharpemu_mesh_prim_packed & 0xFFu) | (((sharpemu_mesh_prim_packed >> 8u) & 0xFFu) << {stride}u) |");
+                    source.AppendLine(
+                        $"           (((sharpemu_mesh_prim_packed >> 16u) & 0xFFu) << {stride * 2}u))");
+                    source.AppendLine(
+                        $"        : (sharpemu_mesh_prim_base | ((sharpemu_mesh_prim_base + 1u) << {stride}u) |");
+                    source.AppendLine(
+                        $"           ((sharpemu_mesh_prim_base + 2u) << {stride * 2}u));");
+                    source.AppendLine($"    v[{Gen5NggExports.GsVertexOffset23Register}] = 0u;");
+                }
+                else
+                {
+                    source.AppendLine(
+                        $"    v[{Gen5NggExports.GsVertexOffset01Register}] = sharpemu_meshlets_on");
+                    source.AppendLine(
+                        "        ? (((sharpemu_mesh_prim_packed & 0xFFu) << 2u) | (((sharpemu_mesh_prim_packed >> 8u) & 0xFFu) << 18u))");
+                    source.AppendLine(
+                        "        : (((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |");
+                    source.AppendLine(
+                        "           ((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u));");
+                    source.AppendLine(
+                        $"    v[{Gen5NggExports.GsVertexOffset23Register}] = sharpemu_meshlets_on");
+                    source.AppendLine(
+                        "        ? (((sharpemu_mesh_prim_packed >> 16u) & 0xFFu) << 2u)");
+                    source.AppendLine(
+                        "        : (((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu);");
+                }
             }
             source.AppendLine($"    v[{Gen5NggExports.GsPrimitiveIdRegister}] = sharpemu_mesh_prim_slot;");
             source.AppendLine($"    v[{Gen5NggExports.GsInvocationIdRegister}] = 0u;");
@@ -721,13 +806,23 @@ public static partial class Gen5MslTranslator
         private void EmitMeshEpilogue(StringBuilder source)
         {
             var mesh = Mesh;
-            if (MeshWritesPrimitiveOutputs)
+            if (MeshHasPrimitiveData)
             {
                 source.AppendLine($"    if (sharpemu_tg_index < {mesh.MaxVertices}u)");
                 source.AppendLine("    {");
-                source.AppendLine(
-                    "        sharpemu_mesh_vertex_target[sharpemu_tg_index] = " +
-                    "uint2(sharpemu_mesh_layer, sharpemu_mesh_viewport);");
+                if (MeshWritesPrimitiveOutputs)
+                {
+                    source.AppendLine(
+                        "        sharpemu_mesh_vertex_target[sharpemu_tg_index] = " +
+                        "uint2(sharpemu_mesh_layer, sharpemu_mesh_viewport);");
+                }
+
+                foreach (var location in MeshPerVertexLocations)
+                {
+                    var value = _vertexOutputs.Contains(location) ? $"sharpemu_out.param{location}" : "float4(0.0f)";
+                    source.AppendLine($"        sharpemu_mesh_param{location}[sharpemu_tg_index] = {value};");
+                }
+
                 source.AppendLine("    }");
                 source.AppendLine();
             }
@@ -787,11 +882,15 @@ public static partial class Gen5MslTranslator
                     $"        {MeshOutputName}.set_index(base + {component}u, indices[{Math.Min(component, 2u)}]);");
             }
 
-            if (MeshWritesPrimitiveOutputs)
+            if (MeshHasPrimitiveData)
             {
-                source.AppendLine(
-                    $"        const uint2 target = sharpemu_mesh_vertex_target[min(indices[0], {mesh.MaxVertices - 1}u)];");
                 source.AppendLine($"        {MeshPrimitiveStructName} primitive = {{}};");
+                if (MeshWritesPrimitiveOutputs)
+                {
+                    source.AppendLine(
+                        $"        const uint2 target = sharpemu_mesh_vertex_target[min(indices[0], {mesh.MaxVertices - 1}u)];");
+                }
+
                 if (_writesLayer)
                 {
                     source.AppendLine("        primitive.sharpemu_layer = target.x;");
@@ -800,6 +899,19 @@ public static partial class Gen5MslTranslator
                 if (_writesViewportIndex)
                 {
                     source.AppendLine("        primitive.sharpemu_viewport = target.y;");
+                }
+
+                // P0, P1 and P2 of the guest's V_INTERP: the values of the vertices in the
+                // order the primitive names them, which is also the order of Metal's
+                // [[barycentric_coord]] components for a mesh triangle.
+                foreach (var location in MeshPerVertexLocations)
+                {
+                    for (var vertex = 0u; vertex < 3u; vertex++)
+                    {
+                        source.AppendLine(
+                            $"        primitive.param{location}_v{vertex} = " +
+                            $"sharpemu_mesh_param{location}[min(indices[{vertex}], {mesh.MaxVertices - 1}u)];");
+                    }
                 }
 
                 source.AppendLine($"        {MeshOutputName}.set_primitive(sharpemu_tg_index, primitive);");

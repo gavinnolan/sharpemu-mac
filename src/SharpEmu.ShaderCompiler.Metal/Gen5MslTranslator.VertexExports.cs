@@ -264,6 +264,16 @@ public static partial class Gen5MslTranslator
         private bool MeshWritesPrimitiveOutputs =>
             _stage == Gen5MslStage.Mesh && (_writesLayer || _writesViewportIndex);
 
+        // The params whose three vertex values every mesh primitive carries for a pixel
+        // program that reads them per vertex (ShaderCompileRequest.MeshPerVertexParameterMask).
+        private IEnumerable<uint> MeshPerVertexLocations =>
+            Enumerable.Range(0, 32)
+                .Where(location => _stage == Gen5MslStage.Mesh &&
+                    (_request.MeshPerVertexParameterMask & (1u << location)) != 0)
+                .Select(location => (uint)location);
+
+        private bool MeshHasPrimitiveData => MeshWritesPrimitiveOutputs || MeshPerVertexLocations.Any();
+
         private string LayerOutput => _stage == Gen5MslStage.Mesh
             ? "sharpemu_mesh_layer"
             : "sharpemu_out.sharpemu_layer";
