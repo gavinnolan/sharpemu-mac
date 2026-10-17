@@ -29,17 +29,15 @@ internal static class GuestRedZonePatcher
         private readonly long _started = System.Diagnostics.Stopwatch.GetTimestamp();
         private long _lastReport = System.Diagnostics.Stopwatch.GetTimestamp();
 
-        // Scan chunks report from several threads at once.
         public void Report(int done)
         {
             var now = System.Diagnostics.Stopwatch.GetTimestamp();
-            var last = Interlocked.Read(ref _lastReport);
-            if (System.Diagnostics.Stopwatch.GetElapsedTime(last, now) < ProgressInterval ||
-                Interlocked.CompareExchange(ref _lastReport, now, last) != last)
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(_lastReport, now) < ProgressInterval)
             {
                 return;
             }
 
+            _lastReport = now;
             Console.Error.WriteLine(
                 $"[LOADER] {hostName} red-zone {phase}: {done}/{total} ({(total == 0 ? 100 : done * 100L / total)}%) " +
                 $"after {System.Diagnostics.Stopwatch.GetElapsedTime(_started, now).TotalSeconds:F0} s");
@@ -96,7 +94,6 @@ internal static class GuestRedZonePatcher
         }
 
         var hostName = OperatingSystem.IsWindows() ? "Windows" : "macOS";
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
 
         if (!TryDecodeFunctionStarts(memory, programHeaders, imageBase, out var functionStarts))
         {
@@ -117,7 +114,6 @@ internal static class GuestRedZonePatcher
             memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteSha, out var scan,
             large ? new Progress(hostName, "scan", functionStarts.Length) : null);
         sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
-        var scanned = System.Diagnostics.Stopwatch.GetTimestamp();
         if (sites.Count == 0)
         {
             Console.Error.WriteLine(
@@ -195,32 +191,8 @@ internal static class GuestRedZonePatcher
             $"stack_after={result.StackRefusals} too_short={result.TooShortRefusals} " +
             $"indirect_branch={result.IndirectBranchRefusals}) " +
             $"rosetta_vector_stores={result.VectorStoreCount} sha_rewrites={result.ShaInstructionCount} " +
-            $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X} " +
-            $"scan_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started, scanned).TotalMilliseconds:F0} " +
-            $"patch_ms={System.Diagnostics.Stopwatch.GetElapsedTime(scanned).TotalMilliseconds:F0}.");
+            $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X}.");
         return result;
-    }
-
-    // Functions are scanned independently (each decodes, collects its own branch targets
-    // and keeps its own last-site bound), so a large executable is split into chunks of
-    // whole functions that run in parallel; the chunks' sites are joined in address order.
-    private const int FunctionsPerScanChunk = 512;
-
-    /// <summary>What one chunk of functions produced; merged in chunk order.</summary>
-    private sealed class ScanChunk
-    {
-        public readonly List<PatchSite> Sites = new();
-        // One list and set serve every function of the chunk: growing fresh ones per function
-        // dominated the loader's garbage, with large functions landing on the large object heap.
-        public readonly List<DecodedInstruction> Decoded = new();
-        public readonly HashSet<ulong> BranchTargets = new();
-        public readonly int[] RefusalCounts = new int[6];
-        public int Functions;
-        public int RedZoneFunctions;
-        public int Instructions;
-        public int VectorStores;
-        public int Unrelocatable;
-        public int ShaInstructions;
     }
 
     private static List<PatchSite> CollectPatchSites(
@@ -234,8 +206,19 @@ internal static class GuestRedZonePatcher
         out PatchResult result,
         Progress? progress = null)
     {
-        var chunks = new List<ScanChunk>();
+        var sites = new List<PatchSite>();
         var scannedFunctions = 0;
+        var functionCount = 0;
+        var redZoneFunctionCount = 0;
+        var instructionCount = 0;
+        var vectorStoreCount = 0;
+        var unrelocatableSites = 0;
+        var refusalCounts = new int[6];
+        var shaInstructionCount = 0;
+        // One list and set serve every function of the module: growing fresh ones per function
+        // dominated the loader's garbage, with large functions landing on the large object heap.
+        var decoded = new List<DecodedInstruction>();
+        var branchTargets = new HashSet<ulong>();
 
         foreach (var header in programHeaders)
         {
@@ -265,176 +248,124 @@ internal static class GuestRedZonePatcher
                 continue;
             }
 
-            var chunkCount = (segmentFunctions.Length + FunctionsPerScanChunk - 1) / FunctionsPerScanChunk;
-            var segmentChunks = new ScanChunk[chunkCount];
-            void ScanChunkAt(int chunkIndex)
+            for (var functionIndex = 0; functionIndex < segmentFunctions.Length; functionIndex++)
             {
-                var chunk = new ScanChunk();
-                var first = chunkIndex * FunctionsPerScanChunk;
-                var last = Math.Min(first + FunctionsPerScanChunk, segmentFunctions.Length);
-                for (var functionIndex = first; functionIndex < last; functionIndex++)
+                progress?.Report(scannedFunctions++);
+                var functionStart = segmentFunctions[functionIndex];
+                var functionEnd = functionIndex + 1 < segmentFunctions.Length
+                    ? segmentFunctions[functionIndex + 1]
+                    : segmentEnd;
+                if (functionEnd <= functionStart || functionEnd - functionStart > int.MaxValue)
                 {
-                    var functionStart = segmentFunctions[functionIndex];
-                    var functionEnd = functionIndex + 1 < segmentFunctions.Length
-                        ? segmentFunctions[functionIndex + 1]
-                        : segmentEnd;
-                    ScanFunction(
-                        memory, programHeaders, imageBase, segmentBytes, segmentStart, functionStart, functionEnd,
-                        protectRedZone, splitVectorStores, rewriteSha, chunk);
+                    continue;
                 }
 
-                segmentChunks[chunkIndex] = chunk;
-                progress?.Report(Interlocked.Add(ref scannedFunctions, last - first));
-            }
+                DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd, decoded);
+                if (decoded.Count == 0)
+                {
+                    continue;
+                }
 
-            if (chunkCount == 1)
-            {
-                ScanChunkAt(0);
-            }
-            else
-            {
-                Parallel.For(0, chunkCount, ScanChunkAt);
-            }
+                functionCount++;
+                instructionCount += decoded.Count;
+                var frameDelta = protectRedZone ? ComputeFramePointerDelta(decoded) : -1;
+                var usesRedZone = protectRedZone &&
+                    (decoded.Any(static entry => UsesRedZone(entry.Instruction)) ||
+                     decoded.Any(entry => UsesFramePointerRedZone(entry.Instruction, frameDelta)));
 
-            chunks.AddRange(segmentChunks);
-        }
+                if (!usesRedZone && !splitVectorStores && !rewriteSha)
+                {
+                    continue;
+                }
 
-        var sites = new List<PatchSite>(chunks.Sum(static chunk => chunk.Sites.Count));
-        var refusalCounts = new int[6];
-        foreach (var chunk in chunks)
-        {
-            sites.AddRange(chunk.Sites);
-            for (var index = 0; index < refusalCounts.Length; index++)
-            {
-                refusalCounts[index] += chunk.RefusalCounts[index];
+                if (usesRedZone)
+                {
+                    redZoneFunctionCount++;
+                }
+                CollectBranchTargets(decoded, branchTargets);
+                var canBorrowFollowingInstructions = TryCollectJumpTableTargets(
+                    memory,
+                    programHeaders,
+                    imageBase,
+                    decoded,
+                    functionStart,
+                    functionEnd,
+                    branchTargets);
+
+                var lastSiteEnd = 0UL;
+
+                for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
+                {
+                    var instruction = decoded[instructionIndex].Instruction;
+                    var isShaSite = rewriteSha && ShaInstructionRewrite.CanRewrite(instruction);
+                    if (!isShaSite &&
+                        ((!usesRedZone && !(splitVectorStores && RosettaVectorStorePatch.RequiresStoreSplit(instruction))) ||
+                         !IsFaultableGuestMemoryInstruction(instruction)))
+                    {
+                        continue;
+                    }
+
+                    var span = default(PatchSite);
+                    var refusal = SpanRefusal.TooShort;
+                    var forward = TryBuildPatchSpan(
+                        decoded,
+                        instructionIndex,
+                        branchTargets,
+                        canBorrowFollowingInstructions,
+                        out span,
+                        out refusal);
+                    var backward = !forward &&
+                        canBorrowFollowingInstructions &&
+                        TryBuildEnclosingPatchSpan(decoded, instructionIndex, branchTargets, out span);
+                    if (!forward && !backward)
+                    {
+                        unrelocatableSites++;
+                        refusalCounts[(int)refusal]++;
+                        continue;
+                    }
+
+                    if (span.Address < lastSiteEnd)
+                    {
+                        unrelocatableSites++;
+                        refusalCounts[(int)SpanRefusal.TooShort]++;
+                        continue;
+                    }
+
+                    sites.Add(span);
+                    lastSiteEnd = span.Address + (ulong)span.ByteLength;
+                    if (splitVectorStores)
+                    {
+                        vectorStoreCount += span.Instructions.Count(static instruction => RosettaVectorStorePatch.RequiresStoreSplit(instruction));
+                    }
+                    if (rewriteSha)
+                    {
+                        shaInstructionCount += span.Instructions.Count(static instruction => ShaInstructionRewrite.CanRewrite(instruction));
+                    }
+
+                    if (!backward)
+                    {
+                        instructionIndex += span.Instructions.Count - 1;
+                    }
+                }
             }
         }
 
         result = new PatchResult
         {
-            Functions = chunks.Sum(static chunk => chunk.Functions),
-            RedZoneFunctions = chunks.Sum(static chunk => chunk.RedZoneFunctions),
-            Instructions = chunks.Sum(static chunk => chunk.Instructions),
+            Functions = functionCount,
+            RedZoneFunctions = redZoneFunctionCount,
+            Instructions = instructionCount,
             CandidateSites = sites.Count,
-            VectorStoreCount = chunks.Sum(static chunk => chunk.VectorStores),
-            UnrelocatableSites = chunks.Sum(static chunk => chunk.Unrelocatable),
+            VectorStoreCount = vectorStoreCount,
+            UnrelocatableSites = unrelocatableSites,
             ControlFlowRefusals = refusalCounts[(int)SpanRefusal.ControlFlow],
             BranchTargetRefusals = refusalCounts[(int)SpanRefusal.BranchTargetAfter],
             StackRefusals = refusalCounts[(int)SpanRefusal.StackAfter],
             TooShortRefusals = refusalCounts[(int)SpanRefusal.TooShort],
             IndirectBranchRefusals = refusalCounts[(int)SpanRefusal.IndirectBranch],
-            ShaInstructionCount = chunks.Sum(static chunk => chunk.ShaInstructions),
+            ShaInstructionCount = shaInstructionCount,
         };
         return sites;
-    }
-
-    private static void ScanFunction(
-        IVirtualMemory memory,
-        IReadOnlyList<ProgramHeader> programHeaders,
-        ulong imageBase,
-        byte[] segmentBytes,
-        ulong segmentStart,
-        ulong functionStart,
-        ulong functionEnd,
-        bool protectRedZone,
-        bool splitVectorStores,
-        bool rewriteSha,
-        ScanChunk chunk)
-    {
-        if (functionEnd <= functionStart || functionEnd - functionStart > int.MaxValue)
-        {
-            return;
-        }
-
-        var decoded = chunk.Decoded;
-        var branchTargets = chunk.BranchTargets;
-        DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd, decoded);
-        if (decoded.Count == 0)
-        {
-            return;
-        }
-
-        chunk.Functions++;
-        chunk.Instructions += decoded.Count;
-        var frameDelta = protectRedZone ? ComputeFramePointerDelta(decoded) : -1;
-        var usesRedZone = protectRedZone &&
-            (decoded.Any(static entry => UsesRedZone(entry.Instruction)) ||
-             decoded.Any(entry => UsesFramePointerRedZone(entry.Instruction, frameDelta)));
-
-        if (!usesRedZone && !splitVectorStores && !rewriteSha)
-        {
-            return;
-        }
-
-        if (usesRedZone)
-        {
-            chunk.RedZoneFunctions++;
-        }
-        CollectBranchTargets(decoded, branchTargets);
-        var canBorrowFollowingInstructions = TryCollectJumpTableTargets(
-            memory,
-            programHeaders,
-            imageBase,
-            decoded,
-            functionStart,
-            functionEnd,
-            branchTargets);
-
-        var lastSiteEnd = 0UL;
-
-        for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
-        {
-            var instruction = decoded[instructionIndex].Instruction;
-            var isShaSite = rewriteSha && ShaInstructionRewrite.CanRewrite(instruction);
-            if (!isShaSite &&
-                ((!usesRedZone && !(splitVectorStores && RosettaVectorStorePatch.RequiresStoreSplit(instruction))) ||
-                 !IsFaultableGuestMemoryInstruction(instruction)))
-            {
-                continue;
-            }
-
-            var span = default(PatchSite);
-            var refusal = SpanRefusal.TooShort;
-            var forward = TryBuildPatchSpan(
-                decoded,
-                instructionIndex,
-                branchTargets,
-                canBorrowFollowingInstructions,
-                out span,
-                out refusal);
-            var backward = !forward &&
-                canBorrowFollowingInstructions &&
-                TryBuildEnclosingPatchSpan(decoded, instructionIndex, branchTargets, out span);
-            if (!forward && !backward)
-            {
-                chunk.Unrelocatable++;
-                chunk.RefusalCounts[(int)refusal]++;
-                continue;
-            }
-
-            if (span.Address < lastSiteEnd)
-            {
-                chunk.Unrelocatable++;
-                chunk.RefusalCounts[(int)SpanRefusal.TooShort]++;
-                continue;
-            }
-
-            chunk.Sites.Add(span);
-            lastSiteEnd = span.Address + (ulong)span.ByteLength;
-            if (splitVectorStores)
-            {
-                chunk.VectorStores += span.Instructions.Count(static instruction => RosettaVectorStorePatch.RequiresStoreSplit(instruction));
-            }
-            if (rewriteSha)
-            {
-                chunk.ShaInstructions += span.Instructions.Count(static instruction => ShaInstructionRewrite.CanRewrite(instruction));
-            }
-
-            if (!backward)
-            {
-                instructionIndex += span.Instructions.Count - 1;
-            }
-        }
     }
 
     private static List<DecodedInstruction> DecodeFunction(
