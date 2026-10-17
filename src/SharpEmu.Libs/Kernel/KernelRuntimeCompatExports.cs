@@ -100,9 +100,9 @@ public static class KernelRuntimeCompatExports
     // between short sleeps or sleeps for 1 ms or more. Per thread, not per title.
     internal static readonly long UsleepNapMicroseconds =
         ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_US", 250);
-    private static readonly long _usleepNapAfterTicks =
+    internal static readonly long _usleepNapAfterTicks =
         ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_AFTER_US", 500) * Stopwatch.Frequency / 1_000_000;
-    private static readonly long _usleepStreakGapTicks = Stopwatch.Frequency * 2 / 1000;
+    internal static readonly long _usleepStreakGapTicks = Stopwatch.Frequency * 2 / 1000;
 
     [ThreadStatic]
     private static long _shortUsleepStreakStart;
