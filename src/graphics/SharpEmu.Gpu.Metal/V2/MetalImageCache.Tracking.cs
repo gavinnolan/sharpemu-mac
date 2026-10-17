@@ -1362,12 +1362,19 @@ internal sealed partial class MetalImageCache
         var fullImage = range.BaseLevel == 0 && range.LevelCount >= shape.MipLevels &&
             range.BaseLayer == 0 && range.LayerCount >= layers;
         WatchImage(imageIdentifier);
-        if (!fullImage && image.IsCpuDirty)
+        // The clear is a write like any pass's, and the newest one to these bytes: an alias
+        // the GPU wrote earlier hands them over now, as it would to a pass binding the image.
+        // Left GPU-modified, it still looked like the owner when the cleared image bound as
+        // a target next, and the bytes it published were reloaded over the clear. That is
+        // how the scene's 1440p transients drew bands across Demon's Souls' 4K HUD layer,
+        // which a DCC fast clear empties every frame over memory they reuse.
+        DrainOverlappingDeferredRefreshesLocked(image);
+        SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+        if (!fullImage)
         {
             // Taking GPU ownership drops the image's dirty state, so guest bytes not yet
             // in the texture are uploaded first; otherwise the slices this clear leaves
             // alone would keep stale contents and later be written back over the guest's.
-            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
         }
 
