@@ -266,7 +266,7 @@ public sealed class KernelSyncOnAddressCompatExportsTests
         var (memory, ctx) = CreateContext();
         WriteUInt64(memory, ValueAddress, 21);
         WriteUInt64(memory, TimeoutAddress, 0);
-        WriteUInt64(memory, TimeoutAddress + sizeof(long), 1_000_000); // 1 ms
+        WriteUInt64(memory, TimeoutAddress + sizeof(long), 50_000_000); // 50 ms: long enough that first-call JIT cannot expire it before it parks
         SetErrnoStorage(ctx);
         ctx[CpuRegister.Rdi] = ValueAddress;
         ctx[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
@@ -290,7 +290,7 @@ public sealed class KernelSyncOnAddressCompatExportsTests
             stagedWaiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter);
         });
 
-        Thread.Sleep(10);
+        Thread.Sleep(100);
         var resumed = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(stagedWaiter);
         Assert.Equal(-1, resumed.Resume());
         Assert.Equal(60, ReadInt32(memory, ctx.FsBase + 0x40)); // ETIMEDOUT

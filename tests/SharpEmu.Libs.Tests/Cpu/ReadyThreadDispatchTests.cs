@@ -145,7 +145,7 @@ public sealed class ReadyThreadDispatchTests
 
         internal void Enqueue(object thread)
         {
-            lock (_gate) Invoke("EnqueueReadyGuestThreadLocked", thread);
+            lock (_gate) Invoke("EnqueueReadyGuestThreadLocked", thread, null);
         }
 
         internal void Release(object thread)
