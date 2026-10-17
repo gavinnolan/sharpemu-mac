@@ -119,16 +119,25 @@ internal sealed partial class MetalRenderHost
         // worker, with the translation of the second in between.
         void build()
         {
-            if (stage == ShaderStage.Compute)
+            try
             {
-                // The background prewarm may have this source in hand; its library is then
-                // a cache hit here once it is done.
-                MetalShaderPrewarm.WaitWhileCompiling(metal);
-            }
+                if (stage == ShaderStage.Compute)
+                {
+                    // The background prewarm may have this source in hand; its library is
+                    // then a cache hit here once it is done.
+                    MetalShaderPrewarm.WaitWhileCompiling(metal);
+                }
 
-            BuildModule(module, stage);
+                BuildModule(module, stage);
+            }
+            finally
+            {
+                MetalShaderPrewarm.GameCompileDone();
+            }
         }
 
+        // From here until the module is built the background prewarm holds back.
+        MetalShaderPrewarm.GameCompileStarted();
         if (MetalLibraryCompilePool.Enabled)
         {
             module.Compiling = MetalLibraryCompilePool.Shared.Run(build);

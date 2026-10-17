@@ -239,7 +239,8 @@ internal static class MetalShaderPrewarm
         // Seeded before the compute prewarm or the game plans a shader.
         MetalDeviceDataLoadsStore.Open(directory, stamp);
         // Loaded before the gate lets the game go, so every module the game creates
-        // finds the graphics libraries queued; they compile once the computes are done.
+        // finds the graphics libraries queued; they compile once the computes the guest is
+        // held for are done.
         MetalLibraryPrewarm.Open(directory, device, stamp);
         if (ShaderPrewarmList.Open(directory) is not { } list)
         {
@@ -282,10 +283,15 @@ internal static class MetalShaderPrewarm
             {
                 while (!_stopping && work.TryDequeue(out var item))
                 {
-                    if (!item.Held && Thread.CurrentThread.Priority != ThreadPriority.BelowNormal)
+                    if (!item.Held)
                     {
                         // The guest runs again: what is left compiles behind its threads.
-                        Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                        if (Thread.CurrentThread.Priority != ThreadPriority.BelowNormal)
+                        {
+                            Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                        }
+
+                        YieldToTheGame();
                     }
 
                     PrewarmComputePipeline(item.Record, item.Code, compiler, device);
@@ -293,6 +299,9 @@ internal static class MetalShaderPrewarm
                     if (item.Held && Gate.Advance() == held && held < pending.Count)
                     {
                         Gate.SetRunning(false);
+                        // The graphics libraries of past sessions go ahead of the computes
+                        // the guest was not held for (see YieldToTheGame).
+                        MetalLibraryPrewarm.Begin();
                         Console.Error.WriteLine(string.Create(
                             System.Globalization.CultureInfo.InvariantCulture,
                             $"[LOADER][INFO] Shader prewarm: the {held} computes of the first frame are ready after " +
@@ -391,6 +400,39 @@ internal static class MetalShaderPrewarm
             .Where(item => !firstFrame.Contains(ShaderPrewarmList.Identity(item.Record)))
             .Select(item => (item.Record, item.Code, false)));
         return ordered;
+    }
+
+    private static int _gameCompiles;
+    private static long _yieldedTicks;
+
+    /// <summary>The game starts compiling a shader module of its own.</summary>
+    public static void GameCompileStarted() => Interlocked.Increment(ref _gameCompiles);
+
+    /// <summary>The game's shader module compile is done.</summary>
+    public static void GameCompileDone() => Interlocked.Decrement(ref _gameCompiles);
+
+    /// <summary>
+    /// Holds a compute the guest is not held for while the game compiles modules of its own
+    /// or the graphics libraries of past sessions compile, so neither queues behind the
+    /// background prewarm in the driver's compiler service. A cold start that let the guest
+    /// go after its first frame's computes had its GPU worker wait 120 s in one stretch for
+    /// the logos' graphics libraries while 1500 computes compiled in the background
+    /// (run 20261017-095415-ds-sc-cold2).
+    /// </summary>
+    private static void YieldToTheGame()
+    {
+        if (!MetalLibraryPrewarm.Running && Volatile.Read(ref _gameCompiles) == 0)
+        {
+            return;
+        }
+
+        var started = Stopwatch.GetTimestamp();
+        while (!_stopping && (MetalLibraryPrewarm.Running || Volatile.Read(ref _gameCompiles) > 0))
+        {
+            Thread.Sleep(2);
+        }
+
+        Interlocked.Add(ref _yieldedTicks, Stopwatch.GetTimestamp() - started);
     }
 
     /// <summary>The guest presented its first frame: what it created until now is what the next start holds it for.</summary>
@@ -577,6 +619,7 @@ internal static class MetalShaderPrewarm
             $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _compiled)} " +
             $"failed={Volatile.Read(ref _failed)} same_source={Volatile.Read(ref _deduplicated)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
+            $"yielded_ms={Interlocked.Read(ref _yieldedTicks) * 1000 / Stopwatch.Frequency} " +
             $"runtime_compute_modules={runtime.Count} matched={matched}");
     }
 
