@@ -140,6 +140,10 @@ internal sealed partial class MetalRenderHost
     private readonly nint[] _stageArgumentBuffers = new nint[StageCount];
     private readonly ulong[] _stageArgumentOffsets = new ulong[StageCount];
     private readonly bool[] _stageArgumentValid = new bool[StageCount];
+
+    // Which prepared stages run a device-address program, whose encoder names the windows
+    // the address table spans (NameDeviceAddressWindows).
+    private readonly bool[] _stageUsesDeviceAddresses = new bool[StageCount];
     private nint _pushBuffer;
     private ulong _pushOffset;
     private bool _hasPushData;
@@ -183,6 +187,7 @@ internal sealed partial class MetalRenderHost
         _usedResourceCount = 0;
         _bindlessDeclarations.Clear();
         Array.Clear(_stageArgumentValid);
+        Array.Clear(_stageUsesDeviceAddresses);
         _hasPushData = false;
         // The attachment subresources are recorded as the draw acquires them, which
         // happens inside this preparation.
@@ -881,6 +886,7 @@ internal sealed partial class MetalRenderHost
                     break;
                 case MslArgumentFieldKind.Pointer:
                     BinaryPrimitives.WriteUInt64LittleEndian(span, PointerFieldValue(stage, field.Kind));
+                    _stageUsesDeviceAddresses[stageIndex] |= field.Kind == DescriptorBindingKind.DeviceAddressPageTable;
                     break;
                 case MslArgumentFieldKind.StepReport:
                     BinaryPrimitives.WriteUInt64LittleEndian(
@@ -1063,10 +1069,6 @@ internal sealed partial class MetalRenderHost
 
         System.Runtime.InteropServices.MemoryMarshal.AsBytes(granuleIndex.AsSpan()).CopyTo(span[entryBytes..]);
 
-        // A device-address program can dereference any mapped guest page, so every
-        // window the table names has to be resident for this submission even though
-        // nothing resolved a range through it.
-        _guestMemory.MarkWindowsTouched(_deviceAddressWindows);
         _deviceAddressTable = range.GpuAddress;
         _deviceAddressEntryCount = (uint)_deviceAddressEntries.Count;
         _deviceAddressTableSerial = _submissionSerial;
@@ -1140,12 +1142,12 @@ internal sealed partial class MetalRenderHost
 
         _deviceAddressWindows = _guestMemory.TouchedWindows;
         _guestMemory.ClearTouchedWindows();
-        _guestMemory.MarkWindowsTouched(touchedBefore | _deviceAddressWindows);
+        _guestMemory.MarkWindowsTouched(touchedBefore);
         _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
         _deviceAddressIndex = MetalDeviceAddressIndex.Build(_deviceAddressEntries);
-        // The windows the table names are what every device-address submission asks the
-        // driver to keep resident, which it does by wiring them whole; say when that set
-        // changes so a wired-memory jump can be read against it.
+        // The windows the table names are what every encoder running a device-address
+        // program asks the driver to keep resident, which it does by wiring them whole;
+        // say when that set changes so a wired-memory jump can be read against it.
         if (_deviceAddressWindows != _deviceAddressWindowsLogged)
         {
             _deviceAddressWindowsLogged = _deviceAddressWindows;
@@ -1291,6 +1293,11 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
+            if (_stageUsesDeviceAddresses[StageVertex] || _stageUsesDeviceAddresses[StageFragment])
+            {
+                NameDeviceAddressWindows(_renderEncoder, stages);
+            }
+
             DeclareBindlessImages(_renderEncoder, graphics: true, stages);
             return;
         }
@@ -1312,6 +1319,11 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendUseResourceUsage(
                     _computeEncoder, SelUseResourceUsage, _usedResources[index], _usedResourceUsage[index]);
             }
+        }
+
+        if (_stageUsesDeviceAddresses[StageCompute])
+        {
+            NameDeviceAddressWindows(_computeEncoder, stages: 0);
         }
 
         DeclareBindlessImages(_computeEncoder, graphics: false, stages: 0);
@@ -1340,6 +1352,33 @@ internal sealed partial class MetalRenderHost
 
     /// <summary>How many -useResource: calls the encoder cache skipped.</summary>
     public long TakeSkippedResidencyCalls() => Interlocked.Exchange(ref _residencyCallsSkipped, 0);
+
+    // A device-address program can dereference any mapped guest page, so the encoder that
+    // runs one names the windows the address table spans, whether or not anything resolved
+    // a range through them. Only that encoder: the rest of the submission names the windows
+    // its own bindings resolved.
+    private void NameDeviceAddressWindows(nint encoder, nuint stages)
+    {
+        for (var windows = _deviceAddressWindows; windows != 0; windows &= windows - 1)
+        {
+            var window = _guestMemory.WindowBuffer(System.Numerics.BitOperations.TrailingZeroCount(windows));
+            if (!TryNoteResident(window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages))
+            {
+                continue;
+            }
+
+            if (stages == 0)
+            {
+                MetalNative.SendUseResourceUsage(
+                    encoder, SelUseResourceUsage, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
+            }
+            else
+            {
+                MetalNative.SendUseResource(
+                    encoder, SelUseResourceStages, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages);
+            }
+        }
+    }
 
     private bool TryNoteResident(nint resource, nuint usage, nuint stages)
     {

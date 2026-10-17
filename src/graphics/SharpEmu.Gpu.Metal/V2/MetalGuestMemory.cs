@@ -400,6 +400,9 @@ internal sealed class MetalGuestMemory : IDisposable
     private ulong _touchedWindows;
     private bool _residentDirty = true;
 
+    /// <summary>The buffer of one window, for an encoder that names it itself.</summary>
+    public nint WindowBuffer(int index) => _windows[index].Buffer;
+
     /// <summary>The windows resolved since this submission began, one bit each.</summary>
     public ulong TouchedWindows => _touchedWindows;
 
