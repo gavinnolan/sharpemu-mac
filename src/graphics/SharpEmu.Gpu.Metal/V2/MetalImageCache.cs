@@ -1209,10 +1209,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     // One line per distinct pair of aliasing surfaces, with the bytes each round trip
     // moves, so the cost can be attributed to the surfaces rather than to a counter.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+        (GpuFormat, uint, uint, GpuFormat, uint, uint), byte> _reportedAliasPairs = new();
+
     private static void ReportAliasPair(MetalCachedImage requested, MetalCachedImage overlapped)
     {
         ref readonly var wanted = ref requested.Description;
         ref readonly var held = ref overlapped.Description;
+        // The report is once per pair of surface shapes, but it is asked for on every bind
+        // that aliases; answer the repeats from a struct key so they build no strings.
+        var pairKey = (wanted.PixelFormat, wanted.Extent.Width, wanted.Extent.Height,
+            held.PixelFormat, held.Extent.Width, held.Extent.Height);
+        if (_reportedAliasPairs.ContainsKey(pairKey) || !_reportedAliasPairs.TryAdd(pairKey, 0))
+        {
+            return;
+        }
+
         var overlapStart = Math.Max(wanted.Data.Address, held.Data.Address);
         var overlapEnd = Math.Min(
             wanted.Data.Address + wanted.Data.Size, held.Data.Address + held.Data.Size);
