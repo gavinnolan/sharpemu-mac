@@ -87,6 +87,7 @@ internal static class MetalLibraryPrewarm
     private static nint _device;
     private static volatile bool _stopping;
     private static bool _started;
+    private static volatile bool _running;
     private static int _compiled;
     private static int _failed;
     private static long _compileTicks;
@@ -163,7 +164,10 @@ internal static class MetalLibraryPrewarm
         }
     }
 
-    /// <summary>Starts compiling the queued sources; called once the compute prewarm is done.</summary>
+    /// <summary>
+    /// Starts compiling the queued sources; called once the computes the guest is held for
+    /// are done. Later calls do nothing.
+    /// </summary>
     public static void Begin()
     {
         List<Slot> order;
@@ -184,8 +188,9 @@ internal static class MetalLibraryPrewarm
         }
 
         var work = new ConcurrentQueue<Slot>(order);
-        var workerCount = Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
+        var workerCount = MetalShaderPrewarm.WorkerCount;
         var remaining = workerCount;
+        _running = true;
         var started = Stopwatch.GetTimestamp();
         Console.Error.WriteLine($"[LOADER][INFO] Library prewarm started: libraries={order.Count} workers={workerCount}");
         var threads = new Thread[workerCount];
@@ -200,6 +205,7 @@ internal static class MetalLibraryPrewarm
 
                 if (Interlocked.Decrement(ref remaining) == 0)
                 {
+                    _running = false;
                     var compiled = Volatile.Read(ref _compiled);
                     Console.Error.WriteLine(string.Create(
                         System.Globalization.CultureInfo.InvariantCulture,
@@ -209,8 +215,10 @@ internal static class MetalLibraryPrewarm
                 }
             })
             {
+                // Normal priority, as the compute prewarm's: a library the game takes from
+                // here waits for it, and the compiler service runs the request at this
+                // thread's priority.
                 IsBackground = true,
-                Priority = ThreadPriority.BelowNormal,
                 Name = $"SharpEmu library prewarm {index}",
             };
         }
@@ -225,6 +233,9 @@ internal static class MetalLibraryPrewarm
             thread.Start();
         }
     }
+
+    /// <summary>True while the queued sources are compiling.</summary>
+    public static bool Running => _running;
 
     private static void CompileSlot(Slot slot)
     {

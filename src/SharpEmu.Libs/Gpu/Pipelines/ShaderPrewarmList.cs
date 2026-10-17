@@ -156,6 +156,7 @@ public sealed class ShaderPrewarmList : IDisposable
     public static string FileName => Stem + ".bin";
     public static string StampFileName => Stem + ".stamp";
     public static string ProgressFileName => Stem + ".progress";
+    public static string FirstFrameFileName => Stem + ".first-frame";
 
     private const uint Magic = 0x57504553;
     private const uint FormatVersion = 5;
@@ -172,6 +173,11 @@ public sealed class ShaderPrewarmList : IDisposable
     private readonly HashSet<ulong> _computes = [];
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset), ShaderCodeCapture> _loadedCodes = new();
     private readonly List<ComputePrewarmRecord> _loadedComputes = [];
+    // The computes this session created, in order, until its first guest frame.
+    private readonly List<ulong> _sessionComputes = [];
+    private readonly HashSet<ulong> _sessionComputeSet = [];
+    private string? _firstFramePath;
+    private bool _firstFrameWritten;
     private bool _failed;
 
     private ShaderPrewarmList(FileStream file, string stampPath, string progressPath)
@@ -191,7 +197,10 @@ public sealed class ShaderPrewarmList : IDisposable
             var path = Path.Combine(directory, FileName);
             AdoptLegacyList(directory, path);
             var file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-            var list = new ShaderPrewarmList(file, Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName));
+            var list = new ShaderPrewarmList(file, Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName))
+            {
+                _firstFramePath = Path.Combine(directory, FirstFrameFileName),
+            };
             try
             {
                 list.Load();
@@ -283,7 +292,7 @@ public sealed class ShaderPrewarmList : IDisposable
         foreach (var file in others)
         {
             var stem = Path.GetFileNameWithoutExtension(file.Name);
-            foreach (var extension in new[] { ".bin", ".stamp", ".progress" })
+            foreach (var extension in new[] { ".bin", ".stamp", ".progress", ".first-frame" })
             {
                 File.Delete(Path.Combine(directory, stem + extension));
             }
@@ -412,6 +421,69 @@ public sealed class ShaderPrewarmList : IDisposable
         }
     }
 
+    /// <summary>
+    /// The computes the last session that reached a guest frame created before its first
+    /// one, by identity; null when no session has. A prewarm can hold the guest for these
+    /// alone and compile the rest while it runs.
+    /// </summary>
+    public HashSet<ulong>? ReadFirstFrameComputes()
+    {
+        try
+        {
+            if (_firstFramePath is not { } path || !File.Exists(path))
+            {
+                return null;
+            }
+
+            var identities = new HashSet<ulong>();
+            foreach (var line in File.ReadAllLines(path))
+            {
+                if (ulong.TryParse(line, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var identity))
+                {
+                    identities.Add(identity);
+                }
+            }
+
+            return identities;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The guest showed its first frame: the computes this session created until now are
+    /// the ones the next start's prewarm holds the guest for. Once per session.
+    /// </summary>
+    public void WriteFirstFrameComputes()
+    {
+        ulong[] identities;
+        lock (_gate)
+        {
+            if (_firstFrameWritten || _firstFramePath is null)
+            {
+                return;
+            }
+
+            _firstFrameWritten = true;
+            identities = _sessionComputes.ToArray();
+            _sessionComputes.Clear();
+            _sessionComputeSet.Clear();
+        }
+
+        try
+        {
+            var temporary = _firstFramePath + ".tmp";
+            File.WriteAllLines(temporary, identities.Select(identity => identity.ToString("X16", CultureInfo.InvariantCulture)));
+            File.Move(temporary, _firstFramePath, overwrite: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm first-frame list write failed: {exception.Message}");
+        }
+    }
+
     private static string ProgressKey(string stamp) =>
         XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp)).ToString("X16", CultureInfo.InvariantCulture);
 
@@ -421,6 +493,11 @@ public sealed class ShaderPrewarmList : IDisposable
         var identity = XxHash3.HashToUInt64(payload);
         lock (_gate)
         {
+            if (!_firstFrameWritten && _sessionComputeSet.Add(identity))
+            {
+                _sessionComputes.Add(identity);
+            }
+
             if (_failed || !_computes.Add(identity))
             {
                 return;

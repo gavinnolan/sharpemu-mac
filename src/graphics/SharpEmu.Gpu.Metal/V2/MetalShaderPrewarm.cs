@@ -17,10 +17,11 @@ namespace SharpEmu.Gpu.Metal.V2;
 
 /// <summary>
 /// Holds the guest at its first splash hide, GPU submission or flip until the shader
-/// prewarm has been decided and has finished, so logos, movies and the first scenes do
-/// not race thousands of background pipeline compiles. The window keeps presenting the
-/// splash meanwhile. SHARPEMU_SHADER_PREWARM_WAIT=0 opts out. The v2 twin of the
-/// Vulkan presenter's WaitForShaderPrewarm.
+/// prewarm has been decided and has compiled what the guest needs first (every recorded
+/// compute, or those of its first frame once a session has recorded them; see
+/// MetalShaderPrewarm.HoldFirst), so the first frames do not wait on cold compiles. The
+/// window keeps presenting the splash meanwhile. SHARPEMU_SHADER_PREWARM_WAIT=0 opts out.
+/// The v2 twin of the Vulkan presenter's WaitForShaderPrewarm.
 /// </summary>
 internal sealed class MetalShaderPrewarmGate(bool disabled)
 {
@@ -184,7 +185,18 @@ internal static class MetalShaderPrewarm
     private static int _compiled;
     private static int _failed;
     private static int _runtimeHits;
+    private static int _deduplicated;
     private static readonly ConcurrentQueue<ulong> _completed = new();
+    private static readonly ConcurrentDictionary<string, ManualResetEventSlim> _inFlight = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Compiles in flight at once. The MSL front end runs in the driver's compiler service
+    /// and is CPU bound there. On a ten-core machine (four performance, six efficiency
+    /// cores), 200 cold Demon's Souls computes took 14.5-15.4 s with six requests in flight,
+    /// 16.8 s with five, 18.6-26.5 s with four and 44 s with two, and eight or more were
+    /// slower again (ShaderCompileBench, machine otherwise idle).
+    /// </summary>
+    internal static int WorkerCount { get; } = Math.Clamp(Environment.ProcessorCount * 3 / 5, 1, 6);
 
     /// <summary>The list the shader cache records into; null while prewarm is off.</summary>
     public static ShaderPrewarmList? List => Volatile.Read(ref _list);
@@ -241,7 +253,8 @@ internal static class MetalShaderPrewarm
         // Seeded before the compute prewarm or the game plans a shader.
         MetalDeviceDataLoadsStore.Open(directory, stamp);
         // Loaded before the gate lets the game go, so every module the game creates
-        // finds the graphics libraries queued; they compile once the computes are done.
+        // finds the graphics libraries queued; they compile once the computes the guest is
+        // held for are done.
         MetalLibraryPrewarm.Open(directory, device, stamp);
         if (ShaderPrewarmList.Open(directory) is not { } list)
         {
@@ -268,16 +281,15 @@ internal static class MetalShaderPrewarm
             return false;
         }
 
-        var work = new ConcurrentQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>(pending);
-        // The MSL front end runs in the driver's compiler service, and the gate holds the
-        // guest meanwhile. Cold compiles of Demon's Souls' largest compute shaders finished
-        // twice as fast with four requests in flight as with two, and no faster with six.
-        var workerCount = Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
+        var ordered = HoldFirst(pending, HoldsForEveryCompute ? null : list.ReadFirstFrameComputes(), out var held);
+        var work = new ConcurrentQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)>(ordered);
+        var workerCount = WorkerCount;
         var remaining = workerCount;
-        Gate.SetTotal(pending.Count);
+        var done = 0;
+        Gate.SetTotal(held);
         Console.Error.WriteLine(
-            $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} resumed={resumed} workers={workerCount}");
-        Gate.SetRunning(true);
+            $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} held={held} resumed={resumed} workers={workerCount}");
+        Gate.SetRunning(held > 0);
         var threads = new Thread[workerCount];
         for (var index = 0; index < workerCount; index++)
         {
@@ -285,9 +297,32 @@ internal static class MetalShaderPrewarm
             {
                 while (!_stopping && work.TryDequeue(out var item))
                 {
+                    if (!item.Held)
+                    {
+                        // The guest runs again: what is left compiles behind its threads.
+                        if (Thread.CurrentThread.Priority != ThreadPriority.BelowNormal)
+                        {
+                            Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                        }
+
+                        YieldToTheGame();
+                    }
+
                     PrewarmComputePipeline(item.Record, item.Code, compiler, device);
                     _completed.Enqueue(ShaderPrewarmList.Identity(item.Record));
-                    if (Gate.Advance() % PrewarmProgressBatch == 0)
+                    if (item.Held && Gate.Advance() == held && held < pending.Count)
+                    {
+                        Gate.SetRunning(false);
+                        // The graphics libraries of past sessions go ahead of the computes
+                        // the guest was not held for (see YieldToTheGame).
+                        MetalLibraryPrewarm.Begin();
+                        Console.Error.WriteLine(string.Create(
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            $"[LOADER][INFO] Shader prewarm: the {held} computes of the first frame are ready after " +
+                            $"{Stopwatch.GetElapsedTime(started).TotalSeconds:F1}s; the other {pending.Count - held} compile while the game runs."));
+                    }
+
+                    if (Interlocked.Increment(ref done) % PrewarmProgressBatch == 0)
                     {
                         FlushProgress(list, stamp);
                     }
@@ -300,8 +335,13 @@ internal static class MetalShaderPrewarm
                 }
             })
             {
+                // Normal priority while the guest is held for these compiles: the driver's
+                // compiler service runs a request at the requester's priority, and from
+                // below-normal threads each compile took about a fifth longer even on an idle
+                // machine (ShaderCompileBench, 200 cold Demon's Souls computes) and fell far
+                // behind under load from other processes. The computes the guest is not
+                // held for compile below normal (see the loop above).
                 IsBackground = true,
-                Priority = ThreadPriority.BelowNormal,
                 Name = $"SharpEmu shader prewarm {index}",
             };
         }
@@ -338,6 +378,98 @@ internal static class MetalShaderPrewarm
             .ToList();
     }
 
+    /// <summary>
+    /// SHARPEMU_SHADER_PREWARM_HOLD=all holds the guest for every recorded compute, as
+    /// before there was a first-frame list.
+    /// </summary>
+    private static readonly bool HoldsForEveryCompute =
+        Environment.GetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_HOLD") == "all";
+
+    /// <summary>
+    /// The pending computes in the order the prewarm compiles them, and how many from the
+    /// front the guest is held for: those the last session created before its first frame
+    /// (in list order, which is the order a session first used them), then the rest. With no
+    /// first-frame list yet, every one is held for. Demon's Souls records some 1400 computes
+    /// across its scenes and creates about a hundred before its first frame; a cold start
+    /// held it for all of them, 126 s at the splash screen (run 20261017-075343-ds-base-boot),
+    /// while the rest can compile behind the logos and the intro.
+    /// </summary>
+    internal static List<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)> HoldFirst(
+        IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> pending,
+        IReadOnlySet<ulong>? firstFrame,
+        out int held)
+    {
+        if (firstFrame is null)
+        {
+            held = pending.Count;
+            return pending.Select(item => (item.Record, item.Code, true)).ToList();
+        }
+
+        var ordered = new List<(ComputePrewarmRecord, ShaderCodeCapture, bool)>(pending.Count);
+        ordered.AddRange(pending
+            .Where(item => firstFrame.Contains(ShaderPrewarmList.Identity(item.Record)))
+            .Select(item => (item.Record, item.Code, true)));
+        held = ordered.Count;
+        ordered.AddRange(pending
+            .Where(item => !firstFrame.Contains(ShaderPrewarmList.Identity(item.Record)))
+            .Select(item => (item.Record, item.Code, false)));
+        return ordered;
+    }
+
+    private static int _gameCompiles;
+    private static long _yieldedTicks;
+
+    /// <summary>The game starts compiling a shader module of its own.</summary>
+    public static void GameCompileStarted() => Interlocked.Increment(ref _gameCompiles);
+
+    /// <summary>The game's shader module compile is done.</summary>
+    public static void GameCompileDone() => Interlocked.Decrement(ref _gameCompiles);
+
+    /// <summary>
+    /// Holds a compute the guest is not held for while the game compiles modules of its own
+    /// or the graphics libraries of past sessions compile, so neither queues behind the
+    /// background prewarm in the driver's compiler service. A cold start that let the guest
+    /// go after its first frame's computes had its GPU worker wait 120 s in one stretch for
+    /// the logos' graphics libraries while 1500 computes compiled in the background
+    /// (run 20261017-095415-ds-sc-cold2).
+    /// </summary>
+    private static void YieldToTheGame()
+    {
+        if (!MetalLibraryPrewarm.Running && Volatile.Read(ref _gameCompiles) == 0)
+        {
+            return;
+        }
+
+        var started = Stopwatch.GetTimestamp();
+        while (!_stopping && (MetalLibraryPrewarm.Running || Volatile.Read(ref _gameCompiles) > 0))
+        {
+            Thread.Sleep(2);
+        }
+
+        Interlocked.Add(ref _yieldedTicks, Stopwatch.GetTimestamp() - started);
+    }
+
+    /// <summary>The guest presented its first frame: what it created until now is what the next start holds it for.</summary>
+    public static void NoteFirstGuestFrame() => List?.WriteFirstFrameComputes();
+
+    /// <summary>
+    /// Waits while the prewarm compiles this module's source, so a dispatch that comes for
+    /// a compute the background prewarm has in hand takes its cached library instead of
+    /// starting the same front-end compile a second time.
+    /// </summary>
+    public static void WaitWhileCompiling(MetalCompiledGuestShader shader)
+    {
+        if (_finished || _inFlight.IsEmpty)
+        {
+            return;
+        }
+
+        if (_inFlight.TryGetValue(Identity(shader.Payload), out var compiling))
+        {
+            compiling.Wait();
+        }
+    }
+
     private static void FlushProgress(ShaderPrewarmList list, string stamp)
     {
         var batch = new List<ulong>();
@@ -349,7 +481,10 @@ internal static class MetalShaderPrewarm
         list.AppendProgress(stamp, batch);
     }
 
-    private static string StampPart(Type type) => type.Assembly.ManifestModule.ModuleVersionId.ToString("N");
+    // The translators' code, not their build: every commit gives every assembly a new
+    // module version id, and keying on it threw away the library list and the learned
+    // device data loads at the first start after any commit (AssemblyCodeIdentity).
+    private static string StampPart(Type type) => AssemblyCodeIdentity.Of(type.Assembly);
 
     // The translators decide the MSL; the device and the OS decide what the driver's
     // compiler makes of it.
@@ -393,7 +528,33 @@ internal static class MetalShaderPrewarm
             return;
         }
 
-        _prewarmedShaderIdentities![Identity(metal.Payload)] = 0;
+        // Records that differ only in what the plan never reads translate to the same
+        // MSL; about half of Demon's Souls' 1389 recorded computes repeat another one's
+        // source, and a cold start compiled each copy again, side by side with the first.
+        var identity = Identity(metal.Payload);
+        if (!_prewarmedShaderIdentities!.TryAdd(identity, 0))
+        {
+            Interlocked.Increment(ref _deduplicated);
+            return;
+        }
+
+        // Not disposed: a dispatch may still be waking from it.
+        var compiling = new ManualResetEventSlim(false);
+        _inFlight[identity] = compiling;
+        try
+        {
+            CompileComputePipeline(record, metal, device);
+        }
+        finally
+        {
+            _inFlight.TryRemove(identity, out _);
+            compiling.Set();
+        }
+    }
+
+    private static void CompileComputePipeline(ComputePrewarmRecord record, MetalCompiledGuestShader metal, nint device)
+    {
+        string error;
         var pool = MetalNative.objc_autoreleasePoolPush();
         nint library = 0;
         nint function = 0;
@@ -470,7 +631,9 @@ internal static class MetalShaderPrewarm
         MetalLibraryPrewarm.Begin();
         Console.Error.WriteLine(
             $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _compiled)} " +
-            $"failed={Volatile.Read(ref _failed)} ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
+            $"failed={Volatile.Read(ref _failed)} same_source={Volatile.Read(ref _deduplicated)} " +
+            $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
+            $"yielded_ms={Interlocked.Read(ref _yieldedTicks) * 1000 / Stopwatch.Frequency} " +
             $"runtime_compute_modules={runtime.Count} matched={matched}");
     }
 

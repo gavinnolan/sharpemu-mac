@@ -100,6 +100,9 @@ internal sealed partial class MetalRenderHost :
 
     // How long the MSL front end spent turning sources into libraries.
     private long _libraryTicks;
+
+    // How long the GPU worker waited for libraries still compiling on the module pool.
+    private long _libraryWaitTicks;
     private long _shaderCompilations;
     private long _flushes;
     private long _gpuWaits;
@@ -2056,6 +2059,7 @@ internal sealed partial class MetalRenderHost :
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
             $"pipeline_ms={pipelineMs.ToString("F1", culture)} " +
             $"library_ms={(Interlocked.Exchange(ref _libraryTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"library_wait_ms={(Interlocked.Exchange(ref _libraryWaitTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
             $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +

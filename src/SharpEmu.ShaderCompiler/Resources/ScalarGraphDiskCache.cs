@@ -109,7 +109,8 @@ internal static class ScalarGraphDiskCache
         using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
         {
             writer.Write(Version);
-            writer.Write(typeof(ScalarValueGraph).Module.ModuleVersionId.ToByteArray());
+            // The analysis code, not the build: see AssemblyCodeIdentity.
+            writer.Write(AssemblyCodeIdentity.Of(typeof(ScalarValueGraph).Assembly));
             writer.Write(userDataBase); writer.Write(userDataCount); writer.Write(waveSize);
             writer.Write(excludedUserDataRegisters);
             var loads = fixedFunctionVertexLoads?.Order().ToArray() ?? [];

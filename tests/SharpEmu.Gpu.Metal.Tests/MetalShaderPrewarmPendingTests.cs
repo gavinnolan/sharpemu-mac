@@ -58,6 +58,69 @@ public sealed class MetalShaderPrewarmPendingTests : IDisposable
         Assert.Equal(0x2000UL, Assert.Single(pending).Record.Address);
     }
 
+    [Fact]
+    public void WithNoFirstFrameListTheGuestIsHeldForEveryCompute()
+    {
+        using (var list = Open())
+        {
+            Record(list, 0x1000);
+            Record(list, 0x2000);
+        }
+
+        using var reopened = Open();
+        Assert.Null(reopened.ReadFirstFrameComputes());
+        var ordered = MetalShaderPrewarm.HoldFirst(reopened.LoadedComputes(), null, out var held);
+        Assert.Equal(2, held);
+        Assert.All(ordered, item => Assert.True(item.Held));
+    }
+
+    [Fact]
+    public void TheComputesBeforeTheFirstFrameAreHeldForAndCompiledFirst()
+    {
+        using (var list = Open())
+        {
+            Record(list, 0x1000);
+            Record(list, 0x2000);
+            list.WriteFirstFrameComputes();
+            // Created after the first frame: not in the next start's hold.
+            Record(list, 0x3000);
+            list.WriteFirstFrameComputes();
+        }
+
+        using (var reopened = Open())
+        {
+            // A later session first uses 0x3000 and 0x1000 before its frame.
+            Record(reopened, 0x3000);
+            Record(reopened, 0x1000);
+            var firstFrame = reopened.ReadFirstFrameComputes()!;
+            var ordered = MetalShaderPrewarm.HoldFirst(reopened.LoadedComputes(), firstFrame, out var held);
+            Assert.Equal(2, held);
+            Assert.Equal(new ulong[] { 0x1000, 0x2000, 0x3000 }, ordered.Select(item => item.Record.Address));
+            Assert.Equal(new[] { true, true, false }, ordered.Select(item => item.Held));
+            reopened.WriteFirstFrameComputes();
+        }
+
+        using var third = Open();
+        var held3 = MetalShaderPrewarm.HoldFirst(third.LoadedComputes(), third.ReadFirstFrameComputes(), out var count);
+        Assert.Equal(2, count);
+        Assert.Equal(new ulong[] { 0x1000, 0x3000, 0x2000 }, held3.Select(item => item.Record.Address));
+    }
+
+    [Fact]
+    public void AFirstFrameBeforeAnyComputeHoldsForNone()
+    {
+        using (var list = Open())
+        {
+            list.WriteFirstFrameComputes();
+            Record(list, 0x1000);
+        }
+
+        using var reopened = Open();
+        var ordered = MetalShaderPrewarm.HoldFirst(reopened.LoadedComputes(), reopened.ReadFirstFrameComputes(), out var held);
+        Assert.Equal(0, held);
+        Assert.False(Assert.Single(ordered).Held);
+    }
+
     private ShaderPrewarmList Open() =>
         ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
 
