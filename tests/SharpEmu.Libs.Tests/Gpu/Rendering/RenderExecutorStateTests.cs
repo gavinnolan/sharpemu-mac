@@ -376,6 +376,27 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
+    public void Attachments_TheDepthPassKeepsTheTargetsTheCompactedExportsReach()
+    {
+        // Unreal's base pass exports MRT0 and MRT1 with CB_SHADER_MASK enabling slots 0 and 2:
+        // the second export lands in slot 2, and slot 1 is bound but written by nothing. Testing
+        // the export mask at the slot number dropped slot 2 and kept slot 1, so the stationary
+        // lights' precomputed shadow factors never reached their G-buffer.
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 32, 32);
+        banks.Context.ColorTargets[2] = RegisterWords.Color(RecordingRenderHost.MemoryBase + 0x40_0000, 64, 64);
+        banks.Context.RenderTargetMask = 0xFFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xF0F;
+        banks.Context.ShaderInterface.TargetOutputModes[0] = 4;
+        banks.Context.ShaderInterface.TargetOutputModes[1] = 4;
+        _pipelines.Graphics = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = 0xFF }));
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = _host.BegunRenderings[0];
+        Assert.Equal((2u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+    }
+
+    [Fact]
     public void Attachments_AColorTargetWithoutAnActivePixelShaderIsDroppedFromTheDepthPass()
     {
         var banks = Banks(withDepth: true);

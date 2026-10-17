@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -265,9 +266,18 @@ public sealed partial class RenderExecutor
         state.ColorCount = kept;
     }
 
-    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks) =>
-        exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0 ||
-        ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
+    // The export that reaches the slot is the one routed to it, not the export of the same
+    // number: exports are compacted onto the slots CB_SHADER_MASK enables.
+    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
+    {
+        if (exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0)
+        {
+            return true;
+        }
+
+        var export = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
+        return export < 0 || ((pixelColorExportMasks >> (export * 4)) & 0xFu) == 0;
+    }
 
     // Acquires every attachment through the host and assembles the rendering scope.
     private RenderingState AcquireAttachments(ContextRegisters context, ref DrawState state)
