@@ -38,8 +38,8 @@ internal sealed class MetalLibraryCompilePool
     public static MetalLibraryCompilePool Shared => _shared.Value;
 
     /// <summary>
-    /// As many compiles in flight as the shader prewarm keeps: the driver's front end ran
-    /// Demon's Souls' computes no faster with more (see MetalShaderPrewarm.WorkerCount).
+    /// As many compiles in flight as the shader prewarm keeps, where the driver's front
+    /// end ran Demon's Souls' computes fastest (see MetalShaderPrewarm.WorkerCount).
     /// </summary>
     internal static int ThreadCount => MetalShaderPrewarm.WorkerCount;
 

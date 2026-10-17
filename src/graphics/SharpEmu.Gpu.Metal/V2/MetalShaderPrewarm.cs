@@ -177,10 +177,12 @@ internal static class MetalShaderPrewarm
 
     /// <summary>
     /// Compiles in flight at once. The MSL front end runs in the driver's compiler service
-    /// and is CPU bound there: cold compiles of Demon's Souls' computes finished twice as
-    /// fast with four requests in flight as with two, and no faster with more.
+    /// and is CPU bound there. On a ten-core machine (four performance, six efficiency
+    /// cores), 200 cold Demon's Souls computes took 14.5-15.4 s with six requests in flight,
+    /// 16.8 s with five, 18.6-26.5 s with four and 44 s with two, and eight or more were
+    /// slower again (ShaderCompileBench, machine otherwise idle).
     /// </summary>
-    internal static int WorkerCount { get; } = Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
+    internal static int WorkerCount { get; } = Math.Clamp(Environment.ProcessorCount * 3 / 5, 1, 6);
 
     /// <summary>The list the shader cache records into; null while prewarm is off.</summary>
     public static ShaderPrewarmList? List => Volatile.Read(ref _list);

@@ -184,7 +184,7 @@ internal static class MetalLibraryPrewarm
         }
 
         var work = new ConcurrentQueue<Slot>(order);
-        var workerCount = Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
+        var workerCount = MetalShaderPrewarm.WorkerCount;
         var remaining = workerCount;
         var started = Stopwatch.GetTimestamp();
         Console.Error.WriteLine($"[LOADER][INFO] Library prewarm started: libraries={order.Count} workers={workerCount}");
