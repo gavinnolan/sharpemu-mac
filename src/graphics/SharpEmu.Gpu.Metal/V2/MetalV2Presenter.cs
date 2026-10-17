@@ -79,6 +79,7 @@ internal static partial class MetalV2Presenter
     private static uint _hostFrameHeight;
     private static long _guestFrameSequence;
     private static long _presentedGuestFrames;
+    private static int _firstGuestFrameNoted;
     private static long _publishedGuestFrames;
     private static long _adoptionsBlocked;
     private static long _hostPresents;
@@ -844,7 +845,10 @@ internal static partial class MetalV2Presenter
         _presentWidth = frame.Width;
         _presentHeight = frame.Height;
         _presentIsHdr = frame.IsHdr;
-        Interlocked.Increment(ref _presentedGuestFrames);
+        if (Interlocked.Increment(ref _presentedGuestFrames) == 1 && Interlocked.Exchange(ref _firstGuestFrameNoted, 1) == 0)
+        {
+            MetalShaderPrewarm.NoteFirstGuestFrame();
+        }
         if (DsTrace.Gpu && DsTrace.Armed)
         {
             DsTrace.Emit(DsEv.PRESENT, frame.RequestId);

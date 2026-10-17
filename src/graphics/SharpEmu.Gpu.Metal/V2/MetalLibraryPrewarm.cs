@@ -209,8 +209,10 @@ internal static class MetalLibraryPrewarm
                 }
             })
             {
+                // Normal priority, as the compute prewarm's: a library the game takes from
+                // here waits for it, and the compiler service runs the request at this
+                // thread's priority.
                 IsBackground = true,
-                Priority = ThreadPriority.BelowNormal,
                 Name = $"SharpEmu library prewarm {index}",
             };
         }
