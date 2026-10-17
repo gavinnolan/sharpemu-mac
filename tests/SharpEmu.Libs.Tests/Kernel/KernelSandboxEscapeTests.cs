@@ -182,6 +182,74 @@ public sealed class KernelSandboxEscapeTests : IDisposable
         Assert.StartsWith(rootWithSep, Path.GetFullPath(resolved));
     }
 
+    // Resolving a sibling verifies the shared directories, after which the walk
+    // looks them up as slices of the candidate path. A link one level below that
+    // verified directory must still be examined, not skipped with its parent.
+    [Fact]
+    public void ResolveGuestPath_LinkBelowAlreadyVerifiedDirectoryIsDenied()
+    {
+        var shared = Path.Combine(_app0Root, "shared");
+        Directory.CreateDirectory(shared);
+        File.WriteAllBytes(Path.Combine(shared, "ok.bin"), [1]);
+        var outsideDir = Path.Combine(_tempRoot, "outside-verified");
+        Directory.CreateDirectory(outsideDir);
+        File.WriteAllBytes(Path.Combine(outsideDir, "secret.bin"), [2]);
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(shared, "link"), outsideDir);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        Assert.False(string.IsNullOrEmpty(KernelMemoryCompatExports.ResolveGuestPath("/app0/shared/ok.bin")));
+        Assert.Equal(string.Empty, KernelMemoryCompatExports.ResolveGuestPath("/app0/shared/link/secret.bin"));
+        // Asked again, once every component before the link is verified.
+        Assert.Equal(string.Empty, KernelMemoryCompatExports.ResolveGuestPath("/app0/shared/link/secret.bin"));
+    }
+
+    // A link whose target stays inside the mount is never cached as verified, so
+    // the components after it are still walked and a real file beyond it resolves.
+    [Fact]
+    public void ResolveGuestPath_InMountLinkInTheMiddleOfAPathResolves()
+    {
+        var target = Path.Combine(_app0Root, "real", "dir");
+        Directory.CreateDirectory(target);
+        File.WriteAllBytes(Path.Combine(target, "f.bin"), [3]);
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(_app0Root, "alias"), Path.Combine(_app0Root, "real"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            Assert.Equal(
+                Path.Combine(_app0Root, "alias", "dir", "f.bin"),
+                KernelMemoryCompatExports.ResolveGuestPath("/app0/alias/dir/f.bin"));
+        }
+    }
+
+    // A path with "." / ".." / empty segments takes the general normalization and
+    // lands on the same host file the plain spelling does.
+    [Theory]
+    [InlineData("/app0/p//q/./r.bin")]
+    [InlineData("/app0/p/x/../q/r.bin")]
+    [InlineData("/app0/p/q/r.bin/")]
+    public void ResolveGuestPath_NonPlainSpellingMatchesPlainSpelling(string guestPath)
+    {
+        Directory.CreateDirectory(Path.Combine(_app0Root, "p", "q"));
+        File.WriteAllBytes(Path.Combine(_app0Root, "p", "q", "r.bin"), [4]);
+
+        Assert.Equal(
+            KernelMemoryCompatExports.ResolveGuestPath("/app0/p/q/r.bin"),
+            KernelMemoryCompatExports.ResolveGuestPath(guestPath));
+    }
+
     // The containment guard resolves paths via Path.GetFullPath / File.GetAttributes,
     // which throw on a crafted over-long or invalid path. Because ResolveGuestPath
     // runs outside the callers' try blocks, an uncaught throw would crash the

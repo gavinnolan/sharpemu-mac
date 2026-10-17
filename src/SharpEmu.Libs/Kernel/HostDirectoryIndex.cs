@@ -105,6 +105,11 @@ internal static partial class HostDirectoryIndex
             return default;
         }
 
+        if (TryDescribeFromCachedListing(hostPath, out var described))
+        {
+            return described;
+        }
+
         string? directory;
         string name;
         try
@@ -136,6 +141,45 @@ internal static partial class HostDirectoryIndex
         }
 
         return listing.Complete ? new Entry(Verdict.Absent, 0) : default;
+    }
+
+    /// <summary>
+    /// <see cref="Describe"/> for a path whose parent is already listed, looked up
+    /// by slices of <paramref name="hostPath"/> instead of new directory and name
+    /// strings: the path resolver asks this once per asset it resolves.
+    /// </summary>
+    private static bool TryDescribeFromCachedListing(string hostPath, out Entry entry)
+    {
+        entry = default;
+        // GetDirectoryName(string) also collapses repeated separators (and flips
+        // them on Windows); only a path it would return unchanged is sliced.
+        ReadOnlySpan<char> doubleSeparator = ['/', '/'];
+        if (OperatingSystem.IsWindows() || hostPath.AsSpan().IndexOf(doubleSeparator) >= 0)
+        {
+            return false;
+        }
+
+        var directory = Path.GetDirectoryName(hostPath.AsSpan());
+        var name = Path.GetFileName(hostPath.AsSpan());
+        if (directory.IsEmpty || name.IsEmpty ||
+            !_directories.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(directory, out var listing))
+        {
+            return false;
+        }
+
+        if (listing.Ordinal.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out entry))
+        {
+            return true;
+        }
+
+        if (listing.IgnoreCase is { } folded &&
+            folded.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out entry))
+        {
+            return true;
+        }
+
+        entry = listing.Complete ? new Entry(Verdict.Absent, 0) : default;
+        return true;
     }
 
     /// <summary>
