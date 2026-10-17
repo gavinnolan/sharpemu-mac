@@ -17,6 +17,21 @@ internal static class ScalarGraphDiskCache
     private static readonly bool Trace = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_SHADER_PLANNING") == "1";
     private static readonly object WriteLock = new();
 
+    // Pruning lists and stats every entry: the shared cache held 42,740 graphs (255 MB), which
+    // took 160-360 ms to list under Rosetta. Listing for every written graph, under WriteLock,
+    // on the GPU worker and the prewarm threads, charged that to every shader planned without
+    // a cached graph, which is every shader after a compiler build. The size is now listed once per
+    // process and directory and then counted forward, and a prune goes down to three
+    // quarters of the cap so the next one is many entries away. Other processes writing the
+    // same directory are only seen at the next listing, so the cap can be overshot by what
+    // they wrote in between.
+    private const long PruneTargetBytes = MaxCacheBytes / 4 * 3;
+    private static readonly Dictionary<string, long> KnownBytes = new(StringComparer.Ordinal);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Listings = new(StringComparer.Ordinal);
+
+    /// <summary>How many times this process has listed <paramref name="directory"/>.</summary>
+    internal static int ListingsOf(string directory) => Listings.GetValueOrDefault(directory);
+
     internal static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, string? cachePath = null, ulong excludedUserDataRegisters = 0)
     {
@@ -62,14 +77,12 @@ internal static class ScalarGraphDiskCache
                     Directory.CreateDirectory(directory);
                     // Keep a bounded cache across compiler versions too. No live
                     // analysis objects or guest memory are retained by the cache.
-                    var entries = new DirectoryInfo(directory).GetFiles("*.graph").OrderBy(f => f.LastWriteTimeUtc).ToArray();
-                    var total = entries.Sum(f => f.Length) + stream.Length + 32;
-                    foreach (var entry in entries)
+                    var entryBytes = stream.Length + 32;
+                    if (!KnownBytes.TryGetValue(directory, out var known) || known + entryBytes > MaxCacheBytes)
                     {
-                        if (total <= MaxCacheBytes) break;
-                        total -= entry.Length;
-                        entry.Delete();
+                        known = Prune(directory, MaxCacheBytes - entryBytes, PruneTargetBytes - entryBytes);
                     }
+                    KnownBytes[directory] = known + entryBytes;
                     var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                     try
                     {
@@ -119,6 +132,26 @@ internal static class ScalarGraphDiskCache
             }
         }
         return Convert.ToHexString(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+    }
+
+    /// <summary>
+    /// Lists the directory's graphs and, when they hold more than <paramref name="limit"/>
+    /// bytes, deletes the oldest until at most <paramref name="target"/> bytes are left.
+    /// Returns the bytes left.
+    /// </summary>
+    internal static long Prune(string directory, long limit, long target)
+    {
+        Listings.AddOrUpdate(directory, 1, static (_, count) => count + 1);
+        var entries = new DirectoryInfo(directory).GetFiles("*.graph").OrderBy(f => f.LastWriteTimeUtc).ToArray();
+        var total = entries.Sum(f => f.Length);
+        if (total <= limit) return total;
+        foreach (var entry in entries)
+        {
+            if (total <= target) break;
+            total -= entry.Length;
+            entry.Delete();
+        }
+        return total;
     }
 
     private static bool IsCacheFailure(Exception error) => error is IOException or UnauthorizedAccessException or
