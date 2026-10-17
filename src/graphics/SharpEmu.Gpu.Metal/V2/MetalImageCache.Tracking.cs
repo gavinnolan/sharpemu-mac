@@ -32,6 +32,11 @@ internal sealed partial class MetalImageCache
         // Counted before anything can find the image or arm its watch: a CPU write that
         // reads no owner without the lock must never have an image over its bytes.
         _pageOwners.Add(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
+        if (image.Description.HasStencil)
+        {
+            _stencilOwners.Add(imageIdentifier);
+        }
+
         image.Registered = true;
         _totalUsedMemory += image.AccountedSize;
     }
@@ -47,6 +52,7 @@ internal sealed partial class MetalImageCache
         // The watch goes first and the count last, once no lookup can find the image.
         UnwatchImage(imageIdentifier);
         _pageOwners.Remove(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
+        _stencilOwners.Remove(imageIdentifier);
 
         var accounted = image.AccountedSize;
         _totalUsedMemory -= Math.Min(accounted, _totalUsedMemory);
