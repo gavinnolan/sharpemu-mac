@@ -3777,6 +3777,21 @@ public static partial class Gen5MslTranslator
             return name;
         }
 
+        /// <summary>The per-lane view after a write of the low dword of a mask pair. The lanes
+        /// of the high half keep the view they had, which is its bit of the high dword (the view
+        /// is kept in step with the pair), so the high dword is not read: a pair whose last
+        /// ballot nothing else reads can stay unexchanged (Gen5MslTranslator.LaneMasks.cs).</summary>
+        private string LowHalfWriteBit(string low, string view, string high) =>
+            LaneMasksEnabled
+                ? $"sharpemu_lane < 32u ? (((({low}) >> (sharpemu_lane & 31u)) & 1u) != 0u) : {view}"
+                : LaneBit(low, high);
+
+        /// <summary>The same for a write of the high dword.</summary>
+        private string HighHalfWriteBit(string low, string high, string view) =>
+            LaneMasksEnabled
+                ? $"sharpemu_lane < 32u ? {view} : (((({high}) >> (sharpemu_lane & 31u)) & 1u) != 0u)"
+                : LaneBit(low, high);
+
         /// <summary>This lane's bit of a 64-bit mask held as two dwords.
         ///
         /// A 64-lane guest wave runs as two 32-wide Apple simdgroups, so its lane index
@@ -3831,7 +3846,7 @@ public static partial class Gen5MslTranslator
                 {
                     var value = Temp("uint", expression);
                     Line($"s[{VccLoRegister}] = {value};");
-                    Line($"vcc = {LaneBit(value, ScalarExpression(VccHiRegister))};");
+                    Line($"vcc = {LowHalfWriteBit(value, "vcc", ScalarExpression(VccHiRegister))};");
                     return;
                 }
 
@@ -3839,7 +3854,7 @@ public static partial class Gen5MslTranslator
                 {
                     var value = Temp("uint", ClampExecToLanes(expression));
                     Line($"s[{ExecLoRegister}] = {value};");
-                    Line($"exec = {LaneBit(value, ScalarExpression(ExecHiRegister))};");
+                    Line($"exec = {LowHalfWriteBit(value, "exec", ScalarExpression(ExecHiRegister))};");
                     return;
                 }
 
@@ -3856,8 +3871,8 @@ public static partial class Gen5MslTranslator
                         var low = ScalarExpression(
                             register == VccHiRegister ? VccLoRegister : ExecLoRegister);
                         Line(register == VccHiRegister
-                            ? $"vcc = {LaneBit(low, value)};"
-                            : $"exec = {LaneBit(low, value)};");
+                            ? $"vcc = {HighHalfWriteBit(low, value, "vcc")};"
+                            : $"exec = {HighHalfWriteBit(low, value, "exec")};");
                     }
 
                     return;

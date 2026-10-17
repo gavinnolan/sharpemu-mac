@@ -604,6 +604,11 @@ public static partial class Gen5MslTranslator
 
             source.AppendLine("    bool vcc = false;");
             source.AppendLine("    bool scc = false;");
+            foreach (var register in _laneVariables)
+            {
+                source.AppendLine($"    bool {LaneVariableName(register)} = false;");
+            }
+
             if (_usesShaderClock)
             {
                 source.AppendLine($"    ulong {ShaderClockName} = 0ul;");
