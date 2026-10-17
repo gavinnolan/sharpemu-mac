@@ -265,6 +265,14 @@ internal sealed partial class MetalRenderHost
 
     private const long MaxSnapshotBytes = 3L << 30;
 
+    // SHARPEMU_METAL_V2_DUMP_SNAPSHOT_MATCH=<a,b,...>: snapshot only targets whose label
+    // contains one of the texts ("-cs" for compute, a format, an address), so a frame's
+    // budget reaches the pass that matters instead of every geometry pass before it.
+    private static readonly string[]? _snapshotMatch =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_SNAPSHOT_MATCH") is { Length: > 0 } snapshotMatch
+            ? snapshotMatch.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            : null;
+
     private readonly List<(nint Buffer, nint Contents, uint Width, uint Height, ulong Format, nint Texture, string Label)>
         _snapshots = new();
 
@@ -307,6 +315,11 @@ internal sealed partial class MetalRenderHost
         if (!_dumpSnapshots || _renderEncoder != 0 || _computeEncoder != 0)
         {
             return false;
+        }
+
+        if (_snapshotMatch is not null && !Array.Exists(_snapshotMatch, token => label.Contains(token, StringComparison.Ordinal)))
+        {
+            return true;
         }
 
         var width = (uint)MetalV2Native.SendValue(texture, SelWidth);
