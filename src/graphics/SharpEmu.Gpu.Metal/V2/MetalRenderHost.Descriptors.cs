@@ -471,7 +471,7 @@ internal sealed partial class MetalRenderHost
                 $"storage[{index}] hash=0x{stage.Program.Hash:X16}{(written ? " written" : string.Empty)}",
                 descriptor.Address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
             stage.Buffers[index] = range;
-            stage.BufferLengths[index] = (uint)Math.Min(size, uint.MaxValue);
+            stage.BufferLengths[index] = BoundBufferBytes(size, range);
             ReportBufferBinding(stage, index, in descriptor, requested, size, range);
         }
 
@@ -591,6 +591,17 @@ internal sealed partial class MetalRenderHost
 
         return hashes;
     }
+
+    /// <summary>
+    /// The byte count the shader bounds a storage binding by: what the bound buffer
+    /// holds, never more. A range too large for one window binds only its window prefix
+    /// (and one too large to stage only the ring's cap), and the shader checks its
+    /// accesses against this count, not the bound buffer's end; with the guest's whole
+    /// size an access past the prefix would read and write whatever follows the window
+    /// in the GPU address space. Past it a load reads zero and a store is dropped.
+    /// </summary>
+    internal static uint BoundBufferBytes(ulong size, in MetalGuestRange range) =>
+        (uint)Math.Min(Math.Min(size, range.Size), uint.MaxValue);
 
     private void ReportBufferBinding(
         MetalStageBindings stage,

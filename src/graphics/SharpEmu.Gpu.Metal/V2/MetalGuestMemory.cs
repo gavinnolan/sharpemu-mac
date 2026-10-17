@@ -499,6 +499,20 @@ internal sealed class MetalGuestMemory : IDisposable
         return !StageEverything && TryResolveWindow(gpuVa, size, out range);
     }
 
+    /// <summary>True when the range is a window's own bytes - guest memory - rather than a ring copy.</summary>
+    public bool IsInPlace(in MetalGuestRange range)
+    {
+        foreach (var window in _windows)
+        {
+            if (window.Buffer == range.Buffer)
+            {
+                return range.IsValid;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>A ring copy of the guest bytes the CPU sees now.</summary>
     public MetalGuestRange Stage(ulong gpuVa, ulong size) =>
         size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ? default : Upload(gpuVa, size);
