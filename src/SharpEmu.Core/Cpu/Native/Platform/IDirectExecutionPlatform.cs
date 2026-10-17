@@ -221,4 +221,18 @@ public unsafe interface IDirectExecutionPlatform
     /// slowed by other processes is not taken for a hang.
     /// </summary>
     double HostLoadAverage => -1.0;
+
+    /// <summary>
+    /// Resolves a host address that lives inside an OS-loaded image (system
+    /// library, GPU driver, runtime) for crash symbolization. Platforms with no
+    /// such facility return false.
+    /// </summary>
+    bool TryResolveHostImageSymbol(ulong address, out HostImageSymbol symbol)
+    {
+        symbol = default;
+        return false;
+    }
 }
+
+/// <summary>A host address resolved to its loaded image and nearest symbol.</summary>
+public readonly record struct HostImageSymbol(string ImagePath, string? SymbolName, ulong SymbolAddress, ulong ImageBase);
