@@ -87,7 +87,7 @@ public sealed class Gen5ManualInterpolationTests
             out var reason);
 
         Assert.Null(plan);
-        Assert.Equal("product of vertex values", reason);
+        Assert.StartsWith("product of vertex values at ", reason);
     }
 
     [Fact]
@@ -111,7 +111,58 @@ public sealed class Gen5ManualInterpolationTests
             out var reason);
 
         Assert.Null(plan);
-        Assert.Equal("lane mixture of a vertex value", reason);
+        Assert.StartsWith("lane mixture of a vertex value at ", reason);
+    }
+
+    [Fact]
+    public void BarycentricOverwrittenUnderNarrowedExec_IsReadByTheSameLanes()
+    {
+        // v0 (I) is overwritten for the lanes of a narrowed EXEC; those lanes may read it,
+        // the others still hold I.
+        HalfInterpolationThen(
+            [Vop2(0x40, "VMulF32", 0, V(20), V(20)), Vop2(0x44, "VAddF32", 21, V(0), V(20)), Export(21)],
+            expectPlan: true);
+        HalfInterpolationThen(
+            [Vop2(0x40, "VMulF32", 0, V(20), V(20)), RestoreExec(0x44), Vop2(0x48, "VAddF32", 21, V(0), V(20)), Export(21)],
+            expectPlan: false);
+    }
+
+    [Theory]
+    [InlineData(12u, true)]
+    [InlineData(14u, false)]
+    public void ExecRestoredInsideTheWholeQuadMask_ReadsWhatThatMaskWrote(uint restored, bool expectPlan)
+    {
+        // s[12:13] = EXEC; EXEC = WQM(EXEC); ...; discard; EXEC = WQM(s[12:13]); v0 overwritten;
+        // EXEC = s[12:13] (inside the whole-quad mask) exports v0. A scalar load in between
+        // leaves s[12:13] alone.
+        var plan = Analyze(
+            [Sop1(0x00, "SMovB64", 12, 126), Sop1(0x04, "SWqmB64", 126, 126),
+             .. HalfInterpolation(false, result: 20, pc: 0x10),
+             new(0x40, Gen5ShaderEncoding.Sop2, "SAndn2B64", [0], [Gen5Operand.Scalar(12), Gen5Operand.Scalar(106)],
+                 [Gen5Operand.Scalar(12)], null),
+             Sop1(0x44, "SWqmB64", 126, 12),
+             new(0x48, Gen5ShaderEncoding.Smem, "SLoadDwordx8", [0], [Gen5Operand.Scalar(16)],
+                 [.. Enumerable.Range(0, 8).Select(register => Gen5Operand.Scalar((uint)register))],
+                 new Gen5ScalarMemoryControl(8, 0, null)),
+             Vop2(0x50, "VMulF32", 0, V(20), V(20)),
+             Sop1(0x54, "SMovB64", 126, restored),
+             Export(0)],
+            out var reason);
+
+        Assert.Equal(expectPlan, plan is not null);
+        if (!expectPlan)
+        {
+            Assert.StartsWith("Exp at 0xFF00 reads a vertex value", reason);
+        }
+    }
+
+    [Fact]
+    public void ExportWithNoChannelEnabled_ReadsNothing()
+    {
+        var nullExport = new Gen5ShaderInstruction(0xFF08, Gen5ShaderEncoding.Exp, "Exp", [0], [V(11)], [],
+            new Gen5ExportControl(9, 0, false, true, true));
+
+        Assert.NotNull(Analyze([.. HalfInterpolation(false, result: 20), Export(20), nullExport], out _));
     }
 
     [Fact]
@@ -149,6 +200,21 @@ public sealed class Gen5ManualInterpolationTests
             new(pc + 0x20, Gen5ShaderEncoding.Vop2, "VMacF32", [0], [V(15), V(1)], [V(result)], null),
         ];
     }
+
+    // The half interpolation inside a narrowed EXEC, followed by the given instructions.
+    private static void HalfInterpolationThen(Gen5ShaderInstruction[] tail, bool expectPlan)
+    {
+        var plan = Analyze([SaveExec(0x00), .. HalfInterpolation(false, result: 20, pc: 0x10), .. tail], out var reason);
+
+        Assert.True(expectPlan == plan is not null, reason);
+        if (!expectPlan)
+        {
+            Assert.StartsWith("lane mixture of a vertex value", reason);
+        }
+    }
+
+    private static Gen5ShaderInstruction Sop1(uint pc, string opcode, uint destination, uint source) =>
+        new(pc, Gen5ShaderEncoding.Sop1, opcode, [0], [Gen5Operand.Scalar(source)], [Gen5Operand.Scalar(destination)], null);
 
     private static Gen5ManualInterpolationPlan? Analyze(params Gen5ShaderInstruction[] instructions) =>
         Analyze(instructions, out _);

@@ -287,8 +287,14 @@ public static class Gen5WaveLaneLocalAnalysis
         var op = Normalize(instruction, NoPcs);
         if (op.WrittenVectorStart >= 0)
         {
-            var status = op.Family == Family.Mimg && instruction.Control is Gen5ImageControl && op.WrittenVectorCount > 1 ? 1 : 0;
-            return (op.WrittenVectorStart, op.WrittenVectorCount - status, status);
+            if (op.Family == Family.Mimg && instruction.Control is Gen5ImageControl image)
+            {
+                // The data dwords (packed in pairs with D16), then the status dword with TFE/LWE.
+                var data = (int)Math.Max(Gen5ImageOpcodes.ResultDwords(instruction.Opcode, image.Dmask, image.D16), 1u);
+                return (op.WrittenVectorStart, data, image.Tfe || image.Lwe ? 1 : 0);
+            }
+
+            return (op.WrittenVectorStart, op.WrittenVectorCount, 0);
         }
 
         return op.Destination.Kind == Kind.Vector ? (op.Destination.Register, 1, op.Wide ? 1 : 0) : (-1, 0, 0);

@@ -240,6 +240,9 @@ public static class Gen5ManualInterpolation
         public uint Bits { get; private init; }
         public double Number { get; private init; }
         public int Vertex { get; private init; }
+        // The 16-bit halves of a raw value still in the register (bit 0 low, bit 1 high): a
+        // partial write (SDWA, a 16-bit result) replaces the other.
+        public uint Halves { get; private init; } = 3;
         public uint Location { get; private init; }
         public uint Channel { get; private init; }
         public (Basis Basis, Poly Coefficient)[] Terms { get; private init; } = [];
@@ -251,6 +254,18 @@ public static class Gen5ManualInterpolation
 
         public static Value OfRaw(int vertex, uint location, uint channel) =>
             new(Tag.Raw) { Vertex = vertex, Location = location, Channel = channel };
+
+        // What is left after a write of one half (0 low, 1 high).
+        public Value WithoutHalf(int half)
+        {
+            var halves = Halves & (half == 0 ? 2u : 1u);
+            if (Tag != Tag.Raw || halves == 0)
+            {
+                return Dependent ? Poison : Opaque;
+            }
+
+            return new Value(Tag.Raw) { Vertex = Vertex, Location = Location, Channel = Channel, Halves = halves };
+        }
 
         public static Value Constant(double number) => OfTerms([(Basis.One, new Poly(number, 0, 0))], -1);
 
@@ -298,7 +313,7 @@ public static class Gen5ManualInterpolation
 
         public bool Equals(Value? other) =>
             other is not null && Tag == other.Tag && Bits == other.Bits && Number.Equals(other.Number) &&
-            Vertex == other.Vertex && Location == other.Location && Channel == other.Channel &&
+            Vertex == other.Vertex && Location == other.Location && Channel == other.Channel && Halves == other.Halves &&
             Barycentric == other.Barycentric && Terms.AsSpan().SequenceEqual(other.Terms);
 
         public override bool Equals(object? obj) => Equals(obj as Value);
@@ -311,17 +326,43 @@ public static class Gen5ManualInterpolation
         public required Value[] Vectors;
         // The EXEC epoch each VGPR was written in (0: a full EXEC).
         public required int[] Epochs;
+        // Set when the lanes outside a VGPR's epoch may still hold a vertex value.
+        public required bool[] Shadows;
         public required uint?[] Scalars;
+        // What each SGPR pair (by its low register) is known to hold of EXEC.
+        public required ExecFact?[] Facts;
         public int Epoch;
+        // Epochs whose lanes include all of the current EXEC.
+        public int[] Within = [];
 
         public State Clone() => new()
         {
             Vectors = (Value[])Vectors.Clone(),
             Epochs = (int[])Epochs.Clone(),
+            Shadows = (bool[])Shadows.Clone(),
             Scalars = (uint?[])Scalars.Clone(),
+            Facts = (ExecFact?[])Facts.Clone(),
             Epoch = Epoch,
+            Within = Within,
         };
+
+        public bool Covers(int epoch) => epoch == 0 || epoch == Epoch || Within.Contains(epoch);
     }
+
+    // A mask equal to the EXEC of epoch Exact (or -1), inside the EXEC of every epoch in Within.
+    private sealed record ExecFact(int Exact, int[] Within)
+    {
+        public int[] Containing => Exact < 0 ? Within : Union(Within, [Exact]);
+
+        public bool Equals(ExecFact? other) =>
+            other is not null && Exact == other.Exact && Within.AsSpan().SequenceEqual(other.Within);
+
+        public override int GetHashCode() => HashCode.Combine(Exact, Within.Length);
+    }
+
+    private static int[] Union(int[] left, int[] right) => left.Union(right).Order().ToArray();
+
+    private static int[] Intersect(int[] left, int[] right) => left.Intersect(right).Order().ToArray();
 
     private sealed class Analysis
     {
@@ -448,7 +489,9 @@ public static class Gen5ManualInterpolation
             {
                 Vectors = Enumerable.Repeat(Value.Opaque, VectorCount).ToArray(),
                 Epochs = new int[VectorCount],
+                Shadows = new bool[VectorCount],
                 Scalars = new uint?[ScalarCount],
+                Facts = new ExecFact?[ScalarCount],
             };
             var vgpr = 0;
             for (var bit = 0; bit < 7; bit++)
@@ -475,14 +518,16 @@ public static class Gen5ManualInterpolation
 
         private static bool SameState(State left, State right)
         {
-            if (left.Epoch != right.Epoch)
+            if (left.Epoch != right.Epoch || !left.Within.AsSpan().SequenceEqual(right.Within) ||
+                !left.Facts.AsSpan().SequenceEqual(right.Facts))
             {
                 return false;
             }
 
             for (var register = 0; register < VectorCount; register++)
             {
-                if (left.Epochs[register] != right.Epochs[register] || !left.Vectors[register].Equals(right.Vectors[register]))
+                if (left.Epochs[register] != right.Epochs[register] || left.Shadows[register] != right.Shadows[register] ||
+                    !left.Vectors[register].Equals(right.Vectors[register]))
                 {
                     return false;
                 }
@@ -500,8 +545,12 @@ public static class Gen5ManualInterpolation
             {
                 Vectors = new Value[VectorCount],
                 Epochs = new int[VectorCount],
+                Shadows = new bool[VectorCount],
                 Scalars = new uint?[ScalarCount],
+                Facts = new ExecFact?[ScalarCount],
                 Epoch = epoch,
+                Within = Intersect(Union(existing.Within, [existing.Epoch]), Union(incoming.Within, [incoming.Epoch]))
+                    .Where(value => value != epoch).ToArray(),
             };
             for (var register = 0; register < VectorCount; register++)
             {
@@ -509,21 +558,22 @@ public static class Gen5ManualInterpolation
                 var right = incoming.Vectors[register];
                 var leftEpoch = existing.Epochs[register];
                 var rightEpoch = incoming.Epochs[register];
+                var shadow = existing.Shadows[register] || incoming.Shadows[register];
                 if (left.Equals(right) && leftEpoch == rightEpoch)
                 {
                     merged.Vectors[register] = left;
                     merged.Epochs[register] = leftEpoch;
+                    merged.Shadows[register] = shadow;
                 }
-                else if (left.Equals(right) &&
-                         (leftEpoch == 0 || leftEpoch == existing.Epoch) &&
-                         (rightEpoch == 0 || rightEpoch == incoming.Epoch))
+                else if (left.Equals(right) && existing.Covers(leftEpoch) && incoming.Covers(rightEpoch))
                 {
                     merged.Vectors[register] = left;
                     merged.Epochs[register] = leftEpoch == 0 && rightEpoch == 0 ? 0 : epoch;
+                    merged.Shadows[register] = shadow;
                 }
                 else
                 {
-                    merged.Vectors[register] = left.Dependent || right.Dependent ? Value.Poison : Value.Opaque;
+                    merged.Vectors[register] = left.Dependent || right.Dependent || shadow ? Value.Poison : Value.Opaque;
                 }
             }
 
@@ -531,6 +581,9 @@ public static class Gen5ManualInterpolation
             {
                 merged.Scalars[register] = existing.Scalars[register] == incoming.Scalars[register]
                     ? existing.Scalars[register]
+                    : null;
+                merged.Facts[register] = Equals(existing.Facts[register], incoming.Facts[register])
+                    ? existing.Facts[register]
                     : null;
             }
 
@@ -541,10 +594,23 @@ public static class Gen5ManualInterpolation
 
         private State Transfer(Gen5ShaderInstruction instruction, State input)
         {
+            try
+            {
+                return TransferCore(instruction, input);
+            }
+            catch (PlanFailure failure) when (!failure.Message.Contains(" at 0x", StringComparison.Ordinal))
+            {
+                throw new PlanFailure($"{failure.Message} at 0x{instruction.Pc:X} {instruction.Opcode}");
+            }
+        }
+
+        private State TransferCore(Gen5ShaderInstruction instruction, State input)
+        {
             var state = input.Clone();
             if (_execFullPcs.Contains(instruction.Pc))
             {
                 state.Epoch = 0;
+                state.Within = [];
             }
 
             var opcode = instruction.Opcode;
@@ -564,25 +630,19 @@ public static class Gen5ManualInterpolation
             }
 
             TransferScalars(instruction, state);
-            if (WritesExec(instruction))
-            {
-                state.Epoch = (int)instruction.Pc + 1;
-            }
-
-            return state;
+            TransferExec(instruction, input, state);            return state;
         }
 
         private Value ReadVector(State state, uint register)
         {
             var value = state.Vectors[register];
-            var epoch = state.Epochs[register];
-            if (value.Tag == Tag.Opaque || epoch == 0 || epoch == state.Epoch)
+            if (state.Covers(state.Epochs[register]))
             {
                 return value;
             }
 
             // Written for other lanes than the ones reading it.
-            return value.Dependent ? Value.Poison : Value.Opaque;
+            return value.Dependent || state.Shadows[register] ? Value.Poison : Value.Opaque;
         }
 
         private static void WriteVector(State state, uint register, Value value, bool maybe = false)
@@ -593,19 +653,27 @@ public static class Gen5ManualInterpolation
             }
 
             var old = state.Vectors[register];
+            var oldEpoch = state.Epochs[register];
+            var oldShadow = state.Shadows[register];
             if (maybe)
             {
-                value = old.Dependent ? Value.Poison : Value.Opaque;
-            }
-            else if (state.Epoch != 0 && old.Dependent && state.Epochs[register] != state.Epoch && !old.Equals(value))
-            {
-                // The lanes outside EXEC keep the vertex value (unless it was written for the
-                // same lanes, whose others never held it).
-                value = Value.Poison;
+                value = old.Dependent || oldShadow ? Value.Poison : Value.Opaque;
             }
 
+            if (value.Tag == Tag.Poison || state.Epoch == 0)
+            {
+                state.Vectors[register] = value;
+                state.Epochs[register] = 0;
+                state.Shadows[register] = false;
+                return;
+            }
+
+            // Under a narrowed EXEC the other lanes keep what they held: a vertex value there
+            // shadows the register for any read by other lanes. A value written for the same
+            // lanes leaves the others as they were.
             state.Vectors[register] = value;
-            state.Epochs[register] = value.Tag is Tag.Opaque or Tag.Poison ? 0 : state.Epoch;
+            state.Shadows[register] = oldEpoch == state.Epoch ? oldShadow : oldShadow || (old.Dependent && !old.Equals(value));
+            state.Epochs[register] = state.Epoch;
         }
 
         private Value ReadOperand(State state, Gen5Operand operand) => operand.Kind switch
@@ -636,9 +704,31 @@ public static class Gen5ManualInterpolation
         {
             Tag.Bits => Value.Constant(BitConverter.UInt32BitsToSingle(value.Bits)),
             Tag.Inline => Value.Constant(value.Number),
-            Tag.Raw => Value.OfTerms([(new Basis(value.Vertex, value.Location, value.Channel, Gen5InterpolantKind.Float), new Poly(1, 0, 0))], -1),
+            Tag.Raw => RawTerm(value, Gen5InterpolantKind.Float),
             _ => value,
         };
+
+        // A raw value read as one kind, which needs the halves the kind reads.
+        private static Value RawTerm(Value value, Gen5InterpolantKind kind)
+        {
+            var needed = kind switch
+            {
+                Gen5InterpolantKind.HalfLow or Gen5InterpolantKind.Byte0 or Gen5InterpolantKind.Byte1 => 1u,
+                Gen5InterpolantKind.HalfHigh or Gen5InterpolantKind.Byte2 or Gen5InterpolantKind.Byte3 => 2u,
+                _ => 3u,
+            };
+            if ((value.Halves & needed) != needed)
+            {
+                if (value.Dependent)
+                {
+                    throw new PlanFailure("partly overwritten vertex value");
+                }
+
+                return Value.Opaque;
+            }
+
+            return Value.OfTerms([(new Basis(value.Vertex, value.Location, value.Channel, kind), new Poly(1, 0, 0))], -1);
+        }
 
         // One 16-bit half of the value as an f16 operand, widened.
         private static Value AsHalf(Value value, bool high) => value.Tag switch
@@ -646,9 +736,7 @@ public static class Gen5ManualInterpolation
             Tag.Poison => throw new PlanFailure("lane mixture of a vertex value"),
             Tag.Bits => Value.Constant((double)BitConverter.UInt16BitsToHalf((ushort)(high ? value.Bits >> 16 : value.Bits))),
             Tag.Inline => Value.Constant(value.Number),
-            Tag.Raw => Value.OfTerms(
-                [(new Basis(value.Vertex, value.Location, value.Channel, high ? Gen5InterpolantKind.HalfHigh : Gen5InterpolantKind.HalfLow), new Poly(1, 0, 0))],
-                -1),
+            Tag.Raw => RawTerm(value, high ? Gen5InterpolantKind.HalfHigh : Gen5InterpolantKind.HalfLow),
             _ when value.Dependent => throw new PlanFailure("half of a computed vertex value"),
             _ => Value.Opaque,
         };
@@ -661,7 +749,7 @@ public static class Gen5ManualInterpolation
                 case Tag.Poison:
                     throw new PlanFailure("lane mixture of a vertex value");
                 case Tag.Raw:
-                    return Value.OfTerms([(new Basis(value.Vertex, value.Location, value.Channel, kind), new Poly(1, 0, 0))], -1);
+                    return RawTerm(value, kind);
                 case Tag.Bits:
                 case Tag.Inline:
                     var bits = value.Tag == Tag.Bits ? value.Bits : BitConverter.SingleToUInt32Bits((float)value.Number);
@@ -1081,8 +1169,16 @@ public static class Gen5ManualInterpolation
         private void TransferOther(Gen5ShaderInstruction instruction, State state)
         {
             var opcode = instruction.Opcode;
-            foreach (var source in instruction.Sources)
+            for (var index = 0; index < instruction.Sources.Count; index++)
             {
+                // An export reads only its enabled channels (a compressed one two per source).
+                var source = instruction.Sources[index];
+                if (instruction.Control is Gen5ExportControl export &&
+                    (export.EnableMask & (export.Compressed ? 3u << (2 * index) : 1u << index)) == 0)
+                {
+                    continue;
+                }
+
                 if (source.Kind == Gen5OperandKind.VectorRegister && ReadVector(state, source.Value).Dependent)
                 {
                     throw new PlanFailure($"{opcode} at 0x{instruction.Pc:X} reads a vertex value");
@@ -1100,6 +1196,14 @@ public static class Gen5ManualInterpolation
             var (start, count, maybe) = Gen5WaveLaneLocalAnalysis.WrittenVectorRange(instruction);
             if (start < 0)
             {
+                return;
+            }
+
+            // A 16-bit write keeps the other half of its register.
+            var half = WrittenHalf(instruction);
+            if (half >= 0 && count == 1 && maybe == 0)
+            {
+                WriteVector(state, (uint)start, ReadVector(state, (uint)start).WithoutHalf(half));
                 return;
             }
 
@@ -1183,7 +1287,44 @@ public static class Gen5ManualInterpolation
         }
 
         private static readonly string[] DestinationReadingParts =
-            ["Mac", "Fmac", "Dot", "16", "Writelane", "Permlane", "Swap", "Qsad", "Interp"];
+            ["Mac", "Fmac", "Dot", "Writelane", "Permlane", "Swap", "Qsad", "Interp", "Mix"];
+
+        // The half of its VGPR a 16-bit result goes to (0 low, 1 high; the other is kept), or -1
+        // for a 32-bit write: SDWA byte/word destinations that preserve the rest, the f16 mix
+        // forms, and 16-bit results (op_sel[3] picks the high half).
+        private static int WrittenHalf(Gen5ShaderInstruction instruction)
+        {
+            var opcode = instruction.Opcode;
+            if (instruction.Control is Gen5SdwaControl { DestinationSelect: not 6 } sdwa)
+            {
+                return sdwa.DestinationUnused == 2 ? (sdwa.DestinationSelect is 2 or 3 or 5 ? 1 : 0) : -1;
+            }
+
+            if (opcode.Contains("Mixlo", StringComparison.Ordinal))
+            {
+                return 0;
+            }
+
+            if (opcode.Contains("Mixhi", StringComparison.Ordinal))
+            {
+                return 1;
+            }
+
+            if (!opcode.StartsWith('V') || opcode.Contains("Pk", StringComparison.Ordinal) ||
+                instruction.Encoding == Gen5ShaderEncoding.Vop3p || opcode.StartsWith("VCmp", StringComparison.Ordinal) ||
+                opcode.StartsWith("VInterp", StringComparison.Ordinal))
+            {
+                return -1;
+            }
+
+            var type = System.Text.RegularExpressions.Regex.Match(opcode, "[FIUB](16|32|64)");
+            if (!type.Success || type.Groups[1].Value != "16")
+            {
+                return -1;
+            }
+
+            return instruction.Control is Gen5Vop3Control { OperandSelect: var select } && (select & 8u) != 0 ? 1 : 0;
+        }
 
         private static bool ReadsDestination(Gen5ShaderInstruction instruction) =>
             DestinationReadingParts.Any(part => instruction.Opcode.Contains(part, StringComparison.Ordinal)) ||
@@ -1203,11 +1344,25 @@ public static class Gen5ManualInterpolation
                     if (register + offset < ScalarCount)
                     {
                         state.Scalars[register + offset] = null;
+                        state.Facts[register + offset] = null;
+                        if (register + offset > 0)
+                        {
+                            state.Facts[register + offset - 1] = null;
+                        }
                     }
                 }
             }
 
-            if (opcode.StartsWith('V'))
+            // VOPC compares and the VOP2 carry forms write VCC without listing it.
+            var scalarDestination = instruction.Control switch
+            {
+                Gen5Vop3Control control => control.ScalarDestination,
+                Gen5SdwaControl control => control.ScalarDestination,
+                _ => null,
+            };
+            if (opcode.StartsWith('V') && scalarDestination is null &&
+                (opcode.StartsWith("VCmp", StringComparison.Ordinal) && !opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
+                 opcode.Contains("Co", StringComparison.Ordinal)))
             {
                 Clear(106, 2);
             }
@@ -1247,6 +1402,12 @@ public static class Gen5ManualInterpolation
                 };
             }
 
+            if (instruction.Control is Gen5ScalarMemoryControl load &&
+                instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister } first, ..])
+            {
+                Clear(first.Value, load.DestinationCount);
+            }
+
             foreach (var destination in instruction.Destinations)
             {
                 if (destination.Kind != Gen5OperandKind.ScalarRegister)
@@ -1254,9 +1415,10 @@ public static class Gen5ManualInterpolation
                     continue;
                 }
 
-                Clear(destination.Value, instruction.Control is Gen5ScalarMemoryControl memory
-                    ? Math.Max(memory.DestinationCount, 2u)
-                    : 2u);
+                // Every listed register is written; a 64-bit scalar result also the next one.
+                // A scalar load lists each register it loads.
+                var wide = opcode.StartsWith('S') && System.Text.RegularExpressions.Regex.IsMatch(opcode, "[BIU]64$");
+                Clear(destination.Value, wide && instruction.Control is not Gen5ScalarMemoryControl ? 2u : 1u);
             }
 
             if (constant is { } bits && instruction.Destinations.Count == 1 &&
@@ -1264,6 +1426,71 @@ public static class Gen5ManualInterpolation
             {
                 state.Scalars[scalar.Value] = bits;
             }
+        }
+
+        // Tracks which epochs' lanes contain the EXEC: a mask saved from EXEC restores its epoch,
+        // a mask ANDed into EXEC stays inside the epochs containing the operand, and the
+        // source of a whole-quad EXEC is inside it.
+        private static void TransferExec(Gen5ShaderInstruction instruction, State input, State state)
+        {
+            var opcode = instruction.Opcode;
+            var current = new ExecFact(input.Epoch, input.Within);
+            ExecFact? Fact(int index) =>
+                index < instruction.Sources.Count && instruction.Sources[index] is { Kind: Gen5OperandKind.ScalarRegister } source
+                    ? source.Value == 126 ? current : source.Value < ScalarCount ? input.Facts[source.Value] : null
+                    : null;
+            int[] Containing(int index) => Fact(index)?.Containing ?? [];
+            var destination = instruction.Destinations.Count == 1 &&
+                              instruction.Destinations[0] is { Kind: Gen5OperandKind.ScalarRegister, Value: < ScalarCount } scalar
+                ? (uint?)scalar.Value
+                : null;
+
+            if (!WritesExec(instruction))
+            {
+                if (opcode == "SMovB64" && destination is { } copy && Fact(0) is { } copied)
+                {
+                    state.Facts[copy] = copied;
+                }
+
+                return;
+            }
+
+            var epoch = (int)instruction.Pc + 1;
+            var within = Array.Empty<int>();
+            if (opcode.Contains("Saveexec", StringComparison.Ordinal))
+            {
+                within = opcode.StartsWith("SAndSaveexec", StringComparison.Ordinal) ? Union(Containing(0), current.Containing)
+                    : opcode.StartsWith("SAndn2Saveexec", StringComparison.Ordinal) ? Containing(0)
+                    : [];
+                if (destination is { } saved and not 126)
+                {
+                    state.Facts[saved] = current;
+                }
+            }
+            else if (destination == 126)
+            {
+                switch (opcode)
+                {
+                    case "SMovB64" when Fact(0) is { Exact: >= 0 } restored:
+                        epoch = restored.Exact;
+                        within = restored.Within;
+                        break;
+                    case "SMovB64":
+                    case "SAndn2B64":
+                        within = Containing(0);
+                        break;
+                    case "SAndB64":
+                        within = Union(Containing(0), Containing(1));
+                        break;
+                    case "SWqmB64" when instruction.Sources[0] is { Kind: Gen5OperandKind.ScalarRegister, Value: < 126 } quad:
+                        var known = input.Facts[quad.Value] ?? new ExecFact(-1, []);
+                        state.Facts[quad.Value] = known with { Within = Union(known.Within, [epoch]) };
+                        break;
+                }
+            }
+
+            state.Epoch = epoch;
+            state.Within = within.Where(value => value != epoch).ToArray();
         }
 
         private static bool WritesExec(Gen5ShaderInstruction instruction)
