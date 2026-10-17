@@ -1046,6 +1046,21 @@ public static class KernelPthreadCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
     }
 
+    // The closures live in their own method on purpose: a lambda that captures the lock's
+    // parameters makes the compiler allocate the capture class on entry to the method that
+    // contains it, which put an 88-byte allocation on every uncontended lock and trylock.
+    private static SyncBlockWaiter CreateMutexBlockWaiter(
+        CpuContext ctx,
+        ulong mutexAddress,
+        ulong resolvedAddress,
+        PthreadMutexState state,
+        PthreadMutexWaiter waiter,
+        bool posix,
+        long deadline) =>
+        new(
+            () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter, posix, deadline),
+            () => TryGrantBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter));
+
     private static int PthreadMutexLockSce(CpuContext ctx, ulong mutexAddress, bool tryOnly, bool posix, long deadline)
     {
         if (mutexAddress == 0)
@@ -1156,9 +1171,7 @@ public static class KernelPthreadCompatExports
         }
 
         if (canCooperativelyBlock && waiter is not null &&
-            RequestMutexBlock(ctx, waiter, deadline, new SyncBlockWaiter(
-                () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter, posix, deadline),
-                () => TryGrantBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter))))
+            RequestMutexBlock(ctx, waiter, deadline, CreateMutexBlockWaiter(ctx, mutexAddress, resolvedAddress, state, waiter, posix, deadline)))
         {
             if (dsSync)
             {
