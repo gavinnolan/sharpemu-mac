@@ -19,7 +19,8 @@
 # The game is stopped with SIGTERM first, because SIGKILL with GPU work in flight has been
 # linked to an IOGPU kernel panic; SIGKILL is used only if it is still alive 10 s later.
 #
-# Output: artifacts/runs/<timestamp>-<game>-<tag>/ with game.log, result.txt, keys.log,
+# Output: artifacts/runs/<timestamp>-<game>-<tag>/ with game.log, game.tlog (game.log lines
+# prefixed with seconds since launch), result.txt, keys.log,
 # footprint.log ("seconds footprint_mb rss_mb" per second), screenshots (when a window-id
 # helper is available) and run.env. SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
 set -uo pipefail
@@ -183,6 +184,14 @@ shot() {
 ) > "$OUT/game.log" 2>&1 &
 GPID=$!
 start=$(date +%s)
+# game.tlog: game.log with seconds since launch on each line, for load timelines.
+perl -MTime::HiRes=time,sleep -e '
+  my ($log, $pid) = @ARGV; my $t0 = time; $| = 1;
+  sleep 0.05 until -e $log;
+  open(my $in, "<", $log) or exit 1;
+  my $drain = sub { while (defined(my $l = <$in>)) { printf "[+%8.3f] %s", time - $t0, $l } seek $in, 0, 1 };
+  while (kill 0, $pid) { $drain->(); sleep 0.05 }
+  $drain->();' "$OUT/game.log" "$GPID" > "$OUT/game.tlog" 2>/dev/null &
 python3 "$REPO_ROOT/scripts/macos/input-plan.py" --plan "$PLAN" --keys "$KEYS" \
   --events "$OUT/keys.log" --game-log "$OUT/game.log" --start-after-log "$INPUT_ANCHOR" \
   --run-limit "$SECONDS_LIMIT" > "$OUT/input-plan.log" 2>&1 &
