@@ -277,6 +277,29 @@ public static class Gen5WaveLaneLocalAnalysis
         return new Analysis(ops, blocks).Run(out reason);
     }
 
+    private static readonly IReadOnlySet<uint> NoPcs = new HashSet<uint>();
+
+    /// <summary>The VGPRs an instruction writes: [Start, Start + Count) surely, and the Maybe
+    /// registers after them perhaps (the second half of a 64-bit destination, an image
+    /// load's TFE/LWE status dword). Start is -1 when it writes none.</summary>
+    internal static (int Start, int Count, int Maybe) WrittenVectorRange(Gen5ShaderInstruction instruction)
+    {
+        var op = Normalize(instruction, NoPcs);
+        if (op.WrittenVectorStart >= 0)
+        {
+            if (op.Family == Family.Mimg && instruction.Control is Gen5ImageControl image)
+            {
+                // The data dwords (packed in pairs with D16), then the status dword with TFE/LWE.
+                var data = (int)Math.Max(Gen5ImageOpcodes.ResultDwords(instruction.Opcode, image.Dmask, image.D16), 1u);
+                return (op.WrittenVectorStart, data, image.Tfe || image.Lwe ? 1 : 0);
+            }
+
+            return (op.WrittenVectorStart, op.WrittenVectorCount, 0);
+        }
+
+        return op.Destination.Kind == Kind.Vector ? (op.Destination.Register, 1, op.Wide ? 1 : 0) : (-1, 0, 0);
+    }
+
     private static Op Normalize(Gen5ShaderInstruction instruction, IReadOnlySet<uint> sharedFlatPcs)
     {
         var opcode = instruction.Opcode;

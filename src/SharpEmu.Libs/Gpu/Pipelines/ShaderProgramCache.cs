@@ -47,6 +47,16 @@ public sealed class StageCompileOptions
     // as a workgroup; the emitter then compiles the merged ES/GS stage instead of a plain
     // vertex shader.
     public Gen5NggStageInfo? PrimitiveShader { get; init; }
+
+    // The params the paired pixel program reads per vertex from the primitive shader's mesh
+    // primitives (ShaderCompileRequest.MeshPerVertexParameterMask), and the pixel side of it.
+    public uint MeshPerVertexParameterMask { get; init; }
+    public bool PerVertexInputsFromPrimitive { get; init; }
+
+    // The host interpolants that replace the paired pixel program's hand interpolations of
+    // its per-vertex inputs (ShaderCompileRequest.VertexInterpolants), and the pixel side of it.
+    public IReadOnlyList<uint> VertexInterpolants { get; init; } = [];
+    public bool ManualInterpolation { get; init; }
     public PixelInputInfo? PixelInfo { get; init; }
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
     public uint PixelInputEnable { get; init; }
@@ -486,9 +496,20 @@ internal sealed class ShaderProgramCache
             case ShaderStage.Vertex:
                 StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."),
                     options.RequiredVertexOutputCount, options.PrimitiveShader, _staticState);
+                _staticState.Add(options.MeshPerVertexParameterMask);
+                _staticState.Add((uint)options.VertexInterpolants.Count);
+                foreach (var interpolant in options.VertexInterpolants)
+                {
+                    _staticState.Add(interpolant);
+                }
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
+                _staticState.Add((options.PerVertexInputsFromPrimitive ? 1u : 0u) | (options.ManualInterpolation ? 2u : 0u));
+                if (options.ManualInterpolation)
+                {
+                    _staticState.Add(options.PixelInputAddress);
+                }
                 foreach (var output in options.PixelOutputs)
                 {
                     _staticState.Add(output.GuestSlot);
@@ -517,7 +538,7 @@ internal sealed class ShaderProgramCache
         EmbeddedVertexFetchPlan? fetch = null;
         ShaderVertexInput[] vertexInputs = [];
         if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { FetchEmbedded: true } vertexInfo &&
-            ShaderCompileRequest.AllowsEmbeddedVertexFetch(program, options.PrimitiveShader))
+            ShaderCompileRequest.AllowsEmbeddedVertexFetch(program, options.PrimitiveShader, options.MeshPerVertexParameterMask))
         {
             fetch = EmbeddedVertexFetchDetector.Detect(
                 program,
@@ -806,6 +827,8 @@ internal sealed class ShaderProgramCache
                     ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     PrimitiveShader = options.PrimitiveShader,
+                    MeshPerVertexParameterMask = options.MeshPerVertexParameterMask,
+                    VertexInterpolants = options.VertexInterpolants,
                     VertexInputs = entry.VertexInputs,
                     PositionExportControl = info.PositionExportControl,
                     SupportsClipDistance = _host.ClipDistanceEnabled,
@@ -860,6 +883,8 @@ internal sealed class ShaderProgramCache
                     PixelFrontFaceAllBits = info.FrontFaceAllBits,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
                     SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,
+                    PixelPerVertexInputsFromPrimitive = options.PerVertexInputsFromPrimitive,
+                    PixelManualInterpolation = options.ManualInterpolation,
                     PixelInputAddress = options.PixelInputAddress,
                     PixelInputCntl = interpolators,
                     MipStatisticsSubgroupReduction = _host.MipStatisticsSubgroupReduction,

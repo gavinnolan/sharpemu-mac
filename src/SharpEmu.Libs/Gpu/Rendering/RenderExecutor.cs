@@ -1017,6 +1017,7 @@ public sealed partial class RenderExecutor
         }
 
         inputs.PixelActive = state.PixelActive;
+        inputs.TriangleList = AssemblesTriangleList(banks);
         inputs.DepthBound = state.Depth.HasTarget;
         inputs.DepthAspectBound = state.Depth.HasTarget &&
             (ViewFormatRules.FullAspects(state.Depth.Target.Target.Format) & GpuImageAspect.DepthBit) != 0;

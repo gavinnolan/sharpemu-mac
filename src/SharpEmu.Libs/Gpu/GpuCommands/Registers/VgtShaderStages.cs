@@ -20,6 +20,12 @@ public static class VgtShaderStages
 
     public static bool IsGeometryWave64(uint stages) => (stages & GeometryWave32Bit) == 0;
 
+    /// <summary>PRIMGEN_PASSTHRU_EN (bit 25): NGG passthrough mode, where the primitive
+    /// shader's v0 is the packed primitive export rather than the GS vertex offsets.</summary>
+    public const uint PrimitivePassthroughBit = 1u << 25;
+
+    public static bool IsPrimitivePassthrough(uint stages) => (stages & PrimitivePassthroughBit) != 0;
+
     // Bits 0-1 (LS_EN), 2 (HS_EN) and 6-7 (VS_EN) select stages no primitive shader
     // implements: tessellation and the legacy vertex stage.
     public const uint ForeignStageBits = 0x7u | (0x3u << 6);

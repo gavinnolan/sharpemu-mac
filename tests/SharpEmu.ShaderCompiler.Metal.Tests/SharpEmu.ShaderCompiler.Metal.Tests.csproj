@@ -16,6 +16,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
        the shared decoder and HLE contract transitively) — never on other test projects
        or the CLI tools. Helpers that exist elsewhere are copied, not referenced. -->
   <ItemGroup>
+    <Compile Include="..\..\src\graphics\SharpEmu.Gpu.Metal\V2\MetalDeviceAddressIndex.cs" Link="MetalDeviceAddressIndex.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
   </ItemGroup>
 

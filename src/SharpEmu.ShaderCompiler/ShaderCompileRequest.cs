@@ -273,6 +273,18 @@ public sealed class ShaderCompileRequest
     // False when the device cannot read one vertex's value of a pixel input (PerVertexKHR).
     // MoltenVK advertises fragment shader barycentrics but cannot translate PerVertexKHR to MSL.
     public bool SupportsPerVertexPixelInputs { get; init; } = true;
+
+    // Set when the paired vertex stage is a mesh function that hands the three vertex values
+    // of every parameter in Gen5PixelInputMapping.PerVertexParameterMask to the pixel stage
+    // as per-primitive data (MeshPerVertexParameterMask): the pixel program reads them there
+    // instead of from vertex_value inputs.
+    public bool PixelPerVertexInputsFromPrimitive { get; init; }
+
+    // Set when the pixel program interpolates its per-vertex inputs only by hand, each into
+    // one channel (Gen5ManualInterpolation finds the plan): the host interpolates those
+    // channels as the paired vertex stage unpacks them (VertexInterpolants), the guest's
+    // results are replaced by them, and the slots themselves become flat.
+    public bool PixelManualInterpolation { get; init; }
     public uint PixelInputAddress { get; init; }
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
 
@@ -282,6 +294,17 @@ public sealed class ShaderCompileRequest
     // keep translating the program as a per-vertex shader, which only works for passthrough
     // NGG programs.
     public Gen5NggStageInfo? PrimitiveShader { get; init; }
+
+    // The parameter exports the paired pixel program reads per vertex
+    // (Gen5PixelInputMapping.PerVertexParameterMask) on a host without per-vertex pixel
+    // inputs. A primitive shader with any is emitted as a mesh function whose primitives
+    // carry the three vertex values of each of them; zero leaves the stage as it is.
+    public uint MeshPerVertexParameterMask { get; init; }
+
+    // The host interpolants the paired pixel program reads (Gen5Interpolant.Encoded, see
+    // PixelManualInterpolation): the vertex stage writes each one, its param's channels
+    // unpacked as that kind, whenever it exports the param.
+    public IReadOnlyList<uint> VertexInterpolants { get; init; } = [];
 
     /// <summary>True when the program cannot be expressed per-vertex: its lanes exchange
     /// data through LDS or synchronize the workgroup, so it needs a real workgroup stage.
@@ -315,11 +338,14 @@ public sealed class ShaderCompileRequest
     /// function has no <c>[[stage_in]]</c>, and the host binds no vertex buffers for it. Its
     /// ES part therefore has to keep fetching for itself, V# scalar loads included -
     /// otherwise the resource plan never sees those loads, the fetch has no buffer binding,
-    /// and the program cannot be compiled.</summary>
+    /// and the program cannot be compiled. A passthrough primitive shader that hands its
+    /// pixel program per-vertex values (<see cref="MeshPerVertexParameterMask"/>) is a mesh
+    /// function too.</summary>
     public static bool AllowsEmbeddedVertexFetch(
         Gen5ShaderProgram program,
-        Gen5NggStageInfo? primitiveShader) =>
-        primitiveShader is null || !RequiresPrimitiveShaderWorkgroup(program);
+        Gen5NggStageInfo? primitiveShader,
+        uint meshPerVertexParameterMask = 0) =>
+        primitiveShader is null || (meshPerVertexParameterMask == 0 && !RequiresPrimitiveShaderWorkgroup(program));
 
     public int RequiredVertexOutputCount { get; init; }
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];

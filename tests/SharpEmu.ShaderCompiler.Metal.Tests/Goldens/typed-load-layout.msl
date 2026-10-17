@@ -233,12 +233,28 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
         return (device uint*)((device uchar*)cache.base + byte_offset);
     }
 
+    // range_count carries the table's entry count in its low 31 bits and, in bit 31, whether
+    // the host appended a granule index after the entries. The index narrows the search to
+    // the entries that can matter for this page; the result is the same upper bound the
+    // full search finds, and a page outside the index's coverage takes the full search.
+    uint entry_count = range_count & 0x7FFFFFFFu;
     uint low = 0u;
-    uint high = range_count;
-    for (uint step = 0u; step < 15u; step++)
+    uint high = entry_count;
+    if ((range_count & 0x80000000u) != 0u)
+    {
+        device const uint* index = (device const uint*)(ranges + entry_count);
+        ulong granule = (page >> index[0]) - (ulong(index[3]) << 32 | ulong(index[2]));
+        if (granule < ulong(index[1]))
+        {
+            uint2 bucket = *(device const uint2*)(index + 4u + (uint)granule * 2u);
+            low = bucket.x;
+            high = bucket.y;
+        }
+    }
+    for (uint step = 0u; step < 15u && low < high; step++)
     {
         uint middle = low + ((high - low) >> 1u);
-        bool move_up = low < high && ranges[middle].first_page <= page;
+        bool move_up = ranges[middle].first_page <= page;
         low = move_up ? middle + 1u : low;
         high = move_up ? high : middle;
     }

@@ -913,7 +913,7 @@ internal sealed partial class MetalRenderHost
     private uint WordFieldValue(MetalStageBindings stage, DescriptorBindingKind kind) => kind switch
     {
         DescriptorBindingKind.GlobalDataShare => (uint)MetalGuestMemory.GdsBytes,
-        DescriptorBindingKind.DeviceAddressPageTable => _deviceAddressEntryCount,
+        DescriptorBindingKind.DeviceAddressPageTable => _deviceAddressEntryCount | MetalDeviceAddressIndex.IndexedFlag,
         DescriptorBindingKind.FaultBuffer => 0,
         DescriptorBindingKind.FlattenedResourceTable =>
             (uint)stage.StageResources.Resources.FlattenedResourceTable.Length,
@@ -960,7 +960,10 @@ internal sealed partial class MetalRenderHost
             _deviceAddressSpanVersion = spanVersion;
         }
 
-        var bytes = Math.Max(_deviceAddressEntries.Count * AddressRangeEntryBytes, AddressRangeEntryBytes);
+        // The granule index follows the entries; the shader finds it at ranges[count].
+        var granuleIndex = _deviceAddressIndex;
+        var entryBytes = _deviceAddressEntries.Count * AddressRangeEntryBytes;
+        var bytes = Math.Max(entryBytes + granuleIndex.Length * sizeof(uint), AddressRangeEntryBytes);
         var range = _guestMemory.Allocate((ulong)bytes, 256, out var span);
         span.Clear();
         for (var index = 0; index < _deviceAddressEntries.Count; index++)
@@ -971,6 +974,8 @@ internal sealed partial class MetalRenderHost
             BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], pageCount);
             BinaryPrimitives.WriteUInt64LittleEndian(entry[16..], address);
         }
+
+        System.Runtime.InteropServices.MemoryMarshal.AsBytes(granuleIndex.AsSpan()).CopyTo(span[entryBytes..]);
 
         // A device-address program can dereference any mapped guest page, so every
         // window the table names has to be resident for this submission even though
@@ -983,6 +988,7 @@ internal sealed partial class MetalRenderHost
     }
 
     private ulong _deviceAddressWindows;
+    private uint[] _deviceAddressIndex = [];
 
     // Each guest span becomes the fewest window-backed runs that cover it. A span whose
     // backing is not contiguous (fragmented flexible memory) or crosses a window splits
@@ -1050,6 +1056,7 @@ internal sealed partial class MetalRenderHost
         _guestMemory.ClearTouchedWindows();
         _guestMemory.MarkWindowsTouched(touchedBefore | _deviceAddressWindows);
         _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
+        _deviceAddressIndex = MetalDeviceAddressIndex.Build(_deviceAddressEntries);
         // The windows the table names are what every device-address submission asks the
         // driver to keep resident, which it does by wiring them whole; say when that set
         // changes so a wired-memory jump can be read against it.

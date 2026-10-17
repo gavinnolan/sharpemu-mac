@@ -12,7 +12,9 @@ public static partial class Gen5MslTranslator
     {
         // Pixel input slots V_INTERP_MOV reads one vertex of (P10/P20, or P1/P2 over
         // them), declared as metal::vertex_value<float4>: MSL 4.0 (macOS 26) on an Apple10
-        // GPU. The request says whether the host can run that.
+        // GPU. The request says whether the host can run that. Paired with a mesh function
+        // that hands the vertex values over (PixelPerVertexInputsFromPrimitive), a slot is
+        // instead three float4 inputs of per-primitive data, which every Apple7+ GPU reads.
         private readonly HashSet<uint> _perVertexAttributes = [];
 
         // Slots read only through P0, the provoking vertex, which a flat input gives.
@@ -34,8 +36,23 @@ public static partial class Gen5MslTranslator
 
         private static readonly string[] VertexIndexNames = ["first", "second", "third"];
 
-        /// <summary>True when the program declares a vertex_value input, which only MSL 4.0 compiles.</summary>
+        // The host interpolants that replace the program's hand interpolations, and where
+        // (ShaderCompileRequest.PixelManualInterpolation); the slots they read become flat.
+        private Gen5ManualInterpolationPlan? _manualInterpolation;
+        private ILookup<uint, Gen5InterpolationRewrite>? _interpolationRewrites;
+        private string? _manualInterpolationFailure;
+
+        private bool IsManuallyInterpolated(uint attribute) =>
+            _manualInterpolation is { } plan && attribute < 32 && (plan.Attributes & (1u << (int)attribute)) != 0;
+
+        /// <summary>True when the program reads every vertex's value of some input.</summary>
         private bool UsesPerVertexPixelInputs => _perVertexAttributes.Count != 0;
+
+        /// <summary>True when those values come from per-primitive data, not vertex_value.</summary>
+        private bool PerVertexInputsFromPrimitive => _request.PixelPerVertexInputsFromPrimitive;
+
+        /// <summary>True when the program declares a vertex_value input, which only MSL 4.0 compiles.</summary>
+        private bool UsesVertexValueInputs => UsesPerVertexPixelInputs && !PerVertexInputsFromPrimitive;
 
         private uint EnabledPixelInputs => _pixelInputAddress & _pixelInputEnable;
 
@@ -51,6 +68,15 @@ public static partial class Gen5MslTranslator
         /// </summary>
         private void ClassifyPixelInputs()
         {
+            if (_request.PixelManualInterpolation)
+            {
+                _manualInterpolation = Gen5ManualInterpolation.Analyze(
+                    _request.Program, _pixelInputCntl, _request.PixelCustomInterpolationMask, _pixelInputAddress,
+                    out var reason);
+                _manualInterpolationFailure = _manualInterpolation is null ? reason : null;
+                _interpolationRewrites = _manualInterpolation?.Rewrites.ToLookup(rewrite => rewrite.Pc);
+            }
+
             foreach (var attribute in _pixelAttributes)
             {
                 if (!NeedsVertexValues(attribute))
@@ -58,11 +84,11 @@ public static partial class Gen5MslTranslator
                     continue;
                 }
 
-                if (ReadsOnlyTheProvokingVertex(attribute))
+                if (ReadsOnlyTheProvokingVertex(attribute) || IsManuallyInterpolated(attribute))
                 {
                     _flatParameterAttributes.Add(attribute);
                 }
-                else if (_request.SupportsPerVertexPixelInputs)
+                else if (_request.SupportsPerVertexPixelInputs || PerVertexInputsFromPrimitive)
                 {
                     _perVertexAttributes.Add(attribute);
                 }
@@ -149,6 +175,20 @@ public static partial class Gen5MslTranslator
             for (var index = 0; index < attributes.Length; index++)
             {
                 var attribute = attributes[index];
+                if (_perVertexAttributes.Contains(attribute) && PerVertexInputsFromPrimitive)
+                {
+                    // Named by the param the slot reads (SPI_PS_INPUT_CNTL.OFFSET), as the
+                    // mesh function names the primitive's copies of it.
+                    for (var vertex = 0u; vertex < 3u; vertex++)
+                    {
+                        source.AppendLine(
+                            $"    float4 attr{attribute}_v{vertex} " +
+                            $"[[user({PerVertexInputName(PixelInputControl(attribute) & 0x1Fu, vertex)})]];");
+                    }
+
+                    continue;
+                }
+
                 if (_perVertexAttributes.Contains(attribute))
                 {
                     source.AppendLine(
@@ -161,6 +201,14 @@ public static partial class Gen5MslTranslator
                     ? ", flat"
                     : InterpolationQualifier(attribute) is { } mode ? $", {mode}" : string.Empty;
                 source.AppendLine($"    float4 attr{attribute} [[user(locn{locations[index]}){qualifier}]];");
+            }
+
+            foreach (var interpolant in _manualInterpolation?.Interpolants ?? [])
+            {
+                var mode = BarycentricQualifier((int)interpolant.Barycentric) is { } qualifier ? $", {qualifier}" : string.Empty;
+                source.AppendLine(
+                    $"    float4 {InterpolantField(interpolant.Location, interpolant.Kind)} " +
+                    $"[[user({InterpolantName(interpolant.Location, interpolant.Kind)}){mode}]];");
             }
 
             if (_perspectiveBarycentric is not null)
@@ -195,8 +243,9 @@ public static partial class Gen5MslTranslator
         private string PixelInputField(uint attribute) =>
             $"sharpemu_in.attr{(_sharedPixelInputs.TryGetValue(attribute, out var owner) ? owner : attribute)}";
 
-        private static string VertexValue(string field, uint vertex, uint channel) =>
-            $"{field}.get(vertex_index::{VertexIndexNames[vertex]})[{channel}]";
+        private string VertexValue(string field, uint vertex, uint channel) => PerVertexInputsFromPrimitive
+            ? $"{field}_v{vertex}[{channel}]"
+            : $"{field}.get(vertex_index::{VertexIndexNames[vertex]})[{channel}]";
 
         // A smooth or flat slot read from a per-vertex input: the vertices weighted by the
         // perspective barycentrics, or vertex 0 (the provoking vertex) for a flat slot.
@@ -390,15 +439,7 @@ public static partial class Gen5MslTranslator
                     var count = bit == 3 ? 3u : 2u;
                     if (vgpr >= start && vgpr < start + count)
                     {
-                        return bit switch
-                        {
-                            0 => "sample_perspective",
-                            2 => "centroid_perspective",
-                            4 => "sample_no_perspective",
-                            5 => "center_no_perspective",
-                            6 => "centroid_no_perspective",
-                            _ => null,
-                        };
+                        return BarycentricQualifier(bit);
                     }
 
                     start += count;
@@ -406,6 +447,102 @@ public static partial class Gen5MslTranslator
             }
 
             return null;
+        }
+
+        // The Metal qualifier of an SPI_PS_INPUT_ENA barycentric (null for PERSP_CENTER, the
+        // default, and the pull model's).
+        private static string? BarycentricQualifier(int bit) => bit switch
+        {
+            0 => "sample_perspective",
+            2 => "centroid_perspective",
+            4 => "sample_no_perspective",
+            5 => "center_no_perspective",
+            6 => "centroid_no_perspective",
+            _ => null,
+        };
+
+        /// <summary>The [[user]] name of a host interpolant (ShaderCompileRequest.VertexInterpolants):
+        /// param <paramref name="location"/>'s channels unpacked as <paramref name="kind"/>.</summary>
+        internal static string InterpolantName(uint location, Gen5InterpolantKind kind) => $"locn{location}_i{(int)kind}";
+
+        internal static string InterpolantField(uint location, Gen5InterpolantKind kind) => $"interp{location}_{(int)kind}";
+
+        // A param's four channels as an interpolant kind, from the float4 that carries its bits.
+        internal static string UnpackInterpolant(string param, Gen5InterpolantKind kind)
+        {
+            if (kind == Gen5InterpolantKind.Float)
+            {
+                return param;
+            }
+
+            var channels = new string[4];
+            for (var channel = 0; channel < 4; channel++)
+            {
+                var bits = $"as_type<uint>({param}[{channel}])";
+                channels[channel] = kind switch
+                {
+                    Gen5InterpolantKind.HalfLow => $"(float)as_type<half2>({bits})[0]",
+                    Gen5InterpolantKind.HalfHigh => $"(float)as_type<half2>({bits})[1]",
+                    Gen5InterpolantKind.UInt => $"(float){bits}",
+                    Gen5InterpolantKind.Int => $"(float)as_type<int>({bits})",
+                    _ => $"(float)(({bits} >> {8 * (kind - Gen5InterpolantKind.Byte0)}u) & 0xFFu)",
+                };
+            }
+
+            return $"float4({string.Join(", ", channels)})";
+        }
+
+        // After a hand interpolation completes, its register takes the host's interpolation of
+        // the same channel instead.
+        private void EmitInterpolationRewrites(uint pc)
+        {
+            if (_interpolationRewrites is null)
+            {
+                return;
+            }
+
+            foreach (var rewrite in _interpolationRewrites[pc])
+            {
+                var value = $"sharpemu_in.{InterpolantField(rewrite.Location, rewrite.Kind)}[{rewrite.Channel}]";
+                if (rewrite.Scale != 1f)
+                {
+                    value = $"({value} * as_type<float>(0x{BitConverter.SingleToUInt32Bits(rewrite.Scale):X8}u))";
+                }
+
+                if (rewrite.Offset != 0f)
+                {
+                    value = $"({value} + as_type<float>(0x{BitConverter.SingleToUInt32Bits(rewrite.Offset):X8}u))";
+                }
+
+                if (rewrite.Clamp)
+                {
+                    value = $"clamp({value}, 0.0f, 1.0f)";
+                }
+
+                StoreVector(rewrite.Register, AsUInt(value));
+            }
+        }
+
+        // The param exports of a vertex stage also write the interpolants unpacked from them.
+        private void EmitInterpolantExports(uint location, string param)
+        {
+            foreach (var encoded in _request.VertexInterpolants)
+            {
+                var (interpolantLocation, kind) = Gen5Interpolant.Decode(encoded);
+                if (interpolantLocation == location)
+                {
+                    Line($"sharpemu_out.{InterpolantField(location, kind)} = {UnpackInterpolant(param, kind)};");
+                }
+            }
+        }
+
+        private void EmitInterpolantOutputMembers(StringBuilder source)
+        {
+            foreach (var encoded in _request.VertexInterpolants)
+            {
+                var (location, kind) = Gen5Interpolant.Decode(encoded);
+                source.AppendLine($"    float4 {InterpolantField(location, kind)} [[user({InterpolantName(location, kind)})]];");
+            }
         }
 
         /// <summary>

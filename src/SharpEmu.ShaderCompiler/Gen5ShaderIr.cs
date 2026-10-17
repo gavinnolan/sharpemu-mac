@@ -215,6 +215,12 @@ public readonly record struct Gen5NggStageInfo(
     /// A mesh program without a GS half translates such a wave as a narrow wave64: one
     /// 32-lane Metal simdgroup whose upper 32 guest lanes are architecturally inactive.</summary>
     public bool IsWave64 { get; init; }
+
+    /// <summary>True in NGG passthrough mode (VGT_SHADER_STAGES_EN.PRIMGEN_PASSTHRU_EN): the
+    /// geometry engine hands every lane its primitive already packed the way the primitive
+    /// export takes it (three 10-bit vertex fields) in v0, instead of the GS vertex offsets,
+    /// and the program exports that register as it is.</summary>
+    public bool Passthrough { get; init; }
 }
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
