@@ -654,6 +654,11 @@ internal static partial class MetalV2Presenter
                 {
                     EncodePresent(encoder, texture, width, height, !movie && presented != 0 && presentedHdr);
                 }
+
+                if (presented == 0 && !movie)
+                {
+                    EncodePrewarmProgress(encoder);
+                }
             }
             finally
             {

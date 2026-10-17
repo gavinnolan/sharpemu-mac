@@ -36,6 +36,20 @@ internal sealed class MetalShaderPrewarmGate(bool disabled)
 
     public int Progress => Volatile.Read(ref _progress);
 
+    public int Total => Volatile.Read(ref _total);
+
+    /// <summary>Whether the prewarm is compiling and holding the guest right now.</summary>
+    public bool IsRunning
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _running && !_released;
+            }
+        }
+    }
+
     /// <summary>The presenter started: a holder now waits for the prewarm to be decided.</summary>
     public void Begin()
     {
