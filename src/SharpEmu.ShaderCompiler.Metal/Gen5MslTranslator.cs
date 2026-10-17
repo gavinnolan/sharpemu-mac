@@ -415,6 +415,11 @@ public static partial class Gen5MslTranslator
                 if (_stage == Gen5MslStage.Pixel)
                 {
                     ClassifyPixelInputs();
+                    if (_manualInterpolationFailure is { } failure)
+                    {
+                        error = $"no manual interpolation plan: {failure}";
+                        return false;
+                    }
                 }
 
                 if (_stage == Gen5MslStage.Mesh)
@@ -645,6 +650,7 @@ public static partial class Gen5MslTranslator
                     source.AppendLine($"    float4 param{location} [[user(locn{location})]];");
                 }
 
+                EmitInterpolantOutputMembers(source);
                 source.AppendLine("};");
                 source.AppendLine();
                 source.AppendLine($"vertex Gen5VsOut {EntryPointName}(");
@@ -1456,6 +1462,8 @@ public static partial class Gen5MslTranslator
                     error = $"pc=0x{instruction.Pc:X4} {instruction.Opcode}: {error}";
                     return false;
                 }
+
+                EmitInterpolationRewrites(instruction.Pc);
 
                 if (isTerminator)
                 {

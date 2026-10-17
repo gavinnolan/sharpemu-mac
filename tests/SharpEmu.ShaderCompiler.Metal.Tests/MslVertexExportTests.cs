@@ -53,6 +53,33 @@ public sealed class MslVertexExportTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ParamExportWritesTheInterpolantsUnpackedFromIt()
+    {
+        // Param 0 carries packed halves; the pixel program reads the high ones and the second
+        // byte interpolated (Gen5ManualInterpolation).
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            CoveringTriangle([(32u, 0xFu, [Vector(24), Vector(23), Vector(24), Vector(23)])], zeroThirdVertex: false),
+            ShaderStage.Vertex,
+            requiredVertexOutputCount: 1,
+            vertexInterpolants:
+            [
+                new Gen5Interpolant(0, Gen5InterpolantKind.HalfHigh, 1).Encoded,
+                new Gen5Interpolant(0, Gen5InterpolantKind.Byte1, 1).Encoded,
+            ]);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        Assert.Contains("float4 interp0_2 [[user(locn0_i2)]];", shader.Source);
+        Assert.Contains("float4 interp0_4 [[user(locn0_i4)]];", shader.Source);
+        Assert.Contains(
+            "sharpemu_out.interp0_2 = float4((float)as_type<half2>(as_type<uint>(sharpemu_out.param0[0]))[1], ",
+            shader.Source);
+        Assert.Contains(
+            "sharpemu_out.interp0_4 = float4((float)((as_type<uint>(sharpemu_out.param0[0]) >> 8u) & 0xFFu), ",
+            shader.Source);
+        AssertCompiles(shader);
+    }
+
+    [Fact]
     public void ClipAndCullDistancesShareTheClipDistanceArray()
     {
         // POS1 x is clip plane 0 and y is cull plane 0; the zero-position plane sits between.

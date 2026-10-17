@@ -474,7 +474,7 @@ internal static class Gen5ComputeFixtures
         ulong excludedUserDataRegisters = 0, bool ieeeMode = false, Gen5ColorExportFormat? pixelDepthExportFormat = null,
         bool pixelStencilExportEnable = false, bool pixelSampleMaskExportEnable = false,
         uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true, bool pixelGuestWave32 = false,
-        uint meshPerVertexParameterMask = 0)
+        uint meshPerVertexParameterMask = 0, IReadOnlyList<uint>? vertexInterpolants = null)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -505,6 +505,7 @@ internal static class Gen5ComputeFixtures
             RequiredVertexOutputCount = requiredVertexOutputCount,
             PrimitiveShader = primitiveShader,
             MeshPerVertexParameterMask = meshPerVertexParameterMask,
+            VertexInterpolants = vertexInterpolants ?? [],
             ScratchDwords = scratchDwords,
             LocalDataShareDwords = localDataShareDwords,
             PositionExportControl = positionExportControl,

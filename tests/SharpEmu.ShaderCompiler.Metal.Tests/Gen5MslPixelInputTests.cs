@@ -395,10 +395,12 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         nuint? languageVersion,
         uint[]? cntl = null,
         bool frontFaceAllBits = false,
-        uint customMask = 0)
+        uint customMask = 0,
+        bool manualInterpolation = false)
     {
         var shader = Compile(pixelWords, inputs, cntl: cntl ?? [0, 1], outputKind: outputKind,
-            frontFaceAllBits: frontFaceAllBits, customMask: customMask);
+            frontFaceAllBits: frontFaceAllBits, customMask: customMask, supportsPerVertex: !manualInterpolation,
+            manualInterpolation: manualInterpolation);
         Assert.True(MetalNative.TryCompileLibrary(vertexSource, out var vertexLibrary, out var error), error);
         nint fragmentLibrary;
         Assert.True(
@@ -437,7 +439,14 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
 
     private const uint OpP1F32 = 0x200, OpP2F32 = 0x201, OpMovF32 = 0x202;
     private const uint OpP1llF16 = 0x342, OpP1lvF16 = 0x343, OpP2F16 = 0x35A;
-    private const uint V0 = 256, V1 = 257, V3 = 259;
+    private const uint V0 = 256, V1 = 257, V3 = 259, V4 = 260;
+
+    // VOP1 V_CVT_F32_F16 and VOP2 V_SUB_F32 / V_MAC_F32 (D = S0 * S1 + D).
+    private const uint OpCvtF32F16 = 0x0B, OpSubF32 = 0x04, OpMacF32 = 0x1F;
+
+    private static uint Vop1(uint op, uint vdst, uint src0) => 0x7E000000u | (vdst << 17) | (op << 9) | src0;
+
+    private static uint Vop2(uint op, uint vdst, uint src0, uint vsrc1) => (op << 25) | (vdst << 17) | (vsrc1 << 9) | src0;
 
     [Theory]
     [InlineData(1u, false, false, "* 2.0f")]
@@ -558,6 +567,92 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         Assert.Contains("(float)as_type<half2>(as_type<uint>(sharpemu_in.attr1_v1[0]))[1]", shader.Source,
             StringComparison.Ordinal);
         AssertCompiles(shader);
+    }
+
+    // Slot 0 (param 0, custom, flat-shaded) interpolated by hand in f32 from the low f16 half
+    // of each vertex: v4..v6 = P0, P1, P2 halves; v5/v6 = P1 - P0, P2 - P0;
+    // v4 += I * v5; v4 += J * v6.
+    private static readonly uint[] ManualHalfInterpolation =
+    [
+        Interp(4, 2, 0, 0, 2),
+        Interp(5, 2, 0, 0, 0),
+        Interp(6, 2, 0, 0, 1),
+        Vop1(OpCvtF32F16, 4, V4), Vop1(OpCvtF32F16, 5, V4 + 1), Vop1(OpCvtF32F16, 6, V4 + 2),
+        Vop2(OpSubF32, 5, V4 + 1, 4), Vop2(OpSubF32, 6, V4 + 2, 4),
+        Vop2(OpMacF32, 4, V0, 5), Vop2(OpMacF32, 4, V1, 6),
+        .. ExportAndEnd(4, 4, 4, 4),
+    ];
+
+    [Fact]
+    public void ManualInterpolation_ReadsTheHostInterpolantOfTheUnpackedHalf()
+    {
+        var shader = Compile(ManualHalfInterpolation, PerspCenter, cntl: [0x400], customMask: 1u,
+            supportsPerVertex: false, manualInterpolation: true);
+
+        // No per-vertex input and no barycentrics: the slot is flat, and the host interpolates
+        // the low halves the vertex stage unpacks into locn0_i1.
+        Assert.False(shader.UsesPerVertexInputs);
+        Assert.DoesNotContain("barycentric_coord", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 attr0 [[user(locn0), flat]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 interp0_1 [[user(locn0_i1)]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_in.interp0_1[0]", shader.Source, StringComparison.Ordinal);
+        AssertCompiles(shader);
+    }
+
+    [Fact]
+    public void ManualInterpolationWithoutAPlan_IsRefused()
+    {
+        // The P1 half is exported as well, so the program needs the vertex values themselves.
+        uint[] words = [.. ManualHalfInterpolation[..^3], .. ExportAndEnd(4, 5, 4, 4)];
+        var request = Request(words, PerspCenter, PerspCenter, [0x400], 1u, supportsPerVertex: false,
+            manualInterpolation: true);
+
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("no manual interpolation plan", error, StringComparison.Ordinal);
+    }
+
+    // One triangle whose param0.x carries the f16 halves 10, 20 and 40 (low) over -1 (high) at
+    // its vertices, and the low halves unpacked as the translated vertex stage writes them.
+    private const string ManualInterpolationVertexSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct VsOut
+        {
+            float4 position [[position]];
+            float4 param0 [[user(locn0)]];
+            float4 interp0_1 [[user(locn0_i1)]];
+        };
+        vertex VsOut manual_vs(uint id [[vertex_id]])
+        {
+            const float2 corners[3] = { float2(-1.0, -1.0), float2(-1.0, 3.0), float2(3.0, -1.0) };
+            const float values[3] = { 10.0, 20.0, 40.0 };
+            VsOut out;
+            out.position = float4(corners[id], 0.5, 1.0);
+            out.param0 = float4(as_type<float>(half2(half(values[id]), half(-1.0))), 0.0, 0.0, 1.0);
+            out.interp0_1 = float4(
+                (float)as_type<half2>(as_type<uint>(out.param0[0]))[0], (float)as_type<half2>(as_type<uint>(out.param0[1]))[0],
+                (float)as_type<half2>(as_type<uint>(out.param0[2]))[0], (float)as_type<half2>(as_type<uint>(out.param0[3]))[0]);
+            return out;
+        }
+        """;
+
+    [Fact]
+    public void ManualInterpolationRendersTheGuestsInterpolation()
+    {
+        if (SkipWithoutMetalDevice("the manual interpolation render test")) return;
+
+        var texels = Render(ManualInterpolationVertexSource, "manual_vs", 3, ManualHalfInterpolation, PerspCenter,
+            Gen5PixelOutputKind.Float, languageVersion: null, cntl: [0x400], customMask: 1u, manualInterpolation: true);
+
+        // P0 + I (P1 - P0) + J (P2 - P0) of the low halves, as the guest computes it.
+        var vertices = new (double X, double Y)[] { (0, TargetHeight * 1.0), (0, -TargetHeight * 1.0), (TargetWidth * 2.0, TargetHeight * 1.0) };
+        double[] values = [10, 20, 40];
+        foreach (var (x, y) in new (uint, uint)[] { (1, 1), (7, 3), (12, 6) })
+        {
+            var actual = BitConverter.UInt32BitsToSingle(texels[(((y * TargetWidth) + x) * 4) + 0]);
+            var expected = Interpolate(vertices, values, x + 0.5, y + 0.5);
+            Assert.True(Math.Abs(actual - expected) < 1e-3, $"({x},{y}): {actual} != {expected}");
+        }
     }
 
     [Fact]
@@ -767,10 +862,11 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
         bool frontFaceAllBits = false,
         bool ieeeMode = false,
-        bool fromPrimitive = false)
+        bool fromPrimitive = false,
+        bool manualInterpolation = false)
     {
         var request = Request(words, inputs, enable ?? inputs, cntl ?? [], customMask, supportsPerVertex, outputKind,
-            frontFaceAllBits, ieeeMode, fromPrimitive);
+            frontFaceAllBits, ieeeMode, fromPrimitive, manualInterpolation);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader;
     }
@@ -785,7 +881,8 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
         bool frontFaceAllBits = false,
         bool ieeeMode = false,
-        bool fromPrimitive = false)
+        bool fromPrimitive = false,
+        bool manualInterpolation = false)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("pixel-inputs", words, 0, 0));
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x5049_5850_494E_5055, 0, 16);
@@ -806,6 +903,7 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
             PixelCustomInterpolationMask = customMask,
             SupportsPerVertexPixelInputs = supportsPerVertex,
             PixelPerVertexInputsFromPrimitive = fromPrimitive,
+            PixelManualInterpolation = manualInterpolation,
             PixelFrontFaceAllBits = frontFaceAllBits,
             IeeeMode = ieeeMode,
         };

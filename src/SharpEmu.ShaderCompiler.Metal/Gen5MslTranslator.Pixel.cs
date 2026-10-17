@@ -1026,6 +1026,10 @@ public static partial class Gen5MslTranslator
             {
                 EmitInvalidPositionDistance();
             }
+            else
+            {
+                EmitInterpolantExports(export.Target - 32, field);
+            }
 
             return true;
         }
@@ -1140,6 +1144,13 @@ public static partial class Gen5MslTranslator
             if (_perVertexAttributes.Contains(interpolation.Attribute))
             {
                 return TryEmitInterpolationParameter(instruction, interpolation, destination, out error);
+            }
+
+            if (IsManuallyInterpolated(interpolation.Attribute))
+            {
+                // Only feeds a hand interpolation whose result the host's replaces.
+                StoreVector(destination, AsUInt($"{PixelInputField(interpolation.Attribute)}[{interpolation.Channel}]"));
+                return true;
             }
 
             if (IsHalfInterpolation(instruction.Opcode) ||

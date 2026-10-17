@@ -142,7 +142,8 @@ public static partial class Gen5MslTranslator
     private const double MeshOutputBudgetBytes = 32768;
 
     // The most one Gen5MeshVertex can take: the position, every param the program exports
-    // or the pixel program reads, and the point size and clip distances rounded to 16.
+    // or the pixel program reads, the host interpolants unpacked from them, and the point
+    // size and clip distances rounded to 16.
     private static uint MeshVertexBytesBound(ShaderCompileRequest request)
     {
         var parameters = new HashSet<uint>();
@@ -159,7 +160,7 @@ public static partial class Gen5MslTranslator
             }
         }
 
-        return 16u + (16u * (uint)parameters.Count) + 48u;
+        return 16u + (16u * (uint)(parameters.Count + request.VertexInterpolants.Count)) + 48u;
     }
 
     // One Gen5MeshPrimitive: three float4 per handed parameter, then the layer and viewport.
@@ -255,6 +256,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"    float4 param{location} [[user(locn{location})]];");
             }
 
+            EmitInterpolantOutputMembers(source);
             source.AppendLine("};");
             source.AppendLine();
 
@@ -1009,6 +1011,10 @@ public static partial class Gen5MslTranslator
             if (export.Target == Gen5NggExports.FirstPositionTarget)
             {
                 EmitInvalidPositionDistance();
+            }
+            else
+            {
+                EmitInterpolantExports(export.Target - Gen5NggExports.FirstParameterTarget, field);
             }
 
             return true;
