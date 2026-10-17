@@ -55,7 +55,16 @@ public static partial class Gen5MslTranslator
 
         private bool TryBuildStructuredBody(IReadOnlyList<ShaderBlock> blocks, out string body)
         {
-            body = string.Empty;
+            var built = TryBuildStructuredBody(blocks, out StringBuilder? text);
+            body = built ? text!.ToString() : string.Empty;
+            return built;
+        }
+
+        private bool TryBuildStructuredBody(
+            IReadOnlyList<ShaderBlock> blocks,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out StringBuilder? body)
+        {
+            body = null;
             var count = blocks.Count;
             _successors = new List<int>[count];
             for (var index = 0; index < count; index++)
@@ -108,8 +117,7 @@ public static partial class Gen5MslTranslator
                 text.Length -= tail.Length;
             }
 
-            body = text.ToString();
-
+            body = text;
             return true;
         }
 

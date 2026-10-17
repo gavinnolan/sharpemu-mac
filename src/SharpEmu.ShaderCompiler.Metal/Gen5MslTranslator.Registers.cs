@@ -67,6 +67,117 @@ public static partial class Gen5MslTranslator
                     return;
                 }
 
+                RewriteSegment(target, text);
+            }
+
+            /// <summary>The same for text that is still in a builder, without gathering it into one
+            /// string first: a body is the size of the shader, which is far into the large object heap.
+            /// It is taken a line-aligned segment at a time, which a register reference never crosses.</summary>
+            public void RewriteInto(StringBuilder target, StringBuilder text)
+            {
+                if (ContainsDynamicMarker(text))
+                {
+                    RewriteInto(target, text.ToString());
+                    return;
+                }
+
+                if (ScalarArray && VectorArray)
+                {
+                    target.Append(text);
+                    return;
+                }
+
+                var buffer = System.Buffers.ArrayPool<char>.Shared.Rent(1024);
+                try
+                {
+                    var carried = 0;
+                    foreach (var chunk in text.GetChunks())
+                    {
+                        var span = chunk.Span;
+                        var lastNewline = span.LastIndexOf('\n');
+                        if (lastNewline < 0)
+                        {
+                            Carry(ref buffer, carried, span);
+                            carried += span.Length;
+                            continue;
+                        }
+
+                        var segment = span[..(lastNewline + 1)];
+                        if (carried == 0)
+                        {
+                            RewriteSegment(target, segment);
+                        }
+                        else
+                        {
+                            Carry(ref buffer, carried, segment);
+                            RewriteSegment(target, buffer.AsSpan(0, carried + segment.Length));
+                        }
+
+                        var rest = span[(lastNewline + 1)..];
+                        carried = 0;
+                        Carry(ref buffer, carried, rest);
+                        carried = rest.Length;
+                    }
+
+                    if (carried != 0)
+                    {
+                        RewriteSegment(target, buffer.AsSpan(0, carried));
+                    }
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<char>.Shared.Return(buffer);
+                }
+            }
+
+            private static void Carry(ref char[] buffer, int length, ReadOnlySpan<char> value)
+            {
+                if (buffer.Length < length + value.Length)
+                {
+                    var larger = System.Buffers.ArrayPool<char>.Shared.Rent(Math.Max(buffer.Length * 2, length + value.Length));
+                    buffer.AsSpan(0, length).CopyTo(larger);
+                    System.Buffers.ArrayPool<char>.Shared.Return(buffer);
+                    buffer = larger;
+                }
+
+                value.CopyTo(buffer.AsSpan(length));
+            }
+
+            private static bool ContainsDynamicMarker(StringBuilder text)
+            {
+                // A marker can straddle two chunks, so the end of one is searched with the start of the next.
+                Span<char> seam = stackalloc char[2 * DynamicVectorWrite.Length];
+                var tail = 0;
+                foreach (var chunk in text.GetChunks())
+                {
+                    var span = chunk.Span;
+                    if (span.Contains(DynamicVectorRead, StringComparison.Ordinal) ||
+                        span.Contains(DynamicVectorWrite, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+
+                    if (tail != 0)
+                    {
+                        var head = Math.Min(span.Length, DynamicVectorWrite.Length);
+                        span[..head].CopyTo(seam[tail..]);
+                        var joined = seam[..(tail + head)];
+                        if (joined.Contains(DynamicVectorRead, StringComparison.Ordinal) ||
+                            joined.Contains(DynamicVectorWrite, StringComparison.Ordinal))
+                        {
+                            return true;
+                        }
+                    }
+
+                    tail = Math.Min(span.Length, DynamicVectorWrite.Length - 1);
+                    span[^tail..].CopyTo(seam);
+                }
+
+                return false;
+            }
+
+            private void RewriteSegment(StringBuilder target, ReadOnlySpan<char> text)
+            {
                 var cursor = 0;
                 foreach (var reference in ScanRegisterReferences(text))
                 {
@@ -76,13 +187,13 @@ public static partial class Gen5MslTranslator
                         continue;
                     }
 
-                    target.Append(text, cursor, reference.Start - cursor);
+                    target.Append(text[cursor..reference.Start]);
                     target.Append(reference.File);
                     target.Append(reference.Index);
                     cursor = reference.Start + reference.Length;
                 }
 
-                target.Append(text, cursor, text.Length - cursor);
+                target.Append(text[cursor..]);
             }
 
             /// <summary>Turns each marked run-time register access into a choice among the

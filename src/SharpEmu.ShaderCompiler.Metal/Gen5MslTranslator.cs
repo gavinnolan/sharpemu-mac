@@ -840,7 +840,7 @@ public static partial class Gen5MslTranslator
 
             var initialStateText = initialState.ToString();
             var body = new StringBuilder();
-            string? bodyText = null;
+            StringBuilder? structuredBuilder = null;
             var structured = false;
             var meshBody = string.Empty;
             if (_stage == Gen5MslStage.Mesh &&
@@ -870,10 +870,9 @@ public static partial class Gen5MslTranslator
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
             else if (_options.StructuredControlFlow &&
-                TryBuildStructuredBody(blocks, out var structuredBody))
+                TryBuildStructuredBody(blocks, out structuredBuilder))
             {
                 structured = true;
-                bodyText = structuredBody;
             }
             else
             {
@@ -929,7 +928,7 @@ public static partial class Gen5MslTranslator
 
             plan.RewriteInto(source, initialStateText);
             source.AppendLine();
-            plan.RewriteInto(source, bodyText ?? body.ToString());
+            plan.RewriteInto(source, structuredBuilder ?? body);
             if (_stage == Gen5MslStage.Mesh)
             {
                 source.AppendLine();
