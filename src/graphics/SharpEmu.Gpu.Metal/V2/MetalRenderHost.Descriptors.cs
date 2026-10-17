@@ -560,7 +560,12 @@ internal sealed partial class MetalRenderHost
     // alone cannot say whether the dword it loads is the guest's count or a stale window.
     private static readonly HashSet<ulong> _dumpBufferHashes = ParseDumpBufferHashes();
     private readonly Dictionary<(ulong Hash, int Buffer), int> _dumpedBufferCounts = new();
-    private const int MaxBufferDumpsPerBinding = 4;
+    // SHARPEMU_METAL_V2_DUMP_BUFFER_COUNT=<n>: reports per binding, for a program that
+    // draws a whole HUD one quad batch after another.
+    private static readonly int MaxBufferDumpsPerBinding =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFER_COUNT"), out var dumps) && dumps > 0
+            ? dumps
+            : 4;
 
     // How much of each buffer to print. The head alone says nothing about the matrix a
     // vertex program loads from the middle of a constant buffer.
@@ -612,7 +617,9 @@ internal sealed partial class MetalRenderHost
         in MetalGuestRange range)
     {
         var hash = stage.Program.Hash;
-        if (_dumpBufferHashes.Count == 0 || !_dumpBufferHashes.Contains(hash))
+        // SHARPEMU_METAL_V2_DUMP_AFTER_SECONDS holds these back too, so a program the
+        // menus also run reports the level's bindings rather than the title screen's.
+        if (_dumpBufferHashes.Count == 0 || !_dumpBufferHashes.Contains(hash) || !DumpWindowOpen)
         {
             return;
         }

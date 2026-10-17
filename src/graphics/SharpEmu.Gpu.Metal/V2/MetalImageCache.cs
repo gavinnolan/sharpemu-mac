@@ -363,6 +363,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var image = _slots[imageIdentifier];
         var address = image.Description.Data.Address;
         var size = image.Description.Data.Size;
+        SynchronizeStencilPlanes(imageIdentifier, image, takesGpuOwnership);
         if (ImageDescription.IsEmptyRange(image.Description.Data) || !_pageOwners.MayHaveOwners(address, size))
         {
             return;
@@ -513,6 +514,126 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
         }
     }
+
+    // Depth images with a stencil plane. The page owner index holds an image's depth
+    // bytes only, and the stencil plane lives elsewhere (DB_STENCIL_*_BASE), so an image
+    // over those bytes - the R8 view a deferred lighting pass samples the stencil through
+    // - would never find the depth image that wrote them.
+    private readonly HashSet<ResourceSlotIdentifier> _stencilOwners = new();
+
+    /// <summary>
+    /// The stencil plane counterpart of the alias rules: the stencil a depth target writes
+    /// lands in its texture, and an image that reads those bytes must see it, as one that
+    /// writes them must leave the depth image reloading its stencil. A shader that samples
+    /// the plane as R8 is how a title tells lit geometry from sky, so a stale plane
+    /// unlights the whole scene.
+    ///
+    /// Caller holds the lock.
+    /// </summary>
+    private void SynchronizeStencilPlanes(
+        ResourceSlotIdentifier imageIdentifier, MetalCachedImage image, bool takesGpuOwnership)
+    {
+        if (!StencilPlaneSyncEnabled || _stencilOwners.Count == 0 ||
+            ImageDescription.IsEmptyRange(image.Description.Data))
+        {
+            return;
+        }
+
+        var address = image.Description.Data.Address;
+        var size = image.Description.Data.Size;
+        foreach (var ownerIdentifier in _stencilOwners)
+        {
+            if (ownerIdentifier == imageIdentifier || _slots.TryGet(ownerIdentifier) is not { } depth ||
+                !depth.Description.HasStencil || depth.Overlaps(address, size) ||
+                !GuestRangeOverlap.Bytes(depth.Description.Stencil.Address, depth.Description.Stencil.Size, address, size))
+            {
+                continue;
+            }
+
+            NoteForeignStencilShare(depth, image);
+            var (start, end) = image.OverlapWithin(depth.Description.Stencil.Address, depth.Description.Stencil.Size);
+            if (depth.IsGpuModified)
+            {
+                // Both planes go out together: only the depth image's texture holds them.
+                WriteBackToGuest(depth, MetalWritebackCause.ImageOverlap);
+                MarkAliasRunDirty(image, start, end);
+                _stencilPlanePublishes++;
+            }
+
+            if (takesGpuOwnership)
+            {
+                // Written back above if it owed anything; both planes reload on its next use.
+                depth.ClearGpuModified();
+                depth.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+            }
+        }
+
+        if (!image.Description.HasStencil)
+        {
+            return;
+        }
+
+        // A depth image binds: an image that wrote its stencil bytes since publishes them,
+        // and the depth image reloads both planes from guest memory.
+        var stencil = image.Description.Stencil;
+        foreach (var otherIdentifier in FindImagesInRange(stencil.Address, stencil.Size, pageOverlap: false))
+        {
+            if (otherIdentifier == imageIdentifier || _slots.TryGet(otherIdentifier) is not { } other ||
+                !other.Overlaps(stencil.Address, stencil.Size) || image.Overlaps(other.Description.Data.Address, other.Description.Data.Size))
+            {
+                continue;
+            }
+
+            NoteForeignStencilShare(image, other);
+            if (other.IsGpuModified)
+            {
+                // The depth plane is written out first so the reload keeps it, and the
+                // other image second so its stencil bytes are the ones left in guest memory.
+                WriteBackToGuest(image, MetalWritebackCause.ImageOverlap);
+                WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                _stencilPlanePublishes++;
+            }
+
+            if (takesGpuOwnership)
+            {
+                // Published above if it owed anything, so a whole reload loses nothing.
+                other.ClearGpuModified();
+                other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+            }
+        }
+    }
+
+    private long _stencilPlanePublishes;
+
+    // The plane read on purpose is an 8-bit depth-tiled image at DB_STENCIL_*_BASE. Any
+    // other surface over it is memory the title reuses, which the hand-over above treats
+    // like any alias; said once per pair, since a whole-plane publish into such a surface
+    // is the first thing to rule out when bands of garbage cross a frame.
+    private static void NoteForeignStencilShare(MetalCachedImage depth, MetalCachedImage other)
+    {
+        ref readonly var plane = ref depth.Description.Stencil;
+        ref readonly var data = ref other.Description.Data;
+        if (data.Address == plane.Address && other.Description.BytesPerBlock == 1 &&
+            other.Description.TileMode == GuestTileMode.Depth)
+        {
+            return;
+        }
+
+        MetalV2Diagnostics.WarnOnce(
+            $"stencil-plane-foreign:{plane.Address:X}:{data.Address:X}:{other.Description.PixelFormat}",
+            $"A surface that is not a view of a stencil plane shares its bytes: plane=0x{plane.Address:X16}+0x{plane.Size:X} " +
+            $"surface=0x{data.Address:X16}+0x{data.Size:X} {other.Description.Extent.Width}x{other.Description.Extent.Height} " +
+            $"format={other.Description.PixelFormat} tile={other.Description.TileMode}.");
+    }
+
+    // SHARPEMU_METAL_V2_STENCIL_PLANES=0 leaves stencil planes unsynchronised again, for a
+    // comparison.
+    private static readonly bool StencilPlaneSyncEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STENCIL_PLANES") != "0";
+
+    /// <summary>Stencil planes handed between a depth image and an image over them.</summary>
+    public long TakeStencilPlanePublishes() => Interlocked.Exchange(ref _stencilPlanePublishes, 0);
 
     // A write through an alias takes over the run a GPU-written image shares with it and
     // leaves that image GPU-modified for the rest: the run is published, so guest memory

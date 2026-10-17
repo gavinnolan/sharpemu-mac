@@ -58,7 +58,8 @@ internal sealed partial class MetalRenderHost
         // profiler; null unless SHARPEMU_METAL_V2_PROFILE_SHADERS=1.
         public string? Profile;
 
-        // The vertex module's hash, for the tiny-pass diagnostics.
+        // The vertex module's hash (the compute module's, for a compute pipeline), for
+        // the tiny-pass diagnostics and the target dump's labels.
         public ulong VertexHash;
 
         // The vertex descriptor this pipeline was built with, for the draw-state report:
@@ -863,6 +864,7 @@ internal sealed partial class MetalRenderHost
             Graphics = false,
             ThreadsPerThreadgroup = threads,
             Profile = ProfileLabelFor(module, null, null),
+            VertexHash = module.Hash,
         };
         _pipelineEntries[entry.Id] = entry;
         return new PipelineHandle(entry.Id, 0, false);
