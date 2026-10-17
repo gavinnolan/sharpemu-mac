@@ -270,14 +270,17 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         // A pixel program that reads the three vertex values of an input on a host that cannot
-        // declare per-vertex pixel inputs gets them from the primitive shader instead, run as a
-        // mesh function whose primitives carry them. The mesh path assembles a triangle list.
+        // declare per-vertex pixel inputs gets host interpolants instead when it only
+        // interpolates them by hand, or else them from the primitive shader, run as a mesh
+        // function whose primitives carry them. The mesh path assembles a triangle list.
         var perVertexParameters = 0u;
-        if (decodedPixelProgram is not null && pixelInfo is not null && primitiveShader is not null && triangleList &&
+        Gen5ManualInterpolationPlan? manualInterpolation = null;
+        if (decodedPixelProgram is not null && pixelInfo is not null && pixelSource is not null &&
             !_host.PerVertexPixelInputsSupported)
         {
-            perVertexParameters = Gen5PixelInputMapping.PerVertexParameterMask(
-                decodedPixelProgram, pixelInfo.InterpolatorSettings.AsSpan(0, (int)pixelInfo.InputCount));
+            perVertexParameters = ResolvePerVertexInputs(pixelSource, decodedPixelProgram, pixelInfo,
+                shaderInterface.PixelInputAddress, attributeCount, primitiveShader is not null && triangleList,
+                out manualInterpolation);
         }
 
         var vertexCompileSource = primitiveShader is null
@@ -302,6 +305,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                         PixelInputEnable = shaderInterface.PixelInputEnable,
                         PixelInputAddress = shaderInterface.PixelInputAddress,
                         PerVertexInputsFromPrimitive = perVertexParameters != 0,
+                        ManualInterpolation = manualInterpolation is not null,
                     },
                     ref pushDataCursor,
                     out pixelProgramHandle,
@@ -317,6 +321,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     RequiredVertexOutputCount = (int)attributeCount,
                     PrimitiveShader = primitiveShader,
                     MeshPerVertexParameterMask = perVertexParameters,
+                    VertexInterpolants = manualInterpolation?.Interpolants.Select(interpolant => interpolant.Encoded).ToArray() ?? [],
                 },
                 ref pushDataCursor,
                 out vertexProgram,
