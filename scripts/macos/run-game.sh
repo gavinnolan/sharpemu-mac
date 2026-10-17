@@ -177,6 +177,8 @@ shot() {
 
 (
   cd "$APP_DIR" || exit 1
+  # Same gen0 budget the app bundle's Info.plist sets (GCgen0size is environment-only).
+  export DOTNET_GCgen0size="${DOTNET_GCgen0size:-0x4000000}"
   for e in "$@"; do export "${e?}"; done
   export SHARPEMU_INPUT_FILE="$KEYS"
   export SHARPEMU_RUN_OUT="$OUT"
