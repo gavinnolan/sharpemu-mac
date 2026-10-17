@@ -76,6 +76,10 @@ internal sealed partial class MetalRenderHost
         public Gen5MslShader Shader = null!;
         public ulong Hash;
 
+        // The library compile on the module pool; Library and Function are set once it is
+        // done, which RequireModule waits for.
+        public Task? Compiling;
+
         // The post-tessellation form a rectangle-list pipeline draws through, built the
         // first time one uses this vertex program.
         public nint RectangleLibrary;
@@ -102,21 +106,36 @@ internal sealed partial class MetalRenderHost
             MetalShaderPrewarm.NoteRuntimeComputeModule(metal);
         }
 
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        // The MSL front end runs here, and the driver's back end runs when a pipeline
-        // state is made from the function. They are separate costs with separate
-        // caches, so they are counted separately. A graphics library the library prewarm
-        // already compiled is taken from it instead.
-        var library = CompileLibrary(
-            metal.Shader.Source, hash, metal.Shader.UsesPerVertexInputs, prewarmable: stage != ShaderStage.Compute);
-        Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
-        var function = MetalNative.Send(
-            library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(metal.Shader.EntryPoint));
-        if (function == 0)
+        var module = new MetalShaderModule
         {
-            MetalNative.SendVoid(library, SelRelease);
-            throw Fatal(
-                $"The MSL library has no entry point: entry={metal.Shader.EntryPoint} hash=0x{hash:X16}.");
+            Shader = metal.Shader,
+            Hash = hash,
+        };
+
+        // The library compiles on the module pool and the handle is returned at once: the
+        // caller goes on translating the draw's other program, whose library then compiles
+        // alongside, and only the pipeline state waits for both (RequireModule). A draw that
+        // brought two new programs used to run one front end after the other on the GPU
+        // worker, with the translation of the second in between.
+        void build()
+        {
+            if (stage == ShaderStage.Compute)
+            {
+                // The background prewarm may have this source in hand; its library is then
+                // a cache hit here once it is done.
+                MetalShaderPrewarm.WaitWhileCompiling(metal);
+            }
+
+            BuildModule(module, stage);
+        }
+
+        if (MetalLibraryCompilePool.Enabled)
+        {
+            module.Compiling = MetalLibraryCompilePool.Shared.Run(build);
+        }
+        else
+        {
+            build();
         }
 
         int index;
@@ -124,22 +143,50 @@ internal sealed partial class MetalRenderHost
         // while RequireModule runs on the GPU worker; the list is shared state.
         lock (_modules)
         {
-            _modules.Add(new MetalShaderModule
-            {
-                Library = library,
-                Function = function,
-                Shader = metal.Shader,
-                Hash = hash,
-            });
+            _modules.Add(module);
             index = _modules.Count;
         }
 
         Interlocked.Increment(ref _shaderCompilations);
-        MetalV2Diagnostics.Trace(
-            $"compiled module hash=0x{hash:X16} entry={metal.Shader.EntryPoint} " +
-            $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
         // Module zero never identifies a module, so the handle is the one-based index.
         return (ulong)index;
+    }
+
+    // The library and the function of a module; on the module pool or the caller's thread.
+    private void BuildModule(MetalShaderModule module, ShaderStage stage)
+    {
+        var shader = module.Shader;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        // The MSL front end runs here, and the driver's back end runs when a pipeline
+        // state is made from the function. They are separate costs with separate
+        // caches, so they are counted separately. A graphics library the library prewarm
+        // already compiled is taken from it instead.
+        var library = CompileLibrary(
+            shader.Source, module.Hash, shader.UsesPerVertexInputs, prewarmable: stage != ShaderStage.Compute);
+        Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        var pool = MetalNative.objc_autoreleasePoolPush();
+        try
+        {
+            var function = MetalNative.Send(
+                library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(shader.EntryPoint));
+            if (function == 0)
+            {
+                MetalNative.SendVoid(library, SelRelease);
+                throw Fatal(
+                    $"The MSL library has no entry point: entry={shader.EntryPoint} hash=0x{module.Hash:X16}.");
+            }
+
+            module.Library = library;
+            module.Function = function;
+        }
+        finally
+        {
+            MetalNative.objc_autoreleasePoolPop(pool);
+        }
+
+        MetalV2Diagnostics.Trace(
+            $"compiled module hash=0x{module.Hash:X16} entry={shader.EntryPoint} " +
+            $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
     }
 
     private nint RequireRectangleFunction(MetalShaderModule module)
@@ -246,8 +293,10 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    // The module with its library and function, waiting for a compile still on the pool.
     private MetalShaderModule RequireModule(in ShaderProgram program)
     {
+        MetalShaderModule module;
         lock (_modules)
         {
             var index = (int)program.Module - 1;
@@ -256,8 +305,24 @@ internal sealed partial class MetalRenderHost
                 throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
             }
 
-            return _modules[index];
+            module = _modules[index];
         }
+
+        if (module.Compiling is { } compiling)
+        {
+            if (!compiling.IsCompleted)
+            {
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                ((IAsyncResult)compiling).AsyncWaitHandle.WaitOne();
+                Interlocked.Add(ref _libraryWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            }
+
+            // A failed compile is fatal where the module is first needed, as it was where
+            // the module was made.
+            compiling.GetAwaiter().GetResult();
+        }
+
+        return module;
     }
 
     /// <summary>A rectangle list draws one patch per rectangle, so its count is needed up
@@ -1058,6 +1123,15 @@ internal sealed partial class MetalRenderHost
         _depthStencilStates.Clear();
         foreach (var module in _modules)
         {
+            try
+            {
+                module.Compiling?.Wait();
+            }
+            catch (AggregateException)
+            {
+                // A compile that failed left nothing to release.
+            }
+
             if (module.Function != 0)
             {
                 MetalNative.SendVoid(module.Function, SelRelease);
