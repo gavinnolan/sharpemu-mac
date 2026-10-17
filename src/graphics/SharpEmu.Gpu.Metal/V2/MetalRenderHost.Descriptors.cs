@@ -38,6 +38,11 @@ internal sealed partial class MetalRenderHost
         public nint[] Textures = [];
         public uint[] TextureLevels = [];
         public ulong[] TextureIds = [];
+
+        // A dynamic-mip storage image's views of its levels past the first, [mip - 1]:
+        // image_store_mip and image_load_mip name the level, each a view of its own.
+        public nint[]?[] MipTextures = [];
+        public ulong[]?[] MipTextureIds = [];
         public nint[] Samplers = [];
         public ulong[] SamplerIds = [];
         public ResourceSlotIdentifier[] Images = [];
@@ -64,6 +69,8 @@ internal sealed partial class MetalRenderHost
             {
                 Textures = new nint[images];
                 TextureIds = new ulong[images];
+                MipTextures = new nint[]?[images];
+                MipTextureIds = new ulong[]?[images];
                 TextureLevels = new uint[images];
                 Images = new ResourceSlotIdentifier[images];
                 Requests = new ImageRequest[images];
@@ -103,10 +110,29 @@ internal sealed partial class MetalRenderHost
 
     // The argument layout of one binding layout, with the per-field resource indices that
     // a draw would otherwise look up by scanning the descriptors.
-    private sealed class ArgumentPlan(Gen5MslArgumentLayout layout, int[]?[] fieldResources)
+    private sealed class ArgumentPlan(Gen5MslArgumentLayout layout, int[]?[] fieldResources, int[]?[] fieldMips)
     {
         public readonly Gen5MslArgumentLayout Layout = layout;
         public readonly int[]?[] FieldResources = fieldResources;
+
+        // Per texture element, the mip it binds of its image: a dynamic-mip storage image
+        // repeats its resource index once per level, in level order.
+        public readonly int[]?[] FieldMips = fieldMips;
+    }
+
+    /// <summary>
+    /// The level each element of a texture field binds: the k-th consecutive repeat of a
+    /// resource index is mip k of that image, every other element mip 0.
+    /// </summary>
+    private static int[] ElementMips(IReadOnlyList<uint> resources)
+    {
+        var mips = new int[resources.Count];
+        for (var index = 1; index < mips.Length; index++)
+        {
+            mips[index] = resources[index] == resources[index - 1] ? mips[index - 1] + 1 : 0;
+        }
+
+        return mips;
     }
 
     private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentLayouts = new();
@@ -381,6 +407,48 @@ internal sealed partial class MetalRenderHost
         return paired;
     }
 
+    // The binding layout gives a dynamic-mip storage image one element per level of its
+    // descriptor (BASE_LEVEL..LAST_LEVEL), and the shader picks the element from the mip
+    // operand. The first element is the base view; each later one needs the view of its
+    // own level, or a downsampler that writes a level and the next through one T# writes
+    // both into the base and leaves the next level stale.
+    private void BindStorageMipViews(
+        MetalStageBindings stage, ImageResource image, ResourceSlotIdentifier identifier, in ImageRequest request, int index)
+    {
+        var extra = image.MipMode == ImageMipMode.DynamicStorage && stage.IsStorage[index]
+            ? (int)image.MipCount - 1
+            : 0;
+        if (extra <= 0)
+        {
+            stage.MipTextures[index] = null;
+            stage.MipTextureIds[index] = null;
+            return;
+        }
+
+        var levels = _imageCache.GetImage(identifier).Description.Resources.Levels;
+        if (request.View.BaseLevel + image.MipCount > levels)
+        {
+            throw Fatal(
+                $"A storage image's mips run past its levels: image={index} base={request.View.BaseLevel} " +
+                $"mips={image.MipCount} levels={levels} hash=0x{stage.Program.Hash:X16}.");
+        }
+
+        var textures = stage.MipTextures[index] is { } held && held.Length == extra ? held : new nint[extra];
+        var ids = stage.MipTextureIds[index] is { } heldIds && heldIds.Length == extra ? heldIds : new ulong[extra];
+        for (var mip = 1; mip <= extra; mip++)
+        {
+            var mipRequest = request with
+            {
+                View = request.View with { BaseLevel = request.View.BaseLevel + (uint)mip, LevelCount = 1 },
+            };
+            textures[mip - 1] = _imageCache.AcquireTextureView(identifier, mipRequest, out ids[mip - 1]);
+            NotePendingInputDump(textures[mip - 1], identifier, index, ImageRole.StorageImage);
+        }
+
+        stage.MipTextures[index] = textures;
+        stage.MipTextureIds[index] = ids;
+    }
+
     public void PrepareDeviceAddresses()
     {
         // Guest memory is the GPU's memory, so a device-address program needs no page
@@ -420,6 +488,7 @@ internal sealed partial class MetalRenderHost
             stage.Textures[index] = _imageCache.AcquireTextureView(
                 identifier, request with { Role = role }, out stage.TextureIds[index]);
             NotePendingInputDump(stage.Textures[index], identifier, index, role);
+            BindStorageMipViews(stage, info.Images[index], identifier, request with { Role = role }, index);
         }
 
         for (var index = 0; index < stage.BufferCount; index++)
@@ -783,7 +852,8 @@ internal sealed partial class MetalRenderHost
 
                     break;
                 case MslArgumentFieldKind.Textures:
-                    WriteTextureField(stage, field, plan.FieldResources[fieldIndex], span, ref imageCursor, stageIndex);
+                    WriteTextureField(
+                        stage, field, plan.FieldResources[fieldIndex], plan.FieldMips[fieldIndex], span, ref imageCursor, stageIndex);
                     break;
                 case MslArgumentFieldKind.Samplers:
                     // The layout lists only canonical samplers (equal descriptors share one
@@ -852,6 +922,7 @@ internal sealed partial class MetalRenderHost
         MetalStageBindings stage,
         MslArgumentField field,
         int[]? bindingResources,
+        int[]? bindingMips,
         Span<byte> span,
         ref int imageCursor,
         int stageIndex)
@@ -866,7 +937,22 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            var mip = bindingMips is not null && index < bindingMips.Length ? bindingMips[index] : 0;
             var texture = stage.Textures[resource];
+            var textureId = stage.TextureIds[resource];
+            if (mip > 0)
+            {
+                if (stage.MipTextures[resource] is not { } mipTextures || mip > mipTextures.Length)
+                {
+                    throw Fatal(
+                        $"A storage image element has no view of its mip: image={resource} mip={mip} " +
+                        $"hash=0x{stage.Program.Hash:X16}.");
+                }
+
+                texture = mipTextures[mip - 1];
+                textureId = stage.MipTextureIds[resource]![mip - 1];
+            }
+
             if (texture == 0)
             {
                 continue;
@@ -882,7 +968,7 @@ internal sealed partial class MetalRenderHost
             }
 
             BinaryPrimitives.WriteUInt64LittleEndian(
-                span[(index * sizeof(ulong))..], stage.TextureIds[resource]);
+                span[(index * sizeof(ulong))..], textureId);
             var usage = Mtl.ResourceUsageRead | (stage.IsStorage[resource] ? Mtl.ResourceUsageWrite : 0);
             NoteUsedResource(texture, usage);
         }
@@ -1116,6 +1202,7 @@ internal sealed partial class MetalRenderHost
 
         var built = Gen5MslArgumentLayout.Build(layout);
         var fieldResources = new int[]?[built.Fields.Count];
+        var fieldMips = new int[]?[built.Fields.Count];
         for (var index = 0; index < fieldResources.Length; index++)
         {
             var field = built.Fields[index];
@@ -1137,9 +1224,13 @@ internal sealed partial class MetalRenderHost
             }
 
             fieldResources[index] = converted;
+            if (field.FieldKind == MslArgumentFieldKind.Textures)
+            {
+                fieldMips[index] = ElementMips(resources);
+            }
         }
 
-        var plan = new ArgumentPlan(built, fieldResources);
+        var plan = new ArgumentPlan(built, fieldResources, fieldMips);
         _argumentLayouts[layout] = plan;
         return plan;
     }

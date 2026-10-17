@@ -1183,4 +1183,21 @@ internal static class ComputeScenePrograms
         0xE0702000, 0x8001050A,    // buffer_store_dword v5, v10, s[4:7], 0 idxen
         0xBF810000,                // s_endpgm
     ];
+
+    /// <summary>
+    /// one 8x8 group writes 0xA00 | y &lt;&lt; 4 | x to mip 0 and 0xB00 | y &lt;&lt; 4 | x to mip 1 of the
+    /// two-level T# in s[0:7], both through image_store_mip (a downsampler writing a level and the next)
+    /// </summary>
+    public static readonly uint[] StoreMipLevels =
+    [
+        0x34080284,                // v_lshlrev_b32_e32 v4, 4, v1
+        0x38080104,                // v_or_b32_e32 v4, v4, v0
+        0x380A08FF, 0x00000B00,    // v_or_b32_e32 v5, 0xb00, v4
+        0x380808FF, 0x00000A00,    // v_or_b32_e32 v4, 0xa00, v4
+        0x7E040280,                // v_mov_b32_e32 v2, 0
+        0xF0241108, 0x00000400,    // image_store_mip v4, v[0:2], s[0:7] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+        0x7E040281,                // v_mov_b32_e32 v2, 1
+        0xF0241108, 0x00000500,    // image_store_mip v5, v[0:2], s[0:7] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+        0xBF810000,                // s_endpgm
+    ];
 }

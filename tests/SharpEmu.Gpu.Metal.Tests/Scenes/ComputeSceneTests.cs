@@ -548,6 +548,46 @@ public sealed partial class ComputeSceneTests(ITestOutputHelper output) : SceneT
         }
     }
 
+    /// <summary>
+    /// image_store_mip picks the level from the address: one T# spanning two levels takes both, each
+    /// into its own level. A downsampler that writes a level and the next this way (Demon's Souls'
+    /// bloom chain) otherwise leaves the next level stale and the levels built from it NaN.
+    /// </summary>
+    [Fact]
+    public void AStoreMipWritesTheLevelItsAddressNames()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const uint size = 16;
+        // Linear R32 levels as addrlib lays them out: the smallest first, rows padded to 64 texels.
+        var mip1Bytes = (ulong)SceneDraws.LinearPitchBytes(size / 2, 4) * (size / 2);
+        var mip0Bytes = (ulong)SceneDraws.LinearPitchBytes(size, 4) * size;
+        var image = rig.Memory.Allocate(mip1Bytes + mip0Bytes, 0x10000);
+        rig.Memory.Write(image, new byte[mip1Bytes + mip0Bytes]);
+        var pm4 = new ScenePm4();
+        Setup(rig, pm4, ComputeScenePrograms.StoreMipLevels,
+                Descriptors.Texture(image, 20, size, size, lastLevel: 1), 8, 8, 1, threadIdComponents: 1)
+            .DispatchDirect(1, 1, 1);
+        CsFlush(pm4);
+        rig.Submit(pm4);
+
+        var mip0 = rig.ReadImage<uint>(image + mip1Bytes, size, size);
+        var mip1 = rig.ReadImage<uint>(image, size / 2, size / 2);
+        for (var y = 0u; y < size; y++)
+        for (var x = 0u; x < size; x++)
+        {
+            var expected = x < 8 && y < 8 ? 0xA00u | (y << 4) | x : 0u;
+            Assert.True(expected == mip0[(y * size) + x], $"mip 0 ({x},{y}): 0x{mip0[(y * size) + x]:X} vs 0x{expected:X}");
+        }
+
+        for (var y = 0u; y < size / 2; y++)
+        for (var x = 0u; x < size / 2; x++)
+        {
+            var expected = 0xB00u | (y << 4) | x;
+            Assert.True(expected == mip1[(y * (size / 2)) + x], $"mip 1 ({x},{y}): 0x{mip1[(y * (size / 2)) + x]:X} vs 0x{expected:X}");
+        }
+    }
+
     private sealed record Candidate(int X0, int Y0, int X1, int Y1, float NearestZ);
 
     /// <summary>Handcrafted and seeded screen-space bounds (inclusive pixels) for the occlusion test.</summary>
