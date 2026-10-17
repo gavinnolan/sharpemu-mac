@@ -99,19 +99,8 @@ internal sealed class MetalPendingWriteOverlay
 
         lock (_gate)
         {
-            ForEachOverlapping(address, size, entry =>
-            {
-                var start = Math.Max(address, entry.Address);
-                var end = Math.Min(address + size, entry.End);
-                if (start <= entry.Address && end >= entry.End)
-                {
-                    RemoveLocked(entry);
-                    return;
-                }
-
-                entry.Dead ??= new bool[entry.Bytes.Length];
-                entry.Dead.AsSpan((int)(start - entry.Address), (int)(end - start)).Fill(true);
-            });
+            var forget = new ForgetVisitor(this, address, size);
+            ForEachOverlapping(address, size, ref forget);
         }
     }
 
@@ -153,31 +142,29 @@ internal sealed class MetalPendingWriteOverlay
                 return AnyOverlapLocked(address, size) ? MetalOverlayCoverage.Partial : MetalOverlayCoverage.None;
             }
 
-            var covered = new bool[size];
-            var any = false;
-            ForEachOverlapping(address, size, entry =>
+            // Rented rather than allocated: this answers every word-line the command
+            // processor parses while any write is pending.
+            var covered = System.Buffers.ArrayPool<bool>.Shared.Rent((int)size);
+            try
             {
-                var start = Math.Max(address, entry.Address);
-                var end = Math.Min(address + size, entry.End);
-                for (var at = start; at < end; at++)
+                Array.Clear(covered, 0, (int)size);
+                var coverage = new CoverageVisitor(address, size, covered);
+                ForEachOverlapping(address, size, ref coverage);
+                if (!coverage.Any)
                 {
-                    if (entry.Dead is null || !entry.Dead[at - entry.Address])
-                    {
-                        covered[at - address] = true;
-                        any = true;
-                    }
+                    return MetalOverlayCoverage.None;
                 }
-            });
 
-            if (!any)
-            {
-                return MetalOverlayCoverage.None;
+                return Array.IndexOf(covered, false, 0, (int)size) < 0
+                    ? MetalOverlayCoverage.Full
+                    : MetalOverlayCoverage.Partial;
             }
-
-            return Array.IndexOf(covered, false) < 0 ? MetalOverlayCoverage.Full : MetalOverlayCoverage.Partial;
+            finally
+            {
+                System.Buffers.ArrayPool<bool>.Shared.Return(covered);
+            }
         }
     }
-
     /// <summary>Writes the pending bytes over <paramref name="destination"/>, oldest first.</summary>
     public void Apply(ulong address, Span<byte> destination)
     {
@@ -190,7 +177,9 @@ internal sealed class MetalPendingWriteOverlay
         {
             var size = (ulong)destination.Length;
             List<Entry>? entries = null;
-            ForEachOverlapping(address, size, entry => (entries ??= new List<Entry>(2)).Add(entry));
+            var collect = new CollectVisitor();
+            ForEachOverlapping(address, size, ref collect);
+            entries = collect.Entries;
             if (entries is null)
             {
                 return;
@@ -214,21 +203,16 @@ internal sealed class MetalPendingWriteOverlay
 
     private bool AnyOverlapLocked(ulong address, ulong size)
     {
-        var found = false;
-        ForEachOverlapping(address, size, _ => found = true);
-        return found;
+        var any = new AnyVisitor();
+        ForEachOverlapping(address, size, ref any);
+        return any.Found;
     }
 
     private void RetireOverlappingLocked(ulong address, ulong size, ulong completedSerial)
     {
-        List<Entry>? landed = null;
-        ForEachOverlapping(address, size, entry =>
-        {
-            if (entry.Serial <= completedSerial)
-            {
-                (landed ??= new List<Entry>(2)).Add(entry);
-            }
-        });
+        var retire = new RetireVisitor(completedSerial);
+        ForEachOverlapping(address, size, ref retire);
+        var landed = retire.Landed;
 
         if (landed is not null)
         {
@@ -240,7 +224,8 @@ internal sealed class MetalPendingWriteOverlay
     }
 
     // Visits each live entry overlapping the range once, in no particular order.
-    private void ForEachOverlapping(ulong address, ulong size, Action<Entry> visit)
+    private void ForEachOverlapping<TVisitor>(ulong address, ulong size, ref TVisitor visit)
+        where TVisitor : struct, IEntryVisitor
     {
         if (_pages.Count == 0)
         {
@@ -257,7 +242,7 @@ internal sealed class MetalPendingWriteOverlay
             {
                 if (!entry.Removed && entry.Address < end && address < entry.End)
                 {
-                    visit(entry);
+                    visit.Visit(entry);
                 }
             }
 
@@ -297,8 +282,77 @@ internal sealed class MetalPendingWriteOverlay
                 }
 
                 previous = entry;
-                visit(entry);
+                visit.Visit(entry);
             }
+        }
+    }
+
+    // Struct visitors, so a probe allocates neither a closure nor a delegate.
+    private interface IEntryVisitor
+    {
+        void Visit(Entry entry);
+    }
+
+    private struct AnyVisitor : IEntryVisitor
+    {
+        public bool Found;
+
+        public void Visit(Entry entry) => Found = true;
+    }
+
+    private struct CollectVisitor : IEntryVisitor
+    {
+        public List<Entry>? Entries;
+
+        public void Visit(Entry entry) => (Entries ??= new List<Entry>(2)).Add(entry);
+    }
+
+    private struct RetireVisitor(ulong completedSerial) : IEntryVisitor
+    {
+        public List<Entry>? Landed;
+
+        public void Visit(Entry entry)
+        {
+            if (entry.Serial <= completedSerial)
+            {
+                (Landed ??= new List<Entry>(2)).Add(entry);
+            }
+        }
+    }
+
+    private struct CoverageVisitor(ulong address, ulong size, bool[] covered) : IEntryVisitor
+    {
+        public bool Any;
+
+        public void Visit(Entry entry)
+        {
+            var start = Math.Max(address, entry.Address);
+            var end = Math.Min(address + size, entry.End);
+            for (var at = start; at < end; at++)
+            {
+                if (entry.Dead is null || !entry.Dead[at - entry.Address])
+                {
+                    covered[at - address] = true;
+                    Any = true;
+                }
+            }
+        }
+    }
+
+    private struct ForgetVisitor(MetalPendingWriteOverlay owner, ulong address, ulong size) : IEntryVisitor
+    {
+        public void Visit(Entry entry)
+        {
+            var start = Math.Max(address, entry.Address);
+            var end = Math.Min(address + size, entry.End);
+            if (start <= entry.Address && end >= entry.End)
+            {
+                owner.RemoveLocked(entry);
+                return;
+            }
+
+            entry.Dead ??= new bool[entry.Bytes.Length];
+            entry.Dead.AsSpan((int)(start - entry.Address), (int)(end - start)).Fill(true);
         }
     }
 
