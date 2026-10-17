@@ -23,7 +23,7 @@ internal static partial class MetalNative
     /// <paramref name="trailingRanges"/> one-page entries on the pages after the guest
     /// range follow it, so the guest range is the first of that many more entries.</summary>
     public static (IReadOnlyList<DeviceTable> Tables, nint Faults) CreateGuestMapping(
-        ulong guestBase, byte[] guestBytes, uint faultWords, uint trailingRanges = 0)
+        ulong guestBase, byte[] guestBytes, uint faultWords, uint trailingRanges = 0, bool indexed = false)
     {
         var pageBytes = 1ul << DeviceAddressPaging.PageBits;
         if (guestBase % pageBytes != 0 || (ulong)guestBytes.Length % pageBytes != 0)
@@ -45,11 +45,26 @@ internal static partial class MetalNative
             BinaryPrimitives.WriteUInt64LittleEndian(entry[16..], gpuAddress);
         }
 
+        var count = trailingRanges + 1;
+        if (indexed)
+        {
+            var entries = new List<(ulong FirstPage, ulong PageCount, ulong Base)>();
+            for (var index = 0; index < count; index++)
+            {
+                entries.Add((BinaryPrimitives.ReadUInt64LittleEndian(table.AsSpan(index * 24)), 0, 0));
+            }
+
+            var words = SharpEmu.Gpu.Metal.V2.MetalDeviceAddressIndex.Build(entries);
+            Array.Resize(ref table, table.Length + words.Length * sizeof(uint));
+            MemoryMarshal.AsBytes(words.AsSpan()).CopyTo(table.AsSpan((int)count * 24));
+            count |= SharpEmu.Gpu.Metal.V2.MetalDeviceAddressIndex.IndexedFlag;
+        }
+
         var ranges = SharedBuffer(table);
         var faults = SharedBuffer(new byte[faultWords * sizeof(uint)]);
         return (
             [
-                new DeviceTable(DescriptorBindingKind.DeviceAddressPageTable, ranges, trailingRanges + 1, [memory]),
+                new DeviceTable(DescriptorBindingKind.DeviceAddressPageTable, ranges, count, [memory]),
                 new DeviceTable(DescriptorBindingKind.FaultBuffer, faults, faultWords, []),
             ],
             faults);

@@ -435,7 +435,7 @@ public static partial class Gen5MslTranslator
             if (_hasDeviceAddressTable)
             {
                 source.AppendLine($"    device const Gen5AddressRange* sharpemu_ranges = {ResourcesName}.address_ranges;");
-                source.AppendLine($"    uint sharpemu_range_count = min({ResourcesName}.address_range_count, {MaxAddressRangeCount}u);");
+                source.AppendLine($"    uint sharpemu_range_count = ({ResourcesName}.address_range_count & 0x80000000u) | min({ResourcesName}.address_range_count & 0x7FFFFFFFu, {MaxAddressRangeCount}u);");
                 source.AppendLine($"    device uint* sharpemu_faults = {ResourcesName}.fault_bits;");
                 source.AppendLine($"    uint sharpemu_fault_words = {ResourcesName}.fault_word_count;");
                 source.AppendLine("    Gen5RangeCache sharpemu_range_cache = { 0ul, 0ul, nullptr };");

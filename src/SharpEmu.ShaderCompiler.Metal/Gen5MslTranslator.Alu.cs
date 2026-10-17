@@ -1822,13 +1822,23 @@ public static partial class Gen5MslTranslator
                 return;
             }
 
-            if (_options.DeadMaskBallotElision && MaskSlotOf(loRegister) >= 0)
+            if (_options.DeadMaskBallotElision && hiRegister < ScalarRegisterFileCount)
             {
-                // VCC or EXEC: the exchange costs a threadgroup barrier, and it is
-                // only worth it if the 64-bit pair is read before it is overwritten.
-                // That is not knowable until every block has been emitted, so leave a
-                // marker for Gen5MslTranslator.MaskBallots to resolve.
-                Line($"{MaskBallotMarker}({loRegister}, {condition});");
+                // The exchange costs a threadgroup barrier, and it is only worth it if
+                // the 64-bit pair is read before it is overwritten. That is not knowable
+                // until every block has been emitted, so leave a marker for
+                // Gen5MslTranslator.MaskBallots to resolve. Remember the per-lane bool
+                // too: a consumer that wants this lane's bit of the mask takes it from
+                // there (Gen5MslTranslator.LaneMasks.cs). VCC and EXEC already have one.
+                var laneCondition = condition;
+                if (LaneMasksEnabled && loRegister != VccLoRegister && loRegister != ExecLoRegister)
+                {
+                    laneCondition = LaneVariableName(loRegister);
+                    _laneVariables.Add(loRegister);
+                    Line($"{laneCondition} = {condition};");
+                }
+
+                Line($"{MaskBallotMarker}({loRegister}, {laneCondition});");
                 return;
             }
 
@@ -2573,6 +2583,11 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (TryEmitLaneMaskOp(instruction, destination))
+            {
+                return true;
+            }
+
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
@@ -3218,7 +3233,7 @@ public static partial class Gen5MslTranslator
             { Kind: Gen5OperandKind.ScalarRegister, Value: ExecLoRegister } => "exec",
             { Kind: Gen5OperandKind.ScalarRegister } scalar =>
                 IsWave64
-                    ? $"({LaneBit($"s[{scalar.Value}]", $"s[{scalar.Value + 1}]")})"
+                    ? $"({LaneBitOfPair(scalar.Value, LaneBit($"s[{scalar.Value}]", $"s[{scalar.Value + 1}]"))})"
                     : $"(((s[{scalar.Value}] >> sharpemu_lane) & 1u) != 0u)",
             _ => throw new NotSupportedException("mask operand must be a scalar register"),
         };
