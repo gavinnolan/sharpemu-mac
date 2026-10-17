@@ -504,6 +504,31 @@ internal sealed class MetalGuestMemory : IDisposable
         return !StageEverything && TryResolveWindow(gpuVa, size, out range);
     }
 
+    /// <summary>The window whose buffer a GPU address lies in, or -1.</summary>
+    public int WindowIndexOfGpuAddress(ulong gpuAddress)
+    {
+        for (var index = 0; index < _windowCount; index++)
+        {
+            if (gpuAddress - _windows[index].GpuAddress < _windows[index].Size)
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// The backing a window owns: from its first byte to the next window's, so the seam it
+    /// shares with the next one belongs to that one and every backing byte to one window.
+    /// </summary>
+    public (ulong Offset, ulong Size) WindowOwnedBacking(int index) =>
+        ((ulong)index * _windowStride, index == _windowCount - 1 ? _windows[index].Size : _windowStride);
+
+    /// <summary>The window that owns a backing offset (<see cref="WindowOwnedBacking"/>).</summary>
+    public int WindowOwningBacking(ulong offset) =>
+        (int)Math.Min(offset / _windowStride, (ulong)(_windowCount - 1));
+
     /// <summary>True when the range is a window's own bytes - guest memory - rather than a ring copy.</summary>
     public bool IsInPlace(in MetalGuestRange range)
     {
@@ -938,6 +963,16 @@ internal sealed class MetalGuestMemory : IDisposable
     public nint CreateMeshletBuffer(ulong size, out nint contents)
     {
         var buffer = CreateSharedBuffer(size, "mesh.meshlets", out contents, out _);
+        AddResident(buffer);
+        CommitResidency();
+        return buffer;
+    }
+
+    /// <summary>A small shared buffer kept resident for the session, for a shader to reach
+    /// through an argument-buffer address.</summary>
+    public nint CreateResidentSharedBuffer(ulong size, string label, out nint contents, out ulong gpuAddress)
+    {
+        var buffer = CreateSharedBuffer(size, label, out contents, out gpuAddress);
         AddResident(buffer);
         CommitResidency();
         return buffer;

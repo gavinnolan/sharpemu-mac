@@ -825,7 +825,7 @@ internal static class MetalShaderPrewarm
     }
 
     // The same per-title directory naming as the Vulkan pipeline cache.
-    private static string SanitizeTitleId(string? titleId)
+    internal static string SanitizeTitleId(string? titleId)
     {
         if (string.IsNullOrWhiteSpace(titleId))
         {

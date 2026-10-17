@@ -992,7 +992,11 @@ internal sealed partial class MetalRenderHost
             case DescriptorBindingKind.DeviceAddressPageTable:
                 return UploadDeviceAddressTable();
             case DescriptorBindingKind.FaultBuffer:
-                return MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
+                // The fault-bitmap words stay at zero (WordFieldValue); the buffer takes the
+                // reach feedback instead.
+                return DeviceAddressReachEnabled
+                    ? ReachFeedbackAddress()
+                    : MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
             case DescriptorBindingKind.FlattenedResourceTable:
                 return UploadDwords(stage.StageResources.Resources.FlattenedResourceTable);
             case DescriptorBindingKind.ShaderData:
@@ -1052,6 +1056,11 @@ internal sealed partial class MetalRenderHost
             _deviceAddressSpanVersion = spanVersion;
         }
 
+        if (DeviceAddressReachEnabled)
+        {
+            BeginDeviceAddressReach();
+        }
+
         // The granule index follows the entries; the shader finds it at ranges[count].
         var granuleIndex = _deviceAddressIndex;
         var entryBytes = _deviceAddressEntries.Count * AddressRangeEntryBytes;
@@ -1063,7 +1072,7 @@ internal sealed partial class MetalRenderHost
             var (firstPage, pageCount, address) = _deviceAddressEntries[index];
             var entry = span[(index * AddressRangeEntryBytes)..];
             BinaryPrimitives.WriteUInt64LittleEndian(entry, firstPage);
-            BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], pageCount);
+            BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], ReachPageCount(pageCount, _deviceAddressEntryWindows[index]));
             BinaryPrimitives.WriteUInt64LittleEndian(entry[16..], address);
         }
 
@@ -1076,6 +1085,9 @@ internal sealed partial class MetalRenderHost
     }
 
     private ulong _deviceAddressWindows;
+
+    // The window each table entry's run lies in, in table order.
+    private readonly List<int> _deviceAddressEntryWindows = [];
     private uint[] _deviceAddressIndex = [];
 
     // Each guest span becomes the fewest window-backed runs that cover it. A span whose
@@ -1144,6 +1156,12 @@ internal sealed partial class MetalRenderHost
         _guestMemory.ClearTouchedWindows();
         _guestMemory.MarkWindowsTouched(touchedBefore);
         _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
+        _deviceAddressEntryWindows.Clear();
+        foreach (var (_, _, address) in _deviceAddressEntries)
+        {
+            _deviceAddressEntryWindows.Add(_guestMemory.WindowIndexOfGpuAddress(address));
+        }
+
         _deviceAddressIndex = MetalDeviceAddressIndex.Build(_deviceAddressEntries);
         // The windows the table names are what every encoder running a device-address
         // program asks the driver to keep resident, which it does by wiring them whole;
@@ -1355,11 +1373,12 @@ internal sealed partial class MetalRenderHost
 
     // A device-address program can dereference any mapped guest page, so the encoder that
     // runs one names the windows the address table spans, whether or not anything resolved
-    // a range through them. Only that encoder: the rest of the submission names the windows
+    // a range through them - or, with the reach profile, those of them the title's programs
+    // are known to reach. Only that encoder: the rest of the submission names the windows
     // its own bindings resolved.
     private void NameDeviceAddressWindows(nint encoder, nuint stages)
     {
-        for (var windows = _deviceAddressWindows; windows != 0; windows &= windows - 1)
+        for (var windows = DeviceAddressNamedWindows(); windows != 0; windows &= windows - 1)
         {
             var window = _guestMemory.WindowBuffer(System.Numerics.BitOperations.TrailingZeroCount(windows));
             if (!TryNoteResident(window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages))
