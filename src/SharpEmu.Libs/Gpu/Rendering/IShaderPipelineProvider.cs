@@ -84,6 +84,23 @@ public interface IShaderPipelineProvider
         bool depthAspectBound,
         bool stencilAspectBound = false);
 
+    // The same, knowing whether the draw's primitives are a triangle list: only then can a
+    // passthrough primitive shader run as a mesh function that hands its pixel program the
+    // three vertex values a host without per-vertex pixel inputs cannot give it.
+    GraphicsPrograms GetGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList) =>
+        GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
+            depthAspectBound, stencilAspectBound);
+
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,
         in DepthAttachmentState depth,

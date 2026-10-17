@@ -25,6 +25,9 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     public bool DepthAspectBound;
     public bool StencilAspectBound;
 
+    // VGT_PRIMITIVE_TYPE is a triangle list (see IShaderPipelineProvider.GetGraphicsPrograms).
+    public bool TriangleList;
+
     public static GraphicsProgramInputs Create()
     {
         var inputs = new GraphicsProgramInputs();
@@ -34,7 +37,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 
     public readonly bool Equals(GraphicsProgramInputs other) =>
         PixelActive == other.PixelActive && DepthBound == other.DepthBound && DepthAspectBound == other.DepthAspectBound &&
-        StencilAspectBound == other.StencilAspectBound &&
+        StencilAspectBound == other.StencilAspectBound && TriangleList == other.TriangleList &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -51,6 +54,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
         hash.Add(DepthBound);
         hash.Add(DepthAspectBound);
         hash.Add(StencilAspectBound);
+        hash.Add(TriangleList);
         return hash.ToHashCode();
     }
 }
@@ -108,6 +112,7 @@ public sealed partial class RenderExecutor
         inputs.StencilAspectBound = depth is { } stencilTarget &&
             (ViewFormatRules.DepthAspects(stencilTarget.Target.Format) & GpuImageAspect.StencilBit) != 0;
         inputs.PixelActive = HasActivePixelShader(banks);
+        inputs.TriangleList = AssemblesTriangleList(banks);
         return inputs;
     }
 
@@ -124,6 +129,10 @@ public sealed partial class RenderExecutor
             inputs.PixelActive,
             inputs.DepthBound,
             inputs.DepthAspectBound,
-            inputs.StencilAspectBound);
+            inputs.StencilAspectBound,
+            inputs.TriangleList);
     }
+
+    private static bool AssemblesTriangleList(RegisterBanks banks) =>
+        (GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.TriangleList;
 }

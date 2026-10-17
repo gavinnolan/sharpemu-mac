@@ -84,6 +84,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             PrimitiveGroupSize: 0)
         {
             IsWave64 = VgtShaderStages.IsGeometryWave64(shaderStages),
+            Passthrough = VgtShaderStages.IsPrimitivePassthrough(shaderStages),
         };
     }
 
@@ -173,12 +174,26 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool pixelActive,
         bool depthBound,
         bool depthAspectBound,
-        bool stencilAspectBound = false)
+        bool stencilAspectBound = false) =>
+        GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
+            depthAspectBound, stencilAspectBound, triangleList: false);
+
+    public GraphicsPrograms GetGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList)
     {
         lock (_resolveGate)
         {
             return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
-                depthAspectBound, stencilAspectBound);
+                depthAspectBound, stencilAspectBound, triangleList);
         }
     }
 
@@ -191,7 +206,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool pixelActive,
         bool depthBound,
         bool depthAspectBound,
-        bool stencilAspectBound)
+        bool stencilAspectBound,
+        bool triangleList)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var vertexSource = PrepareSource(
@@ -203,6 +219,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         vertexInfo.Dx10Clamp = vertex.GeometryResource1.Dx10Clamp;
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
+        Gen5ShaderProgram? decodedPixelProgram = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
         var dropUnwritten = false;
         var attributeCount = 0u;
@@ -216,6 +233,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
             using var pixelProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PixelInputResolution);
             var pixelProgram = _programs.Decode(pixelSource);
+            decodedPixelProgram = pixelProgram;
             attributeCount = InterpolatedAttributeCount(pixelProgram);
             var inputCount = shaderInterface.PixelInputControl & 0x3Fu;
             if (inputCount == 0)
@@ -251,6 +269,17 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             primitiveShader = ngg with { GeometryVerticesOut = Math.Max(shaderInterface.GeometryMaxVerticesOut, 1u) };
         }
 
+        // A pixel program that reads the three vertex values of an input on a host that cannot
+        // declare per-vertex pixel inputs gets them from the primitive shader instead, run as a
+        // mesh function whose primitives carry them. The mesh path assembles a triangle list.
+        var perVertexParameters = 0u;
+        if (decodedPixelProgram is not null && pixelInfo is not null && primitiveShader is not null && triangleList &&
+            !_host.PerVertexPixelInputsSupported)
+        {
+            perVertexParameters = Gen5PixelInputMapping.PerVertexParameterMask(
+                decodedPixelProgram, pixelInfo.InterpolatorSettings.AsSpan(0, (int)pixelInfo.InputCount));
+        }
+
         var vertexCompileSource = primitiveShader is null
             ? vertexSource
             : WithGeometryUserDataAddress(vertexSource, vertex.GeometryUserDataAddress);
@@ -272,6 +301,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                         PixelOutputs = pixelOutputs,
                         PixelInputEnable = shaderInterface.PixelInputEnable,
                         PixelInputAddress = shaderInterface.PixelInputAddress,
+                        PerVertexInputsFromPrimitive = perVertexParameters != 0,
                     },
                     ref pushDataCursor,
                     out pixelProgramHandle,
@@ -286,6 +316,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     VertexInfo = vertexInfo,
                     RequiredVertexOutputCount = (int)attributeCount,
                     PrimitiveShader = primitiveShader,
+                    MeshPerVertexParameterMask = perVertexParameters,
                 },
                 ref pushDataCursor,
                 out vertexProgram,
