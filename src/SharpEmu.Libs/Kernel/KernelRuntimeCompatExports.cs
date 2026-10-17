@@ -92,12 +92,9 @@ public static class KernelRuntimeCompatExports
     private static readonly bool _traceGuestThreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
 
-    [ThreadStatic]
-    private static int _shortUsleepCount;
-
     // Adaptive nap for usleep(<1 ms) polling loops (a worker pool waiting for jobs). The
-    // first short sleeps of a streak only yield, so a wait that ends quickly stays fast;
-    // once one thread has been polling for SHARPEMU_USLEEP_NAP_AFTER_US (default 500 us)
+    // first short sleeps of a streak sleep exactly what they ask for, so a wait that ends
+    // quickly stays fast; once one thread has been polling for SHARPEMU_USLEEP_NAP_AFTER_US (default 500 us)
     // its short sleeps really sleep, for max(requested, SHARPEMU_USLEEP_NAP_US) (default
     // 250 us; 0 turns naps off). A streak ends when the thread spends more than 2 ms
     // between short sleeps or sleeps for 1 ms or more. Per thread, not per title.
@@ -120,7 +117,7 @@ public static class KernelRuntimeCompatExports
 
     /// <summary>
     /// The sub-millisecond usleep policy (see <see cref="UsleepNapMicroseconds"/>): returns
-    /// true when this call napped, false when it only yielded.
+    /// true when this call napped, false when it slept just the requested time.
     /// </summary>
     internal static bool ShortUsleep(ulong micros)
     {
@@ -138,17 +135,14 @@ public static class KernelRuntimeCompatExports
             return true;
         }
 
-        // Guest worker pools use usleep(1) as a polling backoff. Do not turn
-        // PS microsecond waits into millisecond sleeps on hot paths.
-        if ((++_shortUsleepCount & 255) == 0)
-        {
-            Thread.Sleep(0);
-        }
-        else
-        {
-            Thread.Yield();
-        }
-
+        // Like the FreeBSD kernel (kern_clock_nanosleep always blocks for a nonzero
+        // interval), a short sleep never returns before its requested time. A bare yield
+        // returned in well under a microsecond, so a guest that counts usleep(1) calls as
+        // its timeout ("GPU hang after N polls") gave up long before real hardware would,
+        // and before the streak above was old enough to nap. The wait is an
+        // absolute-deadline host wait (mach_wait_until on macOS), never a millisecond
+        // round-up.
+        HostTiming.SleepMicroseconds((long)micros);
         return false;
     }
 
@@ -189,8 +183,8 @@ public static class KernelRuntimeCompatExports
 
         // Sub-millisecond usleep is a worker polling backoff. Pump takes the global
         // guest-thread gate and scans every thread, so many workers spinning on
-        // usleep(1) contend on it; the 1 ms dispatcher still pumps. The yield below
-        // is kept. SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old always-Pump path.
+        // usleep(1) contend on it; the 1 ms dispatcher still pumps. The short sleep
+        // below still blocks. SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old always-Pump path.
         long dsPump = 0;
         if (micros >= 1000 || _usleepShortPump)
         {
@@ -209,7 +203,6 @@ public static class KernelRuntimeCompatExports
         }
         else
         {
-            _shortUsleepCount = 0;
             _lastShortUsleep = 0;
             // Precise sleep: rounding microseconds up to Thread.Sleep
             // milliseconds (which itself overshoots by a scheduler quantum)

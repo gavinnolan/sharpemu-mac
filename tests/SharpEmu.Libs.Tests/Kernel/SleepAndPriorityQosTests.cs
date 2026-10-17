@@ -49,8 +49,42 @@ public sealed class SleepAndPriorityQosTests
 
         Assert.True(napped > 0);
 
-        // A pause longer than the streak gap starts over with yields.
+        // A pause longer than the streak gap starts over without napping.
         Thread.Sleep(5);
         Assert.False(KernelRuntimeCompatExports.ShortUsleep(1));
+    }
+
+    [Fact]
+    public void ShortUsleepNeverReturnsBeforeTheRequestedTime()
+    {
+        Thread.Sleep(5); // a fresh streak, so this call does not nap
+        var before = Stopwatch.GetTimestamp();
+        Assert.False(KernelRuntimeCompatExports.ShortUsleep(200));
+        var tookUs = (Stopwatch.GetTimestamp() - before) * 1_000_000 / Stopwatch.Frequency;
+        Assert.True(tookUs >= 200, $"usleep(200) returned after {tookUs} us");
+    }
+
+    [Fact]
+    public void PollBudgetCountedInUsleepCallsOutlastsAGpuLabelThatLandsLate()
+    {
+        if (KernelRuntimeCompatExports.UsleepNapMicroseconds == 0)
+        {
+            return; // disabled by the environment
+        }
+
+        // The guest pattern: "for (n = 500; n; n--) { if (*label) break; usleep(1); }
+        // fatal('GPU hanged')". The label is written by the GPU some milliseconds later.
+        // When usleep(1) only yielded, the 500 polls finished in well under the nap
+        // window and the guest declared a hang.
+        Thread.Sleep(5);
+        var label = 0;
+        using var writer = new Timer(_ => Volatile.Write(ref label, 1), null, 20, Timeout.Infinite);
+        var polls = 500;
+        while (Volatile.Read(ref label) == 0 && --polls > 0)
+        {
+            KernelRuntimeCompatExports.ShortUsleep(1);
+        }
+
+        Assert.True(Volatile.Read(ref label) != 0, "the 500-poll budget ran out before the label landed");
     }
 }
