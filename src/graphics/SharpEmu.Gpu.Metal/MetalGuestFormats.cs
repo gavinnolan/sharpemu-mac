@@ -354,6 +354,14 @@ internal static class MetalGuestFormats
         MtlPixelFormat.Bgra8UnormSrgb or MtlPixelFormat.Bc1RgbaSrgb or MtlPixelFormat.Bc2RgbaSrgb or
         MtlPixelFormat.Bc3RgbaSrgb or MtlPixelFormat.Bc7RgbaUnormSrgb;
 
+    /// <summary>
+    /// The linear format of an sRGB one, and any other format itself. Metal numbers each
+    /// sRGB format one past its linear twin, and a view that only moves between the two
+    /// needs no pixel-format-view usage on the texture.
+    /// </summary>
+    public static MtlPixelFormat LinearOf(MtlPixelFormat format) =>
+        IsSrgb(format) ? (MtlPixelFormat)((uint)format - 1) : format;
+
     public static bool TryDecodeRenderTargetFormat(
         uint dataFormat,
         uint numberType,

@@ -70,6 +70,8 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:" +
         "toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:options:");
 
+    private static readonly nint SelCopyWholeTexture = MetalNative.Selector("copyFromTexture:toTexture:");
+
     // Everything about one description that changes the staged bytes. Two images that
     // agree on all of it share a plan, so a steady-state frame builds none.
     private readonly record struct PlanKey(
@@ -162,6 +164,19 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     /// from. False when the pair is not one this can carry, and the caller publishes
     /// through guest memory as before.
     /// </summary>
+    public void EncodeWholeTextureCopy(IMetalSubmissionContext context, nint sourceTexture, nint targetTexture)
+    {
+        if (_disposed || context.CommandBuffer == 0 || sourceTexture == 0 || targetTexture == 0)
+        {
+            throw GpuFatal.Fatal(
+                $"A whole-texture copy has nothing to copy with: source=0x{sourceTexture:X} target=0x{targetTexture:X}.");
+        }
+
+        var blit = _tiler.BeginBlit(context);
+        MetalNative.SendVoid(blit, SelCopyWholeTexture, sourceTexture, targetTexture);
+        MetalTiler.EndEncoding(blit);
+    }
+
     public bool TryEncodeTextureToTexture(
         IMetalSubmissionContext context,
         in ImageDescription sourceDescription,

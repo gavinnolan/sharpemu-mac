@@ -2147,6 +2147,7 @@ internal sealed partial class MetalRenderHost :
             $"alias_read_skip={aliases.ReadsSkipped} " +
             $"alias_fallback={_imageCache.TakeAliasFallbacks()} " +
             $"linear_views={_imageCache.LinearViewCount} linear_view_promotions={_imageCache.TakeLinearViewPromotions()} " +
+            $"usage_promotions={_imageCache.TakeUsagePromotions()} " +
             $"alias_on_device={_imageCache.TakeDeviceAliasPublishes()} " +
             $"alias_reused={_imageCache.TakeDeviceAliasReuses()} untested_depth_writes={TakeUntestedDepthWrites()} " +
             $"part_up={subRange.Uploads} part_up_mb={subRange.UploadBytes / (1024 * 1024)} " +

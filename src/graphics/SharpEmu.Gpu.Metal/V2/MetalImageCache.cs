@@ -288,7 +288,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         if (!result.IsValid)
         {
-            result = InsertImage(request.Description, sampledOnly: request.Role == ImageRole.Texture);
+            result = InsertImage(request.Description, sampledOnly: request.Role == ImageRole.Texture, request.Role);
         }
 
         var image = _slots[result];
@@ -583,6 +583,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (request.Role == ImageRole.StorageImage)
         {
             PromoteLinearView(image);
+            EnsureStorageUsageLocked(image);
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
             RefreshFromGuest(image);
@@ -610,6 +611,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         MaterializeSampledDccClear(imageIdentifier, image, in request);
+        EnsureViewUsageLocked(image, in request.View);
         return image.GetOrCreateView(request.View, out resourceId);
     }
 
@@ -737,6 +739,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         DrainOverlappingDeferredRefreshesLocked(image);
         image.LastAccessTick = _collectionTick;
         PromoteLinearView(image);
+        EnsureViewUsageLocked(image, in request.View);
         WatchImage(imageIdentifier);
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         // The pass about to begin may clear or overwrite all of it; BeginRendering decides
@@ -1381,10 +1384,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return imageIdentifier;
     }
 
-    private ResourceSlotIdentifier InsertImage(in ImageDescription description, bool sampledOnly = false)
+    private ResourceSlotIdentifier InsertImage(
+        in ImageDescription description, bool sampledOnly = false, ImageRole role = ImageRole.Texture)
     {
         var admitted = Admit(in description);
-        var shape = _transfer.ShapeFor(in admitted);
+        var shape = CreationShape(in admitted, role);
         nint viewTexture = 0;
         var windowView = sampledOnly && TryCreateLinearView(in admitted, ref shape, out viewTexture);
         var texture = windowView ? viewTexture : CreateTexture(in shape, in admitted);

@@ -111,6 +111,10 @@ internal interface IMetalImageTransfer
         in ImageDescription sourceDescription, nint sourceTexture,
         in ImageDescription targetDescription, nint targetTexture);
 
+    // Copies every slice and level of one texture into another of the same shape, on the
+    // device. The two may differ in usage only.
+    void EncodeWholeTextureCopy(IMetalSubmissionContext context, nint sourceTexture, nint targetTexture);
+
     // Where a run of an image's guest bytes may end without cutting one of its transfers
     // in half: a caller that found a window covering [start, end) asks for the end it
     // should actually use, so every subresource is either wholly inside a run or wholly

@@ -123,6 +123,17 @@ internal static class MetalV2Diagnostics
     public static readonly bool ElideLoads =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ELIDE_LOADS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_COMPRESSIBLE_TARGETS=0 creates every colour image with the
+    // shader-write and pixel-format-view usages, as before. Otherwise an image first asked
+    // for as a colour target is created with ShaderRead | RenderTarget only, and gains the
+    // other two the first time something needs them (MetalImageCache.EnsureTextureUsage).
+    // Apple GPUs keep a texture losslessly compressed only without those two usages:
+    // measured on an M4, a 1920x1080 RGBA16F full-screen pass costs 2.2-3.4x as much
+    // GPU time with either of them as without (243 vs 523-580 us).
+    public static readonly bool CompressibleTargets =
+        !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMPRESSIBLE_TARGETS"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_SKIP_OVERWRITTEN_REFRESH=0 uploads a CPU-dirty render target when it
     // is acquired, as before. Otherwise the upload waits for the pass to begin and is
     // dropped when that pass clears the whole image or its first draw overwrites it

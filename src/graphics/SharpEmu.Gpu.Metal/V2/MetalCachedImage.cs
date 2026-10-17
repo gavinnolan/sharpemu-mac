@@ -242,6 +242,53 @@ internal sealed class MetalCachedImage : IDisposable
         return retired;
     }
 
+    /// <summary>
+    /// Gives the image a texture of the same shape with more usage, which the caller has
+    /// already filled with a device copy of the current one. The old texture and its views
+    /// move to the returned image, which the cache retires once the copy and every
+    /// submission that bound them are done. Nothing the image owes changes: the new texture
+    /// holds what the old one held.
+    /// </summary>
+    public MetalCachedImage ReplaceWithCopy(nint texture, in MetalTextureShape shape, ulong copySerial)
+    {
+        var retired = new MetalCachedImage(in Description, Shape, Texture)
+        {
+            LastUseSerial = Math.Max(LastUseSerial, copySerial),
+        };
+        lock (_viewGate)
+        {
+            retired._views.AddRange(_views);
+            _views.Clear();
+        }
+
+        Texture = texture;
+        Shape = shape;
+        NoteContentChanged();
+        return retired;
+    }
+
+    /// <summary>
+    /// The texture usage a view needs that the texture may lack: pixel-format-view for a
+    /// view of another format, unless the two formats are only the sRGB and linear
+    /// variants of one format, which Metal views without it; and for a component swizzle,
+    /// which this cache only makes on a texture that has it.
+    /// </summary>
+    public ulong UsageNeededFor(in ImageViewDescription requested)
+    {
+        var viewFormat = MetalV2Formats.PixelFormat(requested.Format);
+        SwizzleOf(requested.Mapping, out var identitySwizzle);
+        return (viewFormat == Shape.PixelFormat || IsSrgbTwin(viewFormat)) && identitySwizzle
+            ? 0
+            : Mtl.TextureUsagePixelFormatView;
+    }
+
+    // The sRGB or linear variant of the texture's own format: Metal makes that view of a
+    // texture without the pixel-format-view usage.
+    private bool IsSrgbTwin(ulong viewFormat) =>
+        viewFormat != Shape.PixelFormat &&
+        MetalGuestFormats.LinearOf((MtlPixelFormat)(uint)viewFormat) ==
+            MetalGuestFormats.LinearOf((MtlPixelFormat)(uint)Shape.PixelFormat);
+
     public bool IsGpuModified => _gpuModified;
 
     public bool IsWatched => WatchBegin != 0 && WatchEnd != 0;
@@ -535,6 +582,13 @@ internal sealed class MetalCachedImage : IDisposable
         var viewable = (Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0;
         if (!viewable && !identitySwizzle)
         {
+            // Metal raises on a swizzled view of a texture without the usage, so the view
+            // reads the components in the texture's own order, and that is reported.
+            MetalV2Diagnostics.WarnOnce(
+                $"view-swizzle:{Shape.PixelFormat}:{requested.Mapping}",
+                $"A texture without the pixel-format-view usage cannot swizzle; the view keeps the " +
+                $"texture's component order: format={Shape.PixelFormat} mapping={requested.Mapping} " +
+                $"usage=0x{Shape.Usage:X} address=0x{Description.Data.Address:X16}.");
             identitySwizzle = true;
         }
 
@@ -579,7 +633,7 @@ internal sealed class MetalCachedImage : IDisposable
             }
         }
 
-        if (!viewable && viewFormat != Shape.PixelFormat)
+        if (!viewable && viewFormat != Shape.PixelFormat && !IsSrgbTwin(viewFormat))
         {
             // Metal raises rather than returning nil for a reinterpreting view of
             // a texture that was not created for one, and a raised ObjC exception

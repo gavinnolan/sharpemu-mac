@@ -1370,22 +1370,29 @@ internal sealed partial class MetalImageCache
         // an sRGB target over a UNORM image would otherwise store the unencoded value.
         // A volume has no 2D view of one plane, so it is cleared in its own format, and
         // only a colour-renderable view format is worth a view a render pass can clear.
+        var reinterprets = !volume && PackedClearValue.SupportsDccFixedColor(viewFormat) &&
+            MetalV2Formats.PixelFormat(viewFormat) != shape.PixelFormat;
+        var layerCount = Math.Max(range.LayerCount, 1);
+        var clearView = new ImageViewDescription(
+            viewFormat,
+            layerCount == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray,
+            GpuImageAspect.ColorBit,
+            range.BaseLevel,
+            1,
+            range.BaseLayer,
+            layerCount,
+            default,
+            GpuImageUsage.ColorAttachmentBit);
+        if (reinterprets)
+        {
+            EnsureViewUsageLocked(image, in clearView);
+        }
+
         var texture = image.Texture;
         var clearRange = range;
-        if (!volume && PackedClearValue.SupportsDccFixedColor(viewFormat) &&
-            MetalV2Formats.PixelFormat(viewFormat) != shape.PixelFormat)
+        if (reinterprets)
         {
-            var layerCount = Math.Max(range.LayerCount, 1);
-            var view = image.GetOrCreateView(new ImageViewDescription(
-                viewFormat,
-                layerCount == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray,
-                GpuImageAspect.ColorBit,
-                range.BaseLevel,
-                1,
-                range.BaseLayer,
-                layerCount,
-                default,
-                GpuImageUsage.ColorAttachmentBit));
+            var view = image.GetOrCreateView(clearView);
             if (view != image.Texture)
             {
                 texture = view;

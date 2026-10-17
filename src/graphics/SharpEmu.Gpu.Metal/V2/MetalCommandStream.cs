@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Images;
@@ -1541,7 +1542,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-before-refresh"); }
         _imageCache.RefreshImage(imageIdentifier);
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
-        var texture = PresentationViewOf(image, in request);
+        var texture = PresentationViewOf(imageIdentifier, image, in request);
         var serial = SubmissionSerial;
         FlushCommandBuffer(PassEndCause.Present);
         if (_flipTarget is null || texture == 0)
@@ -1608,7 +1609,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // The presenter samples the flip texture and writes the result into a plain
     // BGRA8 drawable, so an sRGB surface has to be read through a linear view:
     // sampling it as sRGB would convert to linear and show the frame far too dark.
-    private nint PresentationViewOf(MetalCachedImage image, in ImageRequest request)
+    private nint PresentationViewOf(
+        ResourceSlotIdentifier imageIdentifier, MetalCachedImage image, in ImageRequest request)
     {
         var view = request.View;
         var linear = MetalV2Formats.LinearCounterpart(view.Format);
@@ -1618,7 +1620,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         view = view with { Mapping = PresentSwizzle(request.Description.Bgra16, image.Description.Bgra16) };
-        return image.GetOrCreateView(view);
+        return _imageCache.AcquirePresentationView(imageIdentifier, in view);
     }
 
     // A Bgra16 image has its guest bytes swapped on upload and download, so its texture
