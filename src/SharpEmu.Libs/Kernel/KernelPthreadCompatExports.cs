@@ -321,6 +321,37 @@ public static class KernelPthreadCompatExports
         LibraryName = "libc")]
     public static int PosixPthreadEqual(CpuContext ctx) => PthreadEqual(ctx);
 
+    // A guest that polls with sched_yield / scePthreadYield burns a core exactly like a short-usleep
+    // poller. Same streak policy as KernelRuntimeCompatExports.ShortUsleep: yields less than 2 ms
+    // apart form a streak; once a thread has yielded continuously for SHARPEMU_USLEEP_NAP_AFTER_US
+    // (default 500 us) each further yield sleeps SHARPEMU_USLEEP_NAP_US (default 250 us) instead.
+    // SHARPEMU_YIELD_NAP=0 restores the bare Thread.Yield().
+    private static readonly bool _yieldNapEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_YIELD_NAP"), "0", StringComparison.Ordinal) &&
+        KernelRuntimeCompatExports.UsleepNapMicroseconds > 0;
+
+    [ThreadStatic]
+    private static long _yieldStreakStart;
+
+    [ThreadStatic]
+    private static long _lastYield;
+
+    private static bool YieldNapStreak(long now) =>
+        YieldNapPolicy(ref _yieldStreakStart, ref _lastYield, now,
+            KernelRuntimeCompatExports._usleepStreakGapTicks, KernelRuntimeCompatExports._usleepNapAfterTicks);
+
+    /// <summary>Streak bookkeeping for the yield nap: true when this yield should nap.</summary>
+    internal static bool YieldNapPolicy(ref long streakStart, ref long lastYield, long now, long gapTicks, long afterTicks)
+    {
+        if (lastYield == 0 || now - lastYield > gapTicks)
+        {
+            streakStart = now;
+        }
+
+        lastYield = now;
+        return now - streakStart >= afterTicks;
+    }
+
     [SysAbiExport(
         Nid = "T72hz6ffq08",
         ExportName = "scePthreadYield",
@@ -329,6 +360,13 @@ public static class KernelPthreadCompatExports
     public static int PthreadYield(CpuContext ctx)
     {
         _ = ctx;
+        if (_yieldNapEnabled && YieldNapStreak(Stopwatch.GetTimestamp()))
+        {
+            HostTiming.SleepMicroseconds(KernelRuntimeCompatExports.UsleepNapMicroseconds);
+            _lastYield = Stopwatch.GetTimestamp();
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         if (!Thread.Yield())
         {
             Thread.Sleep(0);

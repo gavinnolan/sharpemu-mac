@@ -283,6 +283,8 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe ulong DispatchImportCore(int importIndex, nint argPackPtr)
 	{
+		// Any HLE entry ends this thread's polling streak in the spin-nap locked-op probe.
+		SharpEmu.Core.Loader.SpinNapRuntime.NoteHleEntry(argPackPtr);
 		long num = NextImportDispatchIndex();
 		if ((num & 0x3F) == 0)
 		{
