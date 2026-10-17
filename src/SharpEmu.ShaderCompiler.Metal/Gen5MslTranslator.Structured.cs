@@ -55,7 +55,16 @@ public static partial class Gen5MslTranslator
 
         private bool TryBuildStructuredBody(IReadOnlyList<ShaderBlock> blocks, out string body)
         {
-            body = string.Empty;
+            var built = TryBuildStructuredBody(blocks, out StringBuilder? text);
+            body = built ? text!.ToString() : string.Empty;
+            return built;
+        }
+
+        private bool TryBuildStructuredBody(
+            IReadOnlyList<ShaderBlock> blocks,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out StringBuilder? body)
+        {
+            body = null;
             var count = blocks.Count;
             _successors = new List<int>[count];
             for (var index = 0; index < count; index++)
@@ -97,18 +106,18 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            body = text.ToString();
-
             // The stage epilogue follows the body, so an exit that already sits at the
             // end of it would emit the epilogue twice over.
             var epilogue = new StringBuilder();
             AppendExit(epilogue, 1);
             var tail = epilogue.ToString();
-            if (body.EndsWith(tail, StringComparison.Ordinal))
+            if (text.Length >= tail.Length &&
+                string.Equals(text.ToString(text.Length - tail.Length, tail.Length), tail, StringComparison.Ordinal))
             {
-                body = body[..^tail.Length];
+                text.Length -= tail.Length;
             }
 
+            body = text;
             return true;
         }
 
@@ -230,16 +239,65 @@ public static partial class Gen5MslTranslator
                     join = follow;
                 }
 
-                var taken = new StringBuilder();
-                var takenFell = EmitRegion(taken, terminator.TrueTarget, join, indent + 1);
-                var fallen = new StringBuilder();
-                var fallenFell = EmitRegion(fallen, terminator.FalseTarget, join, indent + 1);
+                // Both arms are written straight into the body: a conditional whose arms
+                // came out empty is cut back off, and an empty taken arm swaps to the
+                // negated form, so the text matches what separate buffers would give.
+                var start = text.Length;
+                AppendIndented(text, $"if ({terminator.Condition})", indent);
+                AppendIndented(text, "{", indent);
+                var takenStart = text.Length;
+                var takenFell = EmitRegion(text, terminator.TrueTarget, join, indent + 1);
                 if (_structureFailed)
                 {
                     return false;
                 }
 
-                AppendConditional(text, terminator.Condition, taken, fallen, indent);
+                var takenEmpty = text.Length == takenStart;
+                bool fallenFell;
+                if (takenEmpty)
+                {
+                    text.Length = start;
+                    AppendIndented(text, $"if (!({terminator.Condition}))", indent);
+                    AppendIndented(text, "{", indent);
+                    var fallenStart = text.Length;
+                    fallenFell = EmitRegion(text, terminator.FalseTarget, join, indent + 1);
+                    if (_structureFailed)
+                    {
+                        return false;
+                    }
+
+                    if (text.Length == fallenStart)
+                    {
+                        text.Length = start;
+                    }
+                    else
+                    {
+                        AppendIndented(text, "}", indent);
+                    }
+                }
+                else
+                {
+                    AppendIndented(text, "}", indent);
+                    var elseStart = text.Length;
+                    AppendIndented(text, "else", indent);
+                    AppendIndented(text, "{", indent);
+                    var fallenStart = text.Length;
+                    fallenFell = EmitRegion(text, terminator.FalseTarget, join, indent + 1);
+                    if (_structureFailed)
+                    {
+                        return false;
+                    }
+
+                    if (text.Length == fallenStart)
+                    {
+                        text.Length = elseStart;
+                    }
+                    else
+                    {
+                        AppendIndented(text, "}", indent);
+                    }
+                }
+
                 if (join == follow)
                 {
                     return takenFell || fallenFell;
@@ -275,42 +333,6 @@ public static partial class Gen5MslTranslator
 
             AppendIndented(text, "}", indent);
             return true;
-        }
-
-        private static void AppendConditional(
-            StringBuilder text,
-            string condition,
-            StringBuilder taken,
-            StringBuilder fallen,
-            int indent)
-        {
-            if (taken.Length == 0 && fallen.Length == 0)
-            {
-                return;
-            }
-
-            if (taken.Length == 0)
-            {
-                AppendIndented(text, $"if (!({condition}))", indent);
-                AppendIndented(text, "{", indent);
-                text.Append(fallen);
-                AppendIndented(text, "}", indent);
-                return;
-            }
-
-            AppendIndented(text, $"if ({condition})", indent);
-            AppendIndented(text, "{", indent);
-            text.Append(taken);
-            AppendIndented(text, "}", indent);
-            if (fallen.Length == 0)
-            {
-                return;
-            }
-
-            AppendIndented(text, "else", indent);
-            AppendIndented(text, "{", indent);
-            text.Append(fallen);
-            AppendIndented(text, "}", indent);
         }
 
         /// <summary>Resolves arriving at <paramref name="node"/> from the statement

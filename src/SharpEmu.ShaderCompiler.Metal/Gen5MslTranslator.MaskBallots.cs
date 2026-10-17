@@ -68,7 +68,14 @@ public static partial class Gen5MslTranslator
         /// <summary>One line of a block, parsed once for the liveness passes.</summary>
         private sealed class MaskLine
         {
-            public required string Text { get; init; }
+            /// <summary>The line as written. Null for a plain line of a block, which stays
+            /// as written and is read back from the block text by <see cref="Start"/> and
+            /// <see cref="Length"/>.</summary>
+            public string? Text { get; init; }
+
+            public int Start { get; init; }
+
+            public int Length { get; init; }
 
             public MaskLineKind Kind { get; init; }
 
@@ -90,19 +97,30 @@ public static partial class Gen5MslTranslator
 
             public MaskOp? Op { get; init; }
 
-            public List<MaskLine> LaneLines { get; init; } = [];
+            public MaskLine[] LaneLines { get; init; } = [];
 
-            public List<MaskLine> PairLines { get; init; } = [];
+            public MaskLine[] PairLines { get; init; } = [];
         }
 
-        private MaskLine ParseMaskLine(string line, int depth)
+        /// <summary>Whether rebuilding the text line by line, as the passes over a block do,
+        /// would give the same text back: newline-terminated lines with no carriage returns.</summary>
+        private static bool IsNormalizedText(string text) =>
+            text.Length == 0 || (text[^1] == '\n' && text.IndexOf('\r') < 0 && Environment.NewLine == "\n");
+
+        private readonly List<int> _readsScratch = [];
+
+        private MaskLine ParseMaskLine(string line, int depth) => ParseMaskLine(line, line, 0, depth);
+
+        /// <summary>Parses one line. <paramref name="text"/> is the line as a string when the
+        /// caller has one; a block's plain lines are left as a range of the block text.</summary>
+        private MaskLine ParseMaskLine(ReadOnlySpan<char> line, string? text, int start, int depth)
         {
             var trimmed = line.Trim();
             if (TryReadBallotMarker(trimmed, out var loRegister, out var condition))
             {
                 return new MaskLine
                 {
-                    Text = line,
+                    Text = text ?? line.ToString(),
                     Kind = MaskLineKind.Ballot,
                     Depth = depth,
                     Lo = loRegister,
@@ -112,16 +130,16 @@ public static partial class Gen5MslTranslator
 
             if (TryReadMarkerArgument(trimmed, SccAnyMarker, out var sccLo))
             {
-                return new MaskLine { Text = line, Kind = MaskLineKind.SccAny, Depth = depth, Lo = sccLo };
+                return new MaskLine { Text = text ?? line.ToString(), Kind = MaskLineKind.SccAny, Depth = depth, Lo = sccLo };
             }
 
             if (TryReadMarkerArgument(trimmed, MaskOpMarker, out var id))
             {
                 var op = _maskOps[(int)id];
-                var pad = line[..(line.Length - line.TrimStart().Length)];
+                var pad = line[..(line.Length - line.TrimStart().Length)].ToString();
                 return new MaskLine
                 {
-                    Text = line,
+                    Text = text ?? line.ToString(),
                     Kind = MaskLineKind.MaskOp,
                     Depth = depth,
                     Op = op,
@@ -131,7 +149,8 @@ public static partial class Gen5MslTranslator
             }
 
             var definition = depth == 0 ? DefinitionTarget(trimmed) : -1;
-            var reads = new List<int>();
+            var reads = _readsScratch;
+            reads.Clear();
             foreach (var reference in ScanRegisterReferences(trimmed))
             {
                 if (reference.File != 's' || reference.Index < 0 ||
@@ -148,7 +167,7 @@ public static partial class Gen5MslTranslator
             if (depth == 0 && trimmed.StartsWith("scc = ", StringComparison.Ordinal) && trimmed.EndsWith(';'))
             {
                 definesScc = true;
-                readsScc = ContainsIdentifier(trimmed.AsSpan(6), "scc");
+                readsScc = ContainsIdentifier(trimmed[6..], "scc");
             }
             else
             {
@@ -158,10 +177,12 @@ public static partial class Gen5MslTranslator
 
             return new MaskLine
             {
-                Text = line,
+                Text = text,
+                Start = start,
+                Length = line.Length,
                 Kind = MaskLineKind.Plain,
                 Depth = depth,
-                Reads = [.. reads],
+                Reads = reads.Count == 0 ? [] : [.. reads],
                 Def = definition >= ScalarSlotBase && definition < VectorSlotBase ? definition : -1,
                 ReadsScc = readsScc,
                 DefinesScc = definesScc,
@@ -194,7 +215,7 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
-        private static bool TryReadMarkerArgument(string trimmed, string marker, out uint value)
+        private static bool TryReadMarkerArgument(ReadOnlySpan<char> trimmed, string marker, out uint value)
         {
             value = 0;
             if (!trimmed.StartsWith(marker, StringComparison.Ordinal) ||
@@ -205,7 +226,7 @@ public static partial class Gen5MslTranslator
             }
 
             return uint.TryParse(
-                trimmed.AsSpan(marker.Length + 1, trimmed.Length - marker.Length - 2),
+                trimmed.Slice(marker.Length + 1, trimmed.Length - marker.Length - 2),
                 out value);
         }
 
@@ -262,9 +283,23 @@ public static partial class Gen5MslTranslator
             var bodyCounts = new int[count];
             for (var index = 0; index < count; index++)
             {
-                var text = SplitLines(_blockText[index]).ToList();
-                var depths = BraceDepths(text);
-                lines[index] = [.. text.Select((line, at) => ParseMaskLine(line, depths[at]))];
+                var blockText = _blockText[index];
+                lines[index] = new List<MaskLine>(blockText.AsSpan().Count('\n') + 1);
+                var lineStart = 0;
+                var lineDepth = 0;
+                while (lineStart < blockText.Length)
+                {
+                    var thisStart = lineStart;
+                    var line = NextLine(blockText, ref lineStart);
+                    lines[index].Add(ParseMaskLine(line, null, thisStart, lineDepth));
+                    foreach (var character in line)
+                    {
+                        lineDepth += character == '{' ? 1 : character == '}' ? -1 : 0;
+                    }
+
+                    lineDepth = Math.Max(lineDepth, 0);
+                }
+
                 bodyCounts[index] = lines[index].Count;
 
                 // The branch condition and dispatcher read at the end of the block, and the
@@ -313,17 +348,48 @@ public static partial class Gen5MslTranslator
             for (var index = 0; index < count; index++)
             {
                 var live = LiveOutOf(index, count, liveIn);
-                var resolved = new List<string?>[lines[index].Count];
+                var resolved = new List<string?>?[lines[index].Count];
                 for (var at = lines[index].Count - 1; at >= 0; at--)
                 {
-                    resolved[at] = [];
+                    // A plain line stays as written: only the liveness step runs for it.
+                    var plain = lines[index][at].Kind == MaskLineKind.Plain;
+                    resolved[at] = plain ? null : [];
                     StepBackward(lines[index][at], live, resolved[at], decide: true);
                 }
 
-                var text = new StringBuilder();
+                var blockText = _blockText[index];
+                var untouched = true;
+                for (var at = 0; at < bodyCounts[index] && untouched; at++)
+                {
+                    untouched = resolved[at] is null;
+                }
+
+                if (untouched && IsNormalizedText(blockText))
+                {
+                    // Nothing in the block was a marker, so it is already the text it would be rebuilt to.
+                    continue;
+                }
+
+                var text = new StringBuilder(blockText.Length);
                 for (var at = 0; at < bodyCounts[index]; at++)
                 {
-                    foreach (var line in resolved[at])
+                    if (resolved[at] is not { } parts)
+                    {
+                        var plain = lines[index][at];
+                        if (plain.Text is { } plainText)
+                        {
+                            text.AppendLine(plainText);
+                        }
+                        else
+                        {
+                            text.Append(blockText, plain.Start, plain.Length);
+                            text.AppendLine();
+                        }
+
+                        continue;
+                    }
+
+                    foreach (var line in parts)
                     {
                         if (line is not null)
                         {
@@ -389,7 +455,7 @@ public static partial class Gen5MslTranslator
                     var hasHigh = hi < (int)ScalarRegisterFileCount;
                     var needed = !IsTrackedSlot(lo) || (hasHigh && !IsTrackedSlot(hi)) ||
                         live[lo] || (hasHigh && live[hi]);
-                    resolved?.Add(needed ? ExpandMaskBallot(line.Text, line.Lo, line.Condition) : null);
+                    resolved?.Add(needed ? ExpandMaskBallot(line.Text!, line.Lo, line.Condition) : null);
                     live[lo] = false;
                     if (hasHigh)
                     {
@@ -408,7 +474,7 @@ public static partial class Gen5MslTranslator
                     }
 
                     var lo = (int)line.Lo;
-                    var indent = line.Text.Length - line.Text.TrimStart().Length;
+                    var indent = line.Text!.Length - line.Text.AsSpan().TrimStart().Length;
                     resolved?.Add($"{line.Text[..indent]}scc = ((s[{lo}] | s[{lo + 1}]) != 0u);");
                     live[SccSlot] = false;
                     live[lo] = true;
@@ -420,8 +486,8 @@ public static partial class Gen5MslTranslator
                 {
                     var pair = decide && PrefersPairForm(line.Op!, live);
                     var sub = pair ? line.PairLines : line.LaneLines;
-                    var parts = new List<string?>[sub.Count];
-                    for (var at = sub.Count - 1; at >= 0; at--)
+                    var parts = new List<string?>[sub.Length];
+                    for (var at = sub.Length - 1; at >= 0; at--)
                     {
                         parts[at] = [];
                         StepBackward(sub[at], live, resolved is null ? null : parts[at], decide);
@@ -460,7 +526,7 @@ public static partial class Gen5MslTranslator
                         live[SccSlot] = true;
                     }
 
-                    resolved?.Add(line.Text);
+                    resolved?.Add(line.Text!);
                     return;
                 }
             }
@@ -489,30 +555,10 @@ public static partial class Gen5MslTranslator
             return true;
         }
 
-        /// <summary>Brace depth at the start of each line, so a write inside a
-        /// conditional can be told from one that always runs.</summary>
-        private static int[] BraceDepths(List<string> lines)
-        {
-            var depths = new int[lines.Count];
-            var depth = 0;
-            for (var index = 0; index < lines.Count; index++)
-            {
-                depths[index] = depth;
-                foreach (var character in lines[index])
-                {
-                    depth += character == '{' ? 1 : character == '}' ? -1 : 0;
-                }
-
-                depth = Math.Max(depth, 0);
-            }
-
-            return depths;
-        }
-
         /// <summary>The cross-simdgroup exchange, at the marker's own indentation.</summary>
         private string ExpandMaskBallot(string markerLine, uint loRegister, string condition)
         {
-            var indent = markerLine.Length - markerLine.TrimStart().Length;
+            var indent = markerLine.Length - markerLine.AsSpan().TrimStart().Length;
             var pad = markerLine[..indent];
             var text = new StringBuilder();
 
@@ -531,7 +577,7 @@ public static partial class Gen5MslTranslator
             return text.ToString();
         }
 
-        private static bool TryReadBallotMarker(string trimmed, out uint loRegister, out string condition)
+        private static bool TryReadBallotMarker(ReadOnlySpan<char> trimmed, out uint loRegister, out string condition)
         {
             loRegister = 0;
             condition = string.Empty;
@@ -547,13 +593,19 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var arguments = trimmed[(open + 1)..close].Split(',');
-            if (arguments.Length != 2 || !uint.TryParse(arguments[0].Trim(), out loRegister))
+            var arguments = trimmed[(open + 1)..close];
+            var comma = arguments.IndexOf(',');
+            if (comma < 0 || arguments[(comma + 1)..].Contains(','))
             {
                 return false;
             }
 
-            condition = arguments[1].Trim();
+            if (!uint.TryParse(arguments[..comma].Trim(), out loRegister))
+            {
+                return false;
+            }
+
+            condition = arguments[(comma + 1)..].Trim().ToString();
             return true;
         }
     }

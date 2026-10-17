@@ -58,15 +58,126 @@ public static partial class Gen5MslTranslator
             /// <summary>Rewrites s[14] into s14 for whichever file was scalarized, and
             /// resolves the dynamic-access markers over the registers the program
             /// touches. The index form stays for a file kept as an array.</summary>
-            public string Rewrite(string text)
+            public void RewriteInto(StringBuilder target, string text)
             {
                 text = ExpandDynamicVectorAccess(text);
                 if (ScalarArray && VectorArray)
                 {
-                    return text;
+                    target.Append(text);
+                    return;
                 }
 
-                var result = new StringBuilder(text.Length);
+                RewriteSegment(target, text);
+            }
+
+            /// <summary>The same for text that is still in a builder, without gathering it into one
+            /// string first: a body is the size of the shader, which is far into the large object heap.
+            /// It is taken a line-aligned segment at a time, which a register reference never crosses.</summary>
+            public void RewriteInto(StringBuilder target, StringBuilder text)
+            {
+                if (ContainsDynamicMarker(text))
+                {
+                    RewriteInto(target, text.ToString());
+                    return;
+                }
+
+                if (ScalarArray && VectorArray)
+                {
+                    target.Append(text);
+                    return;
+                }
+
+                var buffer = System.Buffers.ArrayPool<char>.Shared.Rent(1024);
+                try
+                {
+                    var carried = 0;
+                    foreach (var chunk in text.GetChunks())
+                    {
+                        var span = chunk.Span;
+                        var lastNewline = span.LastIndexOf('\n');
+                        if (lastNewline < 0)
+                        {
+                            Carry(ref buffer, carried, span);
+                            carried += span.Length;
+                            continue;
+                        }
+
+                        var segment = span[..(lastNewline + 1)];
+                        if (carried == 0)
+                        {
+                            RewriteSegment(target, segment);
+                        }
+                        else
+                        {
+                            Carry(ref buffer, carried, segment);
+                            RewriteSegment(target, buffer.AsSpan(0, carried + segment.Length));
+                        }
+
+                        var rest = span[(lastNewline + 1)..];
+                        carried = 0;
+                        Carry(ref buffer, carried, rest);
+                        carried = rest.Length;
+                    }
+
+                    if (carried != 0)
+                    {
+                        RewriteSegment(target, buffer.AsSpan(0, carried));
+                    }
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<char>.Shared.Return(buffer);
+                }
+            }
+
+            private static void Carry(ref char[] buffer, int length, ReadOnlySpan<char> value)
+            {
+                if (buffer.Length < length + value.Length)
+                {
+                    var larger = System.Buffers.ArrayPool<char>.Shared.Rent(Math.Max(buffer.Length * 2, length + value.Length));
+                    buffer.AsSpan(0, length).CopyTo(larger);
+                    System.Buffers.ArrayPool<char>.Shared.Return(buffer);
+                    buffer = larger;
+                }
+
+                value.CopyTo(buffer.AsSpan(length));
+            }
+
+            private static bool ContainsDynamicMarker(StringBuilder text)
+            {
+                // A marker can straddle two chunks, so the end of one is searched with the start of the next.
+                Span<char> seam = stackalloc char[2 * DynamicVectorWrite.Length];
+                var tail = 0;
+                foreach (var chunk in text.GetChunks())
+                {
+                    var span = chunk.Span;
+                    if (span.Contains(DynamicVectorRead, StringComparison.Ordinal) ||
+                        span.Contains(DynamicVectorWrite, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+
+                    if (tail != 0)
+                    {
+                        var head = Math.Min(span.Length, DynamicVectorWrite.Length);
+                        span[..head].CopyTo(seam[tail..]);
+                        var joined = seam[..(tail + head)];
+                        if (joined.Contains(DynamicVectorRead, StringComparison.Ordinal) ||
+                            joined.Contains(DynamicVectorWrite, StringComparison.Ordinal))
+                        {
+                            return true;
+                        }
+                    }
+
+                    tail = Math.Min(span.Length, DynamicVectorWrite.Length - 1);
+                    span[^tail..].CopyTo(seam);
+                }
+
+                return false;
+            }
+
+            private void RewriteSegment(StringBuilder target, ReadOnlySpan<char> text)
+            {
                 var cursor = 0;
                 foreach (var reference in ScanRegisterReferences(text))
                 {
@@ -76,14 +187,13 @@ public static partial class Gen5MslTranslator
                         continue;
                     }
 
-                    result.Append(text, cursor, reference.Start - cursor);
-                    result.Append(reference.File);
-                    result.Append(reference.Index);
+                    target.Append(text[cursor..reference.Start]);
+                    target.Append(reference.File);
+                    target.Append(reference.Index);
                     cursor = reference.Start + reference.Length;
                 }
 
-                result.Append(text, cursor, text.Length - cursor);
-                return result.ToString();
+                target.Append(text[cursor..]);
             }
 
             /// <summary>Turns each marked run-time register access into a choice among the
@@ -234,7 +344,7 @@ public static partial class Gen5MslTranslator
 
         /// <summary>Marks a register read whose number is only known at run time, as the
         /// statement "SHARPEMU_VREAD(target, number);". Resolved by
-        /// <see cref="RegisterPlan.Rewrite"/> once the register set is known.</summary>
+        /// <see cref="RegisterPlan.RewriteInto"/> once the register set is known.</summary>
         private const string DynamicVectorRead = "SHARPEMU_VREAD";
 
         /// <summary>Marks the matching write; takes the register number and the value.</summary>
@@ -251,41 +361,73 @@ public static partial class Gen5MslTranslator
         /// <summary>Finds every s[...]/v[...] in generated MSL. The name must stand alone:
         /// "sharpemu_lds[" and "buffers[" end in s and v but are preceded by an
         /// identifier character, so they are skipped.</summary>
-        private static IEnumerable<RegisterReference> ScanRegisterReferences(string text)
+        private static RegisterReferenceScan ScanRegisterReferences(ReadOnlySpan<char> text) => new(text);
+
+        private readonly ref struct RegisterReferenceScan
         {
-            for (var index = 0; index + 1 < text.Length; index++)
+            private readonly ReadOnlySpan<char> _text;
+
+            public RegisterReferenceScan(ReadOnlySpan<char> text) => _text = text;
+
+            public RegisterReferenceEnumerator GetEnumerator() => new(_text);
+        }
+
+        private ref struct RegisterReferenceEnumerator
+        {
+            private readonly ReadOnlySpan<char> _text;
+            private int _next;
+
+            public RegisterReferenceEnumerator(ReadOnlySpan<char> text)
             {
-                var file = text[index];
-                if ((file != 's' && file != 'v') || text[index + 1] != '[')
+                _text = text;
+                _next = 0;
+                Current = default;
+            }
+
+            public RegisterReference Current { get; private set; }
+
+            public bool MoveNext()
+            {
+                var text = _text;
+                for (var index = _next; index + 1 < text.Length; index++)
                 {
-                    continue;
+                    var file = text[index];
+                    if ((file != 's' && file != 'v') || text[index + 1] != '[')
+                    {
+                        continue;
+                    }
+
+                    if (index > 0 && IsIdentifierCharacter(text[index - 1]))
+                    {
+                        continue;
+                    }
+
+                    var cursor = index + 2;
+                    var value = 0L;
+                    var digits = 0;
+                    while (cursor < text.Length && text[cursor] >= '0' && text[cursor] <= '9')
+                    {
+                        value = (value * 10) + (text[cursor] - '0');
+                        cursor++;
+                        digits++;
+                    }
+
+                    if (digits != 0 && cursor < text.Length && text[cursor] == ']' &&
+                        value < (file == 's' ? ScalarRegisterFileCount : VectorRegisterFileCount))
+                    {
+                        Current = new RegisterReference(file, (int)value, index, cursor + 1 - index);
+                        _next = cursor + 1;
+                        return true;
+                    }
+
+                    // Not a literal subscript: the file is addressed dynamically.
+                    Current = new RegisterReference(file, -1, index, 2);
+                    _next = index + 1;
+                    return true;
                 }
 
-                if (index > 0 && IsIdentifierCharacter(text[index - 1]))
-                {
-                    continue;
-                }
-
-                var cursor = index + 2;
-                var value = 0L;
-                var digits = 0;
-                while (cursor < text.Length && text[cursor] >= '0' && text[cursor] <= '9')
-                {
-                    value = (value * 10) + (text[cursor] - '0');
-                    cursor++;
-                    digits++;
-                }
-
-                if (digits != 0 && cursor < text.Length && text[cursor] == ']' &&
-                    value < (file == 's' ? ScalarRegisterFileCount : VectorRegisterFileCount))
-                {
-                    yield return new RegisterReference(file, (int)value, index, cursor + 1 - index);
-                    index = cursor;
-                    continue;
-                }
-
-                // Not a literal subscript: the file is addressed dynamically.
-                yield return new RegisterReference(file, -1, index, 2);
+                _next = text.Length;
+                return false;
             }
         }
 
@@ -412,17 +554,16 @@ public static partial class Gen5MslTranslator
             for (var index = 0; index < count; index++)
             {
                 var terminator = _blockTerminators[index];
-                var lines = new List<string>(SplitLines(_blockText[index]));
-                if (terminator.Condition.Length != 0)
-                {
-                    // The branch condition reads at the end of the block.
-                    lines.Add(terminator.Condition);
-                }
 
-                Summarize(lines, out exposed[index], out killed[index]);
+                // The branch condition reads at the end of the block.
+                Summarize(
+                    _blockText[index],
+                    terminator.Condition.Length != 0 ? terminator.Condition : null,
+                    out exposed[index],
+                    out killed[index]);
             }
 
-            Summarize([.. SplitLines(initialState)], out exposed[count], out killed[count]);
+            Summarize(initialState, null, out exposed[count], out killed[count]);
 
             var liveIn = new bool[count + 1][];
             for (var index = 0; index <= count; index++)
@@ -482,6 +623,21 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        /// <summary>The next line of <paramref name="text"/> from <paramref name="start"/>, without
+        /// its terminator; the cursor moves past it. The span form of <see cref="SplitLines"/>.</summary>
+        private static ReadOnlySpan<char> NextLine(string text, scoped ref int start)
+        {
+            var end = text.IndexOf('\n', start);
+            if (end < 0)
+            {
+                end = text.Length;
+            }
+
+            var line = text.AsSpan(start, end - start).TrimEnd('\r');
+            start = end + 1;
+            return line;
+        }
+
         private static IEnumerable<string> SplitLines(string text)
         {
             var start = 0;
@@ -504,13 +660,30 @@ public static partial class Gen5MslTranslator
         /// form "s[14] = ...;". An EXEC-guarded store ("if (exec) { v[3] = ...; }") is
         /// not a definition, so a register only ever written under EXEC still gets an
         /// initial value.</summary>
-        private static void Summarize(List<string> lines, out bool[] exposed, out bool[] killed)
+        private static void Summarize(string text, string? tail, out bool[] exposed, out bool[] killed)
         {
             exposed = new bool[RegisterSlotCount];
             killed = new bool[RegisterSlotCount];
             var depth = 0;
-            foreach (var line in lines)
+            var start = 0;
+            var tailPending = tail is not null;
+            while (true)
             {
+                ReadOnlySpan<char> line;
+                if (start < text.Length)
+                {
+                    line = NextLine(text, ref start);
+                }
+                else if (tailPending)
+                {
+                    tailPending = false;
+                    line = tail;
+                }
+                else
+                {
+                    break;
+                }
+
                 var trimmed = line.Trim();
                 var definition = depth == 0 ? DefinitionTarget(trimmed) : -1;
                 foreach (var reference in ScanRegisterReferences(trimmed))
@@ -552,7 +725,7 @@ public static partial class Gen5MslTranslator
             (file == 's' ? ScalarSlotBase : VectorSlotBase) + index;
 
         /// <summary>The register slot a line unconditionally assigns, or -1.</summary>
-        private static int DefinitionTarget(string trimmed)
+        private static int DefinitionTarget(ReadOnlySpan<char> trimmed)
         {
             if (trimmed.Length == 0 || !trimmed.EndsWith(';') ||
                 (trimmed[0] != 's' && trimmed[0] != 'v') ||
@@ -561,13 +734,13 @@ public static partial class Gen5MslTranslator
                 return -1;
             }
 
-            var close = trimmed.IndexOf(']', 2);
-            if (close < 0 || !trimmed.AsSpan(close + 1).StartsWith(" = "))
+            var close = trimmed.IndexOf(']');
+            if (close < 2 || !trimmed[(close + 1)..].StartsWith(" = "))
             {
                 return -1;
             }
 
-            if (!uint.TryParse(trimmed.AsSpan(2, close - 2), out var register))
+            if (!uint.TryParse(trimmed.Slice(2, close - 2), out var register))
             {
                 return -1;
             }

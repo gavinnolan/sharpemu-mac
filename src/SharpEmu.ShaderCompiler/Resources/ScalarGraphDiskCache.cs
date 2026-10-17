@@ -17,6 +17,9 @@ internal static class ScalarGraphDiskCache
     private static readonly bool Trace = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_SHADER_PLANNING") == "1";
     private static readonly object WriteLock = new();
 
+    [ThreadStatic]
+    private static MemoryStream? _snapshotBuffer;
+
     // Pruning lists and stats every entry: the shared cache held 42,740 graphs (255 MB), which
     // took 160-360 ms to list under Rosetta. Listing for every written graph, under WriteLock,
     // on the GPU worker and the prewarm threads, charged that to every shader planned without
@@ -44,17 +47,27 @@ internal static class ScalarGraphDiskCache
             using var file = File.OpenRead(path);
             if (file.Length is > 32 and <= MaxEntryBytes)
             {
-                var digest = new byte[32];
+                Span<byte> digest = stackalloc byte[32];
                 file.ReadExactly(digest);
-                var bytes = new byte[checked((int)file.Length - 32)];
-                file.ReadExactly(bytes);
-                if (CryptographicOperations.FixedTimeEquals(digest, SHA256.HashData(bytes)))
+                var length = checked((int)file.Length - 32);
+
+                // Entries run to hundreds of kilobytes; a pooled buffer keeps each read off the large object heap.
+                var bytes = System.Buffers.ArrayPool<byte>.Shared.Rent(length);
+                try
                 {
-                    using var reader = new BinaryReader(new MemoryStream(bytes, false));
-                    if (reader.ReadString() != key) throw new InvalidDataException("Graph cache key mismatch.");
-                    var cached = ScalarValueGraph.ReadSnapshot(reader, program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters);
-                    if (Trace) Console.Error.WriteLine($"[SHADER_ANALYSIS_CACHE] hit key={key} bytes={bytes.Length}");
-                    return cached;
+                    file.ReadExactly(bytes.AsSpan(0, length));
+                    if (CryptographicOperations.FixedTimeEquals(digest, SHA256.HashData(bytes.AsSpan(0, length))))
+                    {
+                        using var reader = new BinaryReader(new MemoryStream(bytes, 0, length, false));
+                        if (reader.ReadString() != key) throw new InvalidDataException("Graph cache key mismatch.");
+                        var cached = ScalarValueGraph.ReadSnapshot(reader, program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters);
+                        if (Trace) Console.Error.WriteLine($"[SHADER_ANALYSIS_CACHE] hit key={key} bytes={length}");
+                        return cached;
+                    }
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(bytes);
                 }
             }
         }
@@ -63,7 +76,9 @@ internal static class ScalarGraphDiskCache
         var graph = ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters);
         try
         {
-            using var stream = new MemoryStream();
+            // One buffer per thread, kept between shaders, instead of one grown by doubling for each.
+            var stream = _snapshotBuffer ??= new MemoryStream();
+            stream.SetLength(0);
             using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
             {
                 writer.Write(key);
@@ -97,6 +112,7 @@ internal static class ScalarGraphDiskCache
                 }
                 if (Trace) Console.Error.WriteLine($"[SHADER_ANALYSIS_CACHE] miss key={key} bytes={bytes.Length}");
             }
+            if (stream.Capacity > 4 * 1024 * 1024) _snapshotBuffer = null;
         }
         catch (Exception error) when (IsCacheFailure(error)) { }
         return graph;
@@ -105,7 +121,8 @@ internal static class ScalarGraphDiskCache
     internal static string Key(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, ulong excludedUserDataRegisters = 0)
     {
-        using var stream = new MemoryStream();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var stream = new HashingStream(hash);
         using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
         {
             writer.Write(Version);
@@ -132,7 +149,39 @@ internal static class ScalarGraphDiskCache
                 writer.Write(instruction.Control is { } control ? JsonSerializer.Serialize(control, control.GetType()) : "");
             }
         }
-        return Convert.ToHexString(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    /// <summary>A write-only stream that feeds what it is given to a hash instead of keeping it.</summary>
+    private sealed class HashingStream(IncrementalHash hash) : Stream
+    {
+        public override bool CanRead => false;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => hash.AppendData(buffer, offset, count);
+
+        public override void Write(ReadOnlySpan<byte> buffer) => hash.AppendData(buffer);
     }
 
     /// <summary>

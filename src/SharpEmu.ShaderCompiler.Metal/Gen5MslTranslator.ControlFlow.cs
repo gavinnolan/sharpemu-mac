@@ -146,7 +146,7 @@ public static partial class Gen5MslTranslator
                     end = text.Length;
                 }
 
-                var line = text[start..end].TrimEnd('\r');
+                var line = text.AsSpan(start, end - start).TrimEnd('\r');
                 if (line.Length != 0)
                 {
                     for (var level = 0; level < indent; level++)

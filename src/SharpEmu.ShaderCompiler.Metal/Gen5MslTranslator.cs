@@ -844,7 +844,9 @@ public static partial class Gen5MslTranslator
             var initialState = new StringBuilder();
             EmitInitialState(initialState);
 
+            var initialStateText = initialState.ToString();
             var body = new StringBuilder();
+            StringBuilder? structuredBuilder = null;
             var structured = false;
             var meshBody = string.Empty;
             if (_stage == Gen5MslStage.Mesh &&
@@ -874,10 +876,9 @@ public static partial class Gen5MslTranslator
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
             else if (_options.StructuredControlFlow &&
-                TryBuildStructuredBody(blocks, out var structuredBody))
+                TryBuildStructuredBody(blocks, out structuredBuilder))
             {
                 structured = true;
-                body.Append(structuredBody);
             }
             else
             {
@@ -907,7 +908,7 @@ public static partial class Gen5MslTranslator
                 Statistics.NoteControlFlowForm(structured);
             }
 
-            var plan = BuildRegisterPlan(blocks, initialState.ToString());
+            var plan = BuildRegisterPlan(blocks, initialStateText);
             EmitRegisterFile(source, plan, structured);
             if (_stage == Gen5MslStage.Pixel)
             {
@@ -931,9 +932,9 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    Gen5VsOut sharpemu_out = {};");
             }
 
-            source.Append(plan.Rewrite(initialState.ToString()));
+            plan.RewriteInto(source, initialStateText);
             source.AppendLine();
-            source.Append(plan.Rewrite(body.ToString()));
+            plan.RewriteInto(source, structuredBuilder ?? body);
             if (_stage == Gen5MslStage.Mesh)
             {
                 source.AppendLine();
@@ -3781,7 +3782,12 @@ public static partial class Gen5MslTranslator
         private string Temp(string type, string expression)
         {
             var name = $"t{_nextTemp++}";
-            Line($"{type} {name} = {expression};");
+            for (var index = 0; index < _indent; index++)
+            {
+                _body.Append("    ");
+            }
+
+            _body.Append(type).Append(' ').Append(name).Append(" = ").Append(expression).Append(';').AppendLine();
             return name;
         }
 
