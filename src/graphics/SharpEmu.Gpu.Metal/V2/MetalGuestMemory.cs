@@ -21,27 +21,29 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// </summary>
 internal sealed class MetalGuestMemory : IDisposable
 {
-    // Four 4 GiB windows cover the 16 GiB of direct memory; the flexible tail adds a
-    // fifth. maxBufferLength caps a single window at about 13.6 GB on this hardware.
+    // About eighteen 1 GiB windows, overlapping by the seam, cover the 16 GiB of direct
+    // memory and the flexible tail. maxBufferLength caps a single window at about
+    // 13.6 GB on this hardware.
     //
     // Every encoder names the windows it touches with useResource, and the driver holds
     // the named bytes resident (wired) while the command buffer runs - the whole window,
-    // pages the guest never touched included. A 4 GiB window touched for one binding
-    // therefore pins everything under it: Demon's Souls names 3-4 of the five windows
-    // per submission (its device-address programs reach every mapped span), which wires
-    // 14-18 GB of a 24 GB machine and pushes everything else into swap (0.3 fps
-    // in-game). SHARPEMU_METAL_V2_WINDOW_MB (512..4096) shrinks the windows so a touched
-    // window pins only its own stretch; a binding larger than a window minus the seam
-    // then straddles and binds the window prefix in place. 1 GiB windows ran that
-    // title's gameplay 8x faster on the 24 GB machine, but its mapped spans then split
-    // into more device-address runs than the table holds (4096) during longer play, so
-    // the default stays 4 GiB until the table can take them.
-    private const ulong PreferredWindowBytes = 4UL * 1024 * 1024 * 1024;
+    // pages the guest never touched included. A window touched for one binding therefore
+    // pins everything under it: with 4 GiB windows Demon's Souls named 3-4 of five per
+    // submission (its device-address programs reach every mapped span), which wired
+    // 14-18 GB of a 24 GB machine and pushed everything else into swap (0.3 fps
+    // in-game). 1 GiB windows pin only the stretches in use and ran that title's
+    // gameplay 8x faster; a binding larger than a window minus the seam straddles and
+    // binds the window prefix in place. Its mapped spans split into more device-address
+    // runs over the smaller windows, which the table (16384 entries) holds.
+    // SHARPEMU_METAL_V2_WINDOW_MB (512..4096) overrides the size.
+    internal const ulong PreferredWindowBytes = 1UL * 1024 * 1024 * 1024;
     private const int MaxWindows = 64;
 
-    private static ulong ResolvePreferredWindowBytes()
+    private static ulong ResolvePreferredWindowBytes() =>
+        ResolvePreferredWindowBytes(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WINDOW_MB"));
+
+    internal static ulong ResolvePreferredWindowBytes(string? configured)
     {
-        var configured = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WINDOW_MB");
         if (ulong.TryParse(configured, out var megabytes) && megabytes >= 512 && megabytes <= 4096)
         {
             return megabytes * 1024 * 1024;
@@ -497,6 +499,20 @@ internal sealed class MetalGuestMemory : IDisposable
     {
         range = default;
         return !StageEverything && TryResolveWindow(gpuVa, size, out range);
+    }
+
+    /// <summary>True when the range is a window's own bytes - guest memory - rather than a ring copy.</summary>
+    public bool IsInPlace(in MetalGuestRange range)
+    {
+        foreach (var window in _windows)
+        {
+            if (window.Buffer == range.Buffer)
+            {
+                return range.IsValid;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>A ring copy of the guest bytes the CPU sees now.</summary>

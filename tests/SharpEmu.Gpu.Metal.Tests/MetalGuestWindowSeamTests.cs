@@ -205,6 +205,40 @@ public sealed unsafe class MetalGuestWindowSeamTests(ITestOutputHelper output)
         Assert.All(beyond, value => Assert.Equal((byte)0, value));
     }
 
+    // A storage binding that straddles a window edge and is too large to stage binds the
+    // prefix in place: the host treats it as guest memory, not as a ring copy to gather
+    // into and write back, and the shader's bound is the prefix, so no access reaches
+    // past the window into memory the binding does not mean.
+    [Fact]
+    public void AnOversizedStorageBindingIsGuestMemoryBoundedByItsPrefix()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var backing = new Backing();
+        using var memory = new MetalGuestMemory(
+            Device.Value, backing, new BackingMemory(backing), WindowBytes, SeamBytes, Budget, maxUploadBytes: SeamBytes);
+
+        // Straddles the edge between the first two windows by a quarter window each way.
+        var address = GuestBase + WindowBytes - (WindowBytes / 4);
+        var size = WindowBytes / 2;
+        memory.BeginSubmission(1, 0);
+        var staged = memory.Stage(address, size);
+
+        Assert.True(staged.IsValid);
+        Assert.True(memory.IsInPlace(staged));
+        Assert.True(staged.Size < size);
+        Assert.Equal((uint)staged.Size, MetalRenderHost.BoundBufferBytes(size, staged));
+        Assert.Equal(0UL, memory.RingFallbacks);
+
+        var ring = memory.Allocate(256, 256, out _);
+        Assert.False(memory.IsInPlace(ring));
+        Assert.Equal(256u, MetalRenderHost.BoundBufferBytes(size, ring));
+        Assert.False(memory.IsInPlace(default));
+    }
+
     private static void Fill(nint encoder, in MetalGuestRange range, byte value)
     {
         Assert.True(range.IsValid);

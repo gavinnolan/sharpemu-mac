@@ -45,8 +45,11 @@ internal sealed partial class MetalRenderHost
         }
 
         var staging = _guestMemory.Stage(address, size);
-        if (!staging.IsValid)
+        if (!staging.IsValid || _guestMemory.IsInPlace(staging))
         {
+            // A range too large to stage binds its window prefix in place: that is guest
+            // memory, ordered like any window binding, with no copy to gather into or
+            // write back from.
             return staging;
         }
 

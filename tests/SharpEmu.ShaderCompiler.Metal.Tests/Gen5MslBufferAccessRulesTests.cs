@@ -90,6 +90,44 @@ public sealed class Gen5MslBufferAccessRulesTests(ITestOutputHelper output)
         }
     }
 
+    // A table the host filled to capacity still resolves its first entry, the one the
+    // binary search reaches last: it takes enough steps for every range the host uploads.
+    [Fact]
+    public void ADeviceDescriptorLoadResolvesTheFirstEntryOfAFullRangeTable()
+    {
+        var shader = CompileBound(TfeProgram(resource: 12));
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        var input = Input();
+        BinaryPrimitives.WriteUInt32LittleEndian(input.AsSpan(BufferBytes - 4), (uint)GuestBase);
+        var guest = new byte[GuestBytes];
+        var descriptor = new uint[] { (uint)(GuestBase + DeviceBufferOffset), 0, DeviceRecords, RawWord3 };
+        for (var word = 0; word < descriptor.Length; word++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan(word * 4), descriptor[word]);
+        }
+
+        for (var word = 0; word < 16; word++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan(DeviceBufferOffset + word * 4), 0xC0DE_0000u + (uint)word);
+        }
+
+        var (tables, _) = MetalNative.CreateGuestMapping(
+            GuestBase, guest, 0x1000, trailingRanges: Gen5MslTranslator.MaxAddressRangeCount - 1);
+        Assert.Equal(Gen5MslTranslator.MaxAddressRangeCount, tables[0].Count);
+        var result = Execute(shader, input, tables);
+        for (var lane = 0; lane < 15; lane++)
+        {
+            var at = (OutputOffset + lane * 16) / 4;
+            Assert.Equal(0xC0DE_0000u + (uint)lane, Word(result, at));
+            Assert.Equal(0xC0DE_0001u + (uint)lane, Word(result, at + 1));
+            Assert.Equal(0u, Word(result, at + 2));
+        }
+    }
+
     [Theory]
     [InlineData(0xE0041000u, 0x80820401u, 6u)]  // buffer_load_format_xy v[4:6], v1, s[8:11], 0 offen tfe
     [InlineData(0xE0281000u, 0x80830401u, 5u)]  // buffer_load_ushort v[4:5], v1, s[12:15], 0 offen tfe

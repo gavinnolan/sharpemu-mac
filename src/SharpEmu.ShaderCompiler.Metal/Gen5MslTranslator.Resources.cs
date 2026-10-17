@@ -12,10 +12,12 @@ namespace SharpEmu.ShaderCompiler.Metal;
 // argument buffer, every descriptor index from the memory table, user data from push data.
 public static partial class Gen5MslTranslator
 {
-    // The range table holds at most 4096 entries; the resolver's binary search needs
-    // 2^AddressRangeSearchSteps > MaxAddressRangeCount, so 13 steps cover 4096. Raise both together.
-    public const uint AddressRangeSearchSteps = 13;
-    public const uint MaxAddressRangeCount = 4096;
+    // The range table holds at most 16384 entries; the resolver's binary search needs
+    // 2^AddressRangeSearchSteps > MaxAddressRangeCount, so 15 steps cover 16384. Raise both together.
+    // Demon's Souls maps 1834 spans in play and splits them into more than 4096 runs over
+    // 1 GiB guest windows; the table is sorted, so two more steps buy four times the room.
+    public const uint AddressRangeSearchSteps = 15;
+    public const uint MaxAddressRangeCount = 16384;
 
     public static bool TryCompileProgram(
         ShaderCompileRequest request,

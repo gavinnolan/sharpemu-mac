@@ -471,7 +471,7 @@ internal sealed partial class MetalRenderHost
                 $"storage[{index}] hash=0x{stage.Program.Hash:X16}{(written ? " written" : string.Empty)}",
                 descriptor.Address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
             stage.Buffers[index] = range;
-            stage.BufferLengths[index] = (uint)Math.Min(size, uint.MaxValue);
+            stage.BufferLengths[index] = BoundBufferBytes(size, range);
             ReportBufferBinding(stage, index, in descriptor, requested, size, range);
         }
 
@@ -591,6 +591,17 @@ internal sealed partial class MetalRenderHost
 
         return hashes;
     }
+
+    /// <summary>
+    /// The byte count the shader bounds a storage binding by: what the bound buffer
+    /// holds, never more. A range too large for one window binds only its window prefix
+    /// (and one too large to stage only the ring's cap), and the shader checks its
+    /// accesses against this count, not the bound buffer's end; with the guest's whole
+    /// size an access past the prefix would read and write whatever follows the window
+    /// in the GPU address space. Past it a load reads zero and a store is dropped.
+    /// </summary>
+    internal static uint BoundBufferBytes(ulong size, in MetalGuestRange range) =>
+        (uint)Math.Min(Math.Min(size, range.Size), uint.MaxValue);
 
     private void ReportBufferBinding(
         MetalStageBindings stage,
@@ -984,7 +995,7 @@ internal sealed partial class MetalRenderHost
             var page = DeviceAddressPaging.PageSize;
             var start = (address + page - 1) & ~(page - 1);
             var end = (address + size) & ~(page - 1);
-            while (start < end && _deviceAddressEntries.Count < MaxAddressRanges)
+            while (start < end)
             {
                 var remaining = end - start;
                 var run = _guestMemory.ResolveWritable(start, remaining);
@@ -1022,18 +1033,11 @@ internal sealed partial class MetalRenderHost
                     run = _guestMemory.ResolveWritable(start, length);
                 }
 
-                _deviceAddressEntries.Add((start >> DeviceAddressPaging.PageBits,
-                    length >> DeviceAddressPaging.PageBits, run.GpuAddress));
+                AddDeviceAddressEntry(_deviceAddressEntries, (start >> DeviceAddressPaging.PageBits,
+                    length >> DeviceAddressPaging.PageBits, run.GpuAddress), spanCount);
                 start += length;
             }
         });
-        if (_deviceAddressEntries.Count >= MaxAddressRanges)
-        {
-            MetalV2Diagnostics.WarnOnce(
-                "device-address-table-full",
-                $"The device-address table is full and later guest spans are not addressable: " +
-                $"limit={MaxAddressRanges} spans={spanCount}.");
-        }
 
         _deviceAddressWindows = _guestMemory.TouchedWindows;
         _guestMemory.ClearTouchedWindows();
@@ -1059,6 +1063,26 @@ internal sealed partial class MetalRenderHost
     }
 
     private ulong _deviceAddressWindowsLogged;
+
+    /// <summary>
+    /// Adds one run to the table. A span the table has no room for resolves to null in
+    /// every shader, so its loads read zero and its stores are dropped without a word;
+    /// a full table therefore ends the run instead of truncating.
+    /// </summary>
+    internal static void AddDeviceAddressEntry(
+        List<(ulong FirstPage, ulong PageCount, ulong Base)> entries,
+        (ulong FirstPage, ulong PageCount, ulong Base) entry,
+        int spanCount)
+    {
+        if (entries.Count >= MaxAddressRanges)
+        {
+            throw GpuFatal.Fatal(
+                $"The device-address table is full and later guest spans are not addressable: " +
+                $"limit={MaxAddressRanges} spans_so_far={spanCount} page=0x{entry.FirstPage:X}.");
+        }
+
+        entries.Add(entry);
+    }
 
     private ulong UploadDwords(ReadOnlySpan<uint> words)
     {
