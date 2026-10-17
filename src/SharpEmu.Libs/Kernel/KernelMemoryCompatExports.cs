@@ -5372,7 +5372,9 @@ public static partial class KernelMemoryCompatExports
             foreach (var (mountPoint, hostRoot) in _guestMounts)
             {
                 if ((string.Equals(normalizedGuestPath, mountPoint, StringComparison.Ordinal) ||
-                     normalizedGuestPath.StartsWith(mountPoint + "/", StringComparison.Ordinal)) &&
+                     (normalizedGuestPath.Length > mountPoint.Length &&
+                      normalizedGuestPath.StartsWith(mountPoint, StringComparison.Ordinal) &&
+                      normalizedGuestPath[mountPoint.Length] == '/')) &&
                     (matchedMountPoint is null || mountPoint.Length > matchedMountPoint.Length))
                 {
                     matchedMountPoint = mountPoint;
@@ -5460,6 +5462,14 @@ public static partial class KernelMemoryCompatExports
     // title enumerated an unrelated host directory and never found its .pak files.
     private static string NormalizeMountRelativePath(string relativePath)
     {
+        if (IsPlainMountRelativePath(relativePath))
+        {
+            // Nothing to drop or clamp: the joined segments are the input itself.
+            return Path.DirectorySeparatorChar == '/'
+                ? relativePath
+                : relativePath.Replace('/', Path.DirectorySeparatorChar);
+        }
+
         var segments = relativePath.Split(
             new[] { '/', '\\' },
             StringSplitOptions.RemoveEmptyEntries);
@@ -5485,6 +5495,35 @@ public static partial class KernelMemoryCompatExports
         }
 
         return string.Join(Path.DirectorySeparatorChar, resolved);
+    }
+
+    // True when splitting on '/' and '\\' yields only ordinary names: no empty,
+    // "." or ".." segment and no '\\' to re-separate. Such a path normalizes to
+    // itself, which is what nearly every asset path a title resolves looks like.
+    private static bool IsPlainMountRelativePath(string relativePath)
+    {
+        if (relativePath.Length == 0 || relativePath.Contains('\\'))
+        {
+            return false;
+        }
+
+        var rest = relativePath.AsSpan();
+        while (true)
+        {
+            var separator = rest.IndexOf('/');
+            var segment = separator < 0 ? rest : rest[..separator];
+            if (segment.Length == 0 || segment is "." or "..")
+            {
+                return false;
+            }
+
+            if (separator < 0)
+            {
+                return true;
+            }
+
+            rest = rest[(separator + 1)..];
+        }
     }
 
     // Combines a mount-relative guest path onto a built-in mount root and
@@ -5515,10 +5554,12 @@ public static partial class KernelMemoryCompatExports
             return string.Empty;
         }
 
-        var rootWithSeparator =
-            Path.TrimEndingDirectorySeparator(fullRoot) + Path.DirectorySeparatorChar;
+        // StartsWith(root + separator), without building that string per call.
+        var trimmedRoot = Path.TrimEndingDirectorySeparator(fullRoot);
         if (!string.Equals(candidate, fullRoot, HostFsPath.Comparison) &&
-            !candidate.StartsWith(rootWithSeparator, HostFsPath.Comparison))
+            !(candidate.Length > trimmedRoot.Length &&
+              candidate.StartsWith(trimmedRoot, HostFsPath.Comparison) &&
+              candidate[trimmedRoot.Length] == Path.DirectorySeparatorChar))
         {
             return string.Empty;
         }
@@ -5659,29 +5700,52 @@ public static partial class KernelMemoryCompatExports
         }
 
         // Callers pass full paths; one already under the root needs no renormalization.
-        var relative = candidate.Length > rootTrimmed.Length + 1 &&
+        var underRoot = candidate.Length > rootTrimmed.Length + 1 &&
             candidate.StartsWith(rootTrimmed, HostFsPath.Comparison) &&
-            candidate[rootTrimmed.Length] == Path.DirectorySeparatorChar
-                ? candidate[(rootTrimmed.Length + 1)..]
-                : Path.GetRelativePath(rootTrimmed, candidate);
+            candidate[rootTrimmed.Length] == Path.DirectorySeparatorChar;
+        var relative = underRoot
+            ? candidate.AsSpan(rootTrimmed.Length + 1)
+            : Path.GetRelativePath(rootTrimmed, candidate).AsSpan();
         // A leading ".." segment means the candidate is not under the root. Match
         // the segment precisely: bare ".." or a "../" prefix, NOT a legitimate
         // file merely named "..foo". This branch is a defensive fallback (lexical
         // containment already passed before it runs), so it fails closed.
-        if (relative == "." || relative == ".." || Path.IsPathRooted(relative) ||
-            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
-            relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+        if (relative is "." or ".." || Path.IsPathRooted(relative) ||
+            (relative.Length > 2 && relative.StartsWith("..", StringComparison.Ordinal) &&
+             (relative[2] == Path.DirectorySeparatorChar || relative[2] == Path.AltDirectorySeparatorChar)))
         {
             // Not actually under the root (should have been caught lexically);
             // treat as an escape rather than walk outside it.
             return true;
         }
 
+        // Each component's key is the root joined with the segments so far. When
+        // the relative part is a plain run of single-separated segments those keys
+        // are exactly the candidate's own prefixes, so an already-verified
+        // component is looked up as a slice of the candidate instead of a newly
+        // built string. A resource scan resolves ~250k asset paths whose
+        // directories were verified by the first file in each, and building every
+        // prefix of every path was most of the 4 KB each resolution allocated.
+        ReadOnlySpan<char> doubleSeparator = [Path.DirectorySeparatorChar, Path.DirectorySeparatorChar];
+        var keysAreCandidatePrefixes = underRoot &&
+            relative.Length > 0 &&
+            relative[0] != Path.DirectorySeparatorChar &&
+            relative.IndexOf(doubleSeparator) < 0;
+        var verified = _verifiedMountComponents.GetAlternateLookup<ReadOnlySpan<char>>();
         var current = rootTrimmed;
-        foreach (var segment in relative.Split(
-                     Path.DirectorySeparatorChar,
-                     StringSplitOptions.RemoveEmptyEntries))
+        var offset = 0;
+        while (offset < relative.Length)
         {
+            var segmentStart = offset;
+            var separator = relative[offset..].IndexOf(Path.DirectorySeparatorChar);
+            var segmentLength = separator < 0 ? relative.Length - offset : separator;
+            offset += segmentLength + 1;
+            if (segmentLength == 0)
+            {
+                continue;
+            }
+
+            var segment = relative.Slice(segmentStart, segmentLength);
             // A component past NAME_MAX cannot name a host file at all. The
             // per-component stat used to surface that as ENAMETOOLONG, which
             // this guard treated as an unverifiable component and denied; a
@@ -5692,10 +5756,23 @@ public static partial class KernelMemoryCompatExports
                 return true;
             }
 
-            current = Path.Combine(current, segment);
-            if (_verifiedMountComponents.ContainsKey(current))
+            if (keysAreCandidatePrefixes)
             {
-                continue;
+                var prefix = candidate.AsSpan(0, rootTrimmed.Length + 1 + segmentStart + segmentLength);
+                if (verified.ContainsKey(prefix))
+                {
+                    continue;
+                }
+
+                current = prefix.Length == candidate.Length ? candidate : prefix.ToString();
+            }
+            else
+            {
+                current = Path.Combine(current, segment.ToString());
+                if (_verifiedMountComponents.ContainsKey(current))
+                {
+                    continue;
+                }
             }
 
             // One listing of the component's parent answers this question for
