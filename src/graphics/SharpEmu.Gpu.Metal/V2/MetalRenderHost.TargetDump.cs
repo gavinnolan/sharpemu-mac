@@ -351,6 +351,33 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    private const string UnnamedComputeLabel = "cs?";
+
+    /// <summary>
+    /// A dispatch was just recorded: names the program behind the storage images its
+    /// bindings noted, and under snapshots says which program ran with which grid, so a
+    /// compute pass that wrote nothing can be told from one that never ran.
+    /// </summary>
+    private void NoteDispatchState(MetalPipelineEntry entry, string kind, WorkShape shape)
+    {
+        if (!_dumpThisFlip || !_dumpSnapshots)
+        {
+            return;
+        }
+
+        var name = $"cs{entry.VertexHash:X16}";
+        for (var index = 0; index < _computeStorageNoted.Count; index++)
+        {
+            var (texture, label) = _computeStorageNoted[index];
+            if (label.StartsWith(UnnamedComputeLabel, StringComparison.Ordinal))
+            {
+                _computeStorageNoted[index] = (texture, name + label[UnnamedComputeLabel.Length..]);
+            }
+        }
+
+        Console.Error.WriteLine($"[METAL-V2][DUMP] {kind} {name} {shape} seq={_snapshotSerial}");
+    }
+
     /// <summary>
     /// The compute encoder just ended: copy every storage image its dispatches wrote,
     /// labelled with the last pipeline and grid, so the per-encoder state is on record.
@@ -448,10 +475,13 @@ internal sealed partial class MetalRenderHost
             $"-L{description.Resources.Levels}A{description.Resources.Layers}" +
             $"-bpb{description.BytesPerBlock}-pitch{description.Pitch}-bytes{description.Data.Size:X}" +
             $"-at{description.Data.Address:X}";
-        if (_dumpSnapshots && role == ImageRole.StorageImage && _computeEncoder != 0)
+        // A compute encoder's inputs are copied when it ends, like its storage images:
+        // nothing inside it writes them, so that copy is what its dispatches read.
+        if (_dumpSnapshots && _computeEncoder != 0)
         {
-            var pipeline = _pendingComputePipeline?.Id ?? 0;
-            _computeStorageNoted.Add((texture, $"cs{pipeline:X16}-{label}"));
+            // The program is named once the dispatch is recorded (NoteDispatchState):
+            // the bindings are applied before the pipeline is known here.
+            _computeStorageNoted.Add((texture, $"{UnnamedComputeLabel}-{label}"));
             return;
         }
 
@@ -719,6 +749,68 @@ internal sealed partial class MetalRenderHost
                     }
                 };
                 return true;
+            // A depth plane sampled as a colour alias reads as the depth it holds.
+            case MtlFormat.R32Float:
+                sourceBytes = 4;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 3 < source.Length; i += 4, o += 4)
+                    {
+                        var value = BitConverter.UInt32BitsToSingle(
+                            BinaryPrimitives.ReadUInt32LittleEndian(source[i..]));
+                        var level = (byte)Math.Clamp(value * 255f, 0f, 255f);
+                        target[o] = level;
+                        target[o + 1] = level;
+                        target[o + 2] = level;
+                        target[o + 3] = 255;
+                    }
+                };
+                return true;
+            case MtlFormat.R16Float:
+                sourceBytes = 2;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 1 < source.Length; i += 2, o += 4)
+                    {
+                        var value = (float)BitConverter.UInt16BitsToHalf(
+                            BinaryPrimitives.ReadUInt16LittleEndian(source[i..]));
+                        var level = (byte)Math.Clamp(value * 255f, 0f, 255f);
+                        target[o] = level;
+                        target[o + 1] = level;
+                        target[o + 2] = level;
+                        target[o + 3] = 255;
+                    }
+                };
+                return true;
+            // A stencil plane read as R8Uint shows its byte as a level, like R8Unorm.
+            case MtlFormat.R8Unorm:
+            case MtlFormat.R8Uint:
+                sourceBytes = 1;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i < source.Length; i++, o += 4)
+                    {
+                        target[o] = source[i];
+                        target[o + 1] = source[i];
+                        target[o + 2] = source[i];
+                        target[o + 3] = 255;
+                    }
+                };
+                return true;
+            case MtlFormat.Rg11B10Float:
+                sourceBytes = 4;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 3 < source.Length; i += 4, o += 4)
+                    {
+                        var packed = BinaryPrimitives.ReadUInt32LittleEndian(source[i..]);
+                        target[o] = SmallFloatLevel(packed & 0x7FF, 6);
+                        target[o + 1] = SmallFloatLevel((packed >> 11) & 0x7FF, 6);
+                        target[o + 2] = SmallFloatLevel((packed >> 22) & 0x3FF, 5);
+                        target[o + 3] = 255;
+                    }
+                };
+                return true;
             case MtlFormat.Depth16Unorm:
                 sourceBytes = 2;
                 convert = static (source, target) =>
@@ -787,6 +879,17 @@ internal sealed partial class MetalRenderHost
                 convert = static (_, _) => { };
                 return false;
         }
+    }
+
+    // An unsigned small float (11 or 10 bits: 5-bit exponent, bias 15) as an 8-bit level.
+    private static byte SmallFloatLevel(uint bits, int mantissaBits)
+    {
+        var exponent = (int)(bits >> mantissaBits);
+        var mantissa = bits & ((1u << mantissaBits) - 1);
+        var value = exponent == 0
+            ? mantissa / (float)(1 << mantissaBits) * MathF.Pow(2, -14)
+            : (1 + mantissa / (float)(1 << mantissaBits)) * MathF.Pow(2, exponent - 15);
+        return (byte)Math.Clamp(value * 255f, 0f, 255f);
     }
 
     // A minimal PNG: one IDAT of zlib-deflated scanlines, each with filter byte zero.

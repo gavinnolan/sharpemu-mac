@@ -56,6 +56,10 @@ internal sealed partial class MetalRenderHost
         {
             NoteDrawState(kind, shape);
         }
+        else if (DumpTargetsEnabled)
+        {
+            NoteDispatchState(entry, kind, shape);
+        }
 
         ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);
     }
