@@ -81,14 +81,16 @@ public sealed partial class ScalarValueGraph
             if (!Enum.IsDefined(kind) || !Enum.IsDefined(type) || !Enum.IsDefined(operation))
                 throw new InvalidDataException("Invalid graph snapshot node.");
             var payload = reader.ReadUInt64();
-            var refs = new int[Count(65536)];
+            var refCount = Count(65536);
+            var refs = refCount == 0 ? [] : new int[refCount];
             for (var j = 0; j < refs.Length; j++) refs[j] = reader.ReadInt32();
             operands[i] = refs;
-            var predecessors = new int[Count(65536)];
+            var predecessorCount = Count(65536);
+            var predecessors = predecessorCount == 0 ? [] : new int[predecessorCount];
             for (var j = 0; j < predecessors.Length; j++) predecessors[j] = reader.ReadInt32();
             if (kind == ScalarValueKind.Phi ? predecessors.Length != refs.Length : predecessors.Length != 0)
                 throw new InvalidDataException("Invalid graph snapshot phi.");
-            var value = ScalarValue.CreateInterned(kind, type, operation, payload, new ScalarValue[refs.Length]);
+            var value = ScalarValue.CreateInterned(kind, type, operation, payload, refs.Length == 0 ? [] : new ScalarValue[refs.Length]);
             if (kind == ScalarValueKind.Phi) value.SetPhiOperands(predecessors, value.Operands);
             graph._values.Add(value);
         }

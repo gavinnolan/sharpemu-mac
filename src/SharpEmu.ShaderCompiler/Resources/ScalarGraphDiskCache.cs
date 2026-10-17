@@ -105,7 +105,8 @@ internal static class ScalarGraphDiskCache
     internal static string Key(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, ulong excludedUserDataRegisters = 0)
     {
-        using var stream = new MemoryStream();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var stream = new HashingStream(hash);
         using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
         {
             writer.Write(Version);
@@ -132,7 +133,39 @@ internal static class ScalarGraphDiskCache
                 writer.Write(instruction.Control is { } control ? JsonSerializer.Serialize(control, control.GetType()) : "");
             }
         }
-        return Convert.ToHexString(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    /// <summary>A write-only stream that feeds what it is given to a hash instead of keeping it.</summary>
+    private sealed class HashingStream(IncrementalHash hash) : Stream
+    {
+        public override bool CanRead => false;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => hash.AppendData(buffer, offset, count);
+
+        public override void Write(ReadOnlySpan<byte> buffer) => hash.AppendData(buffer);
     }
 
     /// <summary>

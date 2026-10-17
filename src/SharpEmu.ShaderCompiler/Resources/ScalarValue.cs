@@ -225,11 +225,30 @@ public static class ScalarValueEquivalence
     // also draw each operand from the same predecessor block.
     public static bool Equivalent(MemoryAccessTable memory, ScalarValue left, ScalarValue right)
     {
-        var visited = new HashSet<(ScalarValue, ScalarValue)>();
-        return Equivalent(memory, left, right, visited);
+        // Most comparisons end on the first node, so the visited set is only taken
+        // once a node has operands to recurse into, and is handed back cleared.
+        HashSet<(ScalarValue, ScalarValue)>? visited = null;
+        try
+        {
+            return Equivalent(memory, left, right, ref visited);
+        }
+        finally
+        {
+            if (visited is not null)
+            {
+                if (visited.Count <= 4096)
+                {
+                    visited.Clear();
+                    _visitedPairs = visited;
+                }
+            }
+        }
     }
 
-    private static bool Equivalent(MemoryAccessTable memory, ScalarValue left, ScalarValue right, HashSet<(ScalarValue, ScalarValue)> visited)
+    [System.ThreadStatic]
+    private static HashSet<(ScalarValue, ScalarValue)>? _visitedPairs;
+
+    private static bool Equivalent(MemoryAccessTable memory, ScalarValue left, ScalarValue right, ref HashSet<(ScalarValue, ScalarValue)>? visited)
     {
         // An undefined value is never equivalent, not even to itself.
         if (left.IsUndefined || right.IsUndefined)
@@ -275,7 +294,7 @@ public static class ScalarValueEquivalence
         }
 
         // ScalarValue equality uses reference identity. Keep each ordered pair once.
-        if (!visited.Add((left, right)))
+        if (!(visited ??= TakeVisitedPairs()).Add((left, right)))
         {
             return true;
         }
@@ -304,13 +323,20 @@ public static class ScalarValueEquivalence
 
         for (var index = 0; index < left.Operands.Length; index++)
         {
-            if (!Equivalent(memory, left.Operands[index], right.Operands[index], visited))
+            if (!Equivalent(memory, left.Operands[index], right.Operands[index], ref visited))
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    private static HashSet<(ScalarValue, ScalarValue)> TakeVisitedPairs()
+    {
+        var cached = _visitedPairs;
+        _visitedPairs = null;
+        return cached ?? [];
     }
 
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ScalarValue, StrongBox> ResolvedPhis = new();
