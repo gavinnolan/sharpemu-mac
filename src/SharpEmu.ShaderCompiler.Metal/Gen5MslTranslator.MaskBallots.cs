@@ -26,6 +26,11 @@ namespace SharpEmu.ShaderCompiler.Metal;
 // VCC as a mask; they use s106/s107 as ordinary scratch registers, so each V_CMP's
 // ballot is overwritten before anything looks at it.
 //
+// The same holds for every scalar register pair, not just VCC and EXEC, and for the 64-bit
+// mask ops that consume a pair only as per-lane bits (Gen5MslTranslator.LaneMasks.cs and
+// .LaneVariables.cs): they keep the bools, SCC is a marker that reads the result only if it is
+// read, and the 64-bit pair is exchanged only where a scalar reader remains.
+//
 // So the ballot is emitted as a marker and resolved once every block's text exists, by
 // asking whether the pair is live afterwards. Taking the answer from the emitted MSL
 // rather than from the IR is what makes it safe: every way the translator can read one
@@ -39,32 +44,187 @@ public static partial class Gen5MslTranslator
         /// condition. Resolved by <see cref="ResolveMaskBallots"/>.</summary>
         private const string MaskBallotMarker = "SHARPEMU_BALLOT";
 
-        /// <summary>The four registers a mask ballot can write: VCC and EXEC, low and
-        /// high. Tracked as slots 0..3 in that order.</summary>
-        private static readonly uint[] MaskRegisters =
-            [VccLoRegister, VccHiRegister, ExecLoRegister, ExecHiRegister];
+        /// <summary>Marks a 64-bit mask op that has a lane form and a pair form (see
+        /// Gen5MslTranslator.LaneMasks.cs); the argument indexes <c>_maskOps</c>.</summary>
+        private const string MaskOpMarker = "SHARPEMU_MASKOP";
 
-        private static int MaskSlotOf(uint register)
+        /// <summary>Marks SCC = "the mask pair written by the op is non-zero"; the argument is
+        /// the pair's low register. It reads the pair only if SCC is read afterwards.</summary>
+        private const string SccAnyMarker = "SHARPEMU_SCCANY";
+
+        /// <summary>The slot of SCC in the liveness arrays, after the scalar registers.</summary>
+        private const int SccSlot = (int)ScalarRegisterFileCount;
+
+        private const int MaskSlotCount = SccSlot + 1;
+
+        /// <summary>VCC and EXEC, low and high: the registers the elision tracked before it
+        /// followed every scalar register. When a shader addresses the scalar file
+        /// dynamically these are the only pairs still elided.</summary>
+        private static bool IsClassicMaskSlot(int slot) =>
+            slot is (int)VccLoRegister or (int)VccHiRegister or (int)ExecLoRegister or (int)ExecHiRegister;
+
+        private enum MaskLineKind { Plain, Ballot, SccAny, MaskOp }
+
+        /// <summary>One line of a block, parsed once for the liveness passes.</summary>
+        private sealed class MaskLine
         {
-            for (var slot = 0; slot < MaskRegisters.Length; slot++)
-            {
-                if (MaskRegisters[slot] == register)
-                {
-                    return slot;
-                }
-            }
+            public required string Text { get; init; }
 
-            return -1;
+            public MaskLineKind Kind { get; init; }
+
+            public int Depth { get; init; }
+
+            /// <summary>Slots a plain line reads, excluding its own assignment target.</summary>
+            public int[] Reads { get; init; } = [];
+
+            /// <summary>The slot an always-run assignment overwrites, or -1.</summary>
+            public int Def { get; init; } = -1;
+
+            public bool ReadsScc { get; init; }
+
+            public bool DefinesScc { get; init; }
+
+            public uint Lo { get; init; }
+
+            public string Condition { get; init; } = string.Empty;
+
+            public MaskOp? Op { get; init; }
+
+            public List<MaskLine> LaneLines { get; init; } = [];
+
+            public List<MaskLine> PairLines { get; init; } = [];
         }
 
+        private MaskLine ParseMaskLine(string line, int depth)
+        {
+            var trimmed = line.Trim();
+            if (TryReadBallotMarker(trimmed, out var loRegister, out var condition))
+            {
+                return new MaskLine
+                {
+                    Text = line,
+                    Kind = MaskLineKind.Ballot,
+                    Depth = depth,
+                    Lo = loRegister,
+                    Condition = condition,
+                };
+            }
+
+            if (TryReadMarkerArgument(trimmed, SccAnyMarker, out var sccLo))
+            {
+                return new MaskLine { Text = line, Kind = MaskLineKind.SccAny, Depth = depth, Lo = sccLo };
+            }
+
+            if (TryReadMarkerArgument(trimmed, MaskOpMarker, out var id))
+            {
+                var op = _maskOps[(int)id];
+                var pad = line[..(line.Length - line.TrimStart().Length)];
+                return new MaskLine
+                {
+                    Text = line,
+                    Kind = MaskLineKind.MaskOp,
+                    Depth = depth,
+                    Op = op,
+                    LaneLines = [.. op.LaneLines.Select(text => ParseMaskLine(pad + text, depth))],
+                    PairLines = [.. op.PairLines.Select(text => ParseMaskLine(pad + text, depth))],
+                };
+            }
+
+            var definition = depth == 0 ? DefinitionTarget(trimmed) : -1;
+            var reads = new List<int>();
+            foreach (var reference in ScanRegisterReferences(trimmed))
+            {
+                if (reference.File != 's' || reference.Index < 0 ||
+                    (definition >= 0 && reference.Start == 0))
+                {
+                    continue;
+                }
+
+                reads.Add(reference.Index);
+            }
+
+            bool definesScc;
+            bool readsScc;
+            if (depth == 0 && trimmed.StartsWith("scc = ", StringComparison.Ordinal) && trimmed.EndsWith(';'))
+            {
+                definesScc = true;
+                readsScc = ContainsIdentifier(trimmed.AsSpan(6), "scc");
+            }
+            else
+            {
+                definesScc = false;
+                readsScc = ContainsIdentifier(trimmed, "scc");
+            }
+
+            return new MaskLine
+            {
+                Text = line,
+                Kind = MaskLineKind.Plain,
+                Depth = depth,
+                Reads = [.. reads],
+                Def = definition >= ScalarSlotBase && definition < VectorSlotBase ? definition : -1,
+                ReadsScc = readsScc,
+                DefinesScc = definesScc,
+            };
+        }
+
+        private static bool ContainsIdentifier(ReadOnlySpan<char> text, string name)
+        {
+            var from = 0;
+            while (from <= text.Length - name.Length)
+            {
+                var at = text[from..].IndexOf(name, StringComparison.Ordinal);
+                if (at < 0)
+                {
+                    return false;
+                }
+
+                at += from;
+                var before = at == 0 || !IsIdentifierCharacter(text[at - 1]);
+                var afterIndex = at + name.Length;
+                var after = afterIndex >= text.Length || !IsIdentifierCharacter(text[afterIndex]);
+                if (before && after)
+                {
+                    return true;
+                }
+
+                from = at + 1;
+            }
+
+            return false;
+        }
+
+        private static bool TryReadMarkerArgument(string trimmed, string marker, out uint value)
+        {
+            value = 0;
+            if (!trimmed.StartsWith(marker, StringComparison.Ordinal) ||
+                trimmed.Length <= marker.Length + 2 ||
+                trimmed[marker.Length] != '(' || !trimmed.EndsWith(')'))
+            {
+                return false;
+            }
+
+            return uint.TryParse(
+                trimmed.AsSpan(marker.Length + 1, trimmed.Length - marker.Length - 2),
+                out value);
+        }
+
+        private bool _maskScalarDynamic;
+
+        private bool IsTrackedSlot(int slot) =>
+            !_maskScalarDynamic || IsClassicMaskSlot(slot) || slot == SccSlot;
+
         /// <summary>Replaces every mask-ballot marker with the cross-simdgroup exchange,
-        /// or with nothing where the pair it writes is dead.</summary>
+        /// or with nothing where the pair it writes is dead, and chooses for each 64-bit
+        /// mask op between its lane form and its pair form.</summary>
         private void ResolveMaskBallots(IReadOnlyList<ShaderBlock> blocks)
         {
             var anyMarker = false;
             foreach (var text in _blockText)
             {
-                anyMarker |= text.Contains(MaskBallotMarker, StringComparison.Ordinal);
+                anyMarker |= text.Contains(MaskBallotMarker, StringComparison.Ordinal) ||
+                    text.Contains(MaskOpMarker, StringComparison.Ordinal) ||
+                    text.Contains(LaneBitMarker, StringComparison.Ordinal);
             }
 
             if (!anyMarker)
@@ -73,27 +233,58 @@ public static partial class Gen5MslTranslator
             }
 
             var count = blocks.Count;
-            var lines = new List<string>[count];
-            var exposed = new bool[count][];
-            var defined = new bool[count][];
+
+            // The elision follows every scalar register by its literal index. A run-time
+            // index (S_MOVREL and friends) can name any of them, so then only VCC and EXEC
+            // are tracked, as before, and every mask op keeps its pair form.
+            _maskScalarDynamic = false;
+            for (var index = 0; index < count && !_maskScalarDynamic; index++)
+            {
+                var terminator = _blockTerminators[index];
+                var texts = new List<string> { _blockText[index], terminator.Condition };
+                texts.AddRange(terminator.DispatcherLines);
+                foreach (var text in texts)
+                {
+                    foreach (var reference in ScanRegisterReferences(text))
+                    {
+                        if (reference.File == 's' && reference.Index < 0)
+                        {
+                            _maskScalarDynamic = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            ResolveLaneBits(count);
+
+            var lines = new List<MaskLine>[count];
+            var bodyCounts = new int[count];
             for (var index = 0; index < count; index++)
             {
-                lines[index] = [.. SplitLines(_blockText[index])];
-                var condition = _blockTerminators[index].Condition;
-                if (condition.Length != 0)
+                var text = SplitLines(_blockText[index]).ToList();
+                var depths = BraceDepths(text);
+                lines[index] = [.. text.Select((line, at) => ParseMaskLine(line, depths[at]))];
+                bodyCounts[index] = lines[index].Count;
+
+                // The branch condition and dispatcher read at the end of the block, and the
+                // VCCZ and EXECZ forms read the pair.
+                var terminator = _blockTerminators[index];
+                if (terminator.Condition.Length != 0)
                 {
-                    // The branch condition reads at the end of the block, and the VCCZ and
-                    // EXECZ forms read the pair.
-                    lines[index].Add(condition);
+                    lines[index].Add(ParseMaskLine(terminator.Condition, 0));
                 }
 
-                SummarizeMasks(lines[index], out exposed[index], out defined[index]);
+                foreach (var dispatcher in terminator.DispatcherLines)
+                {
+                    lines[index].Add(ParseMaskLine(dispatcher, 0));
+                }
             }
 
             var liveIn = new bool[count][];
             for (var index = 0; index < count; index++)
             {
-                liveIn[index] = new bool[MaskRegisters.Length];
+                liveIn[index] = new bool[MaskSlotCount];
             }
 
             var changed = true;
@@ -103,11 +294,14 @@ public static partial class Gen5MslTranslator
                 for (var index = count - 1; index >= 0; index--)
                 {
                     var live = LiveOutOf(index, count, liveIn);
-                    for (var slot = 0; slot < MaskRegisters.Length; slot++)
+                    for (var at = lines[index].Count - 1; at >= 0; at--)
                     {
-                        var value = exposed[index][slot] ||
-                            (live[slot] && !defined[index][slot]);
-                        if (value && !liveIn[index][slot])
+                        StepBackward(lines[index][at], live, null, decide: false);
+                    }
+
+                    for (var slot = 0; slot < MaskSlotCount; slot++)
+                    {
+                        if (live[slot] && !liveIn[index][slot])
                         {
                             liveIn[index][slot] = true;
                             changed = true;
@@ -118,10 +312,27 @@ public static partial class Gen5MslTranslator
 
             for (var index = 0; index < count; index++)
             {
-                _blockText[index] = ResolveBlockBallots(
-                    lines[index],
-                    _blockTerminators[index].Condition.Length != 0,
-                    LiveOutOf(index, count, liveIn));
+                var live = LiveOutOf(index, count, liveIn);
+                var resolved = new List<string?>[lines[index].Count];
+                for (var at = lines[index].Count - 1; at >= 0; at--)
+                {
+                    resolved[at] = [];
+                    StepBackward(lines[index][at], live, resolved[at], decide: true);
+                }
+
+                var text = new StringBuilder();
+                for (var at = 0; at < bodyCounts[index]; at++)
+                {
+                    foreach (var line in resolved[at])
+                    {
+                        if (line is not null)
+                        {
+                            text.AppendLine(line);
+                        }
+                    }
+                }
+
+                _blockText[index] = text.ToString();
             }
         }
 
@@ -149,7 +360,7 @@ public static partial class Gen5MslTranslator
 
         private bool[] LiveOutOf(int block, int count, bool[][] liveIn)
         {
-            var live = new bool[MaskRegisters.Length];
+            var live = new bool[MaskSlotCount];
             var terminator = _blockTerminators[block];
             Union(live, Successor(terminator.TrueTarget, count, liveIn));
             if (terminator.Kind == TerminatorKind.CondJump)
@@ -160,64 +371,122 @@ public static partial class Gen5MslTranslator
             return live;
         }
 
-        /// <summary>Which of the four mask registers this block reads before writing, and
-        /// which it writes. A ballot marker writes both halves of its pair; anything else
-        /// follows the same rules the register allocator uses, so a conditional write is
-        /// not a definition and keeps the old value live.</summary>
-        private static void SummarizeMasks(
-            List<string> lines,
-            out bool[] exposed,
-            out bool[] defined)
+        /// <summary>One backward liveness step over a line. With <paramref name="resolved"/>
+        /// it also records the text the line becomes: a ballot marker is its exchange or
+        /// nothing, an SCC marker a read of the pair or nothing, a mask op its lane or pair
+        /// form. A write that always runs ends the previous value's life; one under a
+        /// condition leaves the other path reading what was there, so it keeps the ballot
+        /// that produced it alive. Ballot, SCC and mask-op markers are statement-level, so
+        /// they always run.</summary>
+        private void StepBackward(MaskLine line, bool[] live, List<string?>? resolved, bool decide)
         {
-            exposed = new bool[MaskRegisters.Length];
-            defined = new bool[MaskRegisters.Length];
-            var depths = BraceDepths(lines);
-            for (var index = 0; index < lines.Count; index++)
+            switch (line.Kind)
             {
-                var line = lines[index];
-                var depth = depths[index];
-                var trimmed = line.Trim();
-                if (TryReadBallotMarker(trimmed, out var loRegister, out _))
+                case MaskLineKind.Ballot:
                 {
-                    MarkDefined(exposed, defined, loRegister);
-                    MarkDefined(exposed, defined, loRegister + 1);
-                    continue;
+                    var lo = (int)line.Lo;
+                    var hi = lo + 1;
+                    var hasHigh = hi < (int)ScalarRegisterFileCount;
+                    var needed = !IsTrackedSlot(lo) || (hasHigh && !IsTrackedSlot(hi)) ||
+                        live[lo] || (hasHigh && live[hi]);
+                    resolved?.Add(needed ? ExpandMaskBallot(line.Text, line.Lo, line.Condition) : null);
+                    live[lo] = false;
+                    if (hasHigh)
+                    {
+                        live[hi] = false;
+                    }
+
+                    return;
                 }
 
-                var definition = depth == 0 ? DefinitionTarget(trimmed) : -1;
-                foreach (var reference in ScanRegisterReferences(trimmed))
+                case MaskLineKind.SccAny:
                 {
-                    if (reference.File != 's' || reference.Index < 0 ||
-                        (definition >= 0 && reference.Start == 0))
+                    if (!live[SccSlot])
                     {
-                        continue;
+                        resolved?.Add(null);
+                        return;
                     }
 
-                    var slot = MaskSlotOf((uint)reference.Index);
-                    if (slot >= 0 && !defined[slot])
-                    {
-                        exposed[slot] = true;
-                    }
+                    var lo = (int)line.Lo;
+                    var indent = line.Text.Length - line.Text.TrimStart().Length;
+                    resolved?.Add($"{line.Text[..indent]}scc = ((s[{lo}] | s[{lo + 1}]) != 0u);");
+                    live[SccSlot] = false;
+                    live[lo] = true;
+                    live[lo + 1] = true;
+                    return;
                 }
 
-                if (definition >= ScalarSlotBase && definition < VectorSlotBase)
+                case MaskLineKind.MaskOp:
                 {
-                    var slot = MaskSlotOf((uint)(definition - ScalarSlotBase));
-                    if (slot >= 0)
+                    var pair = decide && PrefersPairForm(line.Op!, live);
+                    var sub = pair ? line.PairLines : line.LaneLines;
+                    var parts = new List<string?>[sub.Count];
+                    for (var at = sub.Count - 1; at >= 0; at--)
                     {
-                        defined[slot] = true;
+                        parts[at] = [];
+                        StepBackward(sub[at], live, resolved is null ? null : parts[at], decide);
                     }
+
+                    if (resolved is not null)
+                    {
+                        foreach (var part in parts)
+                        {
+                            resolved.AddRange(part);
+                        }
+                    }
+
+                    return;
+                }
+
+                default:
+                {
+                    if (line.Def >= 0)
+                    {
+                        live[line.Def] = false;
+                    }
+
+                    if (line.DefinesScc)
+                    {
+                        live[SccSlot] = false;
+                    }
+
+                    foreach (var read in line.Reads)
+                    {
+                        live[read] = true;
+                    }
+
+                    if (line.ReadsScc)
+                    {
+                        live[SccSlot] = true;
+                    }
+
+                    resolved?.Add(line.Text);
+                    return;
+                }
+            }
+        }
+
+        /// <summary>The pair form of a mask op is free when every pair the lane form would
+        /// have taken from a per-lane value is already materialized for another reader: it
+        /// computes its result from those pairs with no exchange at all. Otherwise the lane
+        /// form drops the producers' exchanges and pays one for its result, and only if
+        /// that result is read as a pair.</summary>
+        private bool PrefersPairForm(MaskOp op, bool[] live)
+        {
+            if (_maskScalarDynamic)
+            {
+                return true;
+            }
+
+            foreach (var register in op.Lazy)
+            {
+                if (op.Dests.Contains(register) || !live[register])
+                {
+                    return false;
                 }
             }
 
-            static void MarkDefined(bool[] exposed, bool[] defined, uint register)
-            {
-                var slot = MaskSlotOf(register);
-                if (slot >= 0 && !exposed[slot])
-                {
-                    defined[slot] = true;
-                }
-            }
+            return true;
         }
 
         /// <summary>Brace depth at the start of each line, so a write inside a
@@ -238,99 +507,6 @@ public static partial class Gen5MslTranslator
             }
 
             return depths;
-        }
-
-        /// <summary>Walks a block backwards and expands each marker, now that the live set
-        /// at the end of the block is known.</summary>
-        private string ResolveBlockBallots(
-            List<string> lines,
-            bool hasTerminatorCondition,
-            bool[] liveOut)
-        {
-            // The terminator condition was appended for the liveness pass; it is not part
-            // of the block's text.
-            var bodyCount = hasTerminatorCondition ? lines.Count - 1 : lines.Count;
-            var depths = BraceDepths(lines);
-            var live = (bool[])liveOut.Clone();
-            if (hasTerminatorCondition)
-            {
-                AddMaskReads(live, lines[^1]);
-            }
-
-            var resolved = new string?[bodyCount];
-            for (var index = bodyCount - 1; index >= 0; index--)
-            {
-                var line = lines[index];
-                var trimmed = line.Trim();
-                if (TryReadBallotMarker(trimmed, out var loRegister, out var condition))
-                {
-                    var loSlot = MaskSlotOf(loRegister);
-                    var hiSlot = MaskSlotOf(loRegister + 1);
-                    var needed = (loSlot >= 0 && live[loSlot]) || (hiSlot >= 0 && live[hiSlot]);
-                    resolved[index] = needed
-                        ? ExpandMaskBallot(line, loRegister, condition)
-                        : null;
-                    if (loSlot >= 0)
-                    {
-                        live[loSlot] = false;
-                    }
-
-                    if (hiSlot >= 0)
-                    {
-                        live[hiSlot] = false;
-                    }
-
-                    continue;
-                }
-
-                resolved[index] = line;
-
-                // Only a write that always runs ends the previous value's life. One
-                // under a condition leaves the other path reading what was there, so it
-                // keeps the ballot that produced it alive.
-                var definition = depths[index] == 0 ? DefinitionTarget(trimmed) : -1;
-                if (definition >= ScalarSlotBase && definition < VectorSlotBase)
-                {
-                    var slot = MaskSlotOf((uint)(definition - ScalarSlotBase));
-                    if (slot >= 0)
-                    {
-                        live[slot] = false;
-                    }
-                }
-
-                AddMaskReads(live, line);
-            }
-
-            var text = new StringBuilder();
-            foreach (var line in resolved)
-            {
-                if (line is not null)
-                {
-                    text.AppendLine(line);
-                }
-            }
-
-            return text.ToString();
-        }
-
-        private static void AddMaskReads(bool[] live, string line)
-        {
-            var trimmed = line.Trim();
-            var definition = DefinitionTarget(trimmed);
-            foreach (var reference in ScanRegisterReferences(trimmed))
-            {
-                if (reference.File != 's' || reference.Index < 0 ||
-                    (definition >= 0 && reference.Start == 0))
-                {
-                    continue;
-                }
-
-                var slot = MaskSlotOf((uint)reference.Index);
-                if (slot >= 0)
-                {
-                    live[slot] = true;
-                }
-            }
         }
 
         /// <summary>The cross-simdgroup exchange, at the marker's own indentation.</summary>
