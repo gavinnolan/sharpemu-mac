@@ -122,4 +122,32 @@ public sealed class MetalGuestWindowLayoutTests
         Assert.Equal(4 * Gib, stride);
         Assert.Equal(aliasSize, mapped);
     }
+
+    // 1 GiB windows are the default, so a submission wires only the gigabytes it
+    // touches; SHARPEMU_METAL_V2_WINDOW_MB still picks any size from 512 to 4096 MB.
+    [Theory]
+    [InlineData(null, 1024UL)]
+    [InlineData("", 1024UL)]
+    [InlineData("4096", 4096UL)]
+    [InlineData("512", 512UL)]
+    [InlineData("2048", 2048UL)]
+    [InlineData("256", 1024UL)]
+    [InlineData("8192", 1024UL)]
+    [InlineData("big", 1024UL)]
+    public void WindowsAreOneGibibyteUnlessConfigured(string? configured, ulong megabytes)
+        => Assert.Equal(megabytes * 1024 * 1024, MetalGuestMemory.ResolvePreferredWindowBytes(configured));
+
+    // The measured case at the default size: a 16.375 GiB backing and a 24 GB M4 keep the
+    // seam overlap, so every range up to the seam still lies inside one window.
+    [Fact]
+    public void DefaultWindowsOnTheMeasuredMachineOverlapBySeam()
+    {
+        var aliasSize = (16 * Gib) + (3 * Gib / 8);
+        var (stride, count, mapped) = MetalGuestMemory.ChooseWindowLayout(
+            aliasSize, MetalGuestMemory.PreferredWindowBytes, 18186UL * 1024 * 1024);
+
+        Assert.Equal(Gib - MetalGuestMemory.SeamOverlapBytes, stride);
+        Assert.Equal(18, count);
+        Assert.True(mapped <= 18186UL * 1024 * 1024);
+    }
 }
