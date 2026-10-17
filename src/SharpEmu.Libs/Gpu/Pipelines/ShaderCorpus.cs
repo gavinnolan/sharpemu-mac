@@ -179,7 +179,7 @@ public static class ShaderCorpus
     public static bool TryBuildRequest(ShaderCorpusRecord record, out ShaderCompileRequest? request, out string error) =>
         ShaderProgramCache.TryBuildCorpusRequest(record, out request, out error);
 
-    private static ShaderCorpusRecord Create(ShaderSource source, StageCompileOptions options, ShaderCodeCapture code,
+    internal static ShaderCorpusRecord Create(ShaderSource source, StageCompileOptions options, ShaderCodeCapture code,
         ShaderCorpusHostFlags host, ResourceSpecialization? specialization, uint pushDataCursor) =>
         new()
         {
@@ -204,6 +204,12 @@ public static class ShaderCorpus
         var key = XxHash3.HashToUInt64(JsonSerializer.SerializeToUtf8Bytes(keyed, JsonOptions));
         return $"{LabelOf(record.Stage)}-{record.Hash:X16}-{key:X16}";
     }
+
+    // The record body as the corpus files and the graphics prewarm list keep it, without the guest code.
+    internal static byte[] SerializeBody(ShaderCorpusRecord record) => JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions);
+
+    internal static ShaderCorpusRecord DeserializeBody(ReadOnlySpan<byte> body) =>
+        JsonSerializer.Deserialize<ShaderCorpusRecord>(body, JsonOptions) ?? throw new InvalidDataException("The record body is empty.");
 
     private static string LabelOf(ShaderStage stage) => stage switch
     {

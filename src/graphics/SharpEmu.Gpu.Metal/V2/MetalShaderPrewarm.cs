@@ -177,6 +177,11 @@ internal static class MetalShaderPrewarm
     private static readonly object _startGate = new();
     private static bool _startRequested;
     private static ShaderPrewarmList? _list;
+    private static GraphicsPrewarmList? _graphics;
+    private static ConcurrentDictionary<ulong, byte>? _graphicsKeys;
+    private static int _graphicsCompiled;
+    private static int _graphicsFailed;
+    private static bool _graphicsRan;
     private static ConcurrentDictionary<string, byte>? _prewarmedShaderIdentities;
     private static ConcurrentDictionary<string, byte>? _runtimeComputeIdentities;
     private static Thread[] _threads = [];
@@ -200,6 +205,9 @@ internal static class MetalShaderPrewarm
 
     /// <summary>The list the shader cache records into; null while prewarm is off.</summary>
     public static ShaderPrewarmList? List => Volatile.Read(ref _list);
+
+    /// <summary>The list the shader cache records its vertex and pixel programs into; null while prewarm is off.</summary>
+    public static GraphicsPrewarmList? Graphics => Volatile.Read(ref _graphics);
 
     /// <summary>
     /// Decides the prewarm once per session, off the caller's thread: loading the list
@@ -256,6 +264,7 @@ internal static class MetalShaderPrewarm
         // finds the graphics libraries queued; they compile once the computes the guest is
         // held for are done.
         MetalLibraryPrewarm.Open(directory, device, stamp);
+        var graphics = OpenGraphics(directory, stamp);
         if (ShaderPrewarmList.Open(directory) is not { } list)
         {
             MetalLibraryPrewarm.Begin();
@@ -265,7 +274,7 @@ internal static class MetalShaderPrewarm
         _prewarmedShaderIdentities = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         _runtimeComputeIdentities = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         Volatile.Write(ref _list, list);
-        if (list.LoadedComputeCount == 0)
+        if (list.LoadedComputeCount == 0 && graphics.Count == 0)
         {
             list.WriteStamp(stamp);
             _finished = true;
@@ -275,21 +284,37 @@ internal static class MetalShaderPrewarm
 
         var pending = PendingComputes(list, stamp, out var resumed);
         var started = Stopwatch.GetTimestamp();
-        if (pending.Count == 0)
+        if (pending.Count == 0 && graphics.Count == 0)
         {
             Finish(list, stamp, started);
             return false;
         }
 
-        var ordered = HoldFirst(pending, HoldsForEveryCompute ? null : list.ReadFirstFrameComputes(), out var held);
-        var work = new ConcurrentQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)>(ordered);
+        var ordered = HoldFirst(pending, HoldsForEveryCompute ? null : list.ReadFirstFrameComputes(), out var heldComputes);
+        var orderedGraphics = HoldFirstGraphics(
+            graphics, HoldsForEveryCompute ? null : _graphics?.ReadFirstFrame(), out var heldGraphics);
+        var held = heldComputes + heldGraphics;
+        var total = pending.Count + graphics.Count;
+        // What the guest is held for first, then what the game needs soonest: the graphics
+        // libraries of its scenes, then the computes it was not held for.
+        var work = new ConcurrentQueue<PrewarmWork>(
+            orderedGraphics.Where(item => item.Held).Select(item => new PrewarmWork(item.Item, null, null, true))
+                .Concat(ordered.Where(item => item.Held).Select(item => new PrewarmWork(null, item.Record, item.Code, true)))
+                .Concat(orderedGraphics.Where(item => !item.Held).Select(item => new PrewarmWork(item.Item, null, null, false)))
+                .Concat(ordered.Where(item => !item.Held).Select(item => new PrewarmWork(null, item.Record, item.Code, false))));
         var workerCount = WorkerCount;
         var remaining = workerCount;
         var done = 0;
         Gate.SetTotal(held);
         Console.Error.WriteLine(
-            $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} held={held} resumed={resumed} workers={workerCount}");
+            $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} graphics={graphics.Count} held={held} " +
+            $"resumed={resumed} workers={workerCount}");
         Gate.SetRunning(held > 0);
+        if (held == 0)
+        {
+            MetalLibraryPrewarm.Begin();
+        }
+
         var threads = new Thread[workerCount];
         for (var index = 0; index < workerCount; index++)
         {
@@ -297,20 +322,30 @@ internal static class MetalShaderPrewarm
             {
                 while (!_stopping && work.TryDequeue(out var item))
                 {
-                    if (!item.Held)
+                    if (item.Graphics is { } graphicsItem)
                     {
-                        // The guest runs again: what is left compiles behind its threads.
-                        if (Thread.CurrentThread.Priority != ThreadPriority.BelowNormal)
+                        // A library the game takes waits for it, so these keep normal priority
+                        // (see MetalLibraryPrewarm).
+                        PrewarmGraphicsLibrary(graphicsItem, compiler);
+                    }
+                    else
+                    {
+                        if (!item.Held)
                         {
-                            Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                            // The guest runs again: what is left compiles behind its threads.
+                            if (Thread.CurrentThread.Priority != ThreadPriority.BelowNormal)
+                            {
+                                Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                            }
+
+                            YieldToTheGame();
                         }
 
-                        YieldToTheGame();
+                        PrewarmComputePipeline(item.Compute!, item.Code!, compiler, device);
+                        _completed.Enqueue(ShaderPrewarmList.Identity(item.Compute!));
                     }
 
-                    PrewarmComputePipeline(item.Record, item.Code, compiler, device);
-                    _completed.Enqueue(ShaderPrewarmList.Identity(item.Record));
-                    if (item.Held && Gate.Advance() == held && held < pending.Count)
+                    if (item.Held && Gate.Advance() == held && held < total)
                     {
                         Gate.SetRunning(false);
                         // The graphics libraries of past sessions go ahead of the computes
@@ -318,8 +353,8 @@ internal static class MetalShaderPrewarm
                         MetalLibraryPrewarm.Begin();
                         Console.Error.WriteLine(string.Create(
                             System.Globalization.CultureInfo.InvariantCulture,
-                            $"[LOADER][INFO] Shader prewarm: the {held} computes of the first frame are ready after " +
-                            $"{Stopwatch.GetElapsedTime(started).TotalSeconds:F1}s; the other {pending.Count - held} compile while the game runs."));
+                            $"[LOADER][INFO] Shader prewarm: the {held} programs of the first frame are ready after " +
+                            $"{Stopwatch.GetElapsedTime(started).TotalSeconds:F1}s; the other {total - held} compile while the game runs."));
                     }
 
                     if (Interlocked.Increment(ref done) % PrewarmProgressBatch == 0)
@@ -353,6 +388,101 @@ internal static class MetalShaderPrewarm
         }
 
         return true;
+    }
+
+    /// <summary>SHARPEMU_METAL_V2_GRAPHICS_PREWARM=0 neither records graphics programs nor translates them again.</summary>
+    private static readonly bool GraphicsPrewarmDisabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRAPHICS_PREWARM") == "0";
+
+    private readonly record struct PrewarmWork(
+        GraphicsPrewarmList.Item? Graphics, ComputePrewarmRecord? Compute, ShaderCodeCapture? Code, bool Held);
+
+    /// <summary>
+    /// The recorded graphics programs this start translates again and compiles the libraries
+    /// of: all of them when the translator changed since a prewarm last finished, or when the
+    /// library list no longer holds what that prewarm made of them (a list moved or pruned);
+    /// none while the library list is whole, which compiles its own sources. The list is
+    /// opened either way, so the session records into it.
+    /// </summary>
+    private static IReadOnlyList<GraphicsPrewarmList.Item> OpenGraphics(string directory, string stamp)
+    {
+        if (GraphicsPrewarmDisabled || !MetalLibraryPrewarm.Active || GraphicsPrewarmList.Open(directory) is not { } graphics)
+        {
+            return [];
+        }
+
+        Volatile.Write(ref _graphics, graphics);
+        if (graphics.LoadedCount == 0)
+        {
+            return [];
+        }
+
+        if (graphics.ReadComplete() is { } complete &&
+            complete.Stamp == stamp &&
+            MetalLibraryPrewarm.ListedSources >= Math.Min(complete.Libraries, MetalLibraryPrewarm.MaxEntries))
+        {
+            return [];
+        }
+
+        _graphicsKeys = new ConcurrentDictionary<ulong, byte>();
+        _graphicsRan = true;
+        return graphics.Loaded();
+    }
+
+    /// <summary>
+    /// The graphics programs in the order the prewarm translates them, and how many from the
+    /// front the guest is held for: those the last session created before its first frame,
+    /// then the rest in the order they were first used. With no first-frame list yet, every
+    /// one is held for.
+    /// </summary>
+    internal static List<(GraphicsPrewarmList.Item Item, bool Held)> HoldFirstGraphics(
+        IReadOnlyList<GraphicsPrewarmList.Item> items,
+        IReadOnlySet<ulong>? firstFrame,
+        out int held)
+    {
+        if (firstFrame is null)
+        {
+            held = items.Count;
+            return items.Select(item => (item, true)).ToList();
+        }
+
+        var ordered = new List<(GraphicsPrewarmList.Item, bool)>(items.Count);
+        ordered.AddRange(items.Where(item => firstFrame.Contains(item.Identity)).Select(item => (item, true)));
+        held = ordered.Count;
+        ordered.AddRange(items.Where(item => !firstFrame.Contains(item.Identity)).Select(item => (item, false)));
+        return ordered;
+    }
+
+    // Translates one recorded graphics program and compiles its library into the library list's
+    // slots, where the module the game creates for it takes it from.
+    private static void PrewarmGraphicsLibrary(in GraphicsPrewarmList.Item item, IGuestGpuBackend compiler)
+    {
+        if (!ShaderPrewarmCompiler.TryCompileGraphicsPrewarm(item, compiler, out var compiled, out var error))
+        {
+            NoteGraphicsFailure(error);
+            return;
+        }
+
+        if (compiled is not MetalCompiledGuestShader metal)
+        {
+            NoteGraphicsFailure($"the compiler produced {compiled?.GetType().Name ?? "nothing"}, not MSL");
+            return;
+        }
+
+        var shader = metal.Shader;
+        _graphicsKeys!.TryAdd(MetalLibraryPrewarm.Key(shader.Source, shader.UsesPerVertexInputs), 0);
+        if (MetalLibraryPrewarm.Offer(shader.Source, shader.UsesPerVertexInputs))
+        {
+            Interlocked.Increment(ref _graphicsCompiled);
+        }
+    }
+
+    private static void NoteGraphicsFailure(string error)
+    {
+        if (Interlocked.Increment(ref _graphicsFailed) <= MaxLoggedPrewarmFailures)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Graphics prewarm failed: error={error}");
+        }
     }
 
     /// <summary>
@@ -450,7 +580,11 @@ internal static class MetalShaderPrewarm
     }
 
     /// <summary>The guest presented its first frame: what it created until now is what the next start holds it for.</summary>
-    public static void NoteFirstGuestFrame() => List?.WriteFirstFrameComputes();
+    public static void NoteFirstGuestFrame()
+    {
+        List?.WriteFirstFrameComputes();
+        Graphics?.WriteFirstFrame();
+    }
 
     /// <summary>
     /// Waits while the prewarm compiles this module's source, so a dispatch that comes for
@@ -626,12 +760,18 @@ internal static class MetalShaderPrewarm
 
         list.WriteStamp(stamp);
         list.ClearProgress();
+        if (_graphicsRan && _graphicsKeys is { } graphicsKeys)
+        {
+            _graphics?.WriteComplete(stamp, graphicsKeys.Count);
+        }
+
         _finished = true;
         Gate.SetRunning(false);
         MetalLibraryPrewarm.Begin();
         Console.Error.WriteLine(
             $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _compiled)} " +
             $"failed={Volatile.Read(ref _failed)} same_source={Volatile.Read(ref _deduplicated)} " +
+            $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
             $"yielded_ms={Interlocked.Read(ref _yieldedTicks) * 1000 / Stopwatch.Frequency} " +
             $"runtime_compute_modules={runtime.Count} matched={matched}");
@@ -680,6 +820,8 @@ internal static class MetalShaderPrewarm
         {
             list.Dispose();
         }
+
+        Interlocked.Exchange(ref _graphics, null)?.Dispose();
     }
 
     // The same per-title directory naming as the Vulkan pipeline cache.

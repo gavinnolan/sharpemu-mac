@@ -337,7 +337,9 @@ public sealed class ShaderPrewarmList : IDisposable
         }
     }
 
-    public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record));
+    // Where the guest loaded the shader is not part of what it compiles to: the same shader at another
+    // address in each session made a new record every time, and the list grew with every start.
+    public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record, withAddress: false));
 
     public HashSet<ulong> ReadProgress(string stamp)
     {
@@ -490,7 +492,7 @@ public sealed class ShaderPrewarmList : IDisposable
     public void RecordCompute(ShaderCodeCapture code, ComputePrewarmRecord record)
     {
         var payload = SerializeCompute(record);
-        var identity = XxHash3.HashToUInt64(payload);
+        var identity = Identity(record);
         lock (_gate)
         {
             if (!_firstFrameWritten && _sessionComputeSet.Add(identity))
@@ -606,12 +608,15 @@ public sealed class ShaderPrewarmList : IDisposable
                 }
 
                 case ComputeKind:
-                    if (_computes.Add(XxHash3.HashToUInt64(payload)))
+                {
+                    var record = DeserializeCompute(payload);
+                    if (_computes.Add(Identity(record)))
                     {
-                        _loadedComputes.Add(DeserializeCompute(payload));
+                        _loadedComputes.Add(record);
                     }
 
                     return true;
+                }
 
                 default:
                     return false;
@@ -703,13 +708,13 @@ public sealed class ShaderPrewarmList : IDisposable
         };
     }
 
-    private static byte[] SerializeCompute(ComputePrewarmRecord record)
+    private static byte[] SerializeCompute(ComputePrewarmRecord record, bool withAddress = true)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
         writer.Write(record.Hash);
         writer.Write(record.CodeSize);
-        writer.Write(record.Address);
+        writer.Write(withAddress ? record.Address : 0UL);
         writer.Write(record.ContinuationAddressOffset);
         writer.Write(record.UserDataBase);
         writer.Write(record.UserDataCount);

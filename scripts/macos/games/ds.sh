@@ -18,6 +18,12 @@
 # artifacts/saves/ds-golden (seeded from the user's SharpEmu savedata on first use) into
 # the run's own directory, so runs never write the user's real saves and always start
 # from the same place. SHARPEMU_DS_SAVE=<dir> picks another golden save root.
+#
+# Each checkout (main and every worktree) keeps its own data root in artifacts/data-root,
+# cloned from the user's data root on first use, so builds tested side by side never
+# rewrite each other's shader caches and prewarm lists. SHARPEMU_DATA_ROOT overrides it.
+# A changed translator still starts cold: SHARPEMU_DS_WARMUP=1 plays the same plan once
+# first (tag <tag>-warm) so the measured run starts from a warm cache, for A/B timing.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -35,7 +41,6 @@ if [[ ! -d "$GOLDEN/PPSA01342" ]]; then
 fi
 SAVES="$(mktemp -d "${TMPDIR:-/tmp}/ds-saves.XXXXXX")"
 trap 'rm -rf "$SAVES"' EXIT
-cp -R "$GOLDEN/PPSA01342" "$SAVES/"
 
 # Seconds after the intro movie starts: Cross held through the movie,
 # then single presses for "press any button", CONTINUE and "Continue Offline".
@@ -49,8 +54,24 @@ case "$MODE" in
   *) echo "unknown mode $MODE (ingame|title|boot)" >&2; exit 2 ;;
 esac
 
+USER_ROOT="$HOME/Library/Application Support/SharpEmu"
+DATA_ROOT="${SHARPEMU_DATA_ROOT:-$REPO_ROOT/artifacts/data-root}"
+if [[ ! -d "$DATA_ROOT/user/pipeline_cache" ]]; then
+  mkdir -p "$DATA_ROOT/user/pipeline_cache"  # ampr-index and shader-analysis stay shared (content-keyed)
+  for part in user/pipeline_cache/PPSA01342; do
+    [[ -d "$USER_ROOT/$part" ]] && cp -cR "$USER_ROOT/$part" "$DATA_ROOT/$part" 2>/dev/null \
+      || cp -R "$USER_ROOT/$part" "$DATA_ROOT/$part" 2>/dev/null || true
+  done
+fi
+export SHARPEMU_DATA_ROOT="$DATA_ROOT"
+
 export SHARPEMU_GAME_ENTRY_RUN=1
 export SHARPEMU_INPUT_START_AFTER_LOG="${SHARPEMU_INPUT_START_AFTER_LOG:-Scheduled guest thread 'Bink IO'}"
 export SHARPEMU_MEM_LIMIT_MB="${SHARPEMU_MEM_LIMIT_MB:-18000}"
-"$REPO_ROOT/scripts/macos/run-game.sh" ds "$TAG" "$SECONDS_LIMIT" "$PLAN" \
-  SHARPEMU_SAVEDATA_DIR="$SAVES" SHARPEMU_LOG_VIDEOOUT_FPS=1 "$@"
+run() {
+  rm -rf "$SAVES/PPSA01342" && cp -R "$GOLDEN/PPSA01342" "$SAVES/"
+  "$REPO_ROOT/scripts/macos/run-game.sh" ds "$1" "$SECONDS_LIMIT" "$PLAN" \
+    SHARPEMU_SAVEDATA_DIR="$SAVES" SHARPEMU_LOG_VIDEOOUT_FPS=1 "${@:2}"
+}
+[[ "${SHARPEMU_DS_WARMUP:-0}" == 1 ]] && run "$TAG-warm" "$@"
+run "$TAG" "$@"
