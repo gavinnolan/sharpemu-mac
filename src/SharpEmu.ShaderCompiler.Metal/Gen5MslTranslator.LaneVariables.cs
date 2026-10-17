@@ -108,19 +108,34 @@ public static partial class Gen5MslTranslator
         private bool[] SimulateLaneVariables(int block, bool[] validAtEntry, bool rewrite, out string resolved)
         {
             var valid = (bool[])validAtEntry.Clone();
-            var lines = SplitLines(_blockText[block]).ToList();
-            var depths = BraceDepths(lines);
-            var text = rewrite ? new StringBuilder() : null;
-            for (var index = 0; index < lines.Count; index++)
+            var source = _blockText[block];
+            var text = rewrite ? new StringBuilder(source.Length) : null;
+            var start = 0;
+            var depth = 0;
+            while (start < source.Length)
             {
-                var line = lines[index];
-                if (line.Contains(LaneBitMarker, StringComparison.Ordinal))
+                var line = NextLine(source, ref start);
+
+                // Depth is that of the line as written, before a sentinel is resolved.
+                var lineDepth = depth;
+                foreach (var character in line)
                 {
-                    line = ResolveLaneBitSentinels(line, valid, rewrite);
+                    depth += character == '{' ? 1 : character == '}' ? -1 : 0;
                 }
 
-                text?.AppendLine(line);
-                ApplyLaneVariableEffects(line, depths[index], valid, rewrite);
+                depth = Math.Max(depth, 0);
+                if (line.Contains(LaneBitMarker, StringComparison.Ordinal))
+                {
+                    line = ResolveLaneBitSentinels(line.ToString(), valid, rewrite);
+                }
+
+                if (text is not null)
+                {
+                    text.Append(line);
+                    text.AppendLine();
+                }
+
+                ApplyLaneVariableEffects(line, lineDepth, valid, rewrite);
             }
 
             resolved = text?.ToString() ?? string.Empty;
@@ -177,7 +192,7 @@ public static partial class Gen5MslTranslator
         /// pair's variable valid (and drops the neighbouring pairs it overlaps), any other write
         /// to a register drops the pairs containing it, and a run-time register index drops all
         /// of them.</summary>
-        private void ApplyLaneVariableEffects(string line, int depth, bool[] valid, bool recordLazy)
+        private void ApplyLaneVariableEffects(ReadOnlySpan<char> line, int depth, bool[] valid, bool recordLazy)
         {
             var trimmed = line.Trim();
             if (TryReadBallotMarker(trimmed, out var lo, out var condition))

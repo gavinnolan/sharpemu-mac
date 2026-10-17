@@ -838,7 +838,9 @@ public static partial class Gen5MslTranslator
             var initialState = new StringBuilder();
             EmitInitialState(initialState);
 
+            var initialStateText = initialState.ToString();
             var body = new StringBuilder();
+            string? bodyText = null;
             var structured = false;
             var meshBody = string.Empty;
             if (_stage == Gen5MslStage.Mesh &&
@@ -871,7 +873,7 @@ public static partial class Gen5MslTranslator
                 TryBuildStructuredBody(blocks, out var structuredBody))
             {
                 structured = true;
-                body.Append(structuredBody);
+                bodyText = structuredBody;
             }
             else
             {
@@ -901,7 +903,7 @@ public static partial class Gen5MslTranslator
                 Statistics.NoteControlFlowForm(structured);
             }
 
-            var plan = BuildRegisterPlan(blocks, initialState.ToString());
+            var plan = BuildRegisterPlan(blocks, initialStateText);
             EmitRegisterFile(source, plan, structured);
             if (_stage == Gen5MslStage.Pixel)
             {
@@ -925,9 +927,9 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    Gen5VsOut sharpemu_out = {};");
             }
 
-            source.Append(plan.Rewrite(initialState.ToString()));
+            plan.RewriteInto(source, initialStateText);
             source.AppendLine();
-            source.Append(plan.Rewrite(body.ToString()));
+            plan.RewriteInto(source, bodyText ?? body.ToString());
             if (_stage == Gen5MslStage.Mesh)
             {
                 source.AppendLine();

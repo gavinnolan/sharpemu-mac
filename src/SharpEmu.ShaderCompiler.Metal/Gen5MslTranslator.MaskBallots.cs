@@ -95,9 +95,11 @@ public static partial class Gen5MslTranslator
             public List<MaskLine> PairLines { get; init; } = [];
         }
 
+        private readonly List<int> _readsScratch = [];
+
         private MaskLine ParseMaskLine(string line, int depth)
         {
-            var trimmed = line.Trim();
+            var trimmed = line.AsSpan().Trim();
             if (TryReadBallotMarker(trimmed, out var loRegister, out var condition))
             {
                 return new MaskLine
@@ -118,7 +120,7 @@ public static partial class Gen5MslTranslator
             if (TryReadMarkerArgument(trimmed, MaskOpMarker, out var id))
             {
                 var op = _maskOps[(int)id];
-                var pad = line[..(line.Length - line.TrimStart().Length)];
+                var pad = line[..(line.Length - line.AsSpan().TrimStart().Length)];
                 return new MaskLine
                 {
                     Text = line,
@@ -131,7 +133,8 @@ public static partial class Gen5MslTranslator
             }
 
             var definition = depth == 0 ? DefinitionTarget(trimmed) : -1;
-            var reads = new List<int>();
+            var reads = _readsScratch;
+            reads.Clear();
             foreach (var reference in ScanRegisterReferences(trimmed))
             {
                 if (reference.File != 's' || reference.Index < 0 ||
@@ -148,7 +151,7 @@ public static partial class Gen5MslTranslator
             if (depth == 0 && trimmed.StartsWith("scc = ", StringComparison.Ordinal) && trimmed.EndsWith(';'))
             {
                 definesScc = true;
-                readsScc = ContainsIdentifier(trimmed.AsSpan(6), "scc");
+                readsScc = ContainsIdentifier(trimmed[6..], "scc");
             }
             else
             {
@@ -161,7 +164,7 @@ public static partial class Gen5MslTranslator
                 Text = line,
                 Kind = MaskLineKind.Plain,
                 Depth = depth,
-                Reads = [.. reads],
+                Reads = reads.Count == 0 ? [] : [.. reads],
                 Def = definition >= ScalarSlotBase && definition < VectorSlotBase ? definition : -1,
                 ReadsScc = readsScc,
                 DefinesScc = definesScc,
@@ -194,7 +197,7 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
-        private static bool TryReadMarkerArgument(string trimmed, string marker, out uint value)
+        private static bool TryReadMarkerArgument(ReadOnlySpan<char> trimmed, string marker, out uint value)
         {
             value = 0;
             if (!trimmed.StartsWith(marker, StringComparison.Ordinal) ||
@@ -205,7 +208,7 @@ public static partial class Gen5MslTranslator
             }
 
             return uint.TryParse(
-                trimmed.AsSpan(marker.Length + 1, trimmed.Length - marker.Length - 2),
+                trimmed.Slice(marker.Length + 1, trimmed.Length - marker.Length - 2),
                 out value);
         }
 
@@ -262,9 +265,22 @@ public static partial class Gen5MslTranslator
             var bodyCounts = new int[count];
             for (var index = 0; index < count; index++)
             {
-                var text = SplitLines(_blockText[index]).ToList();
-                var depths = BraceDepths(text);
-                lines[index] = [.. text.Select((line, at) => ParseMaskLine(line, depths[at]))];
+                var blockText = _blockText[index];
+                lines[index] = [];
+                var lineStart = 0;
+                var lineDepth = 0;
+                while (lineStart < blockText.Length)
+                {
+                    var line = NextLine(blockText, ref lineStart);
+                    lines[index].Add(ParseMaskLine(line.ToString(), lineDepth));
+                    foreach (var character in line)
+                    {
+                        lineDepth += character == '{' ? 1 : character == '}' ? -1 : 0;
+                    }
+
+                    lineDepth = Math.Max(lineDepth, 0);
+                }
+
                 bodyCounts[index] = lines[index].Count;
 
                 // The branch condition and dispatcher read at the end of the block, and the
@@ -313,17 +329,25 @@ public static partial class Gen5MslTranslator
             for (var index = 0; index < count; index++)
             {
                 var live = LiveOutOf(index, count, liveIn);
-                var resolved = new List<string?>[lines[index].Count];
+                var resolved = new List<string?>?[lines[index].Count];
                 for (var at = lines[index].Count - 1; at >= 0; at--)
                 {
-                    resolved[at] = [];
+                    // A plain line stays as written: only the liveness step runs for it.
+                    var plain = lines[index][at].Kind == MaskLineKind.Plain;
+                    resolved[at] = plain ? null : [];
                     StepBackward(lines[index][at], live, resolved[at], decide: true);
                 }
 
-                var text = new StringBuilder();
+                var text = new StringBuilder(_blockText[index].Length);
                 for (var at = 0; at < bodyCounts[index]; at++)
                 {
-                    foreach (var line in resolved[at])
+                    if (resolved[at] is not { } parts)
+                    {
+                        text.AppendLine(lines[index][at].Text);
+                        continue;
+                    }
+
+                    foreach (var line in parts)
                     {
                         if (line is not null)
                         {
@@ -408,7 +432,7 @@ public static partial class Gen5MslTranslator
                     }
 
                     var lo = (int)line.Lo;
-                    var indent = line.Text.Length - line.Text.TrimStart().Length;
+                    var indent = line.Text.Length - line.Text.AsSpan().TrimStart().Length;
                     resolved?.Add($"{line.Text[..indent]}scc = ((s[{lo}] | s[{lo + 1}]) != 0u);");
                     live[SccSlot] = false;
                     live[lo] = true;
@@ -489,30 +513,10 @@ public static partial class Gen5MslTranslator
             return true;
         }
 
-        /// <summary>Brace depth at the start of each line, so a write inside a
-        /// conditional can be told from one that always runs.</summary>
-        private static int[] BraceDepths(List<string> lines)
-        {
-            var depths = new int[lines.Count];
-            var depth = 0;
-            for (var index = 0; index < lines.Count; index++)
-            {
-                depths[index] = depth;
-                foreach (var character in lines[index])
-                {
-                    depth += character == '{' ? 1 : character == '}' ? -1 : 0;
-                }
-
-                depth = Math.Max(depth, 0);
-            }
-
-            return depths;
-        }
-
         /// <summary>The cross-simdgroup exchange, at the marker's own indentation.</summary>
         private string ExpandMaskBallot(string markerLine, uint loRegister, string condition)
         {
-            var indent = markerLine.Length - markerLine.TrimStart().Length;
+            var indent = markerLine.Length - markerLine.AsSpan().TrimStart().Length;
             var pad = markerLine[..indent];
             var text = new StringBuilder();
 
@@ -531,7 +535,7 @@ public static partial class Gen5MslTranslator
             return text.ToString();
         }
 
-        private static bool TryReadBallotMarker(string trimmed, out uint loRegister, out string condition)
+        private static bool TryReadBallotMarker(ReadOnlySpan<char> trimmed, out uint loRegister, out string condition)
         {
             loRegister = 0;
             condition = string.Empty;
@@ -547,13 +551,19 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var arguments = trimmed[(open + 1)..close].Split(',');
-            if (arguments.Length != 2 || !uint.TryParse(arguments[0].Trim(), out loRegister))
+            var arguments = trimmed[(open + 1)..close];
+            var comma = arguments.IndexOf(',');
+            if (comma < 0 || arguments[(comma + 1)..].Contains(','))
             {
                 return false;
             }
 
-            condition = arguments[1].Trim();
+            if (!uint.TryParse(arguments[..comma].Trim(), out loRegister))
+            {
+                return false;
+            }
+
+            condition = arguments[(comma + 1)..].Trim().ToString();
             return true;
         }
     }

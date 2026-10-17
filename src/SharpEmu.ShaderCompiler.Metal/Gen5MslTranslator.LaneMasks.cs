@@ -77,7 +77,7 @@ public static partial class Gen5MslTranslator
         private string LaneBitOfPair(uint register, string fromDwords) =>
             LaneMasksEnabled ? $"{LaneBitMarker}({register}, {fromDwords})" : fromDwords;
 
-        private static bool IsWriteReference(string text, RegisterReference reference)
+        private static bool IsWriteReference(ReadOnlySpan<char> text, RegisterReference reference)
         {
             if (reference.Start > 0 && text[reference.Start - 1] == '&' &&
                 (reference.Start < 2 || text[reference.Start - 2] != '&'))

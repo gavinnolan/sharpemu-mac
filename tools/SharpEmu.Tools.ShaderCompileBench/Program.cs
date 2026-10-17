@@ -31,6 +31,7 @@ internal static class Program
         public string Entry = "";
         public bool PerVertex;
         public double TranslateMs;
+        public long TranslateBytes;
         public double LibraryMs;
         public double FunctionMs;
         public double PipelineMs;
@@ -80,6 +81,7 @@ internal static class Program
         MetalNative.EnsureFrameworksLoaded();
         var device = MetalNative.MTLCreateSystemDefaultDevice();
         var mode = Arg("mode", "compute");
+        var listener = Arg("alloctypes", "") == "1" ? new AllocTypeListener() : null;
         var limit = int.Parse(Arg("limit", "0"), CultureInfo.InvariantCulture);
         var rows = new List<Row>();
         var translateWall = 0.0;
@@ -117,6 +119,7 @@ internal static class Program
                 {
                     var row = rows[index];
                     var item = items[index];
+                    var b0 = GC.GetAllocatedBytesForCurrentThread();
                     var t0 = Stopwatch.GetTimestamp();
                     if (ShaderPrewarmCompiler.TryCompilePrewarm(item.Record, item.Code, compiler,
                             MetalRenderHost.PrewarmSharedInt64Atomics, MetalRenderHost.PrewarmExecGuardElision,
@@ -133,13 +136,21 @@ internal static class Program
                     }
 
                     row.TranslateMs = (Stopwatch.GetTimestamp() - t0) * TicksToMs;
+                    row.TranslateBytes = GC.GetAllocatedBytesForCurrentThread() - b0;
                 }
             });
             translateWall = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             list.Dispose();
+            if (listener is not null)
+            {
+                foreach (var (type, bytes) in listener.Bytes.OrderByDescending(x => x.Value).Take(30))
+                {
+                    Console.Error.WriteLine($"  alloc {bytes / 1048576.0,9:F0} MB {type}");
+                }
+            }
             Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"translate: wall_ms={translateWall:F0} sum_ms={rows.Sum(r => r.TranslateMs):F0} tworkers={tworkers} " +
-                $"failed={rows.Count(r => r.Error is not null)} msl_mb={rows.Sum(r => (long)r.Source.Length) / 1048576.0:F1}"));
+                $"alloc_mb={rows.Sum(r => r.TranslateBytes) / 1048576.0:F1} failed={rows.Count(r => r.Error is not null)} msl_mb={rows.Sum(r => (long)r.Source.Length) / 1048576.0:F1}"));
         }
         else if (mode == "libraries")
         {
@@ -303,5 +314,27 @@ internal static class Program
         }).ToList();
         threads.ForEach(thread => thread.Start());
         threads.ForEach(thread => thread.Join());
+    }
+}
+
+internal sealed class AllocTypeListener : System.Diagnostics.Tracing.EventListener
+{
+    public readonly ConcurrentDictionary<string, long> Bytes = new();
+    protected override void OnEventSourceCreated(System.Diagnostics.Tracing.EventSource source)
+    {
+        if (source.Name == "Microsoft-Windows-DotNETRuntime")
+        {
+            EnableEvents(source, System.Diagnostics.Tracing.EventLevel.Verbose, (System.Diagnostics.Tracing.EventKeywords)0x1);
+        }
+    }
+
+    protected override void OnEventWritten(System.Diagnostics.Tracing.EventWrittenEventArgs e)
+    {
+        if (e.EventName?.StartsWith("GCAllocationTick") == true && e.Payload is { } p)
+        {
+            var idx = e.PayloadNames!.IndexOf("TypeName");
+            var amt = e.PayloadNames.IndexOf("AllocationAmount64");
+            Bytes.AddOrUpdate((string)p[idx]!, Convert.ToInt64(p[amt]), (_, v) => v + Convert.ToInt64(p[amt]));
+        }
     }
 }
