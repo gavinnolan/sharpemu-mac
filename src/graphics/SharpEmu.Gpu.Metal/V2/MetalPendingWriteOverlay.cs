@@ -28,6 +28,23 @@ internal sealed class MetalPendingWriteOverlay
     private int _count;
     private long _version;
 
+    // Every read the command stream and the resource walks make asks this overlay first (each
+    // packet header, every word a cached materialization validates), and almost none of them
+    // lands on a page a pending write is on. A count per hashed page of the entries listed on it
+    // answers that without the lock: a range none of whose pages counts anything overlaps no
+    // entry. The counts change under the lock with the page lists; a read that races an add
+    // sees the overlay either before or after it, as it would by taking the lock first or second.
+    // A collision only sends the read on to the locked walk.
+    private const int FilterBits = 14;
+    private const ulong FilterMaxPages = 64;
+    private readonly int[]? _pageFilter;
+
+    /// <param name="pageFilter">False takes the lock for every read, as before the page filter.</param>
+    public MetalPendingWriteOverlay(bool pageFilter = true)
+    {
+        _pageFilter = pageFilter ? new int[1 << FilterBits] : null;
+    }
+
     private sealed class Entry
     {
         public required ulong Address;
@@ -69,6 +86,10 @@ internal sealed class MetalPendingWriteOverlay
                 }
 
                 list.Add(entry);
+                if (_pageFilter is not null)
+                {
+                    Interlocked.Increment(ref _pageFilter[FilterSlot(page)]);
+                }
             }
 
             _order.Enqueue(entry);
@@ -92,7 +113,7 @@ internal sealed class MetalPendingWriteOverlay
     public void Forget(ulong address, ulong size)
     {
         Interlocked.Increment(ref _version);
-        if (size == 0 || Count == 0)
+        if (size == 0 || Count == 0 || !MayOverlap(address, size))
         {
             return;
         }
@@ -135,7 +156,7 @@ internal sealed class MetalPendingWriteOverlay
     /// </summary>
     public MetalOverlayCoverage Coverage(ulong address, ulong size, Func<ulong> completedSerial)
     {
-        if (size == 0 || Count == 0)
+        if (size == 0 || Count == 0 || !MayOverlap(address, size))
         {
             return MetalOverlayCoverage.None;
         }
@@ -181,7 +202,7 @@ internal sealed class MetalPendingWriteOverlay
     /// <summary>Writes the pending bytes over <paramref name="destination"/>, oldest first.</summary>
     public void Apply(ulong address, Span<byte> destination)
     {
-        if (destination.IsEmpty || Count == 0)
+        if (destination.IsEmpty || Count == 0 || !MayOverlap(address, (ulong)destination.Length))
         {
             return;
         }
@@ -211,6 +232,34 @@ internal sealed class MetalPendingWriteOverlay
             }
         }
     }
+
+    // False only when no entry overlaps the range; true may be a collision or a long range.
+    private bool MayOverlap(ulong address, ulong size)
+    {
+        if (_pageFilter is null)
+        {
+            return true;
+        }
+
+        var firstPage = address >> PageShift;
+        var lastPage = (address + size - 1) >> PageShift;
+        if (lastPage - firstPage >= FilterMaxPages)
+        {
+            return true;
+        }
+
+        for (var page = firstPage; page <= lastPage; page++)
+        {
+            if (Volatile.Read(ref _pageFilter[FilterSlot(page)]) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int FilterSlot(ulong page) => (int)((page * 0x9E3779B97F4A7C15UL) >> (64 - FilterBits));
 
     private bool AnyOverlapLocked(ulong address, ulong size)
     {
@@ -320,6 +369,11 @@ internal sealed class MetalPendingWriteOverlay
                 {
                     _pages.Remove(page);
                 }
+            }
+
+            if (_pageFilter is not null)
+            {
+                Interlocked.Decrement(ref _pageFilter[FilterSlot(page)]);
             }
         }
     }

@@ -103,6 +103,12 @@ internal static class MetalV2Diagnostics
     public static readonly bool DataLoadsOnDevice =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DATA_LOADS_DEVICE"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_OVERLAY_PAGE_FILTER=0 makes every guest read take the pending
+    // command-processor write overlay's lock to learn that no pending write is on its pages,
+    // as before the overlay kept its lock-free page counts.
+    public static readonly bool OverlayPageFilter =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_OVERLAY_PAGE_FILTER"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_WAIT_TRACE=1 (or SHARPEMU_METAL_V2_EOP_TRACE=1) names, on each
     // SLOW-WAIT line, the shader whose resources were being materialized when the host waited.
     public static readonly bool WaitTrace =

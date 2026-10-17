@@ -782,7 +782,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     internal int DeferredLabelCopyCount => _deferredLabelCopies.Count;
 
     // The bytes of command-processor writes encoded but not landed, by address.
-    private readonly MetalPendingWriteOverlay _cpOverlay = new();
+    private readonly MetalPendingWriteOverlay _cpOverlay = new(MetalV2Diagnostics.OverlayPageFilter);
 
     /// <summary>
     /// A host write made at parse time (the interpreter's own stores on a queue that writes
