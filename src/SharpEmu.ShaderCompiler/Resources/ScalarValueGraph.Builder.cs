@@ -398,18 +398,38 @@ public sealed partial class ScalarValueGraph
                 _phis[(block, slot)] = phi;
             }
 
-            var predecessors = _graph.ControlFlow.Predecessors[block];
-            var order = block == 0 ? new[] { -1 }.Concat(predecessors).ToArray() : predecessors.ToArray();
-            var operands = new ScalarValue[order.Length];
+            // Every phi of the block lists the same predecessors, so they share one array.
+            if (_phiOrderBlock != block || _phiOrder is null)
+            {
+                var predecessors = _graph.ControlFlow.Predecessors[block];
+                _phiOrder = block == 0 ? new[] { -1 }.Concat(predecessors).ToArray() : predecessors.ToArray();
+                _phiOrderBlock = block;
+            }
+
+            var order = _phiOrder;
+            // A phi seen again keeps its operand array when the predecessors are the same.
+            var operands = phi.Operands.Length == order.Length ? phi.Operands : new ScalarValue[order.Length];
             for (var position = 0; position < order.Length; position++)
             {
-                var source = visited.FirstOrDefault(entry => entry.Block == order[position]);
-                operands[position] = source.State is null ? phi : ReadSlot(source.State, kind, index, lane);
+                RegisterState? source = null;
+                foreach (var (visitedBlock, visitedState) in visited)
+                {
+                    if (visitedBlock == order[position])
+                    {
+                        source = visitedState;
+                        break;
+                    }
+                }
+
+                operands[position] = source is null ? phi : ReadSlot(source, kind, index, lane);
             }
 
             phi.SetPhiOperands(order, operands);
             return phi;
         }
+
+        private int[]? _phiOrder;
+        private int _phiOrderBlock = -1;
 
         private enum SlotKind { Scalar, Vector, Exec, Vcc, Scc, Lane, Mask }
 

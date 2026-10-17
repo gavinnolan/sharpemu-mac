@@ -3775,7 +3775,12 @@ public static partial class Gen5MslTranslator
         private string Temp(string type, string expression)
         {
             var name = $"t{_nextTemp++}";
-            Line($"{type} {name} = {expression};");
+            for (var index = 0; index < _indent; index++)
+            {
+                _body.Append("    ");
+            }
+
+            _body.Append(type).Append(' ').Append(name).Append(" = ").Append(expression).Append(';').AppendLine();
             return name;
         }
 

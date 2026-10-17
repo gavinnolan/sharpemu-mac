@@ -97,9 +97,9 @@ public static partial class Gen5MslTranslator
 
             public MaskOp? Op { get; init; }
 
-            public List<MaskLine> LaneLines { get; init; } = [];
+            public MaskLine[] LaneLines { get; init; } = [];
 
-            public List<MaskLine> PairLines { get; init; } = [];
+            public MaskLine[] PairLines { get; init; } = [];
         }
 
         /// <summary>Whether rebuilding the text line by line, as the passes over a block do,
@@ -284,7 +284,7 @@ public static partial class Gen5MslTranslator
             for (var index = 0; index < count; index++)
             {
                 var blockText = _blockText[index];
-                lines[index] = [];
+                lines[index] = new List<MaskLine>(blockText.AsSpan().Count('\n') + 1);
                 var lineStart = 0;
                 var lineDepth = 0;
                 while (lineStart < blockText.Length)
@@ -486,8 +486,8 @@ public static partial class Gen5MslTranslator
                 {
                     var pair = decide && PrefersPairForm(line.Op!, live);
                     var sub = pair ? line.PairLines : line.LaneLines;
-                    var parts = new List<string?>[sub.Count];
-                    for (var at = sub.Count - 1; at >= 0; at--)
+                    var parts = new List<string?>[sub.Length];
+                    for (var at = sub.Length - 1; at >= 0; at--)
                     {
                         parts[at] = [];
                         StepBackward(sub[at], live, resolved is null ? null : parts[at], decide);
