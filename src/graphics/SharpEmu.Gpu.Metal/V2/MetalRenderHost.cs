@@ -220,6 +220,7 @@ internal sealed partial class MetalRenderHost :
     internal const bool PrewarmExecGuardElision = true;
 
     public ShaderPrewarmList? ShaderPrewarm => MetalShaderPrewarm.List;
+    public GraphicsPrewarmList? GraphicsPrewarm => MetalShaderPrewarm.Graphics;
 
     // Every Metal device has eight [[clip_distance]] planes, so the translator can spend
     // one on culling primitives with a zero position like the guest does.

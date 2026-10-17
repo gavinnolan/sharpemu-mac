@@ -14,4 +14,34 @@ public static class ShaderPrewarmCompiler
         bool hostWave64Supported = false, bool hostComputeSubgroup32 = false) =>
         ShaderProgramCache.TryCompilePrewarm(record, code, compiler, sharedInt64Atomics, execGuardElision, signedZeroInfNanPreserve, out compiled, out layout, out error,
             hostWave64Supported, hostComputeSubgroup32);
+
+    /// <summary>
+    /// Translates a recorded graphics program through the shared plan, layout and request builders
+    /// of live draws, over the recorded guest code; the backend turns the request into a module.
+    /// </summary>
+    public static bool TryCompileGraphicsPrewarm(in GraphicsPrewarmList.Item item, IGuestGpuBackend compiler,
+        out IGuestCompiledShader? compiled, out string error)
+    {
+        compiled = null;
+        try
+        {
+            if (!ShaderCorpus.TryBuildRequest(GraphicsPrewarmList.Decode(item), out var request, out error))
+            {
+                return false;
+            }
+
+            if (request is null)
+            {
+                error = "the record has no specialization";
+                return false;
+            }
+
+            return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
 }
