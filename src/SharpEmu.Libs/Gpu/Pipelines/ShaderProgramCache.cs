@@ -213,7 +213,9 @@ internal sealed class ShaderProgramCache
             return program;
         }
 
-        var recording = _host.ShaderPrewarm is not null || ShaderCorpus.Enabled ? new RecordingCpuMemory(_context.Memory) : null;
+        var recording = _host.ShaderPrewarm is not null || _host.GraphicsPrewarm is not null || ShaderCorpus.Enabled
+            ? new RecordingCpuMemory(_context.Memory)
+            : null;
         var context = recording is null ? _context : new CpuContext(recording, _context.TargetGeneration);
         if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out program, out var error))
         {
@@ -739,6 +741,15 @@ internal sealed class ShaderProgramCache
         var id = ++_nextProgramId;
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
         var info = CreateProgramInfo(source, entry, resources, layout, request);
+        if (source.Stage != ShaderStage.Compute &&
+            _host.GraphicsPrewarm is { } graphicsPrewarm &&
+            _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var graphicsCapture))
+        {
+            graphicsPrewarm.Record(
+                graphicsCapture,
+                ShaderCorpus.Create(source, options, graphicsCapture, CorpusHostFlags(options), specialization, pushDataCursor));
+        }
+
         if (source.Stage == ShaderStage.Compute &&
             _host.ShaderPrewarm is { } prewarm &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))

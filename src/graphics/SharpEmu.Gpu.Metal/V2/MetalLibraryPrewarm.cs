@@ -36,6 +36,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// eight more starts and compiled them all at every start, 114 s on four threads while
 /// the game booted, and none was taken (hits=0). The lists of other builds are kept, the
 /// most recently written first, up to <see cref="MaxOtherLists"/>.
+///
+/// A new translator therefore starts with no list. The graphics prewarm (GraphicsPrewarmList,
+/// run by MetalShaderPrewarm) translates the recorded vertex and pixel programs again and
+/// <see cref="Offer"/>s each source here, which compiles and lists it like one the list held.
 /// </summary>
 internal static class MetalLibraryPrewarm
 {
@@ -99,6 +103,18 @@ internal static class MetalLibraryPrewarm
 
     /// <summary>Whether a list is open: modules then record into it and take from it.</summary>
     public static bool Active => Volatile.Read(ref _slots) is not null;
+
+    /// <summary>The sources this start loaded from its list, before any offered ones.</summary>
+    public static int ListedSources
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _order.Count;
+            }
+        }
+    }
 
     /// <summary>
     /// Loads the title's list and queues every source it holds, without compiling yet; the
@@ -275,6 +291,46 @@ internal static class MetalLibraryPrewarm
             Volatile.Write(ref slot.State, Ready);
             slot.Done.Set();
         }
+    }
+
+    /// <summary>
+    /// A source the graphics prewarm translated from its own list: compiled here and kept for
+    /// the module that asks for it, and written to the list so the next start with this
+    /// translator has it without translating anything. True when this call compiled it; a
+    /// source the list already holds, or one the game compiled itself first, is left to
+    /// whoever has it. Any thread.
+    /// </summary>
+    public static bool Offer(string source, bool usesPerVertexInputs)
+    {
+        if (Volatile.Read(ref _slots) is not { } slots || _stopping)
+        {
+            return false;
+        }
+
+        var key = Key(source, usesPerVertexInputs);
+        if (_written is { } written && written.ContainsKey(key))
+        {
+            return false;
+        }
+
+        var slot = new Slot(key, usesPerVertexInputs, Compress(source));
+        if (!slots.TryAdd(key, slot))
+        {
+            return false;
+        }
+
+        try
+        {
+            _writes?.Add((SourceKind, key, usesPerVertexInputs, source));
+        }
+        catch (InvalidOperationException)
+        {
+            // The list closed with the session.
+        }
+
+        _written?.TryAdd(key, 0);
+        CompileSlot(slot);
+        return true;
     }
 
     /// <summary>The list file of one build: the prefix and a hash of its prewarm stamp.</summary>
