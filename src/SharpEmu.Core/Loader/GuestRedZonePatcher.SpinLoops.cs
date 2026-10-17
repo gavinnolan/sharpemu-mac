@@ -19,13 +19,20 @@ internal static partial class GuestRedZonePatcher
     // a spin. Longer bodies are not tight spins and are left alone.
     private const int MaxSpinLoopBodyBytes = 96;
 
+    // Locked-op polling loops (xchg mem / lock-prefixed RMW): the whole loop body, from its
+    // backward branch's target to the branch, must fit this and contain no call, return,
+    // indirect branch or syscall.
+    private const int MaxLockedLoopBodyBytes = 256;
+
     internal readonly record struct SpinPatchResult(
         int Functions,
         int PauseSites,
         int PatchedSites,
         int FailedSites,
         int UnrelocatableSites,
-        int NonLoopSites);
+        int NonLoopSites,
+        int LockedSites = 0,
+        int LockedNonLoopSites = 0);
 
     public static SpinPatchResult PatchSpinLoops(
         IVirtualMemory memory,
@@ -34,7 +41,8 @@ internal static partial class GuestRedZonePatcher
         ulong imageBase,
         ulong imageSize,
         ReadOnlySpan<byte> probeCode,
-        string moduleName)
+        string moduleName,
+        ReadOnlySpan<byte> lockedProbeCode = default)
     {
         ArgumentNullException.ThrowIfNull(memory);
         ArgumentNullException.ThrowIfNull(physicalMemory);
@@ -46,7 +54,10 @@ internal static partial class GuestRedZonePatcher
             return default;
         }
 
-        var sites = CollectSpinSites(memory, programHeaders, imageBase, functionStarts, out var result);
+        var includeLocked = !lockedProbeCode.IsEmpty;
+        var lockedAddresses = new HashSet<ulong>();
+        var sites = CollectSpinSites(
+            memory, programHeaders, imageBase, functionStarts, includeLocked, lockedAddresses, out var result);
         if (sites.Count == 0)
         {
             return result;
@@ -54,7 +65,7 @@ internal static partial class GuestRedZonePatcher
 
         sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
         // The probe sits at the arena's start so every site's `call rel32` reaches it.
-        var requiredBytes = AlignUp(checked((ulong)sites.Count * 128UL + (ulong)probeCode.Length + PageSize), PageSize);
+        var requiredBytes = AlignUp(checked((ulong)sites.Count * 128UL + (ulong)probeCode.Length + (ulong)lockedProbeCode.Length + 16UL + PageSize), PageSize);
         if (!TryAllocateTrampolines(physicalMemory, imageBase, imageSize, requiredBytes, sites, out var cursor))
         {
             Console.Error.WriteLine(
@@ -71,12 +82,28 @@ internal static partial class GuestRedZonePatcher
         }
 
         cursor = AlignUp(cursor + (ulong)probeCode.Length, 16);
+        var lockedProbeAddress = 0UL;
+        if (includeLocked)
+        {
+            lockedProbeAddress = cursor;
+            if (!memory.TryWrite(cursor, lockedProbeCode))
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] {moduleName} spin-nap: could not place the locked-op probe.");
+                return result with { FailedSites = sites.Count };
+            }
+
+            cursor = AlignUp(cursor + (ulong)lockedProbeCode.Length, 16);
+        }
+
         var patched = 0;
+        var lockedPatched = 0;
         var failed = 0;
         var previousEnd = 0UL;
         foreach (var site in sites)
         {
-            if (site.Address < previousEnd || !TryPatchSpinSite(memory, site, probeAddress, ref cursor, end))
+            var isLockedSite = lockedAddresses.Contains(site.Address);
+            var siteProbe = isLockedSite ? lockedProbeAddress : probeAddress;
+            if (site.Address < previousEnd || !TryPatchSpinSite(memory, site, siteProbe, ref cursor, end))
             {
                 failed++;
                 continue;
@@ -84,13 +111,20 @@ internal static partial class GuestRedZonePatcher
 
             previousEnd = site.Address + (ulong)site.ByteLength;
             patched++;
+            if (isLockedSite)
+            {
+                lockedPatched++;
+            }
         }
 
         result = result with { PatchedSites = patched, FailedSites = failed };
         Console.Error.WriteLine(
             $"[LOADER] {moduleName} spin-nap: functions={result.Functions} pause_sites={result.PauseSites} " +
             $"patched={result.PatchedSites} failed={result.FailedSites} unrelocatable={result.UnrelocatableSites} " +
-            $"non_loop={result.NonLoopSites}.");
+            $"non_loop={result.NonLoopSites}" +
+            (includeLocked
+                ? $" locked_sites={result.LockedSites} locked_patched={lockedPatched} locked_non_loop={result.LockedNonLoopSites}."
+                : "."));
         return result;
     }
 
@@ -99,6 +133,8 @@ internal static partial class GuestRedZonePatcher
         IReadOnlyList<ProgramHeader> programHeaders,
         ulong imageBase,
         IReadOnlyList<ulong> functionStarts,
+        bool includeLocked,
+        HashSet<ulong> lockedAddresses,
         out SpinPatchResult result)
     {
         var sites = new List<PatchSite>();
@@ -106,6 +142,8 @@ internal static partial class GuestRedZonePatcher
         var pauseSites = 0;
         var unrelocatable = 0;
         var nonLoop = 0;
+        var lockedSites = 0;
+        var lockedNonLoop = 0;
         var decoded = new List<DecodedInstruction>();
         var branchTargets = new HashSet<ulong>();
 
@@ -157,7 +195,8 @@ internal static partial class GuestRedZonePatcher
                 var hasPause = false;
                 foreach (var entry in decoded)
                 {
-                    if (entry.Instruction.Code == Code.Pause)
+                    if (entry.Instruction.Code == Code.Pause ||
+                        (includeLocked && IsLockedReadModifyWrite(entry.Instruction)))
                     {
                         hasPause = true;
                         break;
@@ -177,16 +216,25 @@ internal static partial class GuestRedZonePatcher
                 var lastSiteEnd = 0UL;
                 for (var index = 0; index < decoded.Count; index++)
                 {
-                    if (decoded[index].Instruction.Code != Code.Pause)
+                    var isPause = decoded[index].Instruction.Code == Code.Pause;
+                    var isLocked = includeLocked && !isPause && IsLockedReadModifyWrite(decoded[index].Instruction);
+                    if (!isPause && !isLocked)
                     {
                         continue;
                     }
 
-                    pauseSites++;
-                    var pauseAddress = decoded[index].Instruction.IP;
-                    if (!ClosesShortBackwardLoop(decoded, index, pauseAddress))
+                    if (isPause)
                     {
-                        nonLoop++;
+                        pauseSites++;
+                        if (!ClosesShortBackwardLoop(decoded, index, decoded[index].Instruction.IP))
+                        {
+                            nonLoop++;
+                            continue;
+                        }
+                    }
+                    else if (!InShortLockedLoop(decoded, index))
+                    {
+                        lockedNonLoop++;
                         continue;
                     }
 
@@ -203,13 +251,86 @@ internal static partial class GuestRedZonePatcher
                     }
 
                     sites.Add(span);
+                    if (isLocked)
+                    {
+                        lockedSites++;
+                        lockedAddresses.Add(span.Address);
+                    }
+
                     lastSiteEnd = span.Address + (ulong)span.ByteLength;
                 }
             }
         }
 
-        result = new SpinPatchResult(functionCount, pauseSites, 0, 0, unrelocatable, nonLoop);
+        result = new SpinPatchResult(functionCount, pauseSites, 0, 0, unrelocatable, nonLoop, lockedSites, lockedNonLoop);
         return sites;
+    }
+
+    // `xchg r,mem` (implicitly locked) or any lock-prefixed read-modify-write.
+    internal static bool IsLockedReadModifyWrite(in Instruction instruction) =>
+        HasMemoryOperand(instruction) &&
+        (instruction.HasLockPrefix || instruction.Mnemonic == Mnemonic.Xchg);
+
+    private static bool IsLoopBodyBreaker(in Instruction instruction) =>
+        instruction.FlowControl is FlowControl.Return or FlowControl.IndirectBranch or FlowControl.Call
+            or FlowControl.IndirectCall or FlowControl.Interrupt or FlowControl.Exception
+            or FlowControl.XbeginXabortXend ||
+        instruction.Mnemonic is Mnemonic.Syscall or Mnemonic.Sysenter or Mnemonic.Int or Mnemonic.Int3;
+
+    // A locked-op site counts as a poll when a backward direct branch after it closes a loop that
+    // contains it: body (branch target .. branch end) at most MaxLockedLoopBodyBytes, and no
+    // call, return, indirect branch or syscall anywhere in the body.
+    private static bool InShortLockedLoop(IReadOnlyList<DecodedInstruction> decoded, int siteIndex)
+    {
+        var site = decoded[siteIndex].Instruction;
+        for (var index = siteIndex; index < decoded.Count; index++)
+        {
+            var instruction = decoded[index].Instruction;
+            if (instruction.NextIP - site.IP > MaxLockedLoopBodyBytes)
+            {
+                return false;
+            }
+
+            if (index != siteIndex && IsLoopBodyBreaker(instruction))
+            {
+                return false;
+            }
+
+            if (IsRelocatableDirectBranch(instruction) &&
+                instruction.NearBranch64 <= site.IP &&
+                instruction.NearBranch64 >= decoded[0].Instruction.IP &&
+                instruction.NextIP - instruction.NearBranch64 <= MaxLockedLoopBodyBytes &&
+                PrecedingBodyIsClean(decoded, siteIndex, instruction.NearBranch64))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool PrecedingBodyIsClean(IReadOnlyList<DecodedInstruction> decoded, int siteIndex, ulong target)
+    {
+        for (var index = siteIndex; index >= 0; index--)
+        {
+            var instruction = decoded[index].Instruction;
+            if (instruction.IP < target)
+            {
+                return false;
+            }
+
+            if (index != siteIndex && IsLoopBodyBreaker(instruction))
+            {
+                return false;
+            }
+
+            if (instruction.IP == target)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // A pause counts as a spin when a backward branch within the next few instructions targets at

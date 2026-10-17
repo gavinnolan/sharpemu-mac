@@ -61,7 +61,7 @@ public sealed unsafe class SpinLoopNapPatcherTests
             0xB9, 0x04, 0x00, 0x00, 0x00, // mov ecx, 4
             0xF3, 0x90,                   // loop: pause
             0xFF, 0xC9,                   // dec ecx
-            0x75, 0xFB,                   // jnz loop (-5 -> the pause)
+            0x75, 0xFA,                   // jnz loop (next ip 11, -6 -> the pause at 5)
             0xB8, 0x44, 0x33, 0x22, 0x11, // mov eax, 0x11223344
             0xC3,                         // ret
         ];
@@ -106,6 +106,162 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal(7u, ((delegate* unmanaged<uint>)image.Base)());
     }
 
+    // Data cell the locked-loop tests' RIP-relative operands point at (inside the image, past the code).
+    private const int DataOffset = 0x800;
+
+    private static void Rel32(byte[] code, int at, int nextIp) =>
+        BinaryPrimitives.WriteInt32LittleEndian(code.AsSpan(at, 4), DataOffset - nextIp);
+
+    // mov ecx,4 ; loop: mov eax,3 ; lock xadd [rip+data],eax ; dec ecx ; jnz loop ; mov eax,[rip+data] ; ret
+    // Returns 12 (4 x 3) only if the relocated RIP-relative lock xadd still hits the right cell.
+    private static byte[] LockedXaddLoop()
+    {
+        byte[] function =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00,       // 0: mov ecx, 4
+            0xB8, 0x03, 0x00, 0x00, 0x00,       // 5: loop: mov eax, 3
+            0xF0, 0x0F, 0xC1, 0x05, 0, 0, 0, 0, // 10: lock xadd [rip+data], eax (next ip 18)
+            0xFF, 0xC9,                         // 18: dec ecx
+            0x75, 0xEF,                         // 20: jnz loop (22 - 17 = 5)
+            0x8B, 0x05, 0, 0, 0, 0,             // 22: mov eax, [rip+data] (next ip 28)
+            0xC3,                               // 28: ret
+        ];
+        Rel32(function, 14, 18);
+        Rel32(function, 24, 28);
+        return function;
+    }
+
+    [Fact]
+    public void LockedXaddLoopIsRecognizedRelocatedAndStaysTransparent()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var image = SpinImage.Create(LockedXaddLoop(), locked: true);
+        Assert.Equal(1, image.Result.LockedSites);
+        Assert.Equal(0, image.Result.LockedNonLoopSites);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0, image.Result.FailedSites);
+        Assert.Equal(0xE9, image.ReadByte(10)); // the lock xadd is now a jmp into the trampoline
+
+        // The trampoline's call reaches the locked probe (the second probe in the arena).
+        var trampoline = (ulong)((long)image.Base + 10 + 5 + BinaryPrimitives.ReadInt32LittleEndian(image.Read(11, 4)));
+        var lead = image.ReadAbsolute(trampoline, 21);
+        var probe = (ulong)((long)trampoline + 8 + 5 + BinaryPrimitives.ReadInt32LittleEndian(lead.AsSpan(9, 4)));
+        var lockedProbe = SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000);
+        Assert.Equal(lockedProbe, image.ReadAbsolute(probe, lockedProbe.Length));
+
+        Assert.Equal(12u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void LockedOpsAreLeftAloneWithoutTheLockedProbe()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var image = SpinImage.Create(LockedXaddLoop(), locked: false);
+        Assert.Equal(0, image.Result.PatchedSites);
+        Assert.Equal(0xF0, image.ReadByte(10));
+    }
+
+    [Fact]
+    public void XchgMemoryLoopIsRecognized()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // mov ecx,4 ; loop: mov eax,3 ; xchg [rip+data],eax ; dec ecx ; jnz loop ; mov eax,[rip+data] ; ret
+        // The cell ends at 3 (each pass swaps 3 in), proving the relocated xchg still runs.
+        byte[] function =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00,       // 0: mov ecx, 4
+            0xB8, 0x03, 0x00, 0x00, 0x00,       // 5: loop: mov eax, 3
+            0x87, 0x05, 0, 0, 0, 0,             // 10: xchg [rip+data], eax (6 bytes, next ip 16)
+            0xFF, 0xC9,                         // 16: dec ecx
+            0x75, 0xF1,                         // 18: jnz loop (20 - 15 = 5)
+            0x8B, 0x05, 0, 0, 0, 0,             // 20: mov eax, [rip+data] (next ip 26)
+            0xC3,                               // 26: ret
+        ];
+        Rel32(function, 12, 16);
+        Rel32(function, 22, 26);
+        using var image = SpinImage.Create(function, locked: true);
+        Assert.Equal(1, image.Result.LockedSites);
+        Assert.Equal(0xE9, image.ReadByte(10));
+        Assert.Equal(3u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void LockedLoopContainingACallIsNotRecognized()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // loop: call helper ; lock xadd ; dec ; jnz loop ; ... ; helper: ret
+        byte[] function =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00,       // 0: mov ecx, 4
+            0xE8, 0x17, 0x00, 0x00, 0x00,       // 5: loop: call helper (next 10, +0x17 -> 33)
+            0xB8, 0x03, 0x00, 0x00, 0x00,       // 10: mov eax, 3
+            0xF0, 0x0F, 0xC1, 0x05, 0, 0, 0, 0, // 15: lock xadd [rip+data], eax (next ip 23)
+            0xFF, 0xC9,                         // 23: dec ecx
+            0x75, 0xEA,                         // 25: jnz loop (27 - 22 = 5)
+            0x8B, 0x05, 0, 0, 0, 0,             // 27: mov eax, [rip+data]
+            0xC3,                               // 33: ret (also the helper)
+        ];
+        Rel32(function, 19, 23);
+        Rel32(function, 29, 33);
+
+        using var image = SpinImage.Create(function, locked: true);
+        Assert.Equal(0, image.Result.LockedSites);
+        Assert.Equal(1, image.Result.LockedNonLoopSites);
+        Assert.Equal(0, image.Result.PatchedSites);
+        Assert.Equal(0xF0, image.ReadByte(15));
+        Assert.Equal(12u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void LockedOpOutsideAnyLoopOrInALongLoopIsNotRecognized()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // lock xadd with no backward branch at all.
+        byte[] straight =
+        [
+            0xB8, 0x03, 0x00, 0x00, 0x00,       // 0: mov eax, 3
+            0xF0, 0x0F, 0xC1, 0x05, 0, 0, 0, 0, // 5: lock xadd [rip+data], eax (next ip 13)
+            0xC3,                               // 13: ret
+        ];
+        Rel32(straight, 9, 13);
+        using (var image = SpinImage.Create(straight, locked: true))
+        {
+            Assert.Equal(0, image.Result.LockedSites);
+            Assert.Equal(1, image.Result.LockedNonLoopSites);
+        }
+
+        // The same loop with a body padded past 256 bytes with nops.
+        var padded = new List<byte>
+        {
+            0xB9, 0x04, 0x00, 0x00, 0x00,       // 0: mov ecx, 4
+            0xB8, 0x03, 0x00, 0x00, 0x00,       // 5: loop: mov eax, 3
+            0xF0, 0x0F, 0xC1, 0x05, 0, 0, 0, 0, // 10: lock xadd
+        };
+        padded.AddRange(Enumerable.Repeat((byte)0x90, 300));
+        padded.AddRange([0xFF, 0xC9]);          // dec ecx
+        padded.AddRange([0x0F, 0x85, 0, 0, 0, 0]); // jnz loop (rel32)
+        var jnzNext = padded.Count;
+        BinaryPrimitives.WriteInt32LittleEndian(CollectionsMarshal.AsSpan(padded)[(jnzNext - 4)..], 5 - jnzNext);
+        padded.Add(0xC3);
+        var paddedBytes = padded.ToArray();
+        Rel32(paddedBytes, 14, 18);
+        using (var image = SpinImage.Create(paddedBytes, locked: true))
+        {
+            Assert.Equal(0, image.Result.LockedSites);
+            Assert.Equal(1, image.Result.LockedNonLoopSites);
+        }
+    }
+
     private sealed class SpinImage : IDisposable
     {
         private const ulong ImageSize = 0x10000;
@@ -122,7 +278,7 @@ public sealed unsafe class SpinLoopNapPatcherTests
 
         public GuestRedZonePatcher.SpinPatchResult Result { get; }
 
-        public static SpinImage Create(byte[] function)
+        public static SpinImage Create(byte[] function, bool locked = false)
         {
             var memory = new PhysicalVirtualMemory();
             const ulong holeSize = 0x4000000;
@@ -146,7 +302,8 @@ public sealed unsafe class SpinLoopNapPatcherTests
             ];
 
             var probe = SpinNapRuntime.EnsureProbeBytes(1_000_000_000);
-            var result = GuestRedZonePatcher.PatchSpinLoops(memory, memory, headers, imageBase, ImageSize, probe, "test");
+            var lockedProbe = locked ? SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000) : [];
+            var result = GuestRedZonePatcher.PatchSpinLoops(memory, memory, headers, imageBase, ImageSize, probe, "test", lockedProbe);
             return new SpinImage(memory, imageBase, result);
         }
 
