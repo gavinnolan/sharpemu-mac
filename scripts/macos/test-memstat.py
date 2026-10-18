@@ -13,6 +13,7 @@ It needs passwordless `sudo -n` for task_for_pid and is skipped without it.
 import importlib.util
 import json
 from pathlib import Path
+import select
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,33 @@ ctypes.memset(views[2] + 64 * MB, 0, 20 * MB)        # granule 2: 20 MiB zeros .
 ctypes.memset(views[0] + 84 * MB, 3, 12 * MB)        # ... then 12 MiB nonzero; granule 3 untouched
 print("ready", flush=True)
 time.sleep(60)
+'''
+
+X86_HELPER_C = r'''
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#define MB (1ul << 20)
+int main(void) {
+  size_t size = 128 * MB;
+  char name[32];
+  snprintf(name, sizeof name, "/mx-%d", getpid());
+  int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+  shm_unlink(name);
+  ftruncate(fd, size);
+  char *v[3];
+  for (int i = 0; i < 3; i++) v[i] = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  memset(v[0], 1, 32 * MB);
+  memset(v[1] + 32 * MB, 0, 32 * MB);
+  memset(v[2] + 64 * MB, 0, 20 * MB);
+  memset(v[0] + 84 * MB, 3, 12 * MB);
+  printf("ready\n");
+  fflush(stdout);
+  sleep(60);
+  return 0;
+}
 '''
 
 
@@ -152,35 +180,58 @@ class ToolSelfTest(unittest.TestCase):
             child.stdout.close()
 
 
-    def test_zero_scan_counts_resident_zero_pages_once_and_skips_untouched_pages(self):
+    def check_zero_scan(self, pid, target_page_size):
         binary = subprocess.run([str(HERE / "build-memstat.sh")], capture_output=True, text=True, check=True).stdout.strip()
+        proc = subprocess.run(["sudo", "-n", binary, str(pid), "--zero-scan"], capture_output=True, text=True, check=True)
+        row = json.loads(proc.stdout)
+        scan = row["zero_scan"]
+        slack = 256 * 1024  # the interpreter's own few KiB of shared memory
+        self.assertEqual(target_page_size, row["page_size"])
+        self.assertEqual(16384, scan["page_size"])  # zero is judged per 16 KiB host page, also for a 4 KiB-paged target
+        self.assertEqual(0, scan["read_errors"])
+        self.assertLess(scan["resident_pages"] * 16384 - 96 * MB, slack)
+        self.assertGreaterEqual(scan["resident_pages"] * 16384, 96 * MB)  # once, not 3 x; the untouched 32 MiB is not read
+        self.assertLess(scan["zero_bytes"] - 52 * MB, slack)
+        self.assertGreaterEqual(scan["zero_bytes"], 52 * MB)
+        self.assertEqual(scan["zero_pages"] * 16384, scan["zero_bytes"])
+        self.assertEqual(scan["resident_pages"] * 16384, scan["scanned_bytes"])
+        self.assertEqual(32, scan["granule_mib"])
+        granules = scan["granules"]  # the helper's three resident granules; the tail granule has no resident pages
+        self.assertGreaterEqual(granules["zero_lt50"], 1)
+        self.assertGreaterEqual(granules["zero_gt90"], 1)
+        self.assertGreaterEqual(granules["zero_50_90"], 1)
+        self.assertLessEqual(sum(granules.values()), 3 + 4)  # plus a few tiny foreign shm granules
+        plain = subprocess.run(["sudo", "-n", binary, str(pid)], capture_output=True, text=True, check=True)
+        self.assertNotIn("zero_scan", json.loads(plain.stdout))
+
+    def test_zero_scan_counts_resident_zero_pages_once_and_skips_untouched_pages(self):
         child = subprocess.Popen([sys.executable, "-c", ZERO_CHILD], stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual("ready", child.stdout.readline().strip())
-            proc = subprocess.run(["sudo", "-n", binary, str(child.pid), "--zero-scan"], capture_output=True, text=True, check=True)
-            row = json.loads(proc.stdout)
-            scan = row["zero_scan"]
-            slack = 256 * 1024  # the interpreter's own few KiB of shared memory
-            self.assertEqual(16384, scan["page_size"])
-            self.assertEqual(0, scan["read_errors"])
-            self.assertLess(scan["resident_pages"] * 16384 - 96 * MB, slack)
-            self.assertGreaterEqual(scan["resident_pages"] * 16384, 96 * MB)  # once, not 3 x; the untouched 32 MiB is not read
-            self.assertLess(scan["zero_bytes"] - 52 * MB, slack)
-            self.assertGreaterEqual(scan["zero_bytes"], 52 * MB)
-            self.assertEqual(scan["zero_pages"] * 16384, scan["zero_bytes"])
-            self.assertEqual(scan["resident_pages"] * 16384, scan["scanned_bytes"])
-            self.assertEqual(32, scan["granule_mib"])
-            granules = scan["granules"]  # the helper's three resident granules; the tail granule has no resident pages
-            self.assertGreaterEqual(granules["zero_lt50"], 1)
-            self.assertGreaterEqual(granules["zero_gt90"], 1)
-            self.assertGreaterEqual(granules["zero_50_90"], 1)
-            self.assertLessEqual(sum(granules.values()), 3 + 4)  # plus a few tiny foreign shm granules
-            plain = subprocess.run(["sudo", "-n", binary, str(child.pid)], capture_output=True, text=True, check=True)
-            self.assertNotIn("zero_scan", json.loads(plain.stdout))
+            self.check_zero_scan(child.pid, 16384)
         finally:
             child.kill()
             child.wait()
             child.stdout.close()
+
+    def test_zero_scan_on_an_x86_64_rosetta_target(self):
+        # A translated process has 4 KiB task pages, and the kernel rejects mach_vm_page_range_query on its
+        # map from memstat's own 16 KiB-paged task; the scan must still work (it queries a remapped alias).
+        with tempfile.TemporaryDirectory() as folder:
+            source, binary = Path(folder) / "helper.c", Path(folder) / "helper"
+            source.write_text(X86_HELPER_C)
+            built = subprocess.run(["/usr/bin/cc", "-arch", "x86_64", str(source), "-o", str(binary)], capture_output=True)
+            if built.returncode != 0:
+                self.skipTest("cannot build an x86_64 helper")
+            child = subprocess.Popen([str(binary)], stdout=subprocess.PIPE, text=True)
+            try:
+                if not select.select([child.stdout], [], [], 60)[0] or child.stdout.readline().strip() != "ready":
+                    self.skipTest("the x86_64 helper did not start (Rosetta unavailable)")
+                self.check_zero_scan(child.pid, 4096)
+            finally:
+                child.kill()
+                child.wait()
+                child.stdout.close()
 
 
 if __name__ == "__main__":

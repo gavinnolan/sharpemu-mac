@@ -16,12 +16,13 @@
 // --zero-scan: for every VM object classified guest_shm, also read its RESIDENT pages (never the
 // compressed or swapped-out ones: reading those would decompress / swap them in) and count the
 // pages that are entirely zero. Each page of the object is visited once, by the same union-of-
-// mappings walk the unique accounting uses (restricted to readable mappings). Residency comes from
-// mach_vm_page_range_query, data from mach_vm_read_overwrite in runs of up to 4 MiB. The zero test
-// unit is max(target page size, host page size): a 4 KiB-paged (Rosetta) target still has 16 KiB
-// physical pages, so zero is judged per 16 KiB host page, aligned on the object offset, and a unit
-// counts only if all its target pages are present (edge units that straddle two mappings are
-// skipped). Reported as "zero_scan" in the JSON line, with a histogram of the zero fraction per
+// mappings walk the unique accounting uses (restricted to readable mappings). Each mapping is
+// remapped into memstat in chunks of up to 4 MiB (mach_vm_remap), then queried with
+// mach_vm_page_range_query and read in place: the kernel rejects that query on the map of a 4 KiB-
+// paged Rosetta target (KERN_INVALID_ARGUMENT), and the zero test needs the data anyway. The zero
+// test unit is max(target page size, host page size): a 4 KiB-paged (Rosetta) target still has
+// 16 KiB physical pages, so zero is judged per 16 KiB host page, aligned on the mapping address,
+// and edge units that straddle two mappings are skipped. Reported as "zero_scan" in the JSON line, with a histogram of the zero fraction per
 // 32 MiB granule of object offset (only granules with resident pages).
 //
 // Output: one JSON object per run on stdout (or a table with --text). Sizes are bytes.
@@ -150,11 +151,10 @@ static void full_counts(task_t task, uint64_t address, uint64_t *resident, uint6
 }
 
 typedef struct {
-  uint64_t unit;                                     // zero-test unit in bytes
+  uint64_t unit, host_page;                          // zero-test unit and this task's page size, in bytes
   uint64_t resident, zero, scanned_bytes, read_errors, objects;
   uint64_t granules_gt90, granules_50_90, granules_lt50;
   uint64_t *gran_resident, *gran_zero;               // per 32 MiB granule of the current object
-  uint8_t *buffer;                                   // ZERO_READ_CHUNK
   int *dispositions;
 } ZeroScan;
 
@@ -167,54 +167,52 @@ static bool is_zero_block(const uint64_t *words, size_t count) {
   return true;
 }
 
-// Scans object offsets [from, to) of one mapping: `address` is where `from` is mapped.
-static void zero_scan_segment(task_t task, ZeroScan *z, uint64_t address, uint64_t from, uint64_t to, uint64_t page_size) {
-  uint64_t skip = (z->unit - from % z->unit) % z->unit;
+// Scans object offsets [from, to) of one mapping: `address` is where `from` is mapped. Each chunk is
+// first mapped into this task with mach_vm_remap and then queried and read locally. The kernel
+// refuses mach_vm_page_range_query (KERN_INVALID_ARGUMENT) on the map of a 4 KiB-paged Rosetta
+// target from this 16 KiB-paged task, and the remapped alias also lets the zero test read the pages
+// in place. Only pages the query reports PRESENT are touched, so nothing is decompressed or swapped in.
+static void zero_scan_segment(task_t task, ZeroScan *z, uint64_t address, uint64_t from, uint64_t to) {
+  uint64_t skip = (z->unit - address % z->unit) % z->unit;  // units are aligned on the address: that is what the remap can map
   address += skip; from += skip;
-  to -= to % z->unit;
-  uint64_t per_unit = z->unit / page_size;
+  if (to <= from) return;
+  to = from + (to - from) / z->unit * z->unit;
+  uint64_t per_unit = z->unit / z->host_page;
   for (uint64_t chunk = from; chunk < to; chunk += ZERO_READ_CHUNK) {
     uint64_t bytes = to - chunk < ZERO_READ_CHUNK ? to - chunk : ZERO_READ_CHUNK;
-    uint64_t units = bytes / z->unit, pages = bytes / page_size;
-    mach_vm_size_t count = pages;
-    if (mach_vm_page_range_query(task, address + (chunk - from), bytes, (mach_vm_address_t)z->dispositions, &count) != KERN_SUCCESS ||
-        count != pages) {
+    uint64_t units = bytes / z->unit, pages = bytes / z->host_page;
+    mach_vm_address_t local = 0;
+    vm_prot_t cur = 0, max = 0;
+    if (mach_vm_remap(mach_task_self(), &local, bytes, 0, VM_FLAGS_ANYWHERE, task, address + (chunk - from), FALSE, &cur, &max,
+                      VM_INHERIT_NONE) != KERN_SUCCESS) {
       z->read_errors++;
       continue;
     }
-    for (uint64_t u = 0; u < units;) {
+    mach_vm_size_t count = pages;
+    if (!(cur & VM_PROT_READ) ||
+        mach_vm_page_range_query(mach_task_self(), local, bytes, (mach_vm_address_t)z->dispositions, &count) != KERN_SUCCESS ||
+        count != pages) {
+      z->read_errors++;
+      mach_vm_deallocate(mach_task_self(), local, bytes);
+      continue;
+    }
+    for (uint64_t u = 0; u < units; u++) {
       bool present = true;
       for (uint64_t k = 0; k < per_unit; k++) present &= (z->dispositions[u * per_unit + k] & VM_PAGE_QUERY_PAGE_PRESENT) != 0;
-      if (!present) { u++; continue; }
-      uint64_t run = u + 1;                           // extend over consecutive present units
-      for (; run < units; run++) {
-        bool ok = true;
-        for (uint64_t k = 0; k < per_unit; k++) ok &= (z->dispositions[run * per_unit + k] & VM_PAGE_QUERY_PAGE_PRESENT) != 0;
-        if (!ok) break;
-      }
-      mach_vm_size_t got = 0;
-      uint64_t run_bytes = (run - u) * z->unit;
-      if (mach_vm_read_overwrite(task, address + (chunk - from) + u * z->unit, run_bytes, (mach_vm_address_t)z->buffer, &got) != KERN_SUCCESS ||
-          got != run_bytes) {
-        z->read_errors++;                              // reclaimed or re-protected since the query
-        u = run;
-        continue;
-      }
-      z->scanned_bytes += run_bytes;
-      for (uint64_t j = u; j < run; j++) {
-        bool zero = is_zero_block((const uint64_t *)(z->buffer + (j - u) * z->unit), z->unit / 8);
-        uint64_t granule = (chunk + j * z->unit) / ZERO_GRANULE;
-        z->resident++; z->gran_resident[granule]++;
-        if (zero) { z->zero++; z->gran_zero[granule]++; }
-      }
-      u = run;
+      if (!present) continue;
+      z->scanned_bytes += z->unit;
+      bool zero = is_zero_block((const uint64_t *)(local + u * z->unit), z->unit / 8);
+      uint64_t granule = (chunk + u * z->unit) / ZERO_GRANULE;
+      z->resident++; z->gran_resident[granule]++;
+      if (zero) { z->zero++; z->gran_zero[granule]++; }
     }
+    mach_vm_deallocate(mach_task_self(), local, bytes);
   }
 }
 
 // Visits every page of one guest_shm object once: readable mappings in offset order, each scanning only
 // the part past what the earlier ones reached.
-static void zero_scan_object(task_t task, ZeroScan *z, const Region *regions, size_t first, size_t last, uint64_t page_size) {
+static void zero_scan_object(task_t task, ZeroScan *z, const Region *regions, size_t first, size_t last) {
   uint64_t top = 0;
   for (size_t i = first; i < last; i++)
     if (regions[i].offset + regions[i].size > top) top = regions[i].offset + regions[i].size;
@@ -229,7 +227,7 @@ static void zero_scan_object(task_t task, ZeroScan *z, const Region *regions, si
     uint64_t end = r->offset + r->size, from = r->offset;
     if (any && end <= reached) continue;
     if (any && from < reached) from = reached;
-    zero_scan_segment(task, z, r->address + (from - r->offset), from, end, page_size);
+    zero_scan_segment(task, z, r->address + (from - r->offset), from, end);
     reached = end; any = true;
   }
   for (size_t g = 0; g < granules; g++) {
@@ -326,9 +324,9 @@ int main(int argc, char **argv) {
   double zero_ms = 0;
   if (want_zero) {
     uint64_t host_page = (uint64_t)getpagesize();
+    zero.host_page = host_page;
     zero.unit = page_size > host_page ? page_size : host_page;
-    zero.buffer = malloc(ZERO_READ_CHUNK);
-    zero.dispositions = malloc((ZERO_READ_CHUNK / page_size) * sizeof(int));
+    zero.dispositions = malloc((ZERO_READ_CHUNK / host_page) * sizeof(int));
   }
 
   for (size_t first = 0; first < count;) {
@@ -376,7 +374,7 @@ int main(int argc, char **argv) {
     }
     if (want_zero && category == CAT_GUEST_SHM) {
       double began = now_ms();
-      zero_scan_object(task, &zero, regions, first, last, page_size);
+      zero_scan_object(task, &zero, regions, first, last);
       zero_ms += now_ms() - began;
     }
     object_count++;
