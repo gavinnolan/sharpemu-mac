@@ -67,13 +67,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private Gen5NggStageInfo? PrimitiveShaderStageInfo(
         VertexStageRegisters vertex,
         ShaderInterfaceRegisters shaderInterface,
+        uint shaderStages) =>
+        PrimitiveShaderStageInfo(SupportsPrimitiveShaderMeshPipelines, vertex, shaderInterface, shaderStages);
+
+    internal static Gen5NggStageInfo? PrimitiveShaderStageInfo(
+        bool supportsPrimitiveShaderMeshPipelines,
+        VertexStageRegisters vertex,
+        ShaderInterfaceRegisters shaderInterface,
         uint shaderStages)
     {
         // Exactly the draws the executor admits as mesh draws, or a program would be
         // compiled as the merged ES/GS stage with no mesh pipeline to run it - and an
         // ordinary vertex program that happens to touch LDS would have its workgroup sized
         // from geometry-engine registers the draw never programmed.
-        if (!SupportsPrimitiveShaderMeshPipelines || !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
+        if (!supportsPrimitiveShaderMeshPipelines || !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
         {
             return null;
         }
@@ -416,7 +423,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             .ToArray());
 
     // One past the highest parameter location the pixel program reads, resolved as its translator does.
-    private static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
+    internal static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
     {
         var attributes = InterpolatedAttributesOf(pixelProgram);
         if (attributes.Length == 0)
@@ -445,7 +452,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     // The attribute list is ascending, so its last entry is the highest.
-    private static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
+    internal static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
     {
         var attributes = InterpolatedAttributesOf(program);
         return attributes.Length == 0 ? 0 : attributes[^1] + 1;
