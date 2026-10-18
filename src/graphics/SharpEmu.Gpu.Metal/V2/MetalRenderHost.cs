@@ -103,6 +103,13 @@ internal sealed partial class MetalRenderHost :
 
     // How long the GPU worker waited for libraries still compiling on the module pool.
     private long _libraryWaitTicks;
+    // The split of _libraryWaitTicks: waits on a compile the prewarm had in the driver, and
+    // misses that compiled while prewarm compiles were in it; how many waits, and how many
+    // modules the worker compiled itself instead of waiting for the pool.
+    private long _libraryWaitPrewarmTicks;
+    private long _libraryWaitContendedTicks;
+    private long _libraryWaits;
+    private long _libraryInlineCompiles;
     private long _shaderCompilations;
     private long _flushes;
     private long _gpuWaits;
@@ -2053,6 +2060,9 @@ internal sealed partial class MetalRenderHost :
         var pipelineMs = Interlocked.Exchange(ref _pipelineTicks, 0) * 1000.0 /
             System.Diagnostics.Stopwatch.Frequency;
         var compiles = TakeCompilerCounters();
+        var libraryWaitTicks = Interlocked.Exchange(ref _libraryWaitTicks, 0);
+        var libraryWaitPrewarmTicks = Interlocked.Exchange(ref _libraryWaitPrewarmTicks, 0);
+        var scheduler = MetalCompileScheduler.Shared.TakeCounters();
         var failed = Interlocked.Exchange(ref _failedSubmissions, 0);
         var (completions, completionMs) = TakeCompletionLatency();
         var (created, uploads, writebacks, evictions) = _imageCache.Counters;
@@ -2086,7 +2096,18 @@ internal sealed partial class MetalRenderHost :
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
             $"pipeline_ms={pipelineMs.ToString("F1", culture)} " +
             $"library_ms={(Interlocked.Exchange(ref _libraryTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
-            $"library_wait_ms={(Interlocked.Exchange(ref _libraryWaitTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"library_wait_ms={(libraryWaitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
+            // What the worker blocked on: a runtime miss's own compile, a compile the prewarm
+            // had in the driver for the same source, and of the misses, those that compiled
+            // beside prewarm compiles; how many waits and how many it compiled itself.
+            $"library_wait_miss_ms={((libraryWaitTicks - libraryWaitPrewarmTicks) * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"library_wait_prewarm_ms={(libraryWaitPrewarmTicks * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"library_wait_contended_ms={(Interlocked.Exchange(ref _libraryWaitContendedTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"library_waits={Interlocked.Exchange(ref _libraryWaits, 0)} library_inline={Interlocked.Exchange(ref _libraryInlineCompiles, 0)} " +
+            // Prewarm threads held back for the game, compiles the starvation limit let
+            // through, and prewarm compiles in the driver now.
+            $"prewarm_held_ms={scheduler.HeldMilliseconds.ToString("F0", culture)} prewarm_trickle={scheduler.Trickled} " +
+            $"prewarm_inflight={MetalCompileScheduler.Shared.PrewarmInFlight} " +
             $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             // Modules and pipeline states resident against made, and what the bound released.

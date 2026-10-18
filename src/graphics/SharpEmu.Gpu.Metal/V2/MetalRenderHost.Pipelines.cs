@@ -93,8 +93,15 @@ internal sealed partial class MetalRenderHost
         public Gen5MslShader Shader => Compiled.Shader;
 
         // The library compile on the module pool; Library and Function are set once it is
-        // done, which RequireModule waits for.
+        // done, which RequireModule waits for, or runs itself while no pool thread has it.
         public Task? Compiling;
+        public MetalLibraryCompilePool.Job? Job;
+
+        // What the compile spent waiting for the prewarm's compile of the same source, and
+        // whether prewarm compiles were in the driver when it started: the split of the
+        // worker's library wait on the PERF line.
+        public long PrewarmWaitTicks;
+        public bool Contended;
 
         // The post-tessellation form a rectangle-list pipeline draws through, built the
         // first time one uses this vertex program.
@@ -147,6 +154,7 @@ internal sealed partial class MetalRenderHost
         {
             try
             {
+                _ = MetalCompileScheduler.TakeThreadPrewarmWait();
                 if (stage == ShaderStage.Compute)
                 {
                     // The background prewarm may have this source in hand; its library is
@@ -154,10 +162,12 @@ internal sealed partial class MetalRenderHost
                     MetalShaderPrewarm.WaitWhileCompiling(metal);
                 }
 
+                module.Contended = MetalCompileScheduler.Shared.PrewarmInFlight > 0;
                 BuildModule(module, stage);
             }
             finally
             {
+                Volatile.Write(ref module.PrewarmWaitTicks, MetalCompileScheduler.TakeThreadPrewarmWait());
                 MetalShaderPrewarm.GameCompileDone();
             }
         }
@@ -166,7 +176,8 @@ internal sealed partial class MetalRenderHost
         MetalShaderPrewarm.GameCompileStarted();
         if (MetalLibraryCompilePool.Enabled)
         {
-            module.Compiling = MetalLibraryCompilePool.Shared.Run(build);
+            module.Job = MetalLibraryCompilePool.Shared.Run(build);
+            module.Compiling = module.Job.Task;
         }
         else
         {
@@ -260,6 +271,8 @@ internal sealed partial class MetalRenderHost
     // Computes are left to the compute prewarm, which compiles them before the game runs.
     private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs, bool prewarmable)
     {
+        // The background prewarm gives way while the game compiles (MetalCompileScheduler).
+        using var runtime = MetalCompileScheduler.Shared.Runtime();
         var listed = prewarmable && MetalLibraryPrewarm.Active;
         var key = listed ? MetalLibraryPrewarm.Key(source, usesPerVertexInputs) : 0;
         if (listed && MetalLibraryPrewarm.TryTake(key, out var prewarmed))
@@ -355,8 +368,26 @@ internal sealed partial class MetalRenderHost
             if (!compiling.IsCompleted)
             {
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                ((IAsyncResult)compiling).AsyncWaitHandle.WaitOne();
-                Interlocked.Add(ref _libraryWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+                // A module still queued behind the pool's other compiles runs here and now:
+                // the worker needs it before any of them.
+                if (module.Job is { } job && MetalLibraryCompilePool.Shared.TryRunHere(job))
+                {
+                    Interlocked.Increment(ref _libraryInlineCompiles);
+                }
+                else
+                {
+                    ((IAsyncResult)compiling).AsyncWaitHandle.WaitOne();
+                }
+
+                var waited = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                Interlocked.Add(ref _libraryWaitTicks, waited);
+                Interlocked.Increment(ref _libraryWaits);
+                var onPrewarm = Math.Min(waited, Volatile.Read(ref module.PrewarmWaitTicks));
+                Interlocked.Add(ref _libraryWaitPrewarmTicks, onPrewarm);
+                if (module.Contended)
+                {
+                    Interlocked.Add(ref _libraryWaitContendedTicks, waited - onPrewarm);
+                }
             }
 
             // A failed compile is fatal where the module is first needed, as it was where
@@ -642,6 +673,7 @@ internal sealed partial class MetalRenderHost
             }
 
             nint error = 0;
+            using var runtime = MetalCompileScheduler.Shared.Runtime();
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             state = mesh is null
                 ? MetalNative.Send(
@@ -833,6 +865,7 @@ internal sealed partial class MetalRenderHost
     private nint BuildComputePipelineState(nint function, ulong hash)
     {
         nint error = 0;
+        using var runtime = MetalCompileScheduler.Shared.Runtime();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var state = MetalNative.Send(
             _device,
@@ -857,6 +890,7 @@ internal sealed partial class MetalRenderHost
         // The driver turns the function into a GPU binary here, on the worker thread,
         // and the guest's dispatch packet waits for it. Measured on Demon's Souls'
         // load phase this is tens to hundreds of milliseconds per new shader.
+        using var runtime = MetalCompileScheduler.Shared.Runtime();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var state = MetalNative.Send(
             _device,

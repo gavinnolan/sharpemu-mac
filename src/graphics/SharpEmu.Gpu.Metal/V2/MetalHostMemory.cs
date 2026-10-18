@@ -21,6 +21,7 @@ internal static unsafe partial class MetalHostMemory
     private const int HostVmInfo64 = 4;
     private const int HostVmInfo64Count = 38;
     private const int RusageInfoV2 = 2;
+    private const int RusageInfoV4 = 4;
     private const ulong DispatchMemoryPressureNormal = 0x01;
     private const ulong DispatchMemoryPressureWarn = 0x02;
     private const ulong DispatchMemoryPressureCritical = 0x04;
@@ -95,6 +96,23 @@ internal static unsafe partial class MetalHostMemory
         }
 
         return new MetalHostMemorySample(PhysicalBytes, available, footprint, ReadPressureLevel());
+    }
+
+    /// <summary>
+    /// This process's phys_footprint now and the most it has ever been
+    /// (rusage_info_v4 ri_lifetime_max_phys_footprint), in bytes; zeros when unreadable.
+    /// </summary>
+    public static (ulong Current, ulong LifetimePeak) Footprint()
+    {
+        var usage = stackalloc ulong[48];
+        if (proc_pid_rusage(getpid(), RusageInfoV4, usage) != 0)
+        {
+            return (0, 0);
+        }
+
+        // After uuid[16], phys_footprint is the eighth field and ri_lifetime_max_phys_footprint
+        // the twenty-ninth (sys/resource.h).
+        return (usage[2 + 7], usage[2 + 28]);
     }
 
     private static MetalMemoryPressure ReadPressureLevel()

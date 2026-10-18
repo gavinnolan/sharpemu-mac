@@ -230,7 +230,7 @@ internal static class MetalShaderPrewarm
         {
             try
             {
-                if (!StartCore(device))
+                if (!StartCore(device) && !CompletePrecompile())
                 {
                     Gate.SetRunning(false);
                 }
@@ -238,7 +238,10 @@ internal static class MetalShaderPrewarm
             catch (Exception exception)
             {
                 Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm could not start: {exception.Message}");
-                Gate.SetRunning(false);
+                if (!CompletePrecompile())
+                {
+                    Gate.SetRunning(false);
+                }
             }
         })
         {
@@ -267,7 +270,7 @@ internal static class MetalShaderPrewarm
         var graphics = OpenGraphics(directory, stamp);
         if (ShaderPrewarmList.Open(directory) is not { } list)
         {
-            MetalLibraryPrewarm.Begin();
+            BeginLibraries();
             return false;
         }
 
@@ -278,7 +281,7 @@ internal static class MetalShaderPrewarm
         {
             list.WriteStamp(stamp);
             _finished = true;
-            MetalLibraryPrewarm.Begin();
+            BeginLibraries();
             return false;
         }
 
@@ -306,6 +309,11 @@ internal static class MetalShaderPrewarm
         var remaining = workerCount;
         var done = 0;
         Gate.SetTotal(held);
+        if (Precompile.HoldsUntilComplete)
+        {
+            Precompile.BeginPhase("programs", total);
+        }
+
         Console.Error.WriteLine(
             $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} graphics={graphics.Count} held={held} " +
             $"resumed={resumed} workers={workerCount}");
@@ -343,6 +351,11 @@ internal static class MetalShaderPrewarm
 
                         PrewarmComputePipeline(item.Compute!, item.Code!, compiler, device);
                         _completed.Enqueue(ShaderPrewarmList.Identity(item.Compute!));
+                    }
+
+                    if (item.Held && Precompile.HoldsUntilComplete)
+                    {
+                        Precompile.Advance();
                     }
 
                     if (item.Held && Gate.Advance() == held && held < total)
@@ -513,7 +526,49 @@ internal static class MetalShaderPrewarm
     /// before there was a first-frame list.
     /// </summary>
     private static readonly bool HoldsForEveryCompute =
-        Environment.GetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_HOLD") == "all";
+        Environment.GetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_HOLD") == "all" ||
+        MetalShaderPrecompile.Current.HoldsUntilComplete;
+
+    private static MetalShaderPrecompile Precompile => MetalShaderPrecompile.Current;
+
+    /// <summary>
+    /// Starts the library list behind the game, or, in the hold-until-done and precompile-only
+    /// modes, compiles it to completion while the guest is still held (MetalShaderPrecompile).
+    /// </summary>
+    private static void BeginLibraries()
+    {
+        if (!Precompile.HoldsUntilComplete)
+        {
+            MetalLibraryPrewarm.Begin();
+            return;
+        }
+
+        var sources = MetalLibraryPrewarm.ListedSources;
+        if (sources == 0)
+        {
+            return;
+        }
+
+        Gate.SetTotal(sources);
+        Gate.SetRunning(true);
+        Precompile.BeginPhase("libraries", sources);
+        MetalLibraryPrewarm.Precompile(() =>
+        {
+            Gate.Advance();
+            Precompile.Advance();
+        });
+    }
+
+    /// <summary>
+    /// The precompile modes' end, once everything is compiled: the summary and, for
+    /// precompile-only, the session's close. True when the guest stays held because the
+    /// session is closing.
+    /// </summary>
+    private static bool CompletePrecompile() =>
+        Precompile.Complete(
+            $"computes={Volatile.Read(ref _compiled)} compute_failed={Volatile.Read(ref _failed)} " +
+            $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
+            $"libraries_held={MetalLibraryPrewarm.HeldLibraries}");
 
     /// <summary>
     /// The pending computes in the order the prewarm compiles them, and how many from the
@@ -546,32 +601,35 @@ internal static class MetalShaderPrewarm
         return ordered;
     }
 
-    private static int _gameCompiles;
     private static long _yieldedTicks;
-
-    /// <summary>The game starts compiling a shader module of its own.</summary>
-    public static void GameCompileStarted() => Interlocked.Increment(ref _gameCompiles);
-
-    /// <summary>The game's shader module compile is done.</summary>
-    public static void GameCompileDone() => Interlocked.Decrement(ref _gameCompiles);
+    private static int _runtimeFirst;
 
     /// <summary>
-    /// Holds a compute the guest is not held for while the game compiles modules of its own
-    /// or the graphics libraries of past sessions compile, so neither queues behind the
-    /// background prewarm in the driver's compiler service. A cold start that let the guest
-    /// go after its first frame's computes had its GPU worker wait 120 s in one stretch for
-    /// the logos' graphics libraries while 1500 computes compiled in the background
+    /// The game starts compiling a shader module of its own: from here until it is built,
+    /// every prewarm compile not yet started waits (MetalCompileScheduler).
+    /// </summary>
+    public static void GameCompileStarted() => MetalCompileScheduler.Shared.RuntimeStarted();
+
+    /// <summary>The game's shader module compile is done.</summary>
+    public static void GameCompileDone() => MetalCompileScheduler.Shared.RuntimeDone();
+
+    /// <summary>
+    /// Holds a compute the guest is not held for while the graphics libraries of past
+    /// sessions compile, so those go first; the game's own compiles hold every prewarm
+    /// compile back through MetalCompileScheduler. A cold start that let the guest go after
+    /// its first frame's computes had its GPU worker wait 120 s in one stretch for the
+    /// logos' graphics libraries while 1500 computes compiled in the background
     /// (run 20261017-095415-ds-sc-cold2).
     /// </summary>
     private static void YieldToTheGame()
     {
-        if (!MetalLibraryPrewarm.Running && Volatile.Read(ref _gameCompiles) == 0)
+        if (!MetalLibraryPrewarm.Running)
         {
             return;
         }
 
         var started = Stopwatch.GetTimestamp();
-        while (!_stopping && (MetalLibraryPrewarm.Running || Volatile.Read(ref _gameCompiles) > 0))
+        while (!_stopping && MetalLibraryPrewarm.Running)
         {
             Thread.Sleep(2);
         }
@@ -598,9 +656,11 @@ internal static class MetalShaderPrewarm
             return;
         }
 
-        if (_inFlight.TryGetValue(Identity(shader), out var compiling))
+        if (_inFlight.TryGetValue(Identity(shader), out var compiling) && !compiling.IsSet)
         {
+            var started = Stopwatch.GetTimestamp();
             compiling.Wait();
+            MetalCompileScheduler.NotePrewarmWait(Stopwatch.GetTimestamp() - started);
         }
     }
 
@@ -670,6 +730,22 @@ internal static class MetalShaderPrewarm
         if (!_prewarmedShaderIdentities!.TryAdd(identity, 0))
         {
             Interlocked.Increment(ref _deduplicated);
+            return;
+        }
+
+        // Waits while the game compiles (MetalCompileScheduler), and holds a prewarm slot
+        // until this compile is done.
+        using var prewarm = MetalCompileScheduler.Shared.EnterPrewarm(static () => _stopping);
+        if (!prewarm.Entered)
+        {
+            return;
+        }
+
+        // The game created this module while the prewarm waited: its own compile fills
+        // the cache, and a second one beside it would only compete with it.
+        if (_runtimeComputeIdentities?.ContainsKey(identity) == true)
+        {
+            Interlocked.Increment(ref _runtimeFirst);
             return;
         }
 
@@ -767,15 +843,30 @@ internal static class MetalShaderPrewarm
         }
 
         _finished = true;
-        Gate.SetRunning(false);
-        MetalLibraryPrewarm.Begin();
-        Console.Error.WriteLine(
+        var summary =
             $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _compiled)} " +
             $"failed={Volatile.Read(ref _failed)} same_source={Volatile.Read(ref _deduplicated)} " +
+            $"runtime_first={Volatile.Read(ref _runtimeFirst)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
             $"yielded_ms={Interlocked.Read(ref _yieldedTicks) * 1000 / Stopwatch.Frequency} " +
-            $"runtime_compute_modules={runtime.Count} matched={matched}");
+            $"runtime_compute_modules={runtime.Count} matched={matched}";
+        if (Precompile.HoldsUntilComplete)
+        {
+            // The library list compiles to completion before the guest goes, or the session closes.
+            Console.Error.WriteLine(summary);
+            BeginLibraries();
+            if (!CompletePrecompile())
+            {
+                Gate.SetRunning(false);
+            }
+
+            return;
+        }
+
+        Gate.SetRunning(false);
+        MetalLibraryPrewarm.Begin();
+        Console.Error.WriteLine(summary);
     }
 
     /// <summary>A compute module the running title created, counted against the prewarmed ones.</summary>
