@@ -65,7 +65,8 @@ public static class PixelStageInputResolver
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         uint inputCount,
         bool depthAspectBound,
-        bool stencilAspectBound = false)
+        bool stencilAspectBound = false,
+        PixelInputArrays? reuse = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var customMask = 0u;
@@ -84,23 +85,24 @@ public static class PixelStageInputResolver
             }
         }
 
-        var interpolators = new uint[PixelInputInfo.InterpolatorCount];
+        Span<uint> interpolators = stackalloc uint[PixelInputInfo.InterpolatorCount];
         for (var index = 0u; index < inputCount; index++)
         {
             // An unwritten slot maps attribute n to parameter n.
-            interpolators[index] = (shaderInterface.PixelInterpolatorWritten & (1u << (int)index)) != 0
+            interpolators[(int)index] = (shaderInterface.PixelInterpolatorWritten & (1u << (int)index)) != 0
                 ? shaderInterface.PixelInterpolatorSettings[index]
                 : index;
         }
 
-        var outputModes = new byte[PixelInputInfo.TargetCount];
-        var mappings = new ColorComponentMap[PixelInputInfo.TargetCount];
+        Span<byte> outputModes = stackalloc byte[PixelInputInfo.TargetCount];
+        Span<ColorComponentMap> mappings = stackalloc ColorComponentMap[PixelInputInfo.TargetCount];
         for (var index = 0; index < PixelInputInfo.TargetCount; index++)
         {
             outputModes[index] = targetOutputModes[index];
             mappings[index] = outputModes[index] != 0 ? targetExportMapping[index] : default;
         }
 
+        reuse ??= new PixelInputArrays();
         var control = shaderInterface.DepthShaderControl;
         return new PixelInputInfo
         {
@@ -110,9 +112,9 @@ public static class PixelStageInputResolver
             PerspectiveCenterRegister = (activeInputs & InputPerspectiveCenter) != 0
                 ? ((activeInputs & InputPerspectiveSample) != 0 ? 2u : 0u)
                 : PixelInputInfo.NoPerspectiveCenterRegister,
-            InterpolatorSettings = interpolators,
-            TargetOutputModes = outputModes,
-            TargetExportMappings = mappings,
+            InterpolatorSettings = PixelInputArrays.Share(interpolators, ref reuse.Interpolators),
+            TargetOutputModes = PixelInputArrays.Share(outputModes, ref reuse.OutputModes),
+            TargetExportMappings = PixelInputArrays.Share(mappings, ref reuse.ExportMappings),
             ScratchDwords = shader.ScratchDwords,
             PositionX = (activeInputs & InputPositionX) != 0,
             PositionY = (activeInputs & InputPositionY) != 0,
@@ -138,4 +140,17 @@ public static class PixelStageInputResolver
             ExecuteOnNoop = control.ExecuteOnNoop,
         };
     }
+}
+
+// The arrays of the last pixel input resolved. Nothing writes a resolved input's arrays, and
+// consecutive draws of a pass resolve the same interpolators and targets: a draw whose arrays
+// come out equal shares the last ones instead of allocating its own. Used under one lock.
+public sealed class PixelInputArrays
+{
+    internal uint[]? Interpolators;
+    internal byte[]? OutputModes;
+    internal ColorComponentMap[]? ExportMappings;
+
+    internal static T[] Share<T>(ReadOnlySpan<T> values, ref T[]? last) where T : IEquatable<T> =>
+        last is not null && values.SequenceEqual(last) ? last : last = values.ToArray();
 }

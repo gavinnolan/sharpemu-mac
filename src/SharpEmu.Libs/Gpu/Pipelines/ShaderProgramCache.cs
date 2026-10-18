@@ -520,9 +520,10 @@ internal sealed class ShaderProgramCache
                     options.RequiredVertexOutputCount, options.PrimitiveShader, _staticState);
                 _staticState.Add(options.MeshPerVertexParameterMask);
                 _staticState.Add((uint)options.VertexInterpolants.Count);
-                foreach (var interpolant in options.VertexInterpolants)
+                // Indexed: a foreach over the interface boxed an enumerator on every draw.
+                for (var index = 0; index < options.VertexInterpolants.Count; index++)
                 {
-                    _staticState.Add(interpolant);
+                    _staticState.Add(options.VertexInterpolants[index]);
                 }
                 break;
             case ShaderStage.Pixel:
@@ -532,8 +533,9 @@ internal sealed class ShaderProgramCache
                 {
                     _staticState.Add(options.PixelInputAddress);
                 }
-                foreach (var output in options.PixelOutputs)
+                for (var index = 0; index < options.PixelOutputs.Count; index++)
                 {
+                    var output = options.PixelOutputs[index];
                     _staticState.Add(output.GuestSlot);
                     _staticState.Add(output.HostLocation);
                     _staticState.Add(output.ExportTarget);

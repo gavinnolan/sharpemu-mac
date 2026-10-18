@@ -248,48 +248,77 @@ public sealed partial class ResourceMaterializationCache
     private static SlotPlan? SlotPlanOf(ShaderResourcePlan plan) =>
         SlotPlans.GetValue(plan, static plan => new StrongBox<SlotPlan?>(SlotPlan.Analyze(plan))).Value;
 
-    private static SlotModel? ModelOf(Entry entry, ShaderResourcePlan plan, SlotPlan slots)
+    private SlotModel? ModelOf(Entry entry, ShaderResourcePlan plan, SlotPlan slots)
     {
-        var model = entry.Slots ??= BuildModel(entry, plan, slots) ?? Unmodelled;
+        if (entry.Slots is null)
+        {
+            entry.Slots = BuildModel(entry, plan, slots, entry.SlotsHint) ?? Unmodelled;
+            entry.SlotsHint = null;
+        }
+
+        var model = entry.Slots;
         return ReferenceEquals(model, Unmodelled) ? null : model;
     }
 
-    private static SlotModel? BuildModel(Entry entry, ShaderResourcePlan plan, SlotPlan slots)
+    private ulong[] _modelAddresses = [];
+    private int[] _modelOffsets = [];
+    private int[] _modelRanges = [];
+    private uint[] _modelValues = [];
+
+    // Built in scratch: an entry rebuilt from another (hint) for a moved ring usually keeps where
+    // its slots lie in its bytes and often their words, and those arrays are shared.
+    private SlotModel? BuildModel(Entry entry, ShaderResourcePlan plan, SlotPlan slots, SlotModel? hint)
     {
         var table = entry.Snapshot.FlattenedResourceTable;
         if (!entry.TableRefreshable)
             return null;
         var count = slots.Count;
-        var model = new SlotModel
+        if (_modelAddresses.Length < count)
         {
-            Addresses = new ulong[count],
-            Offsets = new int[count],
-            Ranges = new int[count],
-            Values = new uint[count],
-        };
+            var capacity = Math.Max(count, _modelAddresses.Length * 2);
+            _modelAddresses = new ulong[capacity];
+            _modelOffsets = new int[capacity];
+            _modelRanges = new int[capacity];
+            _modelValues = new uint[capacity];
+        }
+
+        var addresses = _modelAddresses.AsSpan(0, count);
+        var offsets = _modelOffsets.AsSpan(0, count);
+        var ranges = _modelRanges.AsSpan(0, count);
+        // TryAddress reads the words of the slots before the one it computes.
+        var valueArray = _modelValues;
+        var values = valueArray.AsSpan(0, count);
+        addresses.Clear();
+        values.Clear();
         for (var slot = 0; slot < count; slot++)
         {
-            if (!slots.TryAddress(slot, entry.UserData, plan.UserDataBase, entry.ShaderBase, model.Values, out var address, out var zero))
+            if (!slots.TryAddress(slot, entry.UserData, plan.UserDataBase, entry.ShaderBase, valueArray, out var address, out var zero))
                 return null;
             if (zero)
             {
-                model.Offsets[slot] = model.Ranges[slot] = -1;
+                offsets[slot] = ranges[slot] = -1;
             }
             else
             {
                 if (!TryFindRange(entry, address, out var range, out var offset))
                     return null;
-                model.Addresses[slot] = address;
-                model.Offsets[slot] = offset;
-                model.Ranges[slot] = range;
-                model.Values[slot] = BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset));
+                addresses[slot] = address;
+                offsets[slot] = offset;
+                ranges[slot] = range;
+                values[slot] = BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset));
             }
 
-            if (slots.FlatOffsets[slot] >= table.Length || table[slots.FlatOffsets[slot]] != model.Values[slot])
+            if (slots.FlatOffsets[slot] >= table.Length || table[slots.FlatOffsets[slot]] != values[slot])
                 return null;
         }
 
-        return model;
+        return new SlotModel
+        {
+            Addresses = hint is not null && addresses.SequenceEqual(hint.Addresses) ? hint.Addresses : addresses.ToArray(),
+            Offsets = hint is not null && offsets.SequenceEqual(hint.Offsets) ? hint.Offsets : offsets.ToArray(),
+            Ranges = hint is not null && ranges.SequenceEqual(hint.Ranges) ? hint.Ranges : ranges.ToArray(),
+            Values = hint is not null && values.SequenceEqual(hint.Values) ? hint.Values : values.ToArray(),
+        };
     }
 
     private uint[] _slotValues = [];
@@ -422,20 +451,32 @@ public sealed partial class ResourceMaterializationCache
             addresses[slot] = address;
         }
 
+        // A ring that moved with the same words in it (constants the title writes again every frame)
+        // gives the entry's table, and with the entry's user data the entry's snapshot.
         var previous = entry.Snapshot;
-        var table = (uint[])previous.FlattenedResourceTable.Clone();
+        var table = previous.FlattenedResourceTable;
         for (var slot = 0; slot < count; slot++)
-            table[slots.FlatOffsets[slot]] = values[slot];
-        var snapshot = new ResourceSnapshot
         {
-            Buffers = previous.Buffers,
-            Images = previous.Images,
-            Samplers = previous.Samplers,
-            FlattenedResourceTable = table,
-            UserData = inputs.UserData as uint[] ?? inputs.UserData.ToArray(),
-            DeviceAddressRanges = previous.DeviceAddressRanges,
-            BindlessImages = previous.BindlessImages,
-        };
+            if (table[slots.FlatOffsets[slot]] == values[slot])
+                continue;
+            if (ReferenceEquals(table, previous.FlattenedResourceTable))
+                table = (uint[])table.Clone();
+            table[slots.FlatOffsets[slot]] = values[slot];
+        }
+
+        var userData = CurrentUserData(previous.UserData, inputs.UserData);
+        var snapshot = ReferenceEquals(table, previous.FlattenedResourceTable) && ReferenceEquals(userData, previous.UserData)
+            ? previous
+            : new ResourceSnapshot
+            {
+                Buffers = previous.Buffers,
+                Images = previous.Images,
+                Samplers = previous.Samplers,
+                FlattenedResourceTable = table,
+                UserData = userData,
+                DeviceAddressRanges = previous.DeviceAddressRanges,
+                BindlessImages = previous.BindlessImages,
+            };
 
         var recorder = TakeRecorder();
         try

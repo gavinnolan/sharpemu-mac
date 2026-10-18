@@ -24,18 +24,42 @@ public sealed partial class ResourceMaterializationCache
     private const ulong JoinedGapBytes = 64;
     private const int PageShift = 12;
 
-    private static JoinedReads JoinedReadsOf(Entry entry)
+    private ulong[] _joinedAddresses = [];
+    private int[] _joinedLengths = [];
+    private bool[] _joinedClean = [];
+    private int[] _joinedFirst = [];
+    private int[] _joinedCount = [];
+    private int[] _joinedOrder = [];
+    private bool[] _joinedProbed = [];
+
+    // Joined in scratch, then copied out: it runs for every new entry. An entry rebuilt from another
+    // (hint) for a moved ring keeps how its ranges join, and those arrays are shared.
+    private JoinedReads JoinedReadsOf(Entry entry, JoinedReads? hint)
     {
-        var addresses = new List<ulong>();
-        var lengths = new List<int>();
-        var clean = new List<bool>();
-        var first = new List<int>();
-        var count = new List<int>();
+        var rangeCount = entry.RangeAddresses.Length;
+        if (_joinedAddresses.Length < rangeCount)
+        {
+            var capacity = Math.Max(rangeCount, _joinedAddresses.Length * 2);
+            _joinedAddresses = new ulong[capacity];
+            _joinedLengths = new int[capacity];
+            _joinedClean = new bool[capacity];
+            _joinedFirst = new int[capacity];
+            _joinedCount = new int[capacity];
+            _joinedOrder = new int[capacity];
+            _joinedProbed = new bool[capacity];
+        }
+
+        var addresses = _joinedAddresses;
+        var lengths = _joinedLengths;
+        var clean = _joinedClean;
+        var first = _joinedFirst;
+        var count = _joinedCount;
+        var reads = 0;
         var end = 0UL;
-        for (var range = 0; range < entry.RangeAddresses.Length; range++)
+        for (var range = 0; range < rangeCount; range++)
         {
             var start = entry.RangeAddresses[range];
-            var last = addresses.Count - 1;
+            var last = reads - 1;
             if (last >= 0 && start >= end && start - end <= JoinedGapBytes && (end - 1) >> PageShift == start >> PageShift)
             {
                 end = Math.Max(end, start + (ulong)entry.RangeLengths[range]);
@@ -45,42 +69,61 @@ public sealed partial class ResourceMaterializationCache
                 continue;
             }
 
-            addresses.Add(start);
-            lengths.Add(entry.RangeLengths[range]);
-            clean.Add(entry.RangeClean[range]);
-            first.Add(range);
-            count.Add(1);
+            addresses[reads] = start;
+            lengths[reads] = entry.RangeLengths[range];
+            clean[reads] = entry.RangeClean[range];
+            first[reads] = range;
+            count[reads] = 1;
+            reads++;
             end = start + (ulong)entry.RangeLengths[range];
         }
 
-        var probed = new bool[addresses.Count];
+        var probed = _joinedProbed.AsSpan(0, reads);
+        probed.Clear();
         if (entry.BaseWordBuffers is not null)
         {
             foreach (var (range, _) in entry.BaseWordProbes ??= BaseWordProbesOf(entry))
             {
-                for (var read = 0; read < addresses.Count; read++)
+                for (var read = 0; read < reads; read++)
                     probed[read] |= range >= first[read] && range < first[read] + count[read];
             }
         }
 
-        var order = Enumerable.Range(0, addresses.Count).Where(read => probed[read])
-            .Concat(Enumerable.Range(0, addresses.Count).Where(read => !probed[read])).ToArray();
+        // The reads holding a base word first, each group in read order.
+        var order = _joinedOrder.AsSpan(0, reads);
+        var next = 0;
+        for (var read = 0; read < reads; read++)
+            if (probed[read])
+                order[next++] = read;
+        for (var read = 0; read < reads; read++)
+            if (!probed[read])
+                order[next++] = read;
+
         return new JoinedReads
         {
-            Addresses = [.. addresses],
-            Lengths = [.. lengths],
-            Clean = [.. clean],
-            FirstRange = [.. first],
-            RangeCount = [.. count],
-            Order = order,
+            Addresses = Shared(addresses.AsSpan(0, reads), hint?.Addresses),
+            Lengths = Shared(lengths.AsSpan(0, reads), hint?.Lengths),
+            Clean = Shared(clean.AsSpan(0, reads), hint?.Clean),
+            FirstRange = Shared(first.AsSpan(0, reads), hint?.FirstRange),
+            RangeCount = Shared(count.AsSpan(0, reads), hint?.RangeCount),
+            Order = Shared(order, hint?.Order),
         };
+
+        static T[] Shared<T>(Span<T> words, T[]? hint) where T : IEquatable<T> =>
+            hint is not null && words.SequenceEqual(hint) ? hint : words.ToArray();
     }
 
     // Validate for an entry whose reads do not move: every recorded byte is compared.
     private bool ValidateJoined(Entry entry, ResidentGuestBytesReader residentReader, out bool unreadable)
     {
         unreadable = false;
-        var reads = entry.Joined ??= JoinedReadsOf(entry);
+        if (entry.Joined is null)
+        {
+            entry.Joined = JoinedReadsOf(entry, entry.JoinedHint);
+            entry.JoinedHint = null;
+        }
+
+        var reads = entry.Joined;
         foreach (var read in reads.Order)
         {
             var length = reads.Lengths[read];
