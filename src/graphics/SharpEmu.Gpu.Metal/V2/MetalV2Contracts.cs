@@ -37,6 +37,10 @@ internal interface IMetalSubmissionContext
         _ = label;
     }
 
+    // Whether ProfileEncoded reads its label. A caller formats the label only when it does:
+    // transfers run tens of thousands of times a second, and the strings were garbage.
+    bool WantsEncodedLabels => false;
+
     // The compute encoder a transfer made of compute dispatches alone may record them into
     // instead of opening one of its own, or zero. The host leaves its open compute encoder
     // to an image upload or writeback (SHARPEMU_METAL_V2_TRANSFER_IN_ENCODER) and hands it

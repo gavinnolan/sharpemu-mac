@@ -723,7 +723,9 @@ internal sealed partial class MetalImageCache
             return;
         }
 
-        foreach (var (start, fill) in _recordedDccFills.ToArray())
+        // Enumerated in place, not over a copy: this runs for every GPU store. Removing the
+        // current entry and writing a value through its reference leave the enumeration valid.
+        foreach (var (start, fill) in _recordedDccFills)
         {
             if (address >= start + fill.Size || start >= address + size)
             {
@@ -732,7 +734,7 @@ internal sealed partial class MetalImageCache
 
             if (fill.AwaitingOwnWrite && address >= start && address + size <= start + fill.Size)
             {
-                _recordedDccFills[start] = fill with { AwaitingOwnWrite = false };
+                System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(_recordedDccFills, start).AwaitingOwnWrite = false;
                 continue;
             }
 
@@ -748,7 +750,8 @@ internal sealed partial class MetalImageCache
             return;
         }
 
-        foreach (var (start, fill) in _recordedDccFills.ToArray())
+        // In place, not over a copy: removing the current entry leaves the enumeration valid.
+        foreach (var (start, fill) in _recordedDccFills)
         {
             if (address < start + fill.Size && start < address + size)
             {

@@ -533,10 +533,15 @@ internal sealed partial class MetalRenderHost
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
             if (written)
             {
-                _imageCache.TraceDccWriter(
-                    descriptor.Address, size,
-                    $"program=0x{stage.Program.Hash:X16} buffer={index} stride={descriptor.Stride} records={descriptor.RecordCount} " +
-                    $"format={descriptor.Format} buffers={stage.BufferCount} user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}]");
+                // The text is built only when the trace prints it: this runs per written buffer per draw.
+                if (MetalImageCache.TracesDccWriter(descriptor.Address, size))
+                {
+                    _imageCache.TraceDccWriter(
+                        descriptor.Address, size,
+                        $"program=0x{stage.Program.Hash:X16} buffer={index} stride={descriptor.Stride} records={descriptor.RecordCount} " +
+                        $"format={descriptor.Format} buffers={stage.BufferCount} user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}]");
+                }
+
                 _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
                 NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
             }

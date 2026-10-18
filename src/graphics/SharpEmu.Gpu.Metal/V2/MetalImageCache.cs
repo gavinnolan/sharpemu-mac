@@ -1219,7 +1219,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        context.ProfileEncoded(ProfileLabel("alias-on-device", in image.Description));
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded(ProfileLabel("alias-on-device", in image.Description));
+        }
         // The target now holds what the source holds, so it owes guest memory no upload.
         image.RefreshComplete();
         image.NotePublishedFrom(other);
@@ -1319,7 +1322,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeTextureToGuest(
             context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned);
-        context.ProfileEncoded(ProfileLabel("writeback-run", in description));
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded(ProfileLabel("writeback-run", in description));
+        }
         image.MarkPublished(aligned, alignedEnd);
         _owner.NoteGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
         _writebackCauses[(int)cause]++;
@@ -1776,7 +1782,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _uploadCauses[(int)image.DirtyCause]++;
-        context.ProfileEncoded(ProfileLabel("upload", in description));
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded(ProfileLabel("upload", in description));
+        }
         image.RefreshComplete();
         Interlocked.Increment(ref _uploads);
     }
@@ -1815,7 +1824,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         _uploadCauses[(int)image.DirtyCause]++;
         _partialUploads++;
         _partialUploadBytesSaved += (long)(description.Data.Size - (end - start));
-        context.ProfileEncoded(ProfileLabel("upload-run", in description));
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded(ProfileLabel("upload-run", in description));
+        }
         image.RefreshComplete(start, end);
         Interlocked.Increment(ref _uploads);
         return true;
@@ -1994,7 +2006,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        context.ProfileEncoded(ProfileLabel("writeback", in description));
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded(ProfileLabel("writeback", in description));
+        }
         image.ClearGpuModified();
         // The retile is a GPU store into guest memory: until it completes the bytes
         // in guest memory are the old ones, so a read of them has to wait for it.
