@@ -24,6 +24,10 @@ public interface IGuestBackedSpace
     // back to the OS and read zero when they are used again. True when anything was released.
     bool TryReleaseBacking(ulong offset, ulong size) => false;
 
+    // Which chunks of a chunked backing a texture holds in place of the backing
+    // (single-copy textures); null when the backing is one object.
+    GuestMemory.GuestSingleCopy? SingleCopy => null;
+
     bool IsBackedView(ulong address);
     bool IsBackedRange(ulong address, ulong size);
 

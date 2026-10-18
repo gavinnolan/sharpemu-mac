@@ -185,6 +185,9 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
     /// <summary>Bytes per separately releasable chunk of the backing; 0 when it is one object.</summary>
     public ulong BackingChunkBytes => _views.ChunkBytes;
 
+    /// <summary>The released-chunk state of a chunked backing; null for one object.</summary>
+    public GuestSingleCopy? SingleCopy => _views.SingleCopy;
+
     /// <summary>Gives the whole unmapped chunks of freed backing bytes back to the OS; the bytes emptied.</summary>
     public ulong ReleaseBacking(ulong offset, ulong size) => _disposed ? 0 : _views.Release(offset, size);
 

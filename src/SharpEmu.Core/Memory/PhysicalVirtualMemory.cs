@@ -1764,6 +1764,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public ulong BackingChunkBytes => HasBackingOwner() ? _backedSpace!.BackingChunkBytes : 0;
 
+    public SharpEmu.HLE.GuestMemory.GuestSingleCopy? SingleCopy => HasBackingOwner() ? _backedSpace!.SingleCopy : null;
+
     public bool TryReleaseBacking(ulong offset, ulong size)
     {
         _gate.EnterWriteLock();

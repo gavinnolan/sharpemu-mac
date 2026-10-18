@@ -77,6 +77,14 @@ public sealed class HostBackingObject : IDisposable
     public Func<HostBackingObject, ulong, ulong, HostBackingDiscard>? DiscardChunks { get; init; }
 
     /// <summary>
+    /// The backend's second mapping of a chunked backing for GPU windows
+    /// (<see cref="IHostBackingGpuAlias"/>), set together with <see cref="ChunkBytes"/>;
+    /// null when the backend cannot make one. Each call makes a new mapping the caller owns.
+    /// </summary>
+    /// <remarks>Host-package contract; written by the owning backend.</remarks>
+    public Func<HostBackingObject, IHostBackingGpuAlias?>? CreateGpuAlias { get; init; }
+
+    /// <summary>
     /// Creates a backing object for storage the caller has already reserved at
     /// <paramref name="aliasBase"/>.
     /// </summary>

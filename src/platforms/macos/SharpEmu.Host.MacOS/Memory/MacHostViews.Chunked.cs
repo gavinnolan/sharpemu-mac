@@ -104,6 +104,7 @@ internal sealed unsafe partial class MacHostViews
             {
                 ChunkBytes = GuestChunkBytes,
                 DiscardChunks = DiscardChunks,
+                CreateGpuAlias = ChunkedGpuAlias.TryCreate,
             };
             MacMappedCopyState.Ledger?.RegisterBacking(backing);
         }
@@ -249,6 +250,126 @@ internal sealed unsafe partial class MacHostViews
         }
 
         return new HostBackingDiscard(emptied, emptiedChunks, zeroFilled);
+    }
+
+    // HostBackingObject.CreateGpuAlias: the alias remapped once more (copy=FALSE, so the same
+    // chunk objects) for the GPU's windows, and one non-purgeable 64 KiB dummy object whose
+    // port is kept so it can be mapped over any number of punched chunks. Measured under
+    // Rosetta on an M4 (artifacts/memopt/single-copy-textures.md §4): remapping an 18 GiB
+    // alias of 64 KiB chunks takes ~0.3 s, a punch or a fill ~20 µs, and the remap keeps one
+    // map entry per chunk, so a window over it costs what one over the alias does.
+    private sealed class ChunkedGpuAlias : IHostBackingGpuAlias
+    {
+        private readonly HostBackingObject _backing;
+        private readonly uint _dummy;
+        private readonly ulong _dummyView;
+        private int _disposed;
+
+        private ChunkedGpuAlias(HostBackingObject backing, ulong address, uint dummy, ulong dummyView)
+        {
+            _backing = backing;
+            Base = address;
+            Size = backing.NativeAliasSize;
+            _dummy = dummy;
+            _dummyView = dummyView;
+        }
+
+        public ulong Base { get; }
+
+        public ulong Size { get; }
+
+        public static IHostBackingGpuAlias? TryCreate(HostBackingObject backing)
+        {
+            if (backing.ChunkBytes != GuestChunkBytes || backing.IsDisposed)
+            {
+                return null;
+            }
+
+            var task = mach_task_self();
+            var size = backing.NativeAliasSize;
+            ulong address = 0;
+            if (mach_vm_remap(task, ref address, size, GuestChunkBytes - 1, VM_FLAGS_ANYWHERE, task, backing.AliasBase, 0,
+                    out _, out _, VM_INHERIT_SHARE) != KERN_SUCCESS)
+            {
+                return null;
+            }
+
+            var entrySize = GuestChunkBytes;
+            if (mach_make_memory_entry_64(task, ref entrySize, 0, MAP_MEM_NAMED_CREATE | VM_PROT_READ_WRITE, out var dummy, 0) !=
+                KERN_SUCCESS)
+            {
+                mach_vm_deallocate(task, address, size);
+                return null;
+            }
+
+            ulong view = 0;
+            if (entrySize < GuestChunkBytes ||
+                mach_vm_map(task, ref view, GuestChunkBytes, GuestChunkBytes - 1, VM_FLAGS_ANYWHERE | GuestChunkTagFlags, dummy, 0, 0,
+                    VM_PROT_READ_WRITE, VM_PROT_READ_WRITE, VM_INHERIT_SHARE) != KERN_SUCCESS)
+            {
+                mach_port_deallocate(task, dummy);
+                mach_vm_deallocate(task, address, size);
+                return null;
+            }
+
+            return new ChunkedGpuAlias(backing, address, dummy, view);
+        }
+
+        public bool TryPunch(ulong offset, ulong size)
+        {
+            if (!IsWholeChunks(offset, size))
+            {
+                return false;
+            }
+
+            var task = mach_task_self();
+            for (var cursor = offset; cursor < offset + size; cursor += GuestChunkBytes)
+            {
+                var length = Math.Min(GuestChunkBytes, Size - cursor);
+                var target = Base + cursor;
+                if (mach_vm_map(task, ref target, length, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | GuestChunkTagFlags, _dummy, 0, 0,
+                        VM_PROT_READ_WRITE, VM_PROT_READ_WRITE, VM_INHERIT_SHARE) != KERN_SUCCESS || target != Base + cursor)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public bool TryFill(ulong offset, ulong size)
+        {
+            if (!IsWholeChunks(offset, size))
+            {
+                return false;
+            }
+
+            var task = mach_task_self();
+            var length = Math.Min(size, Size - offset);
+            var target = Base + offset;
+            return mach_vm_remap(task, ref target, length, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, task,
+                       _backing.AliasBase + offset, 0, out _, out _, VM_INHERIT_SHARE) == KERN_SUCCESS &&
+                   target == Base + offset;
+        }
+
+        public void FillDummy(byte value) => new Span<byte>((void*)_dummyView, (int)GuestChunkBytes).Fill(value);
+
+        private bool IsWholeChunks(ulong offset, ulong size) =>
+            Volatile.Read(ref _disposed) == 0 && size != 0 && offset % GuestChunkBytes == 0 && offset < Size &&
+            size <= Size - offset && (size % GuestChunkBytes == 0 || offset + size == Size);
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            var task = mach_task_self();
+            mach_vm_deallocate(task, Base, Size);
+            mach_vm_deallocate(task, _dummyView, GuestChunkBytes);
+            mach_port_deallocate(task, _dummy);
+        }
     }
 
     [LibraryImport("libSystem.B.dylib")]
