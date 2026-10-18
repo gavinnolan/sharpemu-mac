@@ -18,7 +18,7 @@ public delegate bool ResidentGuestBytesReader(ulong address, Span<byte> destinat
 // does not distinguish two draws; the snapshot a hit returns carries the current user
 // data. Any failed read, any GPU-owned range and any byte difference make the entry
 // miss; nothing is guessed.
-public sealed class ResourceMaterializationCache
+public sealed partial class ResourceMaterializationCache
 {
     // Two generations approximate LRU: a full young generation becomes the old one,
     // and an old entry that is used again is promoted back.
@@ -248,6 +248,7 @@ public sealed class ResourceMaterializationCache
                 {
                     _memoryState[buffer] = MemoryRejected;
                     _memoryLearnable--;
+                    Interlocked.Increment(ref _memoryBasesRejected);
                 }
                 else if (_memoryState[buffer] < MemoryActive)
                 {
@@ -802,6 +803,36 @@ public sealed class ResourceMaterializationCache
     private static readonly string[] RefreshRefusalNames = ["not_refreshable", "unreadable", "descriptor_words", "unchanged", "table_eval", "rebased"];
     private int _lastRefreshRefusal;
 
+    // Why a rebased refresh was refused, for the render report; MemoryBasesRejected counts bases a
+    // wrong prediction rejected for good.
+    private enum RebaseRefusal
+    {
+        NoMap,
+        Unreadable,
+        BaseInWindow,
+        RejectedBase,
+        ChangedWord,
+        NoBaseChange,
+        Table,
+        Count,
+    }
+
+    private static readonly string[] RebaseRefusalNames =
+        ["no_map", "unreadable", "base_in_window", "rejected_base", "changed_word", "no_base_change", "table"];
+    private static readonly long[] _rebaseRefusals = new long[(int)RebaseRefusal.Count];
+    private static long _memoryBasesRejected;
+
+    private static bool RefuseRebase(RebaseRefusal reason)
+    {
+        Interlocked.Increment(ref _rebaseRefusals[(int)reason]);
+        return false;
+    }
+
+    private static string TakeRebaseReport() =>
+        " rebase_refused=" + string.Join(",", RebaseRefusalNames.Select((name, index) =>
+            FormattableString.Invariant($"{name}:{Interlocked.Exchange(ref _rebaseRefusals[index], 0)}"))) +
+        FormattableString.Invariant($" memory_bases_rejected={Interlocked.Exchange(ref _memoryBasesRejected, 0)}");
+
 
     [ThreadStatic]
     private static bool _readingTable;
@@ -831,6 +862,7 @@ public sealed class ResourceMaterializationCache
         var total = hits + misses;
         return FormattableString.Invariant(
             $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}") +
+            TakeSlotReport() + TakeRebaseReport() +
             TakeStaleDifferenceReport();
     }
 
@@ -939,6 +971,10 @@ public sealed class ResourceMaterializationCache
         ulong[]? learned;
         AddressRebase rebase;
         ulong key;
+        var phase = SlotRefreshRuntime.Phase();
+        if (phase != _slotPhase)
+            ReportSlotPhase(phase);
+        var slotRefresh = SlotRefreshRuntime.Enabled(phase);
         using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CacheKey))
         {
             drawKey = DrawKeyOf(plan, inputs);
@@ -965,7 +1001,7 @@ public sealed class ResourceMaterializationCache
                 if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant))
                     continue;
                 stale ??= variant;
-                if (Validate(variant, residentReader, rebase, inputs.UserData, out var variantUnreadable))
+                if (Validate(variant, residentReader, rebase, inputs.UserData, slotRefresh, out var variantUnreadable))
                 {
                     if (previous is not null)
                     {
@@ -983,6 +1019,57 @@ public sealed class ResourceMaterializationCache
                 }
 
                 unreadable |= variantUnreadable;
+            }
+
+            // Slots evaluated again first: exact, and it follows a moved pointer the rebase cannot.
+            var tableRefused = false;
+            if (stale is not null && slotRefresh)
+            {
+                if (SlotPlanOf(plan) is not { } slots)
+                {
+                    RefuseSlots(SlotRefusal.Plan);
+                }
+                else
+                {
+                    for (Entry? previousVariant = null, variant = cached; variant is not null; previousVariant = variant, variant = variant.Next)
+                    {
+                        if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant))
+                            continue;
+                        // A rebased word that moves, or an entry whose bytes were read where another
+                        // draw's rebased words moved them: the slots would be read elsewhere.
+                        if (variant.MovedReads || rebase.Moves(variant, inputs.UserData))
+                        {
+                            RefuseSlots(SlotRefusal.UserData);
+                            continue;
+                        }
+
+                        if (TryRefreshSlots(variant, plan, slots, inputs, residentReader, rebase, out var evaluated, out var descriptorChanged))
+                        {
+                            if (ReferenceEquals(variant, cached))
+                            {
+                                evaluated.Next = cached.Next;
+                            }
+                            else
+                            {
+                                previousVariant!.Next = variant.Next;
+                                evaluated.Next = cached;
+                            }
+
+                            Store(key, evaluated);
+                            TableRefreshes++;
+                            SlotRefreshes++;
+                            Interlocked.Increment(ref _totalRefreshes);
+                            Interlocked.Increment(ref _totalSlotRefreshes);
+                            snapshot = evaluated.Snapshot;
+                            specialization = evaluated.Specialization;
+                            failure = default;
+                            return true;
+                        }
+
+                        // A descriptor slot that changed is a word the table refresh would refuse.
+                        tableRefused |= descriptorChanged && ReferenceEquals(variant, cached);
+                    }
+                }
             }
 
             // Moved bases first: a changed base word is a descriptor word, which a table refresh
@@ -1029,6 +1116,10 @@ public sealed class ResourceMaterializationCache
                 }
 
                 learning = (patches, rebased, refreshedFrom);
+            }
+            else if (tableRefused)
+            {
+                _lastRefreshRefusal = 2;
             }
             else if (rebase.AppliesTo(cached) && TryRefreshTable(key, cached, plan, inputs, residentReader, rebase, out var refreshed))
             {
@@ -1147,36 +1238,42 @@ public sealed class ResourceMaterializationCache
         if (!cached.TableRefreshable)
             return false;
 
-        var current = new byte[cached.Bytes.Length];
-        var moved = cached.RangeAddresses;
-        if (rebase.Moves(cached, inputs.UserData))
-        {
-            moved = new ulong[cached.RangeAddresses.Length];
-            for (var index = 0; index < moved.Length; index++)
-                moved[index] = rebase.MoveRead(cached, inputs.UserData, cached.RangeAddresses[index], cached.RangeLengths[index]);
-        }
-
+        // Each range is compared as soon as it is read: the first changed descriptor word refuses
+        // the entry before the rest is read. The words are kept only once the refresh succeeds.
+        if (_refreshCurrent.Length < cached.Bytes.Length)
+            _refreshCurrent = new byte[Math.Max(cached.Bytes.Length, _refreshCurrent.Length * 2)];
+        var current = _refreshCurrent;
+        var moves = rebase.Moves(cached, inputs.UserData);
+        if (moves && _refreshMoved.Length < cached.RangeAddresses.Length)
+            _refreshMoved = new ulong[Math.Max(cached.RangeAddresses.Length, _refreshMoved.Length * 2)];
+        var changed = false;
         for (var index = 0; index < cached.RangeAddresses.Length; index++)
         {
-            if (!residentReader(moved[index], current.AsSpan(cached.RangeOffsets[index], cached.RangeLengths[index]), cached.RangeClean[index]))
+            var address = cached.RangeAddresses[index];
+            var start = cached.RangeOffsets[index];
+            var length = cached.RangeLengths[index];
+            if (moves)
+                _refreshMoved[index] = address = rebase.MoveRead(cached, inputs.UserData, address, length);
+            if (!residentReader(address, current.AsSpan(start, length), cached.RangeClean[index]))
             {
                 _lastRefreshRefusal = 1;
                 return false;
             }
-        }
 
-        var changed = false;
-        for (var offset = 0; offset < current.Length; offset += sizeof(uint))
-        {
-            if (current.AsSpan(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
+            if (current.AsSpan(start, length).SequenceEqual(cached.Bytes.AsSpan(start, length)))
                 continue;
-            if (!cached.WordTableOnly[offset / sizeof(uint)])
+            for (var offset = start; offset < start + length; offset += sizeof(uint))
             {
-                _lastRefreshRefusal = 2;
-                return false;
-            }
+                if (current.AsSpan(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
+                    continue;
+                if (!cached.WordTableOnly[offset / sizeof(uint)])
+                {
+                    _lastRefreshRefusal = 2;
+                    return false;
+                }
 
-            changed = true;
+                changed = true;
+            }
         }
 
         if (!changed)
@@ -1219,9 +1316,9 @@ public sealed class ResourceMaterializationCache
 
             foreach (var (address, word, _, _) in recorder.Reads)
             {
-                var found = ReferenceEquals(moved, cached.RangeAddresses)
-                    ? TryFindWord(cached, address, out var offset)
-                    : TryFindMovedWord(cached, moved, address, out offset);
+                var found = moves
+                    ? TryFindMovedWord(cached, _refreshMoved, address, out var offset)
+                    : TryFindWord(cached, address, out offset);
                 if (!found || System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
                     return false;
             }
@@ -1245,7 +1342,8 @@ public sealed class ResourceMaterializationCache
                 WordTableOnly = cached.WordTableOnly,
                 BaseWordBuffers = cached.BaseWordBuffers,
                 TableRefreshable = true,
-                Bytes = current,
+                MovedReads = moves || cached.MovedReads,
+                Bytes = current.AsSpan(0, cached.Bytes.Length).ToArray(),
                 Snapshot = new ResourceSnapshot
                 {
                     Buffers = previous.Buffers,
@@ -1302,33 +1400,8 @@ public sealed class ResourceMaterializationCache
     }
 
     // The byte offset of a recorded dword in the entry's bytes, found by its address.
-    private static bool TryFindWord(Entry entry, ulong address, out int offset)
-    {
-        offset = 0;
-        var addresses = entry.RangeAddresses;
-        int low = 0, high = addresses.Length - 1, found = -1;
-        while (low <= high)
-        {
-            var middle = (low + high) >>> 1;
-            if (addresses[middle] <= address)
-            {
-                found = middle;
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
-        }
-
-        if (found < 0)
-            return false;
-        var delta = address - addresses[found];
-        if (delta % sizeof(uint) != 0 || delta >= (ulong)entry.RangeLengths[found])
-            return false;
-        offset = entry.RangeOffsets[found] + (int)delta;
-        return true;
-    }
+    private static bool TryFindWord(Entry entry, ulong address, out int offset) =>
+        TryFindRange(entry, address, out _, out offset);
 
     private static ulong DrawKeyOf(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
@@ -1436,7 +1509,7 @@ public sealed class ResourceMaterializationCache
         {
             if (!previous.Matches(plan, inputs, probe) || !rebase.AppliesTo(previous))
                 return null;
-            if (Validate(previous, residentReader, rebase, inputs.UserData, out _))
+            if (Validate(previous, residentReader, rebase, inputs.UserData, false, out _))
                 return (rebase.Apply(WithCurrentUserData(previous.Snapshot, inputs.UserData), inputs.UserData), null);
             if (rebase.HasLearnableMemoryBases &&
                 TryRebaseRefresh(previous, plan, inputs, residentReader, rebase, out var snapshot, out var patches))
@@ -1564,6 +1637,8 @@ public sealed class ResourceMaterializationCache
     }
 
     private byte[] _rebaseCurrent = [];
+    private byte[] _refreshCurrent = [];
+    private ulong[] _refreshMoved = [];
     private ulong[] _rebaseMoved = [];
     private readonly List<(int Buffer, uint Word)> _rebaseBases = new();
 
@@ -1602,7 +1677,7 @@ public sealed class ResourceMaterializationCache
         snapshot = null!;
         patches = null!;
         if (entry.BaseWordBuffers is not { } map)
-            return false;
+            return RefuseRebase(RebaseRefusal.NoMap);
         var userData = inputs.UserData;
         // The words read here are compared and copied, never kept, so the buffers are reused.
         if (_rebaseCurrent.Length < entry.Bytes.Length)
@@ -1618,7 +1693,17 @@ public sealed class ResourceMaterializationCache
                 continue;
             moved[index] = rebase.MoveRead(entry, userData, entry.RangeAddresses[index], entry.RangeLengths[index]);
             if (!residentReader(moved[index], current.AsSpan(entry.RangeOffsets[index], entry.RangeLengths[index]), entry.RangeClean[index]))
-                return false;
+                return RefuseRebase(RebaseRefusal.Unreadable);
+            // A changed word of a range that does not move is a base or a constant, or the entry is
+            // refused below whatever the other ranges hold.
+            for (var offset = entry.RangeOffsets[index]; offset < entry.RangeOffsets[index] + entry.RangeLengths[index]; offset += sizeof(uint))
+            {
+                var word = offset / sizeof(uint);
+                if (map[word] < 0 && !entry.WordTableOnly[word] &&
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset)) !=
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset)))
+                    return RefuseRebase(RebaseRefusal.ChangedWord);
+            }
         }
 
         // The new base of each buffer whose base word changed, from the ranges read so far. A base
@@ -1629,7 +1714,7 @@ public sealed class ResourceMaterializationCache
         foreach (var (range, rangeOffset) in entry.BaseWordProbes ??= BaseWordProbesOf(entry))
         {
             if (windowed[range] != NoBase)
-                return false;
+                return RefuseRebase(RebaseRefusal.BaseInWindow);
             var offset = entry.RangeOffsets[range] + rangeOffset;
             var now = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset));
             if (now != System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset)))
@@ -1648,7 +1733,7 @@ public sealed class ResourceMaterializationCache
                     newBase = word;
             moved[index] = entry.RangeAddresses[index] - oldBase + newBase;
             if (!residentReader(moved[index], current.AsSpan(entry.RangeOffsets[index], entry.RangeLengths[index]), entry.RangeClean[index]))
-                return false;
+                return RefuseRebase(RebaseRefusal.Unreadable);
         }
 
         List<(int Buffer, uint Word)>? found = null;
@@ -1670,18 +1755,18 @@ public sealed class ResourceMaterializationCache
                 if (buffer >= 0)
                 {
                     if (rebase.IsRejectedMemoryBase(buffer))
-                        return false;
+                        return RefuseRebase(RebaseRefusal.RejectedBase);
                     (found ??= new()).Add((buffer, now));
                 }
                 else if (!entry.WordTableOnly[word])
-                    return false;
+                    return RefuseRebase(RebaseRefusal.ChangedWord);
                 else
                     constantsOutsideWindows |= windowed[index] == NoBase;
             }
         }
 
         if (found is null)
-            return false;
+            return RefuseRebase(RebaseRefusal.NoBaseChange);
         var patched = rebase.PatchMemoryBases(rebase.Apply(WithCurrentUserData(entry.Snapshot, userData), userData), found);
         // A changed constant outside the windows is still copied when every slot is a direct load:
         // each slot's word is then the dword at its own address, which this draw has just read.
@@ -1715,7 +1800,7 @@ public sealed class ResourceMaterializationCache
         if (plan.TableReads.Count != 0)
         {
             if (!entry.TableRefreshable)
-                return false;
+                return RefuseRebase(RebaseRefusal.Table);
             var windows = new List<(ulong Start, ulong Size)>(found.Count);
             foreach (var (buffer, baseWord) in found)
                 if (AddressRebase.TryMovedWindow(patched.Buffers[buffer], baseWord, out var start, out var size))
@@ -1749,7 +1834,7 @@ public sealed class ResourceMaterializationCache
                 }
 
                 if (!evaluated || recorder.Failed || table.Length != cachedTable.Length)
-                    return false;
+                    return RefuseRebase(RebaseRefusal.Table);
 
                 foreach (var (address, word, _, _) in recorder.Reads)
                 {
@@ -1760,7 +1845,7 @@ public sealed class ResourceMaterializationCache
                         continue;
                     if (!TryFindMovedWord(entry, moved, address, out var offset) ||
                         System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
-                        return false;
+                        return RefuseRebase(RebaseRefusal.Table);
                 }
 
                 // The written device-address slots come from reads validated unchanged above.
@@ -1789,9 +1874,11 @@ public sealed class ResourceMaterializationCache
     }
 
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase, IReadOnlyList<uint> userData,
-        out bool unreadable)
+        bool joined, out bool unreadable)
     {
         unreadable = false;
+        if (joined && rebase.Active.Length == 0)
+            return ValidateJoined(entry, residentReader, out unreadable);
         // A memory-loaded base usually moved when anything did: its few bytes are checked before
         // ranges that can span kilobytes. The full comparison below still decides a match.
         if (entry.BaseWordBuffers is not null)
@@ -1851,6 +1938,12 @@ public sealed class ResourceMaterializationCache
         public int[]? RangeWindows { get; set; }
         public int[]? TableCopySources { get; set; }
         public (int Range, int Offset)[]? BaseWordProbes { get; set; }
+        // Bytes a table refresh read where rebased words moved the ranges, not at RangeAddresses.
+        public bool MovedReads { get; init; }
+        // Filled on the first slot refresh of the entry; see ModelOf.
+        public SlotModel? Slots { get; set; }
+        // Filled on the first joined validation of the entry; see JoinedReadsOf.
+        public JoinedReads? Joined { get; set; }
         public Entry? Next { get; set; }
 
         // A rebased word is an address the hit patches in, so it does not distinguish entries.
@@ -1947,6 +2040,8 @@ public sealed class ResourceMaterializationCache
 
         public List<(ulong Address, uint Word, bool Clean, bool Table)> Reads => _reads;
 
+        public void Record(ulong address, uint word, bool clean, bool table) => _reads.Add((address, word, clean, table));
+
         public Action<bool> TablePhase { get; }
 
         public GuestWordReader? Wrap(GuestWordReader? inner, bool clean)
@@ -1993,7 +2088,7 @@ public sealed class ResourceMaterializationCache
         }
 
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,
-            ResourceSpecialization specialization, IReadOnlyList<int> memoryBases)
+            ResourceSpecialization specialization, IReadOnlyList<int> memoryBases, ulong[]? usedUserData = null)
         {
             // Reads mostly arrive in address order; sorting a sorted list was ~5% of a draw-heavy render thread.
             var ordered = true;
@@ -2060,7 +2155,7 @@ public sealed class ResourceMaterializationCache
                 BaseWordBuffers = memoryBases.Count == 0 ? null : MapBaseWords(snapshot, memoryBases, bytes),
                 Plan = plan,
                 UserData = userData,
-                UsedUserData = _userData.TakeUsed(),
+                UsedUserData = usedUserData ?? _userData.TakeUsed(),
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
                 RangeAddresses = addresses,
