@@ -24,13 +24,18 @@ public static class HostViewRegions
     private readonly record struct Region(ulong Start, ulong End, uint State, uint Protection,
         uint[]? PageProtections, ulong PageBase);
     private static readonly List<Region> Regions = new();
+    // The table Replace rebuilds into, kept under Gate like Regions: a fresh one per map
+    // call was a copy of every region, on the large object heap once there are thousands.
+    private static readonly List<Region> Replacement = new();
 
     /// <summary>Records a new view mapping over <paramref name="address"/>, replacing any it overlaps.</summary>
     public static void Replace(ulong address, ulong size, uint state, uint protection)
     {
         HostMemory.OnMappingChanged();
         var end = RoundPageEnd(address, size);
-        var replacement = new List<Region>(Regions.Count + 2);
+        var replacement = Replacement;
+        replacement.Clear();
+        replacement.EnsureCapacity(Regions.Count + 2);
         foreach (var region in Regions)
         {
             if (region.End <= address || region.Start >= end)
@@ -61,6 +66,8 @@ public static class HostViewRegions
             else
                 Regions.Add(region);
         }
+        // The regions live on in Regions; the scratch keeps no page arrays alive.
+        replacement.Clear();
     }
 
     /// <summary>Records a protection change over an already mapped range.</summary>
