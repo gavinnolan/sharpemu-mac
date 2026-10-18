@@ -16,12 +16,14 @@ public sealed class WaitCoreTests
         using var service = new GuestTimerService("test-timer-order");
         var fired = new List<(int Index, long At)>();
         using var done = new CountdownEvent(3);
+        // The gaps leave room for the scheduling loop to be descheduled or JIT-compiled on a
+        // loaded runner: a deadline passed before its timer is armed fires out of order by design.
         var start = Stopwatch.GetTimestamp();
         var deadlines = new[]
         {
-            start + HostPreciseClock.MicrosecondsToTicks(30_000),
-            start + HostPreciseClock.MicrosecondsToTicks(10_000),
-            start + HostPreciseClock.MicrosecondsToTicks(20_000),
+            start + HostPreciseClock.MicrosecondsToTicks(300_000),
+            start + HostPreciseClock.MicrosecondsToTicks(100_000),
+            start + HostPreciseClock.MicrosecondsToTicks(200_000),
         };
         for (var i = 0; i < deadlines.Length; i++)
         {

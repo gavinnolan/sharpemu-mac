@@ -9,6 +9,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- The Metal runtime harness pins buffers and uses source-generated interop. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- These tests drive the Metal runtime through libobjc, which only exists on macOS;
+         elsewhere the project still builds but `dotnet test` skips it. -->
+    <IsTestProject Condition="!$([MSBuild]::IsOSPlatform('OSX'))">false</IsTestProject>
   </PropertyGroup>
 
   <!-- Deliberately self-contained: this project is the model for how per-backend shader
