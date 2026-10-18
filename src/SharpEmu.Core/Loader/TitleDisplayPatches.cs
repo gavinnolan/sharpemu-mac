@@ -9,13 +9,13 @@ namespace SharpEmu.Core.Loader;
 /// <summary>
 /// Per-title display-size patches, chosen by <see cref="EnvironmentVariable"/>:
 /// <list type="bullet">
-/// <item><c>mode</c>: start the title in its own HD display mode (<see cref="DisplayModeProfile"/>).
-/// The title then sizes its output, UI canvas and UI layout consistently for 1080p; below 1080p
-/// only its internal render size shrinks, inside the upscale its reduced HD mode ships with.</item>
-/// <item><c>1</c>: rewrite every compiled 3840x2160 size to the display while the title stays
-/// in its 4K mode. Demon's Souls' UI keeps its 4K layout on the shrunken canvas, so the HUD
-/// comes out 2x (1080p) or 3x (720p) and its item cells break.</item>
-/// <item>unset or <c>0</c>: the title's own sizes, as a PS5 runs it: Demon's Souls outputs 4K
+/// <item>unset or <c>1</c>: rewrite every compiled 3840x2160 size to the display while the
+/// title stays in its 4K mode. The fastest, but Demon's Souls' UI keeps its 4K layout on the
+/// shrunken canvas, so the HUD comes out 2x (1080p) or 3x (720p) and its item cells break.</item>
+/// <item><c>mode</c>: run the title in its own HD display mode, held there
+/// (<see cref="DisplayModeProfile"/>). Its UI canvas, layout and UI coordinates stay native HD;
+/// below 1080p only the HD mode's render targets shrink to the display.</item>
+/// <item><c>0</c>: the title's own sizes, as a PS5 runs it: Demon's Souls outputs 4K
 /// whatever the television is and the system scales it.</item>
 /// </list>
 /// Every site is verified against the bytes the known build carries before anything is
@@ -60,31 +60,37 @@ internal static class TitleDisplayPatches
         DisplayMode,
     }
 
-    /// <summary>A title that picks its display mode from a compiled default. Each
-    /// <see cref="DefaultModeSites"/> offset is the imm32 of a <c>mov r32, OldDefaultMode</c>.
-    /// <see cref="HdMode"/> outputs 1920x1080 from a 1920x1080 internal size;
-    /// <see cref="ReducedMode"/> outputs 1920x1080 from the smaller internal size at
-    /// <see cref="ReducedModeInternalSites"/>, which shrinks to a display below 1080p.</summary>
+    /// <summary>A code patch that is not a size: <see cref="New"/> replaces <see cref="Old"/>.</summary>
+    internal readonly record struct CodeSite(ulong Offset, byte[] Old, byte[] New);
+
+    /// <summary>A title that picks its display mode as "override, else a compiled default".
+    /// Each <see cref="DefaultModeSites"/> offset is the imm32 of a <c>mov r32, OldDefaultMode</c>
+    /// that becomes <see cref="HdMode"/>; <see cref="OverrideSites"/> drop the overrides (a saved
+    /// visual-mode option among them) so the mode holds. Below the HD size,
+    /// <see cref="HdOutputSites"/> (the HD output and display-buffer sizes) become the display
+    /// size and <see cref="HdInternalSites"/> shrink to it.</summary>
     internal sealed record DisplayModeProfile(
         IReadOnlyList<ulong> DefaultModeSites,
         uint OldDefaultMode,
         uint HdMode,
-        uint ReducedMode,
-        IReadOnlyList<Site> ReducedModeInternalSites)
+        IReadOnlyList<CodeSite> OverrideSites,
+        uint HdWidth,
+        uint HdHeight,
+        IReadOnlyList<Site> HdOutputSites,
+        IReadOnlyList<Site> HdInternalSites)
     {
-        /// <summary>The mode for a display <paramref name="height"/> lines high; null keeps
-        /// the title's own 4K mode.</summary>
+        /// <summary>The mode for the display; null keeps the title's own 4K mode.</summary>
         public uint? ModeFor(uint width, uint height) =>
-            width >= 3840 || height >= 2160 ? null : height >= 1080 ? HdMode : ReducedMode;
+            width >= 3840 || height >= 2160 ? null : HdMode;
     }
 
-    // Off until a run has checked the display mode: the title's own sizes are what a PS5 runs it with.
+    // Unset keeps the fast rewrite of every site until the display mode has been checked in a run.
     internal static Strategy SelectedStrategy =>
         Environment.GetEnvironmentVariable(EnvironmentVariable) switch
         {
-            "1" => Strategy.AllSites,
+            "0" => Strategy.Off,
             "mode" => Strategy.DisplayMode,
-            _ => Strategy.Off,
+            _ => Strategy.AllSites,
         };
 
     // Demon's Souls (PPSA01342, v01.004.000). The video-out setup creates its "DisplayBuffer"
@@ -138,15 +144,44 @@ internal static class TitleDisplayPatches
     // decision keys off mode 3 or 4: the registered display buffers (0x9449B0), the
     // display-size getters (0x9E7F80 / 0x9E7FB0), the window margins (0x945745), the UI canvas
     // ({1920,3840} x {1080,2160} at 0x2172C00 / 0x2172A08, read at 0xEB4022 and 0xECBCCE) and
-    // the UI's 4K layout switch (0xEB43B9).
+    // the UI's 4K layout switch (0xEB43B9). A saved visual mode (r_Wants4K_Game 3 or 4) takes
+    // over from the default once the save loads, so the two cmovne at each site go.
+    //
+    // Below 1080p the HD mode's render targets shrink: the output size (table index 1) and the
+    // 1920x1080 views of the display buffers (0x9453E1 / 0x94547A, whose sizes 0x944CB7 hands
+    // to sceVideoOutSetBufferAttribute2 in the HD mode) become the display size, and the
+    // internal size shrinks to it. The UI keeps its native HD units: its canvas tables and the
+    // display-size getters, which the UI uses for safe-area coordinates (0xC29B56, 0xC3DE66,
+    // 0xC43570), stay 1920x1080. The UI maps its canvas onto the target rather than assuming
+    // canvas pixels are target pixels: a 1920x1080 canvas on a 4K target is a state it handles
+    // (the 0.5 / 2.0 canvas scale at 0xEB43DA).
+    private static readonly byte[] Nop3 = [0x0F, 0x1F, 0x00];
+
     private static readonly DisplayModeProfile DemonsSoulsModes = new(
         [0xA63E41, 0xBC8056, 0xEB436C],
         OldDefaultMode: 3,
         HdMode: 2,
-        ReducedMode: 1,
         [
-            new(0x1FFBE20, Slot.Width, 1600, 900, Role.Internal),
-            new(0x1FFD750, Slot.Height, 1600, 900, Role.Internal),
+            new(0xA63E47, [0x0F, 0x45, 0xF1], Nop3),
+            new(0xA63E4C, [0x0F, 0x45, 0xF0], Nop3),
+            new(0xBC806F, [0x0F, 0x45, 0xF1], Nop3),
+            new(0xBC8074, [0x0F, 0x45, 0xF0], Nop3),
+            new(0xEB4372, [0x0F, 0x45, 0xC1], Nop3),
+            new(0xEB437A, [0x0F, 0x45, 0xC3], Nop3),
+        ],
+        HdWidth: 1920,
+        HdHeight: 1080,
+        [
+            new(0x1FFA5D4, Slot.Width, 1920, 1080, Role.Output),
+            new(0x1FFBE34, Slot.Height, 1920, 1080, Role.Output),
+            new(0x9453E2, Slot.Width, 1920, 1080, Role.Output),
+            new(0x9453E7, Slot.Height, 1920, 1080, Role.Output),
+            new(0x94547B, Slot.Width, 1920, 1080, Role.Output),
+            new(0x945480, Slot.Height, 1920, 1080, Role.Output),
+        ],
+        [
+            new(0x1FFBE24, Slot.Width, 1920, 1080, Role.Internal),
+            new(0x1FFD754, Slot.Height, 1920, 1080, Role.Internal),
         ]);
 
     internal static DisplayModeProfile? DisplayModeFor(string? titleId) =>
@@ -218,12 +253,13 @@ internal static class TitleDisplayPatches
             ? $"[LOADER][INFO] {titleId}: starts in its display mode {DisplayModeFor(titleId)!.ModeFor(width, height)} " +
               $"for a {width}x{height} display ({patches.Count} sites, {EnvironmentVariable}=mode)."
             : $"[LOADER][INFO] {titleId}: compiled display sizes rewritten to {width}x{height} at {patches.Count} sites " +
-              $"({EnvironmentVariable}=1; the title's UI keeps its 4K layout and comes out oversized).");
+              $"(the title's UI keeps its 4K layout and comes out oversized; {EnvironmentVariable}=mode runs its HD " +
+              $"mode, =0 keeps its own sizes).");
         return true;
     }
 
-    /// <summary>The default-mode rewrites that start the title in its HD mode, plus, for a
-    /// display below 1080p, its reduced mode's internal size shrunk to the display.</summary>
+    /// <summary>The rewrites that hold the title in its HD mode and, below the HD size, shrink
+    /// that mode's render targets to the display. Nothing the UI lays out in is touched.</summary>
     internal static List<GuestBytePatcher.Patch> BuildDisplayModePatches(
         DisplayModeProfile profile, uint width, uint height)
     {
@@ -239,20 +275,28 @@ internal static class TitleDisplayPatches
         BinaryPrimitives.WriteUInt32LittleEndian(replacement, mode);
         foreach (var offset in profile.DefaultModeSites)
         {
-            patches.Add(new GuestBytePatcher.Patch(
-                offset,
-                replacement,
-                old,
-                $"0x{offset:X}={Convert.ToHexString(replacement).ToLowerInvariant()}?{Convert.ToHexString(old).ToLowerInvariant()}"));
+            patches.Add(CreatePatch(offset, old, replacement));
         }
 
-        if (mode == profile.ReducedMode)
+        foreach (var site in profile.OverrideSites)
         {
-            patches.AddRange(BuildPatches(profile.ReducedModeInternalSites, width, height));
+            patches.Add(CreatePatch(site.Offset, site.Old, site.New));
         }
 
+        // Render targets only shrink: a display between 1080p and 4K keeps the HD sizes.
+        var targetWidth = Math.Min(width, profile.HdWidth);
+        var targetHeight = Math.Min(height, profile.HdHeight);
+        patches.AddRange(BuildPatches(profile.HdOutputSites, targetWidth, targetHeight));
+        patches.AddRange(BuildPatches(profile.HdInternalSites, targetWidth, targetHeight));
         return patches;
     }
+
+    private static GuestBytePatcher.Patch CreatePatch(ulong offset, byte[] old, byte[] replacement) =>
+        new(
+            offset,
+            replacement,
+            old,
+            $"0x{offset:X}={Convert.ToHexString(replacement).ToLowerInvariant()}?{Convert.ToHexString(old).ToLowerInvariant()}");
 
     internal static List<GuestBytePatcher.Patch> BuildPatches(IReadOnlyList<Site> sites, uint width, uint height)
     {

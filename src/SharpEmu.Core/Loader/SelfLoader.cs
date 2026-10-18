@@ -587,8 +587,8 @@ public sealed class SelfLoader : ISelfLoader
         }
     }
 
-    /// <summary>Opt-in only: rewrites a title's compiled display sizes to the display the host
-    /// advertises through sceVideoOut; see <see cref="TitleDisplayPatches"/>.</summary>
+    /// <summary>Rewrites a title's compiled display sizes to the display the host advertises
+    /// through sceVideoOut; see <see cref="TitleDisplayPatches"/>.</summary>
     private static void ApplyTitleDisplayPatch(
         IVirtualMemory virtualMemory,
         IReadOnlyList<ProgramHeader> programHeaders,

@@ -43,9 +43,8 @@ public enum GuestDisplayResolution
     /// <summary>3840x2160.</summary>
     Uhd,
 
-    /// <summary>1280x720: for titles that size their render targets from the reported
-    /// display, a way to cut their pixel work below 1080p. A title that registers its own
-    /// fixed-size buffers keeps them, and the presenter scales them as a PS5 does.</summary>
+    /// <summary>1280x720: for titles whose compiled render sizes follow the display (see
+    /// TitleDisplayPatches), a way to cut their pixel work below 1080p.</summary>
     Hd720,
 }
 
