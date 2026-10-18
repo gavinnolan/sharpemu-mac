@@ -1288,6 +1288,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         MetalCachedImage image, ulong start, ulong end, MetalWritebackCause cause,
         out MetalAliasFallbackReason failure)
     {
+        using var censusScope = MetalGpuReferenceCensus.Scope(MetalRefKind.ImageWriteback);
         ref readonly var description = ref image.Description;
         if (image.Texture == 0 || ImageDescription.IsEmptyRange(description.Data))
         {
@@ -1727,6 +1728,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // Uploads the guest bytes of a CPU-dirty image through the tiler.
     private void RefreshFromGuest(MetalCachedImage image)
     {
+        using var censusScope = MetalGpuReferenceCensus.Scope(MetalRefKind.ImageUpload);
         if (!image.IsCpuDirty || image.Texture == 0 || ImageDescription.IsEmptyRange(image.Description.Data))
         {
             return;
@@ -1965,6 +1967,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // the texture agree, so the image stays cached and clean.
     private void WriteBackToGuest(MetalCachedImage image, MetalWritebackCause cause)
     {
+        using var censusScope = MetalGpuReferenceCensus.Scope(MetalRefKind.ImageWriteback);
         if (!image.IsGpuModified || image.Texture == 0 || ImageDescription.IsEmptyRange(image.Description.Data))
         {
             image.ClearGpuModified();

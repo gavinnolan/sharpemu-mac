@@ -150,6 +150,7 @@ internal sealed partial class MetalRenderHost :
             _imageCache.StagedRanges = _stagedRanges;
         }
         _completions = new MetalCompletionQueue(_sharedEvent);
+        RegisterMemoryTelemetry();
     }
 
     public MetalGuestMemory GuestMemory => _guestMemory;
@@ -259,6 +260,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _commandBuffer = MetalNative.Send(_queue, SelCommandBuffer);
+        MetalMemoryTelemetry.CommandBuffers.Add();
         if (_commandBuffer == 0)
         {
             throw GpuFatal.Fatal("A Metal command buffer could not be created.");
@@ -556,6 +558,8 @@ internal sealed partial class MetalRenderHost :
             _imageCache.MarkFrame();
         }
 
+        NoteCommandBufferForTelemetry();
+        MetalMemoryTelemetry.Commits.Add();
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         if (DsTrace.Gpu && DsTrace.Armed)
         {
@@ -1073,6 +1077,8 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        MetalMemoryTelemetry.CommandBuffers.Add();
+        MetalMemoryTelemetry.Commits.Add();
         MetalNative.SendVoid(buffer, SelCommit);
         _keepWarmSubmissions++;
     }
@@ -1226,6 +1232,7 @@ internal sealed partial class MetalRenderHost :
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for a guest fill.");
@@ -1358,6 +1365,7 @@ internal sealed partial class MetalRenderHost :
         FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for a guest copy.");

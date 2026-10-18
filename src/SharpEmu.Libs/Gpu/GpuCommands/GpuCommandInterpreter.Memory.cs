@@ -543,10 +543,16 @@ public sealed partial class GpuCommandInterpreter
 
         var bufferSize = payload[0];
         var destination = (payload[1] & 0xFFFF_FFC0u) | ((ulong)payload[2] << 32);
+        var slotsBound = SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.Enabled
+            ? MipStatistics.Shared.BoundSlotCount
+            : 0;
         if (destination != 0 && bufferSize != 0 && _host.TryRecordLodStatistics(destination, bufferSize))
         {
+            SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NotePacket(bufferSize, destination, hostRecorded: true, slotsBound);
             return 4;
         }
+
+        SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NotePacket(bufferSize, destination, hostRecorded: false, slotsBound);
 
         if (destination != 0 && bufferSize != 0)
         {

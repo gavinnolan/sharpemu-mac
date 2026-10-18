@@ -908,6 +908,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private static void EncodeLabelCopies(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)
     {
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for an end-of-pipe label.");

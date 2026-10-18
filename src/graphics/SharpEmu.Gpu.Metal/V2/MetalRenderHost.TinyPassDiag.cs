@@ -70,6 +70,7 @@ internal sealed partial class MetalRenderHost
             }
 
             var encoder = MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor);
+            MetalMemoryTelemetry.RenderEncoders.Add();
             if (encoder != 0)
             {
                 MetalNative.SendVoid(encoder, SelEndEncoding);

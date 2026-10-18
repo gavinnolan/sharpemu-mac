@@ -300,6 +300,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     {
         context.ReleaseSharedEncoder();
         var encoder = MetalNative.Send(context.CommandBuffer, SelComputeEncoder);
+        MetalMemoryTelemetry.ComputeEncoders.Add();
         if (encoder == 0)
         {
             throw GpuFatal.Fatal("The tiler could not open a compute encoder.");
@@ -312,6 +313,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     {
         context.ReleaseSharedEncoder();
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
             throw GpuFatal.Fatal("The tiler could not open a blit encoder.");

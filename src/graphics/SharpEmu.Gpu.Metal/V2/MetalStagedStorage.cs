@@ -307,6 +307,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
                 if (encoder == 0)
                 {
                     encoder = MetalNative.Send(commandBuffer, SelComputeEncoder);
+                    MetalMemoryTelemetry.ComputeEncoders.Add();
                     if (encoder == 0)
                     {
                         throw GpuFatal.Fatal("A Metal compute encoder could not be created for staged storage stores.");
@@ -412,6 +413,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
     private static nint BlitEncoder(nint commandBuffer)
     {
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for a staged storage buffer.");

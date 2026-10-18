@@ -1097,6 +1097,8 @@ internal sealed partial class MetalRenderHost
     private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory gpuMemory)
     {
         _deviceAddressEntries.Clear();
+        // Not an exact reference: keep the scan out of the GPU reference census (the table counts as reach only).
+        using var censusSuppressed = MetalGpuReferenceCensus.Suppress();
         // The scan resolves every mapped span, which marks windows this submission may
         // not otherwise touch; remember the set the table needs and restore the rest.
         var touchedBefore = _guestMemory.TouchedWindows;
@@ -1163,6 +1165,8 @@ internal sealed partial class MetalRenderHost
         }
 
         _deviceAddressIndex = MetalDeviceAddressIndex.Build(_deviceAddressEntries);
+        MetalGpuReferenceCensus.SetDeviceAddressSpans(_deviceAddressEntries.Select(entry =>
+            (entry.FirstPage << DeviceAddressPaging.PageBits, entry.PageCount << DeviceAddressPaging.PageBits)));
         // The windows the table names are what every encoder running a device-address
         // program asks the driver to keep resident, which it does by wiring them whole;
         // say when that set changes so a wired-memory jump can be read against it.
@@ -1378,6 +1382,7 @@ internal sealed partial class MetalRenderHost
     // its own bindings resolved.
     private void NameDeviceAddressWindows(nint encoder, nuint stages)
     {
+        _commandBufferReachWindows |= DeviceAddressNamedWindows();
         for (var windows = DeviceAddressNamedWindows(); windows != 0; windows &= windows - 1)
         {
             var window = _guestMemory.WindowBuffer(System.Numerics.BitOperations.TrailingZeroCount(windows));

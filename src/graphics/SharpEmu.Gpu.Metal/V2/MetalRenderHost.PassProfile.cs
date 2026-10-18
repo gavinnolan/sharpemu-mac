@@ -329,6 +329,7 @@ internal sealed partial class MetalRenderHost
         MetalV2Native.SendVoidValue(slot, SelSetStartOfEncoderSampleIndex, (nuint)record.FirstSample);
         MetalV2Native.SendVoidValue(slot, SelSetEndOfEncoderSampleIndex, (nuint)record.FirstSample + 1);
         var encoder = MetalNative.Send(commandBuffer, SelComputeEncoderWithDescriptor, descriptor);
+        MetalMemoryTelemetry.ComputeEncoders.Add();
         _ppOpen = record;
         _ppLast = record;
         return encoder;

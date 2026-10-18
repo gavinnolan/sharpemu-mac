@@ -344,6 +344,7 @@ internal sealed partial class MetalRenderHost
 
         var readback = _guestMemory.CreateReportBuffer(total, "SharpEmu TargetSnapshot", out var contents, out _);
         var blit = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
         if (blit == 0)
         {
             MetalNative.SendVoid(readback, MetalNative.Selector("release"));
@@ -592,6 +593,7 @@ internal sealed partial class MetalRenderHost
             {
                 EndEncoders(PassEndCause.Other);
                 var blit = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
+                MetalMemoryTelemetry.BlitEncoders.Add();
                 if (blit == 0)
                 {
                     return;

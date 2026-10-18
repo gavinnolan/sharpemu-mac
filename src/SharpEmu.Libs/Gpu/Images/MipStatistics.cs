@@ -25,10 +25,14 @@ public sealed class MipStatistics
 
     private readonly uint[] _bindingsBySlot = new uint[SlotCount];
 
+    /// <summary>Slots a draw has bound since the last report (diagnostic; racy by design).</summary>
+    public int BoundSlotCount => _bindingsBySlot.Count(static bindings => bindings != 0);
+
     public void NoteSampled(in TextureDescriptorWords texture)
     {
         if (texture.MipStatsEnabled && !texture.IsNull)
         {
+            LodStatsTelemetry.NoteSampledBinding();
             _bindingsBySlot[texture.MipStatsSlot]++;
         }
     }

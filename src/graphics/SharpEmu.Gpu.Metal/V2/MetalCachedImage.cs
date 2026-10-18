@@ -167,7 +167,23 @@ internal sealed class MetalCachedImage : IDisposable
 
     public ulong WatchEnd;
 
-    public ulong LastAccessTick;
+    private ulong _lastAccessTick;
+
+    public ulong LastAccessTick
+    {
+        get => _lastAccessTick;
+        set
+        {
+            _lastAccessTick = value;
+            if (SharpEmu.Logging.MemoryTelemetry.Enabled)
+            {
+                LastAccessTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+        }
+    }
+
+    /// <summary>Stopwatch ticks of the last use; kept only with SHARPEMU_LOG_MEMORY=1 (idle-age census).</summary>
+    public long LastAccessTimestamp;
 
     // The submission serial of the command buffer that last wrote the image, so a
     // writeback knows whether the GPU work it depends on has been recorded.

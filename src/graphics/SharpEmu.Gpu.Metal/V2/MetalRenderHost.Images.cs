@@ -293,6 +293,7 @@ internal sealed partial class MetalRenderHost
             MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, width);
             MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, height);
             var encoder = MetalNative.Send(context.CommandBuffer, SelRenderEncoder, descriptor);
+            MetalMemoryTelemetry.RenderEncoders.Add();
             if (encoder == 0)
             {
                 throw Fatal($"A Metal multisample resolve pass could not be encoded: {width}x{height} samples={source.Shape.SampleCount}.");
@@ -347,6 +348,7 @@ internal sealed partial class MetalRenderHost
         // A copy rewrites the destination whether or not its caller marks it written.
         destination.NoteContentChanged();
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
             throw Fatal("A Metal blit encoder could not be created for an image copy.");
