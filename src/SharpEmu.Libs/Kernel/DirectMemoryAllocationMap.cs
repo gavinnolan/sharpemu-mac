@@ -162,6 +162,16 @@ internal sealed class DirectMemoryAllocationMap
         AvailableBytes += length;
     }
 
+    // The free range that holds address, merged with its free neighbours; empty when the
+    // address is allocated or past the capacity.
+    public (ulong Start, ulong Length) FreeRangeContaining(ulong address)
+    {
+        var index = FindLastIndexAtOrBelow(_freeRanges.Keys, address);
+        if (index < 0 || address - _freeRanges.Keys[index] >= _freeRanges.Values[index])
+            return default;
+        return (_freeRanges.Keys[index], _freeRanges.Values[index]);
+    }
+
     private void AddFreeRange(ulong address, ulong length)
     {
         var end = address + length;

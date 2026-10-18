@@ -57,6 +57,19 @@ public static partial class KernelMemoryCompatExports
         _poolFreeBytes += length;
     }
 
+    // The uncommitted pool range that holds start, merged with its neighbours; empty when none does.
+    private static (ulong Start, ulong Length) PoolFreeRangeContainingLocked(ulong start)
+    {
+        for (var index = _poolFree.Count - 1; index >= 0; index--)
+        {
+            var rangeStart = _poolFree.Keys[index];
+            if (rangeStart > start)
+                continue;
+            return start - rangeStart < _poolFree.Values[index] ? (rangeStart, _poolFree.Values[index]) : default;
+        }
+        return default;
+    }
+
     // Takes exactly [start, start + length) back out of the supply.
     private static bool TryTakePoolPagesLocked(ulong start, ulong length)
     {

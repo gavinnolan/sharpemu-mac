@@ -176,6 +176,16 @@ internal sealed class FlexibleBackingPool
         Used -= size;
     }
 
+    // The free backing range that holds offset, merged with its free neighbours; empty when
+    // the offset is handed out or outside the pool.
+    public (ulong Start, ulong Length) FreeRangeContaining(ulong offset)
+    {
+        var index = FindFreeIndex(offset);
+        if (index < 0 || offset - _free.Keys[index] >= _free.Values[index])
+            return default;
+        return (_free.Keys[index], _free.Values[index]);
+    }
+
     private int FindFreeIndex(ulong offset)
     {
         for (var index = _free.Count - 1; index >= 0; index--)
@@ -184,11 +194,13 @@ internal sealed class FlexibleBackingPool
         return -1;
     }
 
-    // The caller must remove the host views before it returns their backing.
-    public void Release(ulong address, ulong size)
+    // The caller must remove the host views before it returns their backing. Returns the
+    // backing runs that became free.
+    public List<(ulong Offset, ulong Size)> Release(ulong address, ulong size)
     {
         var end = checked(address + size);
         var remaining = new List<Block>();
+        var freed = new List<(ulong Offset, ulong Size)>();
         ulong removed = 0;
         foreach (var block in _blocks)
         {
@@ -201,6 +213,7 @@ internal sealed class FlexibleBackingPool
                 continue;
             }
             AddFree(block.Offset + start - block.Address, stop - start);
+            freed.Add((block.Offset + start - block.Address, stop - start));
             removed += stop - start;
             if (block.Address < start)
                 remaining.Add(block with { Size = start - block.Address });
@@ -212,6 +225,7 @@ internal sealed class FlexibleBackingPool
         _blocks.Clear();
         _blocks.AddRange(remaining);
         Used -= removed;
+        return freed;
     }
 
     // Clears the parts of a backing range that an earlier mapping may have written.

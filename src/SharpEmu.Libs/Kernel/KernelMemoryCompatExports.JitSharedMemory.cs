@@ -59,6 +59,7 @@ public static partial class KernelMemoryCompatExports
                     region.BackingOffset >= jit.Offset && region.BackingOffset - jit.Offset < jit.Length))
                 continue;
             _flexibleBacking.ReleaseRun(jit.Offset, jit.Length);
+            ReleaseFreedBackingLocked(jit.Offset, jit.Length, _flexibleBacking.FreeRangeContaining(jit.Offset));
             _jitObjects.RemoveAt(index);
         }
     }
