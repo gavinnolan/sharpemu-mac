@@ -199,6 +199,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Idle .NET build servers (MSBuild node-reuse processes, VBCSCompiler) from earlier builds pile up and
+# hold gigabytes of swapped/compressed memory: 161 MSBuild nodes held ~8 GB on 2026-10-18 and skewed
+# every memory reading. They restart on demand, so a measurement run stops them first
+# (SHARPEMU_KEEP_BUILD_SERVERS=1 skips this) and records the machine's memory state at launch.
+if [[ "${SHARPEMU_KEEP_BUILD_SERVERS:-0}" != 1 ]]; then
+  dotnet build-server shutdown > /dev/null 2>&1 || true
+  pkill -f 'MSBuild.dll.*nodemode' 2> /dev/null || true
+  pkill -f 'VBCSCompiler' 2> /dev/null || true
+fi
+{ sysctl vm.swapusage; vm_stat; } > "$OUT/system-at-launch.txt" 2>&1 || true
+
 shot() {
   [[ -x "$WINID" ]] || return 0
   local id
