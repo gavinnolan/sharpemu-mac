@@ -101,31 +101,18 @@ internal static partial class MetalNative
     // MTLResourceUsageRead | MTLResourceUsageWrite for buffers reached through an argument buffer.
     private const nuint ReadWriteUsage = 3;
 
-    // Hosted CI macOS runners only expose "Apple Paravirtual device", which lacks parts of the
-    // Metal API these conformance tests drive (its render encoder has no setMeshBuffer, and
-    // calling it kills the test host). It counts as no device unless the device gate demands
-    // one, in which case it is used and any gap fails loudly.
     private static readonly Lazy<nint> Device = new(() =>
-    {
-        if (!OperatingSystem.IsMacOS())
-        {
-            return 0;
-        }
+        OperatingSystem.IsMacOS() ? MTLCreateSystemDefaultDevice() : 0);
 
-        var device = MTLCreateSystemDefaultDevice();
-        if (device != 0 && Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
-        {
-            var name = Marshal.PtrToStringUTF8(Send(Send(device, Selector("name")), Selector("UTF8String")));
-            if (name is not null && name.Contains("Paravirtual", StringComparison.OrdinalIgnoreCase))
-            {
-                return 0;
-            }
-        }
-
-        return device;
-    });
-
-    public static bool IsAvailable => Device.Value != 0;
+    // Whether device tests may execute. Hosted CI macOS runners only expose "Apple Paravirtual
+    // device": it compiles MSL, but lacks parts of the Metal API the execution tests drive (its
+    // render encoder has no setMeshBuffer, and calling it kills the test host). That device does
+    // not count as available unless the device gate demands one, in which case it is used and
+    // any gap fails loudly. Compile-only paths keep using Device directly.
+    public static bool IsAvailable { get; } = Device.Value != 0 && (
+        Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1" ||
+        !(Marshal.PtrToStringUTF8(Send(Send(Device.Value, Selector("name")), Selector("UTF8String")))
+            ?.Contains("Paravirtual", StringComparison.OrdinalIgnoreCase) ?? false));
 
     private static nint Selector(string name) => sel_registerName(name);
 
