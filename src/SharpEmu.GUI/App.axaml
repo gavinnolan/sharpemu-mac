@@ -8,6 +8,7 @@ cascade order so individual launcher views do not redefine global visuals.
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="SharpEmu.GUI.App"
+             Name="SharpEmu"
              RequestedThemeVariant="Dark">
 
   <Application.Resources>

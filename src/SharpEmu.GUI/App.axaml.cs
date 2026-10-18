@@ -7,7 +7,7 @@ using Avalonia.Markup.Xaml;
 
 namespace SharpEmu.GUI;
 
-public partial class App : Application
+public partial class App : Avalonia.Application
 {
     public override void Initialize()
     {

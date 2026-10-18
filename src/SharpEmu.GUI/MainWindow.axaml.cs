@@ -388,7 +388,7 @@ public partial class MainWindow : Window
         PortableDataToggle.IsCheckedChanged += (_, _) =>
         {
             var enabled = PortableDataToggle.IsChecked == true;
-            if (!SharpEmu.Libs.SharpEmuPaths.SetPortableMarker(enabled))
+            if (!SharpEmu.Logging.SharpEmuPaths.SetPortableMarker(enabled))
             {
                 // Read-only executable directory: revert the switch, the
                 // marker could not be written.
@@ -452,6 +452,11 @@ public partial class MainWindow : Window
         Closing += (_, _) => BeginWindowClosing();
         Closed += (_, _) => CompleteWindowClosing();
 
+        LauncherGamepad.EnsureStarted();
+        _gamepadTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(50),
+        };
         EnvRenderDocToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle(
                 "SHARPEMU_RENDERDOC",
@@ -461,7 +466,7 @@ public partial class MainWindow : Window
                 "SHARPEMU_VK_DISABLE_IMPLICITS",
                 EnvDisableVkImplicitLayersToggle.IsChecked == true);
 
-        SdlLauncherGamepad.EnsureStarted();
+        LauncherGamepad.EnsureStarted();
         InitializeController();
         _gamepadTimer = new DispatcherTimer
         {
@@ -893,7 +898,7 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        if (!SdlLauncherGamepad.TryGetState(out var pad))
+        if (!LauncherGamepad.TryGetState(out var pad))
         {
             _previousPadButtons = HostGamepadButtons.None;
             return;
@@ -1327,7 +1332,7 @@ public partial class MainWindow : Window
         RunShutdownStep("library watcher", _libraryWatcher.Dispose);
         RememberEmbeddedConsoleHeight();
         RunShutdownStep("settings", _settings.Save);
-        RunShutdownStep("SDL gamepad", SdlLauncherGamepad.Shutdown);
+        RunShutdownStep("launcher gamepad", LauncherGamepad.Shutdown);
         RunShutdownStep("title music", _sndPreview.Stop);
         RunShutdownStep("Discord Rich Presence", () => _discord?.Dispose());
         RunShutdownStep("console window", () => _consoleWindow?.Close());
@@ -1517,9 +1522,9 @@ public partial class MainWindow : Window
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         VSyncToggle.IsChecked = _settings.VSync;
-        PortableDataToggle.IsEnabled = SharpEmu.Libs.SharpEmuPaths.IsPortableMarkerPresent() ||
-            SharpEmu.Libs.SharpEmuPaths.CanWriteExecutableDirectory();
-        PortableDataToggle.IsChecked = SharpEmu.Libs.SharpEmuPaths.IsPortableMarkerPresent();
+        PortableDataToggle.IsEnabled = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent() ||
+            SharpEmu.Logging.SharpEmuPaths.CanWriteExecutableDirectory();
+        PortableDataToggle.IsChecked = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent();
         HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
         OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
         OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
@@ -1657,6 +1662,19 @@ public partial class MainWindow : Window
         if (_availableUpdate is null)
         {
             await CheckForUpdatesAsync();
+            return;
+        }
+
+        // A signed .app bundle cannot be rewritten in place, so point the user
+        // at the release instead of pretending the install succeeded.
+        if (!Updater.SupportsInPlaceUpdate)
+        {
+            SetUpdateStatus("Updater.Status.ManualDownload");
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = ProjectLinks.ReleasesUrl,
+                UseShellExecute = true
+            });
             return;
         }
 
@@ -2099,240 +2117,31 @@ public partial class MainWindow : Window
         return total;
     }
 
-    private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
+    private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths) =>
+        GameCatalog.ScanFolders(folders, excludedPaths, ArchiveMetadataPath).Select(game => new GameEntry(game.Name, game.TitleId,
+            game.Version, game.Path, game.SizeBytes, game.CoverPath, game.BackgroundPath)).ToList();
+
+    // An archive's metadata is read from its cache folder, which stands in for the game folder.
+    private static string? ArchiveMetadataPath(string archivePath)
     {
-        var games = new List<GameEntry>();
-        var seen = new HashSet<string>(GameLibraryPath.Comparer);
-        var enumeration = new EnumerationOptions
-        {
-            IgnoreInaccessible = true,
-            RecurseSubdirectories = true,
-            MaxRecursionDepth = 8,
-        };
-
-        foreach (var folder in folders)
-        {
-            if (!Directory.Exists(folder))
-            {
-                continue;
-            }
-
-            try
-            {
-                // A game is a folder with eboot.bin or a .zar archive of one.
-                foreach (var file in Directory.EnumerateFiles(folder, "eboot.bin", enumeration)
-                    .Concat(Directory.EnumerateFiles(folder, "*.zar", enumeration)))
-                {
-                    var fullPath = Path.GetFullPath(file);
-                    if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
-                    {
-                        continue;
-                    }
-
-                    games.Add(CreateGameEntry(fullPath));
-                }
-            }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine(
-                    $"[GUI][WARN] Could not scan game folder '{folder}': {exception.Message}");
-            }
-        }
-
-        games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
-        AddBundledDemo(games, excludedPaths);
-        return games;
-    }
-
-    private static void AddBundledDemo(List<GameEntry> games, IReadOnlySet<string> excludedPaths)
-    {
-        var demo = BundledDemo.FindEboot(AppContext.BaseDirectory);
-        if (demo is null || excludedPaths.Contains(demo))
-        {
-            return;
-        }
-
-        games.RemoveAll(game => string.Equals(game.Path, demo, GameLibraryPath.Comparison));
-        games.Insert(0, CreateGameEntry(demo));
-    }
-
-    private static GameEntry CreateGameEntry(string fullPath)
-    {
-        long size = 0;
         try
         {
-            size = new FileInfo(fullPath).Length;
+            return ZArchiveCache.ExtractMetadata(archivePath) is { } cacheRoot
+                ? Path.Combine(cacheRoot, "eboot.bin")
+                : null;
         }
-        catch (IOException exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
             Console.Error.WriteLine(
-                $"[GUI][WARN] Could not inspect executable '{fullPath}': {exception.Message}");
-        }
-
-        // An archive's metadata is read from its cache folder, which stands in for the game folder.
-        var metadataPath = fullPath;
-        if (ZArchive.IsArchivePath(fullPath))
-        {
-            try
-            {
-                if (ZArchiveCache.ExtractMetadata(fullPath) is { } cacheRoot)
-                {
-                    metadataPath = Path.Combine(cacheRoot, "eboot.bin");
-                }
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
-            {
-                Console.Error.WriteLine(
-                    $"[GUI][WARN] Could not read archive '{fullPath}': {exception.Message}");
-            }
-        }
-
-        var (title, titleId, version) = TryReadParamJson(metadataPath);
-        return new GameEntry(
-            title ?? GameNameFor(metadataPath), titleId, version, fullPath, size,
-            FindCoverFor(metadataPath), FindBackgroundFor(metadataPath));
-    }
-
-    /// <summary>
-    /// Reads the game title, title id and content version from
-    /// sce_sys/param.json next to the executable, when present.
-    /// </summary>
-    private static (string? Title, string? TitleId, string? Version) TryReadParamJson(string ebootPath)
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(ebootPath);
-            if (directory is null)
-            {
-                return (null, null, null);
-            }
-
-            var paramPath = Path.Combine(directory, "sce_sys", "param.json");
-            if (!File.Exists(paramPath))
-            {
-                return (null, null, null);
-            }
-
-            // ReadAllText handles a UTF-8 BOM, which JsonDocument rejects in
-            // raw bytes.
-            using var document = JsonDocument.Parse(File.ReadAllText(paramPath));
-            var root = document.RootElement;
-
-            string? titleId = null;
-            if (root.TryGetProperty("titleId", out var idElement) && idElement.ValueKind == JsonValueKind.String)
-            {
-                titleId = idElement.GetString();
-            }
-
-            // contentVersion carries the installed app version
-            // ("01.000.000"); masterVersion is the fallback on older dumps.
-            string? version = null;
-            if (root.TryGetProperty("contentVersion", out var versionElement) &&
-                versionElement.ValueKind == JsonValueKind.String)
-            {
-                version = versionElement.GetString();
-            }
-            else if (root.TryGetProperty("masterVersion", out var masterElement) &&
-                     masterElement.ValueKind == JsonValueKind.String)
-            {
-                version = masterElement.GetString();
-            }
-
-            string? title = null;
-            if (root.TryGetProperty("localizedParameters", out var localized) &&
-                localized.ValueKind == JsonValueKind.Object)
-            {
-                if (localized.TryGetProperty("defaultLanguage", out var language) &&
-                    language.ValueKind == JsonValueKind.String &&
-                    localized.TryGetProperty(language.GetString()!, out var defaultBlock) &&
-                    defaultBlock.ValueKind == JsonValueKind.Object &&
-                    defaultBlock.TryGetProperty("titleName", out var titleName) &&
-                    titleName.ValueKind == JsonValueKind.String)
-                {
-                    title = titleName.GetString();
-                }
-                else
-                {
-                    foreach (var property in localized.EnumerateObject())
-                    {
-                        if (property.Value.ValueKind == JsonValueKind.Object &&
-                            property.Value.TryGetProperty("titleName", out var anyTitleName) &&
-                            anyTitleName.ValueKind == JsonValueKind.String)
-                        {
-                            title = anyTitleName.GetString();
-                            break;
-                        }
-                    }
-                }
-            }
-
-            return (
-                string.IsNullOrWhiteSpace(title) ? null : title,
-                string.IsNullOrWhiteSpace(titleId) ? null : titleId,
-                string.IsNullOrWhiteSpace(version) ? null : version.Trim());
-        }
-        catch (Exception)
-        {
-            return (null, null, null);
-        }
-    }
-
-    /// <summary>
-    /// Finds the cover art shipped with the game: sce_sys/icon0.png next to
-    /// the executable (falling back to pic0.png).
-    /// </summary>
-    private static string? FindCoverFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
+                $"[GUI][WARN] Could not read archive '{archivePath}': {exception.Message}");
             return null;
         }
-
-        var sceSys = Path.Combine(directory, "sce_sys");
-        foreach (var candidate in new[] { "icon0.png", "pic0.png" })
-        {
-            var coverPath = Path.Combine(sceSys, candidate);
-            if (File.Exists(coverPath))
-            {
-                return coverPath;
-            }
-        }
-
-        return null;
     }
 
-    /// <summary>
-    /// Finds the key art shipped with the game (sce_sys/pic0.png, falling
-    /// back to pic1.png), used as the window backdrop when selected.
-    /// </summary>
-    private static string? FindBackgroundFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
-            return null;
-        }
-
-        var sceSys = Path.Combine(directory, "sce_sys");
-        foreach (var candidate in new[] { "pic0.png", "pic1.png" })
-        {
-            var backgroundPath = Path.Combine(sceSys, candidate);
-            if (File.Exists(backgroundPath))
-            {
-                return backgroundPath;
-            }
-        }
-
-        return null;
-    }
-
-    private static string GameNameFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        var name = directory is not null ? Path.GetFileName(directory) : null;
-        return string.IsNullOrEmpty(name) ? Path.GetFileName(ebootPath) : name;
-    }
+    private static (string? Title, string? TitleId, string? Version) TryReadParamJson(string path) => GameCatalog.TryReadParamJson(path);
+    private static string? FindCoverFor(string path) => GameCatalog.FindCoverFor(path);
+    private static string? FindBackgroundFor(string path) => GameCatalog.FindBackgroundFor(path);
+    private static string GameNameFor(string path) => GameCatalog.GameNameFor(path);
 
     // ---- Game context menu ----
 
@@ -2888,7 +2697,7 @@ public partial class MainWindow : Window
 
         var directory = ZArchive.IsArchivePath(game.Path)
             ? ZArchiveCache.GetCacheRoot(game.Path,
-                Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "zar-cache"))
+                Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "zar-cache"))
             : Path.GetDirectoryName(game.Path);
         var sndPath = directory is null ? null : Path.Combine(directory, "sce_sys", "snd0.at9");
         if (sndPath is not null && File.Exists(sndPath))
@@ -3140,11 +2949,11 @@ public partial class MainWindow : Window
             _appliedEnvironmentVariables.Add(name);
         }
 
-        if (RenderDocCapture.ApplyVulkanLoaderEnvironment())
+        // Whether a graphics loader needs configuring at all, and which variables that takes,
+        // is the composed backend's business; the GUI only has to undo what was set.
+        foreach (var name in RenderDocCapture.ApplyGraphicsLoaderEnvironment())
         {
-            _appliedEnvironmentVariables.Add("VK_LOADER_DEBUG");
-            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_DISABLE");
-            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_ALLOW");
+            _appliedEnvironmentVariables.Add(name);
         }
 
         Environment.SetEnvironmentVariable(
@@ -3277,7 +3086,16 @@ public partial class MainWindow : Window
     {
         try
         {
-            var logsDirectory = Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "logs");
+            var exeDirectory = Path.GetDirectoryName(_emulatorExePath) ?? AppContext.BaseDirectory;
+            if (string.IsNullOrEmpty(exeDirectory))
+            {
+                return null;
+            }
+
+            // The child process resolves its own data root the same way, so
+            // both agree even when the bundle redirects writes out of itself.
+            var logsDirectory = Path.Combine(
+                SharpEmuPaths.ResolveDataRoot(exeDirectory), "user", "logs");
             Directory.CreateDirectory(logsDirectory);
 
             var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;

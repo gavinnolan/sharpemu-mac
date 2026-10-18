@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -28,6 +29,14 @@ internal sealed class EmulatorProcess : IDisposable
     private const int JobObjectExtendedLimitInformationClass = 9;
     private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
+    // macOS: read by the emulator's OwnerProcessWatch, which then leads a process group of
+    // its own and exits with this process.
+    private const string OwnerPidEnvironment = "SHARPEMU_OWNER_PID";
+    // The emulator's cooperative shutdown exits within four seconds of a SIGTERM
+    // (VideoOutExports.ShutdownGraceMilliseconds); its group is killed a second after that.
+    private const int StopGraceMilliseconds = 5000;
+    private const int SIGKILL = 9;
+    private const int SIGTERM = 15;
 
     private static readonly object EnvironmentGate = new();
 
@@ -35,6 +44,8 @@ internal sealed class EmulatorProcess : IDisposable
     private nint _processHandle;
     private nint _jobHandle;
     private Process? _fallbackProcess;
+    private int _fallbackProcessId;
+    private ManualResetEventSlim? _fallbackExited;
     private bool _running;
     private bool _stopRequested;
     private bool _disposed;
@@ -84,6 +95,8 @@ internal sealed class EmulatorProcess : IDisposable
         nint processHandle;
         nint jobHandle;
         Process? fallbackProcess;
+        int fallbackProcessId;
+        ManualResetEventSlim? fallbackExited;
         lock (_sync)
         {
             if (!_running)
@@ -95,6 +108,8 @@ internal sealed class EmulatorProcess : IDisposable
             processHandle = _processHandle;
             jobHandle = _jobHandle;
             fallbackProcess = _fallbackProcess;
+            fallbackProcessId = _fallbackProcessId;
+            fallbackExited = _fallbackExited;
         }
 
         if (jobHandle != 0)
@@ -106,6 +121,12 @@ internal sealed class EmulatorProcess : IDisposable
         if (processHandle != 0)
         {
             _ = TerminateProcess(processHandle, unchecked((uint)HostStopExitCode));
+            return;
+        }
+
+        if (OperatingSystem.IsMacOS() && fallbackProcessId > 0 && fallbackExited is not null)
+        {
+            StopProcessGroup(fallbackProcessId, fallbackExited);
             return;
         }
 
@@ -156,6 +177,11 @@ internal sealed class EmulatorProcess : IDisposable
             startInfo.ArgumentList.Add(argument);
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            startInfo.Environment[OwnerPidEnvironment] = Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
+        }
+
         var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start the emulator process.");
         process.EnableRaisingEvents = true;
@@ -166,6 +192,8 @@ internal sealed class EmulatorProcess : IDisposable
         lock (_sync)
         {
             _fallbackProcess = process;
+            _fallbackProcessId = process.Id;
+            _fallbackExited = new ManualResetEventSlim();
             _running = true;
         }
 
@@ -345,6 +373,37 @@ internal sealed class EmulatorProcess : IDisposable
         }
     }
 
+    /// <summary>
+    /// macOS: SIGTERM to the emulator's process group — its cooperative shutdown — and SIGKILL to
+    /// the group if the emulator is still there after <see cref="StopGraceMilliseconds"/>. Whatever
+    /// outlives an emulator that left in time is swept when it exits (<see cref="OnExited"/>).
+    /// </summary>
+    private static void StopProcessGroup(int processId, ManualResetEventSlim exited)
+    {
+        SignalProcessGroup(processId, SIGTERM);
+        new Thread(() =>
+        {
+            if (!exited.Wait(StopGraceMilliseconds))
+            {
+                SignalProcessGroup(processId, SIGKILL);
+            }
+        }, 128 * 1024)
+        {
+            IsBackground = true,
+            Name = "SharpEmu stop deadline",
+        }.Start();
+    }
+
+    // The emulator makes itself a group leader first thing in startup; until it has, there is no
+    // group of that id and only the process itself (which has started nothing yet) is signalled.
+    private static void SignalProcessGroup(int processId, int signal)
+    {
+        if (kill(-processId, signal) != 0)
+        {
+            _ = kill(processId, signal);
+        }
+    }
+
     private void StartPipeReader(nint handle, bool isError)
     {
         var readerThread = new Thread(() =>
@@ -395,12 +454,18 @@ internal sealed class EmulatorProcess : IDisposable
     private void OnExited(int nativeExitCode)
     {
         int exitCode;
+        int groupId;
         lock (_sync)
         {
             if (!_running)
             {
                 return;
             }
+
+            groupId = _fallbackProcessId;
+            _fallbackProcessId = 0;
+            _fallbackExited?.Set();
+            _fallbackExited = null;
 
             exitCode = _stopRequested ? HostStopExitCode : nativeExitCode;
             _running = false;
@@ -417,6 +482,13 @@ internal sealed class EmulatorProcess : IDisposable
 
             _fallbackProcess?.Dispose();
             _fallbackProcess = null;
+        }
+
+        if (OperatingSystem.IsMacOS() && groupId > 0)
+        {
+            // Anything the emulator started that is still in its group goes with it; a group
+            // with no members left (or never formed) reports ESRCH.
+            _ = kill(-groupId, SIGKILL);
         }
 
         Exited?.Invoke(exitCode);
@@ -648,4 +720,7 @@ internal sealed class EmulatorProcess : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(nint handle);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int kill(int pid, int signal);
 }

@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:SharpEmu.GUI"
+        xmlns:application="clr-namespace:SharpEmu.Application;assembly=SharpEmu.Application"
         xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings"
         x:Class="SharpEmu.GUI.MainWindow"
         Title="SharpEmu"
@@ -1405,7 +1406,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   Width="210"
                                   VerticalAlignment="Center">
                           <ComboBox.ItemTemplate>
-                            <DataTemplate x:DataType="local:LanguageInfo">
+                            <DataTemplate x:DataType="application:LanguageInfo">
                               <TextBlock Text="{Binding NativeName}" />
                             </DataTemplate>
                           </ComboBox.ItemTemplate>

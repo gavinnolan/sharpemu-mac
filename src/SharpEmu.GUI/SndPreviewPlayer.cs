@@ -2,51 +2,74 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
 using LibAtrac9;
-using SDL;
-using static SDL.SDL3;
 
 namespace SharpEmu.GUI;
 
 /// <summary>
 /// Loops a game's sce_sys/snd0.at9 preview music while the game is selected
 /// in the library, like the console home screen. The ATRAC9 stream is decoded
-/// as SDL3 asks for audio (vendored LibAtrac9) on Windows, Linux and macOS.
+/// to WAV on a background task (vendored LibAtrac9); playback uses winmm's
+/// PlaySound on Windows and AVFoundation's AVAudioPlayer on macOS, and is a
+/// no-op elsewhere.
 /// </summary>
 internal sealed class SndPreviewPlayer
 {
+    private const uint SND_ASYNC = 0x0001;
+    private const uint SND_NODEFAULT = 0x0002;
+    private const uint SND_MEMORY = 0x0004;
+    private const uint SND_LOOP = 0x0008;
+
     private readonly object _sync = new();
     private int _generation;
-    private unsafe SDL_AudioStream* _stream;
-    private int _targetQueuedBytes;
-    private byte[] _fillBuffer = [];
+    private GCHandle _pinnedWav;
+    private bool _playing;
     private bool _paused;
     private bool _muted;
+    private MacAudioPlayer? _mac;
     private double _volume = 1.0;
     private string? _cachedPath;
-    private At9Track? _cachedTrack;
+    private byte[]? _cachedWav;
 
-    public unsafe double Volume
+    /// <summary>
+    /// Playback gain in [0, 1]. winmm has no per-sound gain, so on Windows this
+    /// sets the process's wave-out volume, which PlaySound plays through; on
+    /// macOS it is the AVAudioPlayer's own volume.
+    /// </summary>
+    public double Volume
     {
         set
         {
-            lock (_sync)
+            if (!Supported)
             {
-                _volume = double.IsFinite(value) ? Math.Clamp(value, 0.0, 1.0) : 1.0;
-                if (_stream is not null)
-                {
-                    SDL_SetAudioStreamGain(_stream, (float)_volume);
-                }
+                return;
             }
+
+            var level = double.IsFinite(value) ? Math.Clamp(value, 0.0, 1.0) : 1.0;
+            if (OperatingSystem.IsMacOS())
+            {
+                lock (_sync)
+                {
+                    _volume = level;
+                    _mac?.SetVolume((float)level);
+                }
+
+                return;
+            }
+
+            var channel = (uint)Math.Round(level * 0xFFFF);
+            _ = waveOutSetVolume(0, channel | (channel << 16));
         }
     }
 
     /// <summary>
     /// Keeps the music silent while set, even across <see cref="Play"/> and
-    /// <see cref="Resume"/>; the track stays ready to continue after unmuting.
+    /// <see cref="Resume"/>; the track stays ready so clearing it and
+    /// resuming restarts the music.
     /// </summary>
-    public unsafe bool Muted
+    public bool Muted
     {
         get
         {
@@ -57,12 +80,18 @@ internal sealed class SndPreviewPlayer
         }
         set
         {
+            if (!Supported)
+            {
+                return;
+            }
+
             lock (_sync)
             {
                 _muted = value;
-                if (value && _stream is not null)
+                if (value && _playing)
                 {
-                    SDL_PauseAudioStreamDevice(_stream);
+                    PauseBackendLocked();
+                    _playing = false;
                     _paused = true;
                 }
             }
@@ -72,6 +101,11 @@ internal sealed class SndPreviewPlayer
     /// <summary>Starts looping the given snd0.at9 after a short debounce.</summary>
     public void Play(string at9Path)
     {
+        if (!Supported)
+        {
+            return;
+        }
+
         int generation;
         lock (_sync)
         {
@@ -84,7 +118,7 @@ internal sealed class SndPreviewPlayer
             // start) a preview per tile.
             await Task.Delay(120).ConfigureAwait(false);
 
-            At9Track? track;
+            byte[]? wav;
             lock (_sync)
             {
                 if (generation != _generation)
@@ -92,16 +126,16 @@ internal sealed class SndPreviewPlayer
                     return;
                 }
 
-                track = string.Equals(_cachedPath, at9Path, StringComparison.OrdinalIgnoreCase)
-                    ? _cachedTrack
+                wav = string.Equals(_cachedPath, at9Path, StringComparison.OrdinalIgnoreCase)
+                    ? _cachedWav
                     : null;
             }
 
-            if (track is null)
+            if (wav is null)
             {
                 try
                 {
-                    track = At9Track.Open(File.ReadAllBytes(at9Path));
+                    wav = DecodeAt9ToWav(File.ReadAllBytes(at9Path));
                 }
                 catch (Exception)
                 {
@@ -117,17 +151,39 @@ internal sealed class SndPreviewPlayer
                 }
 
                 _cachedPath = at9Path;
-                _cachedTrack = track;
+                _cachedWav = wav;
                 StopLocked();
-                try
+
+                if (OperatingSystem.IsMacOS())
                 {
-                    track.Rewind();
-                    StartLocked(track);
+                    _mac = MacAudioPlayer.Create(wav, loop: true, (float)_volume);
+                    if (_mac is null)
+                    {
+                        return;
+                    }
+
+                    if (_muted)
+                    {
+                        _paused = true;
+                        return;
+                    }
+
+                    _playing = _mac.Play();
+                    return;
                 }
-                catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or InvalidOperationException)
+
+                // The WAV image must stay pinned while winmm plays from it.
+                _pinnedWav = GCHandle.Alloc(wav, GCHandleType.Pinned);
+                if (_muted)
                 {
-                    Console.Error.WriteLine($"[GUI][WARN] Title music playback unavailable: {error.Message}");
-                    StopLocked();
+                    _paused = true;
+                    return;
+                }
+
+                _playing = PlaySound(_pinnedWav.AddrOfPinnedObject(), 0, SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+                if (!_playing)
+                {
+                    _pinnedWav.Free();
                 }
             }
         });
@@ -135,6 +191,11 @@ internal sealed class SndPreviewPlayer
 
     public void Stop()
     {
+        if (!Supported)
+        {
+            return;
+        }
+
         lock (_sync)
         {
             _generation++;
@@ -143,290 +204,229 @@ internal sealed class SndPreviewPlayer
     }
 
     /// <summary>
-    /// Pauses playback while preserving the current position and queued audio.
+    /// Silences playback but keeps the decoded track ready, so
+    /// <see cref="Resume"/> can restart it (winmm cannot truly pause).
     /// </summary>
-    public unsafe void Pause()
+    public void Pause()
     {
+        if (!Supported)
+        {
+            return;
+        }
+
         lock (_sync)
         {
-            if (_stream is null || _paused)
+            if (!_playing)
             {
                 return;
             }
-            SDL_PauseAudioStreamDevice(_stream);
+
+            PauseBackendLocked();
+            _playing = false;
             _paused = true;
         }
     }
 
-    /// <summary>Continues the track silenced by <see cref="Pause"/>.</summary>
-    public unsafe void Resume()
+    /// <summary>Restarts the track silenced by <see cref="Pause"/>.</summary>
+    public void Resume()
     {
+        if (!Supported)
+        {
+            return;
+        }
+
         lock (_sync)
         {
-            if (!_paused || _muted || _stream is null)
+            if (OperatingSystem.IsMacOS())
             {
-                return;
-            }
-            SDL_ResumeAudioStreamDevice(_stream);
-            _paused = false;
-        }
-    }
-
-    private unsafe void StartLocked(At9Track track)
-    {
-        if ((SDL_WasInit(SDL_InitFlags.SDL_INIT_AUDIO) & SDL_InitFlags.SDL_INIT_AUDIO) == 0 &&
-            !SDL_InitSubSystem(SDL_InitFlags.SDL_INIT_AUDIO))
-        {
-            throw new InvalidOperationException("SDL audio initialization failed.");
-        }
-
-        var spec = new SDL_AudioSpec
-        {
-            format = SDL_AudioFormat.SDL_AUDIO_S16LE,
-            channels = checked((byte)track.Channels),
-            freq = track.SampleRate,
-        };
-        _stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, null, IntPtr.Zero);
-        if (_stream is null)
-        {
-            throw new InvalidOperationException("SDL audio stream creation failed.");
-        }
-
-        SDL_SetAudioStreamGain(_stream, (float)_volume);
-        _targetQueuedBytes = spec.freq * spec.channels * sizeof(short) / 4; // 250 ms of buffered audio
-        if (_fillBuffer.Length < _targetQueuedBytes)
-        {
-            _fillBuffer = new byte[_targetQueuedBytes];
-        }
-
-        FillStreamLocked(track);
-        _paused = _muted;
-        if (!_muted && !SDL_ResumeAudioStreamDevice(_stream))
-        {
-            throw new InvalidOperationException("SDL audio stream start failed.");
-        }
-
-        _ = PumpAsync(_generation, track);
-    }
-
-    private async Task PumpAsync(int generation, At9Track track)
-    {
-        while (true)
-        {
-            await Task.Delay(40).ConfigureAwait(false);
-            lock (_sync)
-            {
-                if (generation != _generation)
+                if (!_paused || _muted || _mac is null)
                 {
                     return;
                 }
 
-                FillStreamIfActiveLocked(track);
+                _paused = false;
+                _playing = _mac.Play();
+                return;
             }
+
+            if (!_paused || _muted || !_pinnedWav.IsAllocated)
+            {
+                return;
+            }
+
+            _paused = false;
+            _playing = PlaySound(_pinnedWav.AddrOfPinnedObject(), 0, SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
         }
     }
 
-    private unsafe void FillStreamIfActiveLocked(At9Track track)
+    private static bool Supported => OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
+
+    private void PauseBackendLocked()
     {
-        if (_stream is not null && !_paused)
+        if (OperatingSystem.IsMacOS())
         {
-            FillStreamLocked(track);
+            _mac?.Pause();
+        }
+        else
+        {
+            _ = PlaySound(0, 0, 0);
         }
     }
 
-    private unsafe void FillStreamLocked(At9Track track)
+    private void StopLocked()
     {
-        var remaining = Math.Min(_targetQueuedBytes - SDL_GetAudioStreamQueued(_stream), _fillBuffer.Length);
-        if (remaining <= 0)
+        if (OperatingSystem.IsMacOS())
         {
-            return;
+            _mac?.Dispose();
+            _mac = null;
+        }
+        else
+        {
+            _ = PlaySound(0, 0, 0);
         }
 
-        var bytes = track.Read(_fillBuffer.AsSpan(0, remaining));
-        if (bytes == 0)
-        {
-            return;
-        }
-
-        fixed (byte* data = _fillBuffer)
-        {
-            SDL_PutAudioStreamData(_stream, (nint)data, bytes);
-        }
-    }
-
-    private unsafe void StopLocked()
-    {
-        if (_stream is not null)
-        {
-            SDL_DestroyAudioStream(_stream);
-            _stream = null;
-        }
-
+        _playing = false;
         _paused = false;
+        if (_pinnedWav.IsAllocated)
+        {
+            _pinnedWav.Free();
+        }
     }
 
     private static readonly Guid Atrac9SubFormat = new("47E142D2-36BA-4D8D-88FC-61654F8C836C");
 
     /// <summary>
-    /// A Sony AT9 (RIFF-wrapped ATRAC9) file decoded one superframe at a time.
+    /// Decodes a Sony AT9 (RIFF-wrapped ATRAC9) file to a PCM16 WAV image.
     /// Layout per Sony's container: an extensible fmt chunk whose extension
     /// carries the 4-byte codec config, a fact chunk with the sample count
     /// and encoder delay, and superframes in the data chunk.
     /// </summary>
-    private sealed class At9Track
+    private static byte[] DecodeAt9ToWav(byte[] file)
     {
-        private readonly byte[] _file;
-        private readonly byte[] _config;
-        private readonly int _dataOffset;
-        private readonly int _superframeCount;
-        private readonly int _sampleCount;
-        private readonly int _encoderDelay;
-        private readonly Atrac9Decoder _decoder = new();
-        private readonly short[][] _pcm;
-        private readonly byte[] _superframe;
-        private int _frame;
-        private long _decoded;
-        private int _written;
-        private int _sampleInFrame;
-
-        private At9Track(byte[] file, byte[] config, int dataOffset, int dataSize, int sampleCount, int encoderDelay)
+        using var reader = new BinaryReader(new MemoryStream(file), Encoding.ASCII);
+        if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "RIFF")
         {
-            _file = file;
-            _config = config;
-            _dataOffset = dataOffset;
-            _sampleCount = sampleCount;
-            _encoderDelay = encoderDelay;
-            _decoder.Initialize(config);
-            var decoderConfig = _decoder.Config;
-            Channels = decoderConfig.ChannelCount;
-            SampleRate = decoderConfig.SampleRate;
-            _superframeCount = Math.Min(
-                (sampleCount + encoderDelay + decoderConfig.SuperframeSamples - 1) / decoderConfig.SuperframeSamples,
-                dataSize / decoderConfig.SuperframeBytes);
-            _pcm = new short[Channels][];
-            for (var i = 0; i < Channels; i++)
-            {
-                _pcm[i] = new short[decoderConfig.SuperframeSamples];
-            }
-
-            _superframe = new byte[decoderConfig.SuperframeBytes];
-            _sampleInFrame = decoderConfig.SuperframeSamples;
+            throw new InvalidDataException("Not a RIFF file.");
         }
 
-        public int Channels { get; }
-
-        public int SampleRate { get; }
-
-        public static At9Track Open(byte[] file)
+        reader.BaseStream.Position += 4; // riff size
+        if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "WAVE")
         {
-            using var reader = new BinaryReader(new MemoryStream(file), Encoding.ASCII);
-            if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "RIFF")
-            {
-                throw new InvalidDataException("Not a RIFF file.");
-            }
-
-            reader.BaseStream.Position += 4; // riff size
-            if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "WAVE")
-            {
-                throw new InvalidDataException("Not a WAVE file.");
-            }
-
-            byte[]? configData = null;
-            var sampleCount = 0;
-            var encoderDelay = 0;
-            var dataOffset = -1;
-            var dataSize = 0;
-
-            while (reader.BaseStream.Position + 8 <= reader.BaseStream.Length)
-            {
-                var chunkId = Encoding.ASCII.GetString(reader.ReadBytes(4));
-                var chunkSize = reader.ReadInt32();
-                var chunkStart = reader.BaseStream.Position;
-                switch (chunkId)
-                {
-                    case "fmt ":
-                        var formatTag = reader.ReadUInt16();
-                        reader.BaseStream.Position = chunkStart + 24; // to SubFormat GUID
-                        var subFormat = new Guid(reader.ReadBytes(16));
-                        if (formatTag != 0xFFFE || subFormat != Atrac9SubFormat)
-                        {
-                            throw new InvalidDataException("Not an ATRAC9 stream.");
-                        }
-
-                        reader.BaseStream.Position += 4; // version info
-                        configData = reader.ReadBytes(4);
-                        break;
-                    case "fact":
-                        sampleCount = reader.ReadInt32();
-                        reader.BaseStream.Position += 4; // input overlap delay
-                        encoderDelay = reader.ReadInt32();
-                        break;
-                    case "data":
-                        dataOffset = (int)chunkStart;
-                        dataSize = chunkSize;
-                        break;
-                }
-
-                reader.BaseStream.Position = chunkStart + chunkSize + (chunkSize & 1);
-            }
-
-            if (configData is null || sampleCount <= 0 || dataOffset < 0 || dataSize > file.Length - dataOffset)
-            {
-                throw new InvalidDataException("Missing fmt, fact, or data chunk.");
-            }
-
-            return new At9Track(file, configData, dataOffset, dataSize, sampleCount, encoderDelay);
+            throw new InvalidDataException("Not a WAVE file.");
         }
 
-        public void Rewind()
-        {
-            _decoder.Initialize(_config);
-            _frame = 0;
-            _decoded = 0;
-            _written = 0;
-            _sampleInFrame = _pcm[0].Length;
-        }
+        byte[]? configData = null;
+        var sampleCount = 0;
+        var encoderDelay = 0;
+        var dataOffset = -1;
+        var dataSize = 0;
 
-        public int Read(Span<byte> destination)
+        while (reader.BaseStream.Position + 8 <= reader.BaseStream.Length)
         {
-            var frameBytes = Channels * sizeof(short);
-            var bytes = 0;
-            while (destination.Length - bytes >= frameBytes)
+            var chunkId = Encoding.ASCII.GetString(reader.ReadBytes(4));
+            var chunkSize = reader.ReadInt32();
+            var chunkStart = reader.BaseStream.Position;
+            switch (chunkId)
             {
-                if (_written >= _sampleCount || (_sampleInFrame >= _pcm[0].Length && _frame >= _superframeCount))
-                {
-                    if (_written == 0)
+                case "fmt ":
+                    var formatTag = reader.ReadUInt16();
+                    reader.BaseStream.Position = chunkStart + 24; // to SubFormat GUID
+                    var subFormat = new Guid(reader.ReadBytes(16));
+                    if (formatTag != 0xFFFE || subFormat != Atrac9SubFormat)
                     {
-                        break;
+                        throw new InvalidDataException("Not an ATRAC9 stream.");
                     }
 
-                    Rewind();
-                }
+                    reader.BaseStream.Position += 4; // version info
+                    configData = reader.ReadBytes(4);
+                    break;
+                case "fact":
+                    sampleCount = reader.ReadInt32();
+                    reader.BaseStream.Position += 4; // input overlap delay
+                    encoderDelay = reader.ReadInt32();
+                    break;
+                case "data":
+                    dataOffset = (int)chunkStart;
+                    dataSize = chunkSize;
+                    break;
+            }
 
-                if (_sampleInFrame >= _pcm[0].Length)
-                {
-                    Buffer.BlockCopy(_file, _dataOffset + (_frame * _superframe.Length), _superframe, 0, _superframe.Length);
-                    _decoder.Decode(_superframe, _pcm);
-                    _frame++;
-                    _sampleInFrame = 0;
-                }
+            reader.BaseStream.Position = chunkStart + chunkSize + (chunkSize & 1);
+        }
 
-                var sample = _sampleInFrame++;
-                if (_decoded++ < _encoderDelay)
+        if (configData is null || sampleCount <= 0 || dataOffset < 0)
+        {
+            throw new InvalidDataException("Missing fmt, fact, or data chunk.");
+        }
+
+        var decoder = new Atrac9Decoder();
+        decoder.Initialize(configData);
+        var config = decoder.Config;
+
+        var superframeCount = (sampleCount + encoderDelay + config.SuperframeSamples - 1) / config.SuperframeSamples;
+        superframeCount = Math.Min(superframeCount, dataSize / config.SuperframeBytes);
+
+        var channels = config.ChannelCount;
+        var pcmBuffer = new short[channels][];
+        for (var i = 0; i < channels; i++)
+        {
+            pcmBuffer[i] = new short[config.SuperframeSamples];
+        }
+
+        var wav = new byte[44 + (sampleCount * channels * 2)];
+        WriteWavHeader(wav, channels, config.SampleRate, sampleCount);
+
+        var superframe = new byte[config.SuperframeBytes];
+        var decodedIndex = 0L; // per-channel, includes the encoder delay
+        var written = 0;
+        for (var f = 0; f < superframeCount && written < sampleCount; f++)
+        {
+            Buffer.BlockCopy(file, dataOffset + (f * config.SuperframeBytes), superframe, 0, config.SuperframeBytes);
+            decoder.Decode(superframe, pcmBuffer);
+            for (var s = 0; s < config.SuperframeSamples && written < sampleCount; s++)
+            {
+                if (decodedIndex++ < encoderDelay)
                 {
                     continue;
                 }
 
-                for (var ch = 0; ch < Channels; ch++)
+                var sampleOffset = 44 + ((long)written * channels * 2);
+                for (var ch = 0; ch < channels; ch++)
                 {
-                    BinaryPrimitives.WriteInt16LittleEndian(destination[(bytes + (ch * sizeof(short)))..], _pcm[ch][sample]);
+                    BinaryPrimitives.WriteInt16LittleEndian(
+                        wav.AsSpan((int)(sampleOffset + (ch * 2))),
+                        pcmBuffer[ch][s]);
                 }
 
-                bytes += frameBytes;
-                _written++;
+                written++;
             }
-
-            return bytes;
         }
+
+        return wav;
     }
+
+    internal static void WriteWavHeader(byte[] wav, int channels, int sampleRate, int sampleCount)
+    {
+        var span = wav.AsSpan();
+        Encoding.ASCII.GetBytes("RIFF").CopyTo(span);
+        BinaryPrimitives.WriteInt32LittleEndian(span[4..], wav.Length - 8);
+        Encoding.ASCII.GetBytes("WAVE").CopyTo(span[8..]);
+        Encoding.ASCII.GetBytes("fmt ").CopyTo(span[12..]);
+        BinaryPrimitives.WriteInt32LittleEndian(span[16..], 16);
+        BinaryPrimitives.WriteInt16LittleEndian(span[20..], 1); // PCM
+        BinaryPrimitives.WriteInt16LittleEndian(span[22..], (short)channels);
+        BinaryPrimitives.WriteInt32LittleEndian(span[24..], sampleRate);
+        BinaryPrimitives.WriteInt32LittleEndian(span[28..], sampleRate * channels * 2);
+        BinaryPrimitives.WriteInt16LittleEndian(span[32..], (short)(channels * 2));
+        BinaryPrimitives.WriteInt16LittleEndian(span[34..], 16); // bits per sample
+        Encoding.ASCII.GetBytes("data").CopyTo(span[36..]);
+        BinaryPrimitives.WriteInt32LittleEndian(span[40..], sampleCount * channels * 2);
+    }
+
+    [DllImport("winmm.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PlaySound(nint sound, nint module, uint flags);
+
+    [DllImport("winmm.dll")]
+    private static extern uint waveOutSetVolume(nint waveOut, uint volume);
 }

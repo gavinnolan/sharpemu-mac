@@ -6,10 +6,118 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="../SharpEmu.Application/SharpEmu.Application.csproj" />
+    <ProjectReference Include="../SharpEmu.GUI/SharpEmu.GUI.csproj" />
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\SharpEmu.Debugger\SharpEmu.Debugger.csproj" />
-    <ProjectReference Include="..\SharpEmu.GUI\SharpEmu.GUI.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+  </ItemGroup>
+
+  <!-- Host OS package selection (W06-W09). Exactly one SharpEmu.Host.* project
+       is referenced, picked from the target RID so an osx-* build never carries
+       the Windows or Linux host implementations. HostComposition.cs reads the
+       matching SHARPEMU_HOST_* symbol and is the only place that names a host
+       package. Directory.Build.props already defaults $(RuntimeIdentifier) to
+       the build host's RID for this project; the IsOSPlatform fallbacks below
+       cover an explicitly RID-less build. -->
+  <PropertyGroup>
+    <_SharpEmuHostOS Condition="$(RuntimeIdentifier.StartsWith('osx'))">macos</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="$(RuntimeIdentifier.StartsWith('linux'))">linux</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="$(RuntimeIdentifier.StartsWith('win'))">windows</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">macos</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">linux</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">windows</_SharpEmuHostOS>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_MACOS</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_LINUX</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_WINDOWS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Host.MacOS\SharpEmu.Host.MacOS.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Fonts.CoreTextMac\SharpEmu.Fonts.CoreTextMac.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <ProjectReference Include="..\platforms\linux\SharpEmu.Host.Linux\SharpEmu.Host.Linux.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <ProjectReference Include="..\platforms\windows\SharpEmu.Host.Windows\SharpEmu.Host.Windows.csproj" />
+  </ItemGroup>
+
+  <!-- Guest font rasterizer. macOS uses CoreText (referenced above); the GUI's
+       own text rendering comes from Avalonia.Skia on every platform. -->
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux' Or '$(_SharpEmuHostOS)' == 'windows'">
+    <ProjectReference Include="..\adapters\SharpEmu.Fonts.Skia\SharpEmu.Fonts.Skia.csproj" />
+  </ItemGroup>
+
+  <!-- ===================================================================== -->
+  <!-- Direct-execution OS integration selection (W10, CpuComposition.cs).   -->
+  <!--                                                                       -->
+  <!-- Exactly one SharpEmu.Cpu.DirectExecution.<OS>.X64 project is          -->
+  <!-- referenced, reusing the $(_SharpEmuHostOS) RID mapping above, so an    -->
+  <!-- osx-* build never carries the Windows vectored exception handler or    -->
+  <!-- the Linux signal context layouts. Kept in its own block so the         -->
+  <!-- concurrent namespace/IVT work merges cleanly.                          -->
+  <!-- ===================================================================== -->
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_MACOS_X64</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_LINUX_X64</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_WINDOWS_X64</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Cpu.DirectExecution.MacOS.X64\SharpEmu.Cpu.DirectExecution.MacOS.X64.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <ProjectReference Include="..\platforms\linux\SharpEmu.Cpu.DirectExecution.Linux.X64\SharpEmu.Cpu.DirectExecution.Linux.X64.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <ProjectReference Include="..\platforms\windows\SharpEmu.Cpu.DirectExecution.Windows.X64\SharpEmu.Cpu.DirectExecution.Windows.X64.csproj" />
+  </ItemGroup>
+
+  <!-- ===================================================================== -->
+  <!-- Graphics backend composition (GpuComposition.cs).                     -->
+  <!--                                                                       -->
+  <!-- The target RID picks the graphics backend and the host platform        -->
+  <!-- adapters, so a macOS artifact never restores Vulkan/SDL packages and a -->
+  <!-- Windows/Linux artifact never restores the macOS package. The RID->OS   -->
+  <!-- convention matches Directory.Build.props: osx-* => macOS, linux-* =>   -->
+  <!-- Linux, win-* => Windows, and an empty RID means "the build host's OS"  -->
+  <!-- (a RID-less `dotnet build` of this project is already given the host   -->
+  <!-- RID by Directory.Build.props, so the empty arms only cover an explicit -->
+  <!-- -p:RuntimeIdentifier=''). Kept in its own block, separate from the     -->
+  <!-- ItemGroup above, so the concurrent HLE host split merges cleanly.      -->
+  <!-- ===================================================================== -->
+  <PropertyGroup>
+    <_SharpEmuTargetsMac Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx')) Or ('$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('OSX')))">true</_SharpEmuTargetsMac>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_SharpEmuTargetsMac)' == 'true'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_GPU_METAL</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_GPU_VULKAN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuTargetsMac)' == 'true'">
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Vulkan\SharpEmu.Gpu.Vulkan.csproj" />
+    <ProjectReference Include="..\adapters\SharpEmu.Adapters.Sdl\SharpEmu.Adapters.Sdl.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -17,9 +125,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
          console window; CLI mode re-attaches to the parent terminal's console. -->
     <OutputType>WinExe</OutputType>
     <AssemblyName>SharpEmu</AssemblyName>
-    <!-- osx-x64 is the macOS target: the CPU backend executes guest x86-64
-         natively, so on Apple Silicon it runs under Rosetta 2. -->
-    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <!-- osx-x64 is the only macOS target: the CPU backend executes guest
+         x86-64 natively, so on Apple Silicon it runs under Rosetta 2.
+         osx-arm64 is deliberately absent — the process architecture check in
+         Program.cs rejects a non-x64 process, so an osx-arm64 build is not a
+         runnable target. It comes back once native ARM64 guest execution
+         exists; see RejectUnrunnableMacRuntimeIdentifier below. -->
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
     <!-- A plain "dotnet publish" with no -r defaults $(RuntimeIdentifier) to
          the host's own RID; see Directory.Build.props, which is where that
          default actually has to live (PublishDir's RID suffix is decided
@@ -37,8 +149,62 @@ SPDX-License-Identifier: GPL-2.0-or-later
          that collision and keeps the emulator's required mappings available. -->
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- Tiered PGO stays on: guest dispatch, the command-stream loop and the HLE
+         import thunks are all megamorphic call sites that only get devirtualised
+         once tier-1 has the profile. It costs a little extra tier-0 bookkeeping
+         at startup, which ReadyToRun (see build-app.sh) more than pays back. -->
     <TieredPGO>true</TieredPGO>
+    <!-- Already the default since .NET 7; pinned because it is the opposite of
+         what a reader would assume for an emulator. Leaving loop-containing
+         methods out of quick JIT means every one of them is fully optimised on
+         first call, and the emulator's startup path is full of enormous
+         loop-bearing methods (ELF relocation, the shader translators) that are
+         called once. Quick-jitting them and letting the ones that stay hot be
+         re-jitted at tier 1 is the cheaper trade for time-to-first-frame. -->
+    <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
   </PropertyGroup>
+
+  <!-- ===================================================================== -->
+  <!-- macOS runtime configuration.                                          -->
+  <!-- ===================================================================== -->
+
+  <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
+    <!-- Nothing in the emulator reads culture data: every ToString/TryParse in
+         src passes CultureInfo.InvariantCulture explicitly, there is no
+         `new CultureInfo(...)` anywhere, and the UI strings come from the
+         project's own JSON rather than resource satellites. Avalonia does not
+         need ICU either: it ships its own Unicode tables, shapes text with
+         HarfBuzz and renders with Skia. Invariant mode therefore drops the
+         libicucore load from process startup at no behavioural cost. The one
+         observable change is that culture-sensitive string ordering (the
+         trophy hub's name sort) becomes ordinal, which affects list ordering
+         only. Scoped to osx-* so the Windows/Linux builds keep full ICU. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
+    <!-- W^X double-maps every JIT code page: the runtime writes through an RW
+         alias and executes through a separate RX one. Under Rosetta 2 that extra
+         mapping is pure overhead on a path the emulator hammers — guest code is
+         translated continuously, not just at startup — and it buys nothing here,
+         because the process already holds
+         com.apple.security.cs.allow-unsigned-executable-memory and maps
+         guest-supplied pages executable by design. Turning it off is measurable:
+         about 0.6 s off Dreaming Sarah's time to guest boot complete.
+
+         Set as a host config property rather than DOTNET_EnableWriteXorExecute
+         because that is the form that survives every launch path. CoreCLR reads
+         it with Configuration::GetKnobBooleanValue("System.Runtime.
+         EnableWriteXorExecute", EXTERNAL_EnableWriteXorExecute), so the
+         environment variable still wins when set, and the property applies when
+         it is not — including when the bundle's Mach-O is exec'd directly, where
+         Info.plist LSEnvironment would not be read at all.
+
+         osx-x64 only. On Apple-silicon arm64 hosts IsWXORXEnabled() returns true
+         unconditionally and neither form has any effect, so this would be a lie
+         on an osx-arm64 artifact if one ever existed. -->
+    <RuntimeHostConfigurationOption Include="System.Runtime.EnableWriteXorExecute" Value="false" />
+  </ItemGroup>
 
   <!-- Background GC's write-watch revisit calls FlushProcessWriteBuffers,
        which on macOS uses thread_get_register_pointer_values; under Rosetta 2
@@ -49,6 +215,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
+
+  <!-- The live managed heap is small (tens of MB) but loading leaves hundreds of
+       MB of dead large objects behind, and the large object heap is never
+       compacted by default, so that space stays committed for the whole run.
+       ConserveMemory lets a full GC compact it once fragmentation passes the
+       limit. Measured at 85 s: GC committed 385 -> 197 MB (Oregon) and
+       372 -> 236 MB (Superliminal). Windows and Linux keep the default. -->
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+  </ItemGroup>
+
+  <!-- Building osx-arm64 is a mistake, not a configuration: the result cannot
+       execute guest code and exits with code 5 on launch. Fail loudly at build
+       time instead of shipping a binary that only fails once a user runs it. -->
+  <Target Name="RejectUnrunnableMacRuntimeIdentifier"
+    BeforeTargets="BeforeBuild;CollectPackageReferences;Publish"
+    Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">
+    <Error Text="osx-arm64 is not a supported SharpEmu target: guest x86-64 code executes natively, so the host process must be x86-64. Build osx-x64 and run it under Rosetta 2 on Apple Silicon. This restriction lifts when native ARM64 guest execution is implemented." />
+  </Target>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
@@ -72,7 +257,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <TargetPath>LICENSE.txt</TargetPath>
       <Visible>False</Visible>
     </Content>
-    <Content Include="..\SharpEmu.GUI\Languages\*.json" Condition="'$(Configuration)' != 'Release'">
+    <Content Include="..\SharpEmu.Application\Languages\*.json" Condition="'$(Configuration)' != 'Release'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <TargetPath>Languages\%(Filename)%(Extension)</TargetPath>
       <Visible>False</Visible>
@@ -123,8 +308,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
       $(BaseIntermediateOutputPath)ffmpeg-runtime/$(FfmpegRuntimeTag)/$(RuntimeIdentifier)</FfmpegRuntimeDir>
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'win-x64'">ffmpeg-windows-x64.zip</FfmpegRuntimePackage>
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'linux-x64'">ffmpeg-linux-x64.zip</FfmpegRuntimePackage>
+    <!-- No osx-arm64 entry: that RID is not a runnable target (see
+         RejectUnrunnableMacRuntimeIdentifier). ffmpeg-core still publishes a
+         macos-arm64 package, so the mapping returns together with native
+         ARM64 guest execution. -->
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-x64'">ffmpeg-macos-x64.zip</FfmpegRuntimePackage>
-    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">ffmpeg-macos-arm64.zip</FfmpegRuntimePackage>
     <FfmpegRuntimeArchive>$(FfmpegRuntimeDir)/$(FfmpegRuntimePackage)</FfmpegRuntimeArchive>
     <FfmpegRuntimeExtractDir>$(FfmpegRuntimeDir)/extracted</FfmpegRuntimeExtractDir>
   </PropertyGroup>

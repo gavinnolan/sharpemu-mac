@@ -26,7 +26,7 @@ internal static class TrophyUi
     public static string? GameDirectory(string gamePath) =>
         SharpEmu.HLE.FileSystem.ZArchive.IsArchivePath(gamePath)
             ? SharpEmu.HLE.FileSystem.ZArchiveCache.GetCacheRoot(gamePath,
-                Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "zar-cache"))
+                Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "zar-cache"))
             : Path.GetDirectoryName(gamePath);
 
     public static string TrophyLanguage =>

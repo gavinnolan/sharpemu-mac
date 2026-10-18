@@ -3,7 +3,7 @@
 
 using SharpEmu.Core.Runtime;
 using SharpEmu.Core.Cpu;
-using SharpEmu.GUI;
+using SharpEmu.Application;
 using SharpEmu.HLE;
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host.Windows;
@@ -44,12 +44,29 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // A GUI-launched emulator on macOS: lead a process group and exit with the GUI.
+        if (args.Length > 0)
+        {
+            OwnerProcessWatch.StartIfRequested();
+        }
+
+        AllocationProfiler.StartIfRequested();
+        SharpEmu.Logging.MemoryTelemetry.Start();
+
+        // Must precede anything that can touch HostPlatform/HostViewMemory.
+        HostComposition.Register();
+
+        // Must precede any guest execution; registration itself is lazy.
+        CpuComposition.Register();
+
         ConfigureManagedPluginResolution();
 
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
             return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
 
-        RenderDocCapture.ApplyVulkanLoaderEnvironment();
+        // The GPU backend and the host platform adapters are composed in, not detected; this
+        // has to happen before anything can reach for a renderer, a display list or a pad.
+        GpuComposition.Register();
         SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
 
         try
@@ -93,7 +110,7 @@ internal static partial class Program
 
         if (args.Length == 0)
         {
-            return GuiLauncher.Run();
+            return SharpEmu.GUI.GuiLauncher.Run();
         }
 
         // The executable uses the GUI subsystem, so CLI mode has to connect
@@ -112,12 +129,6 @@ internal static partial class Program
 
         if (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux())
         {
-            if (OperatingSystem.IsMacOS())
-            {
-                ConfigureMoltenVkDefaults();
-                PreloadMacVulkanLoader();
-            }
-
             // SDL/AppKit window work belongs on the process main thread on
             // macOS. Linux uses the same model for consistent X11/Wayland
             // event ownership. Emulation remains on a worker thread.
@@ -125,6 +136,15 @@ internal static partial class Program
             HostMainThread.Enable();
             var emulation = new Thread(() =>
             {
+                // This thread runs the guest's main thread: it drives the ELF
+                // entry point and everything the title does before it spawns a
+                // pthread of its own. Frame deadlines live here, so it asks for
+                // the same QoS class as the presenter. Guest pthreads inherit
+                // their class from whoever creates them and are deliberately
+                // left alone — a title with thirty worker threads must not have
+                // all of them outranking the presenter.
+                SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+                    SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
                 try
                 {
                     exitCode = RunEmulator(args, isMitigatedChild);
@@ -152,7 +172,7 @@ internal static partial class Program
     /// host process must be x86-64 — win-x64/linux-x64 on x64 hardware, or
     /// osx-x64 under Rosetta 2 on Apple Silicon (Rosetta translates the
     /// whole process, so it still reports as X64 here). Failing up front on
-    /// any other process architecture distinguishes that from MoltenVK,
+    /// any other process architecture distinguishes that from Metal,
     /// signal-handler, or guest-memory startup problems.
     /// </summary>
     private static bool CheckHostArchitecture()
@@ -174,63 +194,6 @@ internal static partial class Program
         }
 
         return false;
-    }
-
-    /// <summary>
-    /// Applies MoltenVK performance defaults before the Vulkan loader is
-    /// loaded. Existing user-provided values always take precedence.
-    /// </summary>
-    private static void ConfigureMoltenVkDefaults()
-    {
-        try
-        {
-            _ = MacSetEnv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
-            _ = MacSetEnv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
-            _ = MacSetEnv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
-            _ = MacSetEnv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 0);
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][WARN] Failed to set MoltenVK defaults: {exception.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Makes a Vulkan loader visible before SDL creates its Vulkan surface.
-    /// Homebrew's Vulkan libraries are arm64-only and cannot load into this
-    /// x86-64 (Rosetta 2) process, so a universal libMoltenVK.dylib placed
-    /// next to the executable (named libvulkan.1.dylib) is preloaded here;
-    /// dyld can then resolve the loader for SDL and Silk.NET.
-    /// </summary>
-    private static void PreloadMacVulkanLoader()
-    {
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "libvulkan.1.dylib"),
-            Path.Combine(AppContext.BaseDirectory, "libMoltenVK.dylib"),
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".sharpemu", "x64lib", "libvulkan.1.dylib"),
-        };
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out _))
-            {
-                Console.Error.WriteLine($"[LOADER][INFO] Vulkan loader preloaded: {candidate}");
-                return;
-            }
-        }
-
-        if (NativeLibrary.TryLoad("libvulkan.1.dylib", out _))
-        {
-            return;
-        }
-
-        Console.Error.WriteLine(
-            "[LOADER][WARN] No x86-64 Vulkan loader found; video output will be unavailable. " +
-            "Place a universal libMoltenVK.dylib (from the MoltenVK releases) next to SharpEmu " +
-            "as libvulkan.1.dylib.");
     }
 
     private static int RunEmulator(string[] args, bool isMitigatedChild)
@@ -268,9 +231,13 @@ internal static partial class Program
 
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);
+        // Once per process, next to the hardware banner: every later performance
+        // comparison needs the ISA surface and the core/page shape it was measured
+        // on, and on a translated host that is not what the hardware would say.
+        Log.Info(HostSystemInfo.RuntimeIsaSummary);
 
         ebootPath = Path.GetFullPath(ebootPath);
-        Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
+        Log.Debug($"Full path: {ebootPath}");
 
         if (!File.Exists(ebootPath))
         {
@@ -642,7 +609,7 @@ internal static partial class Program
                 }
 
                 childExitCode = unchecked((int)exitCode);
-                Console.Error.WriteLine("[DEBUG] Running in mitigated child process (CET/CFG disabled).");
+                Log.Debug("Running in mitigated child process (CET/CFG disabled).");
                 return true;
             }
             catch (System.ComponentModel.Win32Exception exception)
@@ -714,7 +681,7 @@ internal static partial class Program
 
     private static string BuildDefaultLogFilePath(string? ebootPath)
     {
-        var logsDirectory = Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "logs");
+        var logsDirectory = SharpEmuPaths.UserPath("logs");
         var name = TryReadTitleId(ebootPath) ?? "UNKNOWN";
 
         foreach (var invalid in Path.GetInvalidFileNameChars())
@@ -1014,7 +981,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--shader-cache=<on|off>] [--shader-learn=<on|off>] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1085,6 +1052,14 @@ internal static partial class Program
         int? refreshRateOverride = null;
         bool? vsyncOverride = null;
         HostHdrMode? hdrModeOverride = null;
+        // SHARPEMU_DISPLAY_RESOLUTION is read here rather than where video-out answers the
+        // guest, so one place decides and every query agrees.
+        var displayResolutionOverride =
+            TryParseDisplayResolution(
+                Environment.GetEnvironmentVariable("SHARPEMU_DISPLAY_RESOLUTION") ?? string.Empty,
+                out var environmentDisplayResolution)
+                ? environmentDisplayResolution
+                : (GuestDisplayResolution?)null;
         bool? overlayEnabledOverride = null;
         PerformanceOverlayMode? overlayModeOverride = null;
         PerformanceOverlayCorner? overlayCornerOverride = null;
@@ -1231,6 +1206,40 @@ internal static partial class Program
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))
             {
                 strictDynlibResolution = true;
+                continue;
+            }
+
+            // The Metal backend's shader prewarm reads these when it starts: hold the guest
+            // until every recorded shader and listed library is compiled, and with
+            // --precompile-only close the session after that instead of letting it run.
+            if (string.Equals(argument, "--precompile-only", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.SetEnvironmentVariable("SHARPEMU_SHADER_PRECOMPILE_ONLY", "1");
+                continue;
+            }
+
+            if (string.Equals(argument, "--shader-prewarm-hold", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.SetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_HOLD", "complete");
+                continue;
+            }
+
+            // The shader cache's static precompile of programs not drawn yet (on by default),
+            // and learn mode, which writes the title's shader seed when the session ends.
+            // Upstream's names and values (PR #1074).
+            if (TrySplitOption(argument, "--shader-cache", out var shaderCacheText) ||
+                TrySplitOption(argument, "--shader-learn", out shaderCacheText))
+            {
+                if (!TryParseOnOff(shaderCacheText, out var shaderCacheEnabled))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+
+                Environment.SetEnvironmentVariable(
+                    argument.StartsWith("--shader-cache", StringComparison.OrdinalIgnoreCase) ? "SHARPEMU_SHADER_CACHE" : "SHARPEMU_SHADER_LEARN",
+                    shaderCacheEnabled ? "on" : "off");
                 continue;
             }
 
@@ -1401,6 +1410,7 @@ internal static partial class Program
             RefreshRate = refreshRateOverride ?? configuredVideoOptions.RefreshRate,
             VSync = vsyncOverride ?? configuredVideoOptions.VSync,
             HdrMode = hdrModeOverride ?? configuredVideoOptions.HdrMode,
+            DisplayResolution = displayResolutionOverride ?? configuredVideoOptions.DisplayResolution,
             OverlayEnabled = overlayEnabledOverride ?? configuredVideoOptions.OverlayEnabled,
             OverlayMode = overlayModeOverride ?? configuredVideoOptions.OverlayMode,
             OverlayCorner = overlayCornerOverride ?? configuredVideoOptions.OverlayCorner,
@@ -1414,7 +1424,7 @@ internal static partial class Program
         try
         {
             var effective = EffectiveLaunchSettings.Resolve(
-                GuiSettings.Load(),
+                ApplicationSettings.Load(),
                 PerGameSettings.Load(TryReadTitleId(ebootPath)));
 
             var windowMode = TryParseWindowMode(effective.WindowMode, out var parsedWindowMode)
@@ -1430,6 +1440,10 @@ internal static partial class Program
             var hdrMode = TryParseHdrMode(effective.HdrMode, out var parsedHdrMode)
                 ? parsedHdrMode
                 : defaults.HdrMode;
+            var displayResolution =
+                TryParseDisplayResolution(effective.GuestDisplayResolution, out var parsedDisplayResolution)
+                    ? parsedDisplayResolution
+                    : defaults.DisplayResolution;
 
             return new HostVideoOptions
             {
@@ -1441,6 +1455,7 @@ internal static partial class Program
                 RefreshRate = effective.RefreshRate,
                 VSync = effective.VSync,
                 HdrMode = hdrMode,
+                DisplayResolution = displayResolution,
                 OverlayEnabled = effective.OverlayEnabled,
                 OverlayCorner = Enum.TryParse<PerformanceOverlayCorner>(effective.OverlayCorner, true, out var corner)
                     ? corner : defaults.OverlayCorner,
@@ -1453,6 +1468,22 @@ internal static partial class Program
             Console.Error.WriteLine(
                 $"[LOADER][WARN] GUI video settings could not be loaded; using defaults: {exception.Message}");
             return defaults;
+        }
+    }
+
+    private static bool TryParseOnOff(string text, out bool enabled)
+    {
+        switch (text.Trim().ToLowerInvariant())
+        {
+            case "1" or "on" or "true" or "yes" or "enabled":
+                enabled = true;
+                return true;
+            case "0" or "off" or "false" or "no" or "disabled":
+                enabled = false;
+                return true;
+            default:
+                enabled = false;
+                return false;
         }
     }
 
@@ -1544,6 +1575,21 @@ internal static partial class Program
             _ => (HostHdrMode)(-1),
         };
         return Enum.IsDefined(mode);
+    }
+
+    /// <summary>The display the guest is told about: 720p, 1080p, 1440p or 2160p. Four-K is the
+    /// one a title can spend four times the pixel work on, so it is opt-in.</summary>
+    private static bool TryParseDisplayResolution(string value, out GuestDisplayResolution resolution)
+    {
+        resolution = value.Trim().ToLowerInvariant() switch
+        {
+            "720p" or "720" or "hd720" or "1280x720" => GuestDisplayResolution.Hd720,
+            "1080p" or "1080" or "fhd" or "hd" or "1920x1080" => GuestDisplayResolution.Hd,
+            "1440p" or "1440" or "qhd" or "2560x1440" => GuestDisplayResolution.Qhd,
+            "2160p" or "2160" or "4k" or "uhd" or "3840x2160" => GuestDisplayResolution.Uhd,
+            _ => (GuestDisplayResolution)(-1),
+        };
+        return Enum.IsDefined(resolution);
     }
 
     private static bool TryParseResolution(string value, out int width, out int height)
@@ -1814,7 +1860,4 @@ internal static partial class Program
         uint creationDisposition,
         uint flagsAndAttributes,
         nint templateFile);
-
-    [DllImport("libSystem", EntryPoint = "setenv")]
-    private static extern int MacSetEnv(string name, string value, int overwrite);
 }

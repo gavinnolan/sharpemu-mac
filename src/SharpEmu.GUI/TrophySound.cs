@@ -17,7 +17,7 @@ internal static class TrophySound
 
     public static void Prepare()
     {
-        if (OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
         {
             _ = Task.Run(() =>
             {
@@ -31,7 +31,7 @@ internal static class TrophySound
 
     public static void Play(int grade)
     {
-        if (!Enabled || !OperatingSystem.IsWindows())
+        if (!Enabled || !(OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()))
         {
             return;
         }
@@ -238,6 +238,12 @@ internal static class TrophySound
 
     private static void PlayPcm(byte[] pcm)
     {
+        if (OperatingSystem.IsMacOS())
+        {
+            PlayPcmMac(pcm);
+            return;
+        }
+
         var format = new WaveFormat
         {
             FormatTag = 1,
@@ -282,6 +288,26 @@ internal static class TrophySound
             _ = waveOutClose(device);
             Marshal.FreeHGlobal(header);
             Marshal.FreeHGlobal(data);
+        }
+    }
+
+    // One-shot AVAudioPlayer over the PCM wrapped in a WAV header, kept alive
+    // (and released) here until it finishes or the clip's duration plus slack passes.
+    private static void PlayPcmMac(byte[] pcm)
+    {
+        var wav = new byte[44 + pcm.Length];
+        SndPreviewPlayer.WriteWavHeader(wav, 2, SampleRate, pcm.Length / 4);
+        pcm.CopyTo(wav, 44);
+        using var player = MacAudioPlayer.Create(wav, loop: false, 1f);
+        if (player is null || !player.Play())
+        {
+            return;
+        }
+
+        var deadline = Environment.TickCount64 + pcm.Length * 1000L / (SampleRate * 4) + 2000;
+        while (player.IsPlaying && Environment.TickCount64 < deadline)
+        {
+            Thread.Sleep(50);
         }
     }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using SharpEmu.Logging;
 
 namespace SharpEmu.GUI;
 
@@ -27,7 +28,15 @@ public static class GuiLauncher
 
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<App>()
+#if SHARPEMU_GUI_MACOS
+            // Avalonia.Desktop's UsePlatformDetect would pull in the Win32
+            // and X11 backends; macOS only needs the native one.
+            .UseAvaloniaNative()
+            .UseSkia()
+            .UseHarfBuzz()
+#else
             .UsePlatformDetect()
+#endif
             .WithInterFont()
             .LogToTrace();
 
@@ -36,7 +45,7 @@ public static class GuiLauncher
         try
         {
             File.AppendAllText(
-                Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "gui-crash.log"),
+                SharpEmuPaths.DataPath("gui-crash.log"),
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}{Environment.NewLine}{Environment.NewLine}");
         }
         catch (Exception)
