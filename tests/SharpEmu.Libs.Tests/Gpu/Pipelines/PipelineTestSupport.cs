@@ -49,6 +49,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
+    public GraphicsPrewarmList? GraphicsPrewarm { get; set; }
+
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
     public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind, out Gen5ColorComponentMapping componentMapping)

@@ -24,6 +24,25 @@ public sealed class MetalShaderPrewarmPendingTests : IDisposable
         }
     }
 
+    // The startup prewarm translates before the command stream exists; with the
+    // mip-statistics switch still off its pixel libraries were not the game's (9 of 343
+    // matched in Demon's Souls).
+    [Fact]
+    public void ThePrewarmTranslatesWithTheCommandStreamsMipStatisticsSwitch()
+    {
+        var previous = ResourceMaterializer.RecordMipStatistics;
+        try
+        {
+            ResourceMaterializer.RecordMipStatistics = !MetalRenderHost.GpuLodStatistics;
+            MetalShaderPrewarm.TranslateAsTheGameDoes();
+            Assert.Equal(MetalRenderHost.GpuLodStatistics, ResourceMaterializer.RecordMipStatistics);
+        }
+        finally
+        {
+            ResourceMaterializer.RecordMipStatistics = previous;
+        }
+    }
+
     [Fact]
     public void ACurrentStampStillPrewarmsEveryRecordedCompute()
     {

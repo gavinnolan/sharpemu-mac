@@ -126,8 +126,13 @@ internal sealed partial class MetalRenderHost
     private long _lodStatsReports;
 
     /// <summary>Pixel programs carry the recording at every sampled-image site, guarded at
-    /// run time by the bound T#'s MIP_STATS_ENABLE, unless SHARPEMU_LOD_STATS=fallback.</summary>
-    private static void EnableLodStatistics() => ResourceMaterializer.RecordMipStatistics = GpuLodStatistics;
+    /// run time by the bound T#'s MIP_STATS_ENABLE, unless SHARPEMU_LOD_STATS=fallback.
+    /// The shader prewarm sets it too, before it translates anything: a pixel program
+    /// translated without it is MSL the game never asks for. Set only at command-stream
+    /// creation, it was still off while the prewarm translated the graphics list, and 9 of
+    /// 343 recorded Demon's Souls pixel libraries matched what the game compiled
+    /// (run 20261018-203322-ds-ds-memopt-check; 725 of 769 with it on).</summary>
+    internal static void EnableLodStatistics() => ResourceMaterializer.RecordMipStatistics = GpuLodStatistics;
 
     /// <summary>GET_LOD_STATS reports this host packed on the GPU.</summary>
     internal long LodStatisticsReports => Interlocked.Read(ref _lodStatsReports);

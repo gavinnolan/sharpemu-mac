@@ -225,6 +225,7 @@ internal static class MetalShaderPrewarm
             _startRequested = true;
         }
 
+        TranslateAsTheGameDoes();
         Gate.Begin();
         new Thread(() =>
         {
@@ -249,6 +250,13 @@ internal static class MetalShaderPrewarm
             Name = "SharpEmu Metal v2 shader prewarm",
         }.Start();
     }
+
+    /// <summary>
+    /// Sets the process-wide translation switches the command stream sets, before the
+    /// prewarm translates anything: what the prewarm makes must be what the game's draws
+    /// ask for (the pixel programs' mip-statistics recording).
+    /// </summary>
+    internal static void TranslateAsTheGameDoes() => MetalRenderHost.EnableLodStatistics();
 
     private static bool StartCore(nint device)
     {
