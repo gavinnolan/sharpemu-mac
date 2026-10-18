@@ -14,7 +14,7 @@ The GUI shows 14 variables on its **Options** and **Game options** pages. This l
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
 `SHARPEMU_RENDERDOC`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
 
-The list contains 269 variables. The source was examined on 2026-09-19, branch `dev`.
+The list contains 270 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
 ## How to use a variable
@@ -34,7 +34,7 @@ The descriptions come from the code that reads each variable. The emulator was n
 | Metal | 10 |
 | Audio and video | 6 |
 | Input | 5 |
-| Memory and CPU | 19 |
+| Memory and CPU | 20 |
 | Loader | 11 |
 | Debugger | 1 |
 | Log channels | 72 |
@@ -183,6 +183,7 @@ These variables apply to guest memory and guest code execution.
 
 | Variable | Value | Function | Code that reads it |
 | --- | --- | --- | --- |
+| `SHARPEMU_DIRECT_MEMORY_MB` | number | Sets the direct memory size that `sceKernelGetDirectMemorySize` reports, in MiB. The default is the 12736 MiB title total less the flexible size (12288 MiB at the 448 MiB default). The value is capped so the flexible share of the backing object stays free. A zero or invalid value is ignored. | `KernelMemoryCompatExports.Budget.cs` |
 | `SHARPEMU_DISABLE_GUEST_ALLOCATOR_HOLE_RECOVERY` | `1` | Stops the Windows fault recovery for a guest allocator that reads an empty pool node. The default recovers the fault and continues at the allocator fallback code. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_DISABLE_MITIGATION_RELAUNCH` | `1` | Stops the Windows relaunch of the emulator as a child process with Control Flow Guard and CET shadow stacks off. The default starts the child process. | `Program.cs`, `SelfLoader.cs` |
 | `SHARPEMU_DISABLE_NATIVE_GUEST_WORKERS` | `1` | Stops the use of native worker threads for guest thread execution on Windows. The default uses the native workers. | `DirectExecutionBackend.NativeWorker.cs` |

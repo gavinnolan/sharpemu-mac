@@ -46,20 +46,37 @@ public sealed class KernelMemoryBudgetTests
         try
         {
             KernelMemoryCompatExports.ConfigureMemoryBudget(256UL << 20);
-            Assert.Equal((13824UL << 20, 256UL << 20, 256UL << 20), ReadBudget());
+            // Direct is the 12736 MiB title total less flexible: a retail PS5 reports 12288 MiB
+            // (0x3_0000_0000) at the 448 MiB default.
+            Assert.Equal((12480UL << 20, 256UL << 20, 256UL << 20), ReadBudget());
 
             KernelMemoryCompatExports.ConfigureMemoryBudget(null);
-            Assert.Equal((13824UL << 20, 448UL << 20, 448UL << 20), ReadBudget());
+            Assert.Equal((0x3_0000_0000UL, 448UL << 20, 448UL << 20), ReadBudget());
 
             // More than the backing object holds beside direct memory is clamped to what fits.
             KernelMemoryCompatExports.ConfigureMemoryBudget(64UL << 30);
-            var room = GuestMemoryLayout.BackingBytes - (13824UL << 20);
-            Assert.Equal(room, ReadBudget().Configured);
+            var room = GuestMemoryLayout.BackingBytes - (12288UL << 20);
+            var clamped = ReadBudget();
+            Assert.Equal(room, clamped.Configured);
+            Assert.Equal(KernelMemoryCompatExports.TitleMemoryBytes - room, clamped.Direct);
         }
         finally
         {
             KernelMemoryCompatExports.ConfigureMemoryBudget(null);
         }
+    }
+
+    [Theory]
+    [InlineData(448UL, null, 12288UL)]
+    [InlineData(320UL, null, 12416UL)]
+    [InlineData(448UL, "", 12288UL)]
+    [InlineData(448UL, "0", 12288UL)]
+    [InlineData(448UL, "junk", 12288UL)]
+    [InlineData(448UL, "8192", 8192UL)]
+    [InlineData(448UL, "20000", 16384UL)] // clamped: the backing object keeps the flexible share
+    public void DirectMemoryIsTitleTotalLessFlexibleUnlessOverridden(ulong flexibleMiB, string? overrideMiB, ulong expectedMiB)
+    {
+        Assert.Equal(expectedMiB << 20, KernelMemoryCompatExports.ResolveDirectMemoryBytes(flexibleMiB << 20, overrideMiB));
     }
 
     [Fact]
