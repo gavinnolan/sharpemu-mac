@@ -145,6 +145,8 @@ public sealed unsafe class MetalSingleCopyTests(ITestOutputHelper output)
             Memory = new MetalGuestMemory(device, Backing, Backing, GranuleBytes, MaxWindowBytes, singleCopy: true);
             Assert.NotNull(Memory.GpuAlias);
             Cache = new MetalImageCache(new Owner(Harness), Harness.Transfer, Memory, _pages, Backing);
+            // Exact textures: a lossy one never round-trips, so it is never released.
+            Cache.LossyTextures = false;
             Configure(retireFrames: 0, retireSeconds: 0);
             SingleCopy = new MetalSingleCopy(device, Memory, Backing, _pages, () => _completed, new MetalSingleCopy.Settings
             {
@@ -569,6 +571,79 @@ public sealed unsafe class MetalSingleCopyTests(ITestOutputHelper output)
         Assert.Equal(bytes, gpu);
         Assert.Equal(bytes, rig.Raw(rig.ImageAddress, size));
         output.WriteLine(rig.SingleCopy.Describe());
+    }
+
+    // A device-address program can reach any mapped page past every window resolve: before
+    // one is prepared, every released or punched chunk gets its bytes and its GPU alias pages
+    // back (a window this command buffer used over one is left stale, so the host ends the
+    // command buffer), and nothing is released for the rest of the session.
+    [Fact]
+    public void ADeviceAddressProgramGivesEverythingBackAndStopsReleases()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var request = Request(rig.ImageAddress, GuestTileMode.Standard64KB);
+        var size = request.Description.Data.Size;
+        var bytes = Pattern(size, 71);
+        var image = rig.Release(request, bytes, (int)(size / Chunk));
+
+        // A window beside the run is pinned by this command buffer.
+        var near = rig.Memory.Resolve(rig.ImageAddress + size, size);
+        Assert.True(rig.Memory.IsInPlace(near));
+
+        rig.SingleCopy.NoteDeviceAddressUse(late: false);
+        Assert.True(rig.SingleCopy.DeviceAddressSeen);
+        Assert.Equal(0, rig.Views.SingleCopy!.ReleasedChunks);
+        Assert.Equal(0, rig.Memory.SingleCopyHoleCount);
+        Assert.Equal(bytes, rig.Raw(rig.ImageAddress, size));
+        Assert.True(rig.Memory.HasStaleSingleCopyWindows);
+        Assert.Equal(0, Field(rig.SingleCopy.Describe(), "device_address_stale"));
+
+        // The next command buffer: every window over the run reads the guest's bytes in place.
+        rig.Submit();
+        Assert.False(rig.Memory.HasStaleSingleCopyWindows);
+        var range = rig.Memory.Resolve(rig.ImageAddress, 2 * size);
+        Assert.True(rig.Memory.IsInPlace(range));
+        var readback = rig.Harness.Buffer(size);
+        Copy(rig.Harness, range.Buffer, range.Offset, readback, size);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        Assert.Equal(bytes, rig.Harness.Read(readback, 0, size));
+
+        // Nothing is armed again, and the in-preparation check finds nothing to count.
+        for (var tick = 0; tick < 4; tick++)
+        {
+            rig.Submit();
+            rig.Cache.Collect();
+        }
+
+        Assert.Null(image.SingleCopyRecord);
+        Assert.Equal(0, rig.Views.SingleCopy!.ReleasedChunks);
+        rig.SingleCopy.NoteDeviceAddressUse(late: true);
+        Assert.Equal(0, Field(rig.SingleCopy.Describe(), "device_address_stale"));
+        Assert.Equal(1, Field(rig.SingleCopy.Describe(), "device_address_restores"));
+    }
+
+    // A lossy texture's texels are approximated, so its guest bytes are the only exact copy.
+    [Fact]
+    public void ALossyTextureIsNeverReleased()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.LossyTextures = true;
+        if (!rig.Cache.LossyTextures) return;
+        var request = Request(rig.ImageAddress, GuestTileMode.Standard64KB);
+        Assert.True(rig.Views.TryWriteBacking(rig.ImageAddress, Pattern(request.Description.Data.Size, 13)));
+        var image = rig.Cache.GetImage(rig.Acquire(request));
+        for (var tick = 0; tick < 4; tick++)
+        {
+            rig.Submit();
+            rig.Cache.Collect();
+        }
+
+        Assert.True(image.Shape.Lossy);
+        Assert.Null(image.SingleCopyRecord);
+        Assert.Equal(0, rig.Views.SingleCopy!.ReleasedChunks);
     }
 
     private bool RequireDevice()

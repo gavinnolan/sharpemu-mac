@@ -17,7 +17,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// Single-copy textures (artifacts/memopt/single-copy-textures.md, stage 4): a clean
 /// sampled texture that gives its guest bytes back exactly through a retile lets the 64 KiB
 /// chunks of the chunked backing it alone covers be emptied, and gets them back the moment
-/// anything else wants them. SHARPEMU_METAL_V2_SINGLE_COPY=1, on SHARPEMU_GUEST_BACKING=chunked.
+/// anything else wants them. On wherever the backing is chunked; SHARPEMU_METAL_V2_SINGLE_COPY=0 turns it off.
 ///
 /// <para>
 /// A chunk goes Arming → Pending → Emptying → Emptied:
@@ -60,7 +60,12 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// </summary>
 internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposable
 {
+    /// <summary>On wherever the backing is chunked; SHARPEMU_METAL_V2_SINGLE_COPY=0 turns it off.</summary>
     public static bool Enabled { get; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SINGLE_COPY") != "0";
+
+    /// <summary>Whether SHARPEMU_METAL_V2_SINGLE_COPY=1 asked for it explicitly (a missing GPU alias is then worth a warning).</summary>
+    public static bool Requested { get; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SINGLE_COPY") == "1";
 
     /// <summary>
@@ -222,6 +227,8 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
     private long _drops;
     private long _armed;
     private long _deviceAddressStale;
+    private long _deviceAddressRestores;
+    private bool _deviceAddressSeen;
 
     public MetalSingleCopy(
         nint device,
@@ -301,7 +308,9 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
             $"re_empties={reEmpties} overwrites={overwrites} drops={drops} orphan_mb={orphan / Mb:F1} " +
             $"gpu_holes={window.Holes} hole_punches={window.Punches} hole_fills={window.Fills} " +
             $"window_renewals={window.Renewals} stale_window_refusals={window.StaleRefusals} " +
-            $"device_address_stale={Interlocked.Read(ref _deviceAddressStale)}");
+            $"device_address_stale={Interlocked.Read(ref _deviceAddressStale)} " +
+            $"device_address_restores={Interlocked.Read(ref _deviceAddressRestores)} " +
+            $"device_address_seen={(DeviceAddressSeen ? 1 : 0)}");
     }
 
     /// <summary>Released bytes now emptied, restores so far and verify rejects (tests).</summary>
@@ -341,6 +350,12 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
         }
 
         TakePunched(now);
+        if (DeviceAddressSeen)
+        {
+            // Nothing new is armed; what was armed was given back when the program ran.
+            return;
+        }
+
         EmptyDue(cache, now);
         if (now - _lastScan >= Ticks(_settings.ScanInterval))
         {
@@ -543,6 +558,16 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
             !_backing.TryResolveBackingAlias(address, _chunkBytes, out var alias) || alias != _aliasBase + offset)
         {
             return false;
+        }
+
+        // A page someone else already read-watches cannot take this watch too (one read
+        // watch per page), and a page the guest cannot read is not one to arm.
+        for (var page = address; page < address + _chunkBytes; page += 4096)
+        {
+            if (!_pages.Allows(page, FaultKind.Read))
+            {
+                return false;
+            }
         }
 
         lock (_m)
@@ -868,68 +893,62 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
         }
     }
 
+    /// <summary>Whether a device-address program has run this session: nothing is released from then on.</summary>
+    public bool DeviceAddressSeen => Volatile.Read(ref _deviceAddressSeen);
+
     /// <summary>
-    /// Every released chunk under guest addresses [address, address + size) gets its bytes
-    /// back and the GPU alias maps them again now: the GPU is about to reach them by address.
+    /// A device-address program is about to be prepared. It can reach any mapped guest page
+    /// through the page table - the reach set only says which windows are named resident,
+    /// and an access outside it still lands - so no chunk it could reach may be a hole while
+    /// it runs, and none can be told apart from the rest: from now on nothing is armed, and
+    /// every chunk released or punched so far gets its bytes and its GPU alias pages back
+    /// before the preparation begins. <paramref name="late"/> is the in-preparation check; it
+    /// finding anything to give back means a program got past the early one, and is counted.
     /// </summary>
-    public void RestoreAddressRange(ulong address, ulong size)
+    public void NoteDeviceAddressUse(bool late)
     {
-        if (_state.ReleasedChunks == 0 || size == 0)
+        if (!Volatile.Read(ref _deviceAddressSeen))
         {
-            return;
+            Volatile.Write(ref _deviceAddressSeen, true);
+            Console.Error.WriteLine(
+                "[METAL-V2][INFO] single-copy textures: a device-address program ran; no chunk is released from now on " +
+                $"(released_chunks={_state.ReleasedChunks} gpu_holes={_memory.SingleCopyHoleCount}).");
         }
 
-        List<(ulong Offset, ulong Length)>? restored = null;
-        var end = address + size;
-        if (_backing.TryResolveBackingAliasSpan(address, size, out var span) && span >= _aliasBase)
+        if (_state.ReleasedChunks == 0 && _memory.SingleCopyHoleCount == 0)
         {
-            // One run of the backing (the usual case): one look at the released set.
-            var spanOffset = span - _aliasBase;
-            if (!_state.AnyReleased(spanOffset, size))
+            lock (_m)
             {
-                return;
-            }
-
-            Restore(spanOffset, size, GuestSingleCopyAccess.GpuBinding);
-            restored = [(spanOffset, size)];
-            address = end;
-        }
-
-        while (address < end)
-        {
-            if (_backing.TryResolveBackingAlias(address, 1, out var alias) && alias >= _aliasBase)
-            {
-                var offset = alias - _aliasBase;
-                var chunkEnd = (offset / _chunkBytes + 1) * _chunkBytes;
-                var length = Math.Min(chunkEnd - offset, end - address);
-                if (_state.AnyReleased(offset, length))
+                if (_records.Count == 0)
                 {
-                    Restore(offset, length, GuestSingleCopyAccess.GpuBinding);
-                    (restored ??= new()).Add((offset, length));
+                    return;
                 }
-
-                address += length;
-            }
-            else
-            {
-                address = (address | 0xFFF) + 1;
             }
         }
 
-        if (restored is null)
+        if (late)
         {
-            return;
+            Interlocked.Increment(ref _deviceAddressStale);
         }
 
+        List<Record> records;
+        lock (_m)
+        {
+            records = _records.ToList();
+        }
+
+        foreach (var record in records)
+        {
+            RestoreRecord(record, GuestSingleCopyAccess.GpuBinding, penalize: false, count: true);
+        }
+
+        Interlocked.Increment(ref _deviceAddressRestores);
         _memory.ApplySingleCopyFills();
-        foreach (var (offset, length) in restored)
+        if (_memory.SingleCopyHoleCount != 0)
         {
-            if (_memory.IsStaleSingleCopyRange(offset, length))
-            {
-                // A window this command buffer already used maps the hole there until the next
-                // one; the host ends the command buffer before the next draw.
-                Interlocked.Increment(ref _deviceAddressStale);
-            }
+            // Only a fill into a chunk still running (BeginOverwrite) keeps its hole: the guest
+            // is writing those bytes while the program reads them.
+            Interlocked.Increment(ref _deviceAddressStale);
         }
     }
 

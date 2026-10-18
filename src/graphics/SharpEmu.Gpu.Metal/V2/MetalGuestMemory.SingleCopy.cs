@@ -16,7 +16,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// <para>
 /// A command buffer that names a window wires and faults in every page of it, so a window
 /// over a chunk whose guest copy was emptied fills it with zeros again and keeps it resident
-/// (§4 a2). With SHARPEMU_METAL_V2_SINGLE_COPY=1 the windows are therefore made over a second
+/// (§4 a2). With single-copy textures on the windows are therefore made over a second
 /// mapping of the backing (<see cref="IHostBackingGpuAlias"/>) instead of the canonical alias:
 /// the same chunk objects, except that a released chunk is punched out and one shared dummy
 /// chunk is mapped there. Host code keeps the canonical alias and its complete bytes.
@@ -69,6 +69,9 @@ internal sealed partial class MetalGuestMemory
     private long _windowRenewals;
     private long _staleRefusals;
 
+    /// <summary>Chunks the GPU alias maps the dummy over now (unlocked).</summary>
+    internal int SingleCopyHoleCount => Volatile.Read(ref _holeCount);
+
     /// <summary>The GPU alias windows are made over, or null when single-copy textures are off.</summary>
     internal IHostBackingGpuAlias? GpuAlias => _gpuAlias;
 
@@ -96,6 +99,11 @@ internal sealed partial class MetalGuestMemory
         if (gpuAlias is null || gpuAlias.Size < _aliasSize)
         {
             gpuAlias?.Dispose();
+            if (!MetalSingleCopy.Requested && singleCopy is null)
+            {
+                return;
+            }
+
             Console.Error.WriteLine(
                 "[METAL-V2][WARN] single-copy textures are off: the guest backing has no GPU alias " +
                 "(SHARPEMU_METAL_V2_SINGLE_COPY=1 needs SHARPEMU_GUEST_BACKING=chunked).");

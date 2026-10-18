@@ -5,7 +5,7 @@ namespace SharpEmu.HLE.Host;
 
 /// <summary>
 /// A second host mapping of a chunked backing, made for the GPU's no-copy windows
-/// (single-copy textures, SHARPEMU_METAL_V2_SINGLE_COPY=1). It maps the same chunk objects
+/// (single-copy textures; SHARPEMU_METAL_V2_SINGLE_COPY=0 turns them off). It maps the same chunk objects
 /// as the canonical alias, so every byte written through one is seen through the other,
 /// except where a chunk has been punched out: there one shared dummy chunk is mapped
 /// instead. A window over a punched chunk then never wires, faults in or reads the chunk the

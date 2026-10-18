@@ -163,14 +163,6 @@ internal sealed partial class MetalRenderHost
         // Acquire the decoded frame before any stage selects its movie planes.
         PumpHostMovieFrame();
 
-        // A chunk restored from a single-copy texture lies under a window this command
-        // buffer already used, which still maps the GPU alias hole there: the next command
-        // buffer renews it, so a draw that reaches it by address reads its bytes.
-        if (_singleCopy is not null && _commandBuffer != 0 && _guestMemory.HasStaleSingleCopyWindows)
-        {
-            FlushCommandBuffer(MetalFlushCause.Other);
-        }
-
         // Keep each submission's command buffer bounded so completions and flips are
         // not stuck behind a frame's worth of recording, and so the rings and staging
         // a draw's uploads borrowed return before the next draw borrows more.
@@ -471,6 +463,30 @@ internal sealed partial class MetalRenderHost
     {
         // Guest memory is the GPU's memory, so a device-address program needs no page
         // table upload: the pointers the shader reads already address the windows.
+        // BeforeDeviceAddressPreparation has already given single-copy chunks back; this
+        // only counts a program that reached here without it.
+        _singleCopy?.NoteDeviceAddressUse(late: true);
+    }
+
+    /// <summary>
+    /// A device-address program can reach any mapped guest page through the page table, past
+    /// every window resolve, so it may never run while the GPU alias has a hole: from the first
+    /// one on, single-copy textures stop releasing, every released chunk gets its bytes back
+    /// and its pages mapped again, and a command buffer whose windows still map a hole over
+    /// restored bytes ends here, between preparations, so the program runs in the next one.
+    /// </summary>
+    void IRenderHost.BeforeDeviceAddressPreparation()
+    {
+        if (_singleCopy is null || _preparation is not null)
+        {
+            return;
+        }
+
+        _singleCopy.NoteDeviceAddressUse(late: false);
+        if (_commandBuffer != 0 && _guestMemory.HasStaleSingleCopyWindows)
+        {
+            FlushCommandBuffer(MetalFlushCause.Other);
+        }
     }
 
     public void BindResources(IPreparedBindings prepared)
@@ -594,6 +610,12 @@ internal sealed partial class MetalRenderHost
     {
         var unplanned = false;
         var declaredWrite = false;
+        if (snapshot.DeviceAddressRanges.Length != 0)
+        {
+            // Counted, and given back, only if the program got past BeforeDeviceAddressPreparation.
+            _singleCopy?.NoteDeviceAddressUse(late: true);
+        }
+
         foreach (var range in snapshot.DeviceAddressRanges)
         {
             if (!range.Planned)
@@ -613,9 +635,6 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
-            // The program reaches these bytes by address, past every window resolve: chunks a
-            // texture holds the guest copy of get their bytes and their GPU alias pages back now.
-            _singleCopy?.RestoreAddressRange(range.Base, size);
             OrderAfterDeferredCopies(range.Base, size);
             OrderAfterStagedStores(range.Base, size);
             FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor);

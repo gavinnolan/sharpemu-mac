@@ -139,6 +139,13 @@ public interface IRenderHost
     {
     }
 
+    // A draw or dispatch whose program reaches guest memory through the device-address page
+    // table is about to be prepared: called before BeginPreparation, so a backend can settle
+    // guest memory such a program may reach (and end its command buffer) while that is safe.
+    void BeforeDeviceAddressPreparation()
+    {
+    }
+
     // Opens the preparation scope; a ring wrap inside it is refused, and disposal releases it on every path.
     IResourcePreparation BeginPreparation();
 

@@ -249,6 +249,12 @@ public sealed partial class RenderExecutor
         var context = banks.Context;
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
+        if ((vertexInput.Stage.Program?.UsesDeviceAddresses ?? false) ||
+            (state.PixelActive && (pixelInput.Stage.Program?.UsesDeviceAddresses ?? false)))
+        {
+            _host.BeforeDeviceAddressPreparation();
+        }
+
         using var preparation = _host.BeginPreparation();
         IPreparedBindings vertexBindings;
         IPreparedBindings? pixelBindings;
