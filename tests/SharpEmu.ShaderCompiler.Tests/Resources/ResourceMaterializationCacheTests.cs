@@ -571,6 +571,76 @@ public sealed class ResourceMaterializationCacheTests
         Assert.True(cache.Hits >= 20, $"hits={cache.Hits} misses={cache.Misses}");
     }
 
+    // A descriptor table at s[0:1] holds a pointer to a per-frame ring at +8; the ring holds two
+    // constants the shader reads and, at +0x60, the V# of the buffer it loads.
+    private static ShaderResourcePlan RingPointerPlan() =>
+        Extract(Program(ScalarLoad(0, 0, 4, 2, immediateOffset: 8), ScalarLoad(4, 4, 8, 4, immediateOffset: 0x60),
+            ScalarLoad(8, 4, 12, 2), Vop1(12, "VMovB32", 0, Gen5Operand.Scalar(12)), Vop1(16, "VMovB32", 1, Gen5Operand.Scalar(13)),
+            BufferLoad(20, 8), EndProgram(24)), userDataCount: 2);
+
+    private static void WriteRing(TestWordMemory memory, uint ring, uint first, uint second, uint size = 256)
+    {
+        memory.At(0x1008) = ring;
+        memory.At(0x100C) = 0;
+        memory.At(ring) = first;
+        memory.At(ring + 4) = second;
+        memory.At(ring + 0x60) = 0x18000;
+        memory.At(ring + 0x64) = 0;
+        memory.At(ring + 0x68) = size;
+        memory.At(ring + 0x6C) = 0x2_0000;
+    }
+
+    [Fact]
+    public void AMovedRingWithTheSameDescriptorsRefreshesItsSlots()
+    {
+        var plan = RingPointerPlan();
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x8000] };
+        var cache = new ResourceMaterializationCache();
+        uint[] userData = [0x1000, 0];
+        WriteRing(memory, 0x10000, 11, 22);
+        Assert.True(RunWords(cache, plan, memory, userData, out var first));
+        AssertMatchesFullWalk(plan, memory, userData, first);
+
+        // The next frame's ring: a new pointer, new constants, the same V# words.
+        WriteRing(memory, 0x14000, 33, 44);
+        Assert.True(RunWords(cache, plan, memory, userData, out var moved));
+        AssertMatchesFullWalk(plan, memory, userData, moved);
+        Assert.Equal((0, 1, 1), (cache.Hits, cache.Misses, cache.SlotRefreshes));
+        Assert.Same(first.Buffers, moved.Buffers);
+        Assert.Contains(33u, moved.FlattenedResourceTable);
+        Assert.Contains(44u, moved.FlattenedResourceTable);
+
+        // The refreshed entry records where this draw read: the same frame's next draw is a hit.
+        Assert.True(RunWords(cache, plan, memory, userData, out var again));
+        Assert.Same(moved, again);
+        Assert.Equal((1, 1, 1), (cache.Hits, cache.Misses, cache.SlotRefreshes));
+    }
+
+    [Fact]
+    public void AMovedRingWithAnotherDescriptorMaterializesAgain()
+    {
+        var plan = RingPointerPlan();
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x8000] };
+        var cache = new ResourceMaterializationCache();
+        uint[] userData = [0x1000, 0];
+        WriteRing(memory, 0x10000, 11, 22);
+        Assert.True(RunWords(cache, plan, memory, userData, out _));
+
+        // The V# behind the moved pointer describes another size.
+        WriteRing(memory, 0x14000, 33, 44, size: 512);
+        Assert.True(RunWords(cache, plan, memory, userData, out var resized));
+        AssertMatchesFullWalk(plan, memory, userData, resized);
+        Assert.Equal(512u, resized.Buffers[0][2]);
+        Assert.Equal((0, 2, 0L), (cache.Hits, cache.Misses, cache.SlotRefreshes));
+
+        // The same ring, its V# rewritten in place.
+        memory.At(0x14000 + 0x60) = 0x19000;
+        Assert.True(RunWords(cache, plan, memory, userData, out var rebased));
+        AssertMatchesFullWalk(plan, memory, userData, rebased);
+        Assert.Equal(0x19000u, rebased.Buffers[0][0]);
+        Assert.Equal(0L, cache.SlotRefreshes);
+    }
+
     [Fact]
     public void AFullGenerationKeepsRecentEntries()
     {
