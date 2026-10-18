@@ -1989,6 +1989,17 @@ public static partial class Gen5MslTranslator
             var stride = FormatUInt(packedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
             var descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
+            if (_request.Bindings is { BufferWordCount: not 0 } portable && (uint)bindingIndex < portable.MemoryOffsetCount)
+            {
+                // Portable buffers (PortableBufferWord): the V#'s stride, and the format word
+                // of a formatted buffer the program only reads, come from the shader data.
+                var words = portable.FirstBufferWordDword() + (uint)bindingIndex * PortableBufferWord.DwordCount;
+                stride = Temp("uint", $"({ShaderDataDword(words)} & 0x{PortableBufferWord.StrideMask:X}u)");
+                if (PortableBufferWord.ReadsFormatAtRuntime(specialized))
+                {
+                    descriptorWord3 = Temp("uint", ShaderDataDword(words + 1));
+                }
+            }
 
             var scalarOffset = instruction.Sources.Count > 2
                 ? SourceExpression(instruction.Sources[2], instruction)
