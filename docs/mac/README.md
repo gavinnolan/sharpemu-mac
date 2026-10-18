@@ -66,19 +66,10 @@ Extracted package namespaces and friend-access cleanup are documented in
 
 ## Latest status (2026-10-08)
 
-Local main now includes the native AppKit launcher, modeless settings, bounded
-console output and private child-process groups. macOS composition references
-`SharpEmu.Launcher.MacOS`; Windows/Linux retain their GUI adapter. Mac publish
-policy rejects Avalonia, SkiaSharp, HarfBuzz and portable font/UI packages as
-well as Vulkan, MoltenVK and SDL. The latest signed default bundle contains clean `8c19cd7`, with the native
-AppKit launcher and no portable UI dependencies.
-
-The integrated signed `e627027` launcher passes a 139s visible synthetic session:
-modeless settings, sustained20,000-line output, natural root exit7 with
-inherited-pipe descendant cleanup and CmdQ/owned Stop&Quit. A real TERM EPERM
-receipt displays an error and cancels auto-Quit; later actual group/process
-completion is recorded separately. A second CmdQ exits0. Minimum resize and
-full frontend parity remain open. Candidate controls pass25/25 per CLR.
+macOS uses the same Avalonia GUI (`SharpEmu.GUI`) as Windows/Linux; the
+earlier native AppKit launcher has been removed. Mac publish policy rejects
+Vulkan, MoltenVK and SDL; Avalonia, SkiaSharp and HarfBuzz ship in the bundle.
+Guest fonts still use the CoreText backend on macOS.
 
 Canonical startup host-memory routing is integrated: legacy HostMemory and
 host services share one immutable selected provider. Integrated104a614

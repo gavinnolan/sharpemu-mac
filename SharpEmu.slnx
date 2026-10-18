@@ -30,7 +30,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/adapters/SharpEmu.Adapters.Sdl/SharpEmu.Adapters.Sdl.csproj" />
   </Folder>
   <Folder Name="/src/platforms/">
-    <Project Path="src/platforms/macos/SharpEmu.Launcher.MacOS/SharpEmu.Launcher.MacOS.csproj" />
     <Project Path="src/platforms/macos/SharpEmu.Fonts.CoreTextMac/SharpEmu.Fonts.CoreTextMac.csproj" />
     <Project Path="src/platforms/linux/SharpEmu.Cpu.DirectExecution.Linux.X64/SharpEmu.Cpu.DirectExecution.Linux.X64.csproj" />
     <Project Path="src/platforms/linux/SharpEmu.Host.Linux/SharpEmu.Host.Linux.csproj" />
@@ -42,7 +41,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SharpEmu.Application.Persistence.Worker/SharpEmu.Application.Persistence.Worker.csproj" />
-    <Project Path="tests/SharpEmu.Launcher.MacOS.Tests/SharpEmu.Launcher.MacOS.Tests.csproj" />
     <Project Path="tests/SharpEmu.Application.Tests/SharpEmu.Application.Tests.csproj" />
     <Project Path="tests/SharpEmu.Fonts.Tests/SharpEmu.Fonts.Tests.csproj" />
     <Project Path="tests/SharpEmu.Gpu.Metal.LeakTests/SharpEmu.Gpu.Metal.LeakTests.csproj" />

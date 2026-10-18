@@ -15,21 +15,19 @@
 # policy into a no-op that still looks green.
 #
 # Usage:
-#   check-macos-output.sh <directory> [--strip] [--forbid-sdl] [--forbid-portable-ui] [--skip-arch]
+#   check-macos-output.sh <directory> [--strip] [--forbid-sdl] [--skip-arch]
 
 set -euo pipefail
 
 directory=""
 strip_forbidden=false
 forbid_sdl=false
-forbid_portable_ui=false
 check_arch=true
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strip) strip_forbidden=true ;;
         --forbid-sdl) forbid_sdl=true ;;
-        --forbid-portable-ui) forbid_portable_ui=true ;;
         --skip-arch) check_arch=false ;;
         -*) echo "check-macos-output.sh: unknown option $1" >&2; exit 2 ;;
         *)
@@ -59,8 +57,7 @@ fi
 # (SharpEmu.Gpu.Vulkan, SharpEmu.Adapters.Sdl and SharpEmu.ShaderCompiler.Vulkan
 # are referenced only for win-*/linux-* RIDs), which SharpEmuMacValidatePublishClosure
 # in macos.targets enforces before single-file bundling - the place this
-# directory scan cannot reach. Native-frontend mode additionally excludes
-# the portable Avalonia/Skia/HarfBuzz launcher closure.
+# directory scan cannot reach.
 forbidden_find_args=(
     '(' -iname '*moltenvk*' ')'
     -o '(' -iname 'libvulkan*' ')'
@@ -78,14 +75,6 @@ forbidden_find_args=(
 # SHARPEMU_MAC_FORBID_SDL. It stays a flag so a bisect can turn it off.
 if [ "${forbid_sdl}" = true ]; then
     forbidden_find_args+=(-o '(' -iname '*sdl3*' ')')
-fi
-
-if [ "${forbid_portable_ui}" = true ]; then
-    forbidden_find_args+=(-o '(' -iname '*avalonia*' ')'
-                         -o '(' -iname '*skiasharp*' ')'
-                         -o '(' -iname '*harfbuzz*' ')'
-                         -o '(' -iname 'SharpEmu.GUI*' ')'
-                         -o '(' -iname 'SharpEmu.Fonts.Skia*' ')')
 fi
 
 # Match symlinks too: renaming a forbidden payload behind a library alias must
@@ -116,7 +105,7 @@ EOF
         echo "macOS output policy violation in ${directory}:" >&2
         printf '%s\n' "${forbidden}" >&2
         echo "The macOS build is Metal-only and osx-x64-only, so it must not carry" >&2
-        echo "Vulkan/MoltenVK assets, forbidden portable UI/font assets, or sibling-OS natives. Scope the offending native" >&2
+        echo "Vulkan/MoltenVK assets or sibling-OS natives. Scope the offending native" >&2
         echo "asset package to its RID; see build/platforms/macos/macos.targets." >&2
         exit 1
     fi
