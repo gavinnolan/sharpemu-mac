@@ -162,6 +162,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         public ulong Size;
         public ulong Cursor;
         public ulong LastUsedSerial;
+        public long LastUsedAt;
     }
 
     private readonly nint _device;
@@ -371,6 +372,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         _submissionSerial = submissionSerial;
         _completedSerial = Math.Max(_completedSerial, completedSerial);
         RecordingBytes = 0;
+        TrimIdleRings();
         // Residency is per submission: a window is named by the submissions that resolve a
         // range through it, never by every submission after.
         _touchedWindows.Clear();
@@ -526,33 +528,70 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // A ring is created when a range is not one backed run, which a title can do in
     // bursts: a 4 GiB span of unbacked descriptors once cost tens of rings. Nothing freed
     // them again, so the pool was the process's high-water mark for the rest of the run.
-    // Rings beyond the few that keep a steady submission fed are released once the GPU
-    // has been done with them for this many serials.
+    // A ring the GPU has been done with for this many serials or milliseconds is released,
+    // except a few standard-size ones that keep a steady submission fed. Trimming ran only
+    // at host waits and kept the first rings whatever their size, so a load's oversized
+    // rings could stay; it now also runs at every new submission and keeps by size.
     private const int KeptRings = 4;
     private const ulong IdleRingSerials = 64;
+    private const long IdleRingMilliseconds = 1000;
+    private const long RingTrimIntervalMilliseconds = 50;
+    private ulong _ringsTrimmedSerial = ulong.MaxValue;
+    private long _ringsTrimmedAt;
+    private long _ringPeakBytes;
+    private long _ringWindowPeakBytes;
+
+    /// <summary>Milliseconds, monotonic; tests replace it to age rings.</summary>
+    internal Func<long> RingClock { get; set; } = static () => Environment.TickCount64;
 
     private void TrimIdleRings()
     {
-        if (_rings.Count <= KeptRings || _completedSerial < IdleRingSerials)
+        var now = RingClock();
+        if (_completedSerial == _ringsTrimmedSerial && now - _ringsTrimmedAt < RingTrimIntervalMilliseconds)
         {
             return;
         }
 
-        var retireBefore = _completedSerial - IdleRingSerials;
-        for (var index = _rings.Count - 1; index >= KeptRings; index--)
+        _ringsTrimmedSerial = _completedSerial;
+        _ringsTrimmedAt = now;
+        var kept = 0;
+        for (var index = 0; index < _rings.Count; index++)
         {
             var ring = _rings[index];
-            if (ring.LastUsedSerial > retireBefore)
+            if (ring.LastUsedSerial > _completedSerial)
             {
+                continue;
+            }
+
+            var idle = _completedSerial - ring.LastUsedSerial >= IdleRingSerials ||
+                now - ring.LastUsedAt >= IdleRingMilliseconds;
+            if (!idle)
+            {
+                continue;
+            }
+
+            if (ring.Size <= RingBufferBytes && kept < KeptRings)
+            {
+                kept++;
                 continue;
             }
 
             RemoveResident(ring.Buffer);
             MetalNative.SendVoid(ring.Buffer, SelRelease);
-            _rings.RemoveAt(index);
+            _rings.RemoveAt(index--);
             Interlocked.Add(ref _ringBytes, -(long)ring.Size);
             _ringsReleased++;
         }
+    }
+
+    /// <summary>The most shared memory the upload rings have held since startup.</summary>
+    public ulong RingPeakBytes => (ulong)Volatile.Read(ref _ringPeakBytes);
+
+    /// <summary>The most shared memory the upload rings have held since the last call.</summary>
+    public ulong TakeWindowPeakRingBytes()
+    {
+        var now = Volatile.Read(ref _ringBytes);
+        return (ulong)Math.Max(Interlocked.Exchange(ref _ringWindowPeakBytes, now), now);
     }
 
     private long _ringsReleased;
@@ -1158,6 +1197,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         ring.LastUsedSerial = _submissionSerial;
+        ring.LastUsedAt = RingClock();
         unsafe
         {
             span = new Span<byte>((void*)(ring.Contents + (nint)offset), checked((int)size));
@@ -1185,7 +1225,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             }
         }
 
-        // Recycle a ring the GPU is done with before growing the pool.
+        // Recycle a ring the GPU is done with before growing the pool: the smallest that
+        // fits, so an oversized ring left by a burst is not kept alive by small requests.
+        RingBuffer? recycled = null;
         for (var index = 0; index < _rings.Count; index++)
         {
             var candidate = _rings[index];
@@ -1194,9 +1236,17 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                 continue;
             }
 
-            candidate.Cursor = size;
+            if (recycled is null || candidate.Size < recycled.Size)
+            {
+                recycled = candidate;
+            }
+        }
+
+        if (recycled is not null)
+        {
+            recycled.Cursor = size;
             offset = 0;
-            return candidate;
+            return recycled;
         }
 
         var buffer = CreateSharedBuffer(capacity, $"guest.ring[{_rings.Count}]", out var contents, out var gpuAddress);
@@ -1209,7 +1259,16 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             Cursor = size,
         };
         _rings.Add(ring);
-        Interlocked.Add(ref _ringBytes, (long)capacity);
+        var total = Interlocked.Add(ref _ringBytes, (long)capacity);
+        if (total > Volatile.Read(ref _ringPeakBytes))
+        {
+            Volatile.Write(ref _ringPeakBytes, total);
+        }
+
+        if (total > Volatile.Read(ref _ringWindowPeakBytes))
+        {
+            Volatile.Write(ref _ringWindowPeakBytes, total);
+        }
         AddResident(buffer);
         CommitResidency();
         offset = 0;

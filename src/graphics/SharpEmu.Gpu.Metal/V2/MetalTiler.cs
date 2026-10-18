@@ -84,10 +84,6 @@ internal sealed unsafe class MetalTiler : IDisposable
     // tiler folds a descriptor offset into SourceBase.
     private const ulong BindAlignment = 16;
 
-    // A staging buffer is never smaller than this, so the small mip tails of one image
-    // all land on the same size class and reuse the same buffer.
-    private const int StagingMinimumShift = 16;
-
     private static readonly nint SelAlloc = MetalNative.Selector("alloc");
     private static readonly nint SelInit = MetalNative.Selector("init");
     private static readonly nint SelRelease = MetalNative.Selector("release");
@@ -103,24 +99,16 @@ internal sealed unsafe class MetalTiler : IDisposable
     private static readonly nint SelSetBuffer = MetalNative.Selector("setBuffer:offset:atIndex:");
     private static readonly nint SelSetBytes = MetalNative.Selector("setBytes:length:atIndex:");
     private static readonly nint SelDispatch = MetalNative.Selector("dispatchThreadgroups:threadsPerThreadgroup:");
-    private static readonly nint SelNewBuffer = MetalNative.Selector("newBufferWithLength:options:");
     private static readonly nint SelSetTexture = MetalNative.Selector("setTexture:atIndex:");
 
     private const uint DataTypeUInt = 33;
     private const uint DataTypeBool = 53;
 
-    private sealed class StagingSlab
-    {
-        public nint Buffer;
-        public ulong Size;
-        public ulong Serial;
-    }
-
     private readonly nint _device;
     private readonly nint[] _blockLibraries = new nint[KindCount * VariantCount];
     private readonly nint[] _blockPipelines = new nint[PipelineCount];
     private readonly Dictionary<string, nint> _conversionPipelines = new(StringComparer.Ordinal);
-    private readonly Dictionary<int, List<StagingSlab>> _staging = new();
+    private readonly MetalStagingPool _staging;
     private readonly Dictionary<(TileBlockKind Kind, MetalTileDirection Direction), nint> _textureLibraries = [];
     private nint _conversionLibrary;
     private nint _depthWritebackLibrary;
@@ -134,11 +122,15 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
 
         _device = device;
+        _staging = new MetalStagingPool(device);
     }
 
-    public ulong StagingBytes { get; private set; }
+    /// <summary>The slabs <see cref="Acquire"/> lends from.</summary>
+    internal MetalStagingPool Staging => _staging;
 
-    public uint StagingBufferCount { get; private set; }
+    public ulong StagingBytes => _staging.TotalBytes;
+
+    public uint StagingBufferCount => _staging.SlabCount;
 
     public void Dispose()
     {
@@ -174,17 +166,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
 
         _textureLibraries.Clear();
-        foreach (var slabs in _staging.Values)
-        {
-            foreach (var slab in slabs)
-            {
-                Release(slab.Buffer);
-            }
-        }
-
-        _staging.Clear();
-        StagingBytes = 0;
-        StagingBufferCount = 0;
+        _staging.Dispose();
     }
 
     private static void Release(nint handle)
@@ -197,104 +179,24 @@ internal sealed unsafe class MetalTiler : IDisposable
 
     // Staging buffers are shared storage: on unified memory a detile writes bytes the
     // blit reads without a copy, and a readback is visible to the CPU with no extra pass.
-    // A slab returns to its size class once the command buffer that used it completes;
-    // nothing caps the size, so a 4096x4096 surface simply gets a bigger slab.
-    public MetalBufferSpan Acquire(IMetalSubmissionContext context, ulong size)
-    {
-        TrimIdleSlabs(context.CompletedSerial);
-        if (size == 0)
-        {
-            throw GpuFatal.Fatal("A tiler staging request has no size.");
-        }
-
-        var rounded = (size + 3) & ~3UL;
-        var shift = Math.Max(StagingMinimumShift, 64 - BitOperations.LeadingZeroCount(rounded - 1));
-        if (!_staging.TryGetValue(shift, out var slabs))
-        {
-            slabs = new List<StagingSlab>();
-            _staging[shift] = slabs;
-        }
-
-        var completed = context.CompletedSerial;
-        // A slab handed out during this command buffer must not be handed out again, so
-        // its serial always lands past the completed one even when the two are equal.
-        var held = Math.Max(context.SubmissionSerial, completed + 1);
-        if (held != RecordingSerial)
-        {
-            RecordingSerial = held;
-            RecordingBytes = 0;
-        }
-
-        foreach (var candidate in slabs)
-        {
-            if (candidate.Serial <= completed && candidate.Size >= rounded)
-            {
-                candidate.Serial = held;
-                RecordingBytes += candidate.Size;
-                return new MetalBufferSpan(candidate.Buffer, 0, size);
-            }
-        }
-
-        var capacity = shift >= 63 ? rounded : 1UL << shift;
-        var buffer = MetalNative.SendNewBuffer(_device, SelNewBuffer, (nuint)capacity, 0);
-        if (buffer == 0)
-        {
-            throw GpuFatal.Fatal($"The tiler could not allocate a staging buffer: size={capacity}.");
-        }
-
-        slabs.Add(new StagingSlab { Buffer = buffer, Size = capacity, Serial = held });
-        StagingBytes += capacity;
-        StagingBufferCount++;
-        RecordingBytes += capacity;
-        return new MetalBufferSpan(buffer, 0, size);
-    }
+    // A slab returns to the pool once the command buffer that used it completes; nothing
+    // caps the size, so a 4096x4096 surface simply gets a bigger slab. The pool's size
+    // classes, idle release, cap and purgeable state are MetalStagingPool's.
+    public MetalBufferSpan Acquire(IMetalSubmissionContext context, ulong size) =>
+        _staging.Acquire(context.SubmissionSerial, context.CompletedSerial, size);
 
     /// <summary>The submission the slabs in <see cref="RecordingBytes"/> were handed to.</summary>
-    public ulong RecordingSerial { get; private set; }
+    public ulong RecordingSerial => _staging.RecordingSerial;
 
     /// <summary>
     /// Shared memory the slabs handed to the submission being recorded hold. None of it
     /// returns before that command buffer completes, so a buffer that keeps recording
     /// transfers holds every slab it was given; the host commits it at a budget.
     /// </summary>
-    public ulong RecordingBytes { get; private set; }
+    public ulong RecordingBytes => _staging.RecordingBytes;
 
-    // A loading screen uploads hundreds of megabytes inside a few command buffers, and
-    // every piece in flight holds its own slab, so the pool reached that burst's size and
-    // kept it as shared memory for the rest of the run (after its first load Demon's Souls
-    // held about 900 MB of shared buffers, mostly 16-64 MiB ones of this pool and the
-    // upload rings). A slab the GPU has been done with for this many serials is
-    // released; one small slab per size class stays for the steady per-frame traffic.
-    private const ulong IdleSlabSerials = 64;
-    private const ulong KeptSlabBytes = 4UL * 1024 * 1024;
-    private ulong _trimmedAtSerial;
-
-    private void TrimIdleSlabs(ulong completed)
-    {
-        if (completed < IdleSlabSerials || completed - _trimmedAtSerial < IdleSlabSerials / 4)
-        {
-            return;
-        }
-
-        _trimmedAtSerial = completed;
-        var retireBefore = completed - IdleSlabSerials;
-        foreach (var slabs in _staging.Values)
-        {
-            for (var index = slabs.Count - 1; index >= 0; index--)
-            {
-                var slab = slabs[index];
-                if (slab.Serial > retireBefore || (index == 0 && slab.Size <= KeptSlabBytes))
-                {
-                    continue;
-                }
-
-                Release(slab.Buffer);
-                slabs.RemoveAt(index);
-                StagingBytes -= slab.Size;
-                StagingBufferCount--;
-            }
-        }
-    }
+    /// <summary>Releases and makes purgeable the slabs idle since <paramref name="completedSerial"/>.</summary>
+    public void TrimStaging(ulong completedSerial) => _staging.Trim(completedSerial);
 
     public nint BeginCompute(IMetalSubmissionContext context)
     {
