@@ -313,12 +313,13 @@ internal sealed partial class MetalRenderHost
 
     // The title's binary archive is asked first: a library stored there is its AIR, with no
     // front end to run (MetalBinaryArchive). The key comes back for storing it there later.
+    // The static precompile, which knows the archive lacks it, does not ask.
     internal static nint TryCompileLibrary(
-        nint device, string source, bool usesPerVertexInputs, out string error, out UInt128 archiveKey)
+        nint device, string source, bool usesPerVertexInputs, out string error, out UInt128 archiveKey, bool askArchive = true)
     {
         error = string.Empty;
         archiveKey = default;
-        if (MetalBinaryArchive.For(device) is { } archive)
+        if (askArchive && MetalBinaryArchive.For(device) is { } archive)
         {
             archiveKey = MetalBinaryArchive.LibraryKey(source, usesPerVertexInputs);
             var stored = archive.TryLoadLibrary(archiveKey);

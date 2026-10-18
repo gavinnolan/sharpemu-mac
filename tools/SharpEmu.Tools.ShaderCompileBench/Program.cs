@@ -152,6 +152,14 @@ internal static class Program
                 $"translate: wall_ms={translateWall:F0} sum_ms={rows.Sum(r => r.TranslateMs):F0} tworkers={tworkers} " +
                 $"alloc_mb={rows.Sum(r => r.TranslateBytes) / 1048576.0:F1} gc0={GC.CollectionCount(0)} gc1={GC.CollectionCount(1)} gc2={GC.CollectionCount(2)} gc_pause_ms={GC.GetTotalPauseDuration().TotalMilliseconds:F0} failed={rows.Count(r => r.Error is not null)} msl_mb={rows.Sum(r => (long)r.Source.Length) / 1048576.0:F1}"));
         }
+        else if (mode == "static")
+        {
+            return Derivation.Static(dir, Arg);
+        }
+        else if (mode == "computematch")
+        {
+            return Derivation.ComputeMatch(dir, Arg);
+        }
         else if (mode == "graphics")
         {
             return GraphicsMatch(dir);

@@ -276,6 +276,8 @@ internal static class MetalShaderPrewarm
         // held for are done.
         MetalLibraryPrewarm.Open(directory, device, stamp);
         var graphics = OpenGraphics(directory, stamp);
+        // Programs the game has not drawn yet, behind everything above (MetalStaticPrecompile).
+        MetalStaticPrecompile.Start(device, directory, stamp, compiler);
         if (ShaderPrewarmList.Open(directory) is not { } list)
         {
             BeginLibraries();
@@ -572,11 +574,19 @@ internal static class MetalShaderPrewarm
     /// precompile-only, the session's close. True when the guest stays held because the
     /// session is closing.
     /// </summary>
-    private static bool CompletePrecompile() =>
-        Precompile.Complete(
+    private static bool CompletePrecompile()
+    {
+        if (Precompile.HoldsUntilComplete && !Precompile.Completed)
+        {
+            // The programs only found in the game's files come last.
+            MetalStaticPrecompile.WaitForCompletion();
+        }
+
+        return Precompile.Complete(
             $"computes={Volatile.Read(ref _compiled)} compute_failed={Volatile.Read(ref _failed)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
-            $"libraries_held={MetalLibraryPrewarm.HeldLibraries}");
+            $"libraries_held={MetalLibraryPrewarm.HeldLibraries} {MetalStaticPrecompile.Describe()}");
+    }
 
     /// <summary>
     /// The pending computes in the order the prewarm compiles them, and how many from the
@@ -905,6 +915,7 @@ internal static class MetalShaderPrewarm
     {
         _stopping = true;
         Gate.Cancel();
+        MetalStaticPrecompile.Stop();
         MetalLibraryPrewarm.Stop();
         MetalDeviceDataLoadsStore.Stop();
         foreach (var thread in Volatile.Read(ref _threads))
