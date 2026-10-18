@@ -598,7 +598,7 @@ internal static class MetalShaderPrewarm
             return;
         }
 
-        if (_inFlight.TryGetValue(Identity(shader.Payload), out var compiling))
+        if (_inFlight.TryGetValue(Identity(shader), out var compiling))
         {
             compiling.Wait();
         }
@@ -631,9 +631,10 @@ internal static class MetalShaderPrewarm
             MetalNative.ReadNsString(MetalNative.Send(device, SelName)),
             RuntimeInformation.OSDescription);
 
-    /// <summary>The identity of a compiled module, for the runtime match count.</summary>
-    public static string Identity(byte[] payload) =>
-        XxHash3.HashToUInt64(payload).ToString("X16", System.Globalization.CultureInfo.InvariantCulture);
+    /// <summary>The identity of a compiled module, for the runtime match count: the hash of
+    /// its UTF-8 payload, which the shader keeps instead of the payload itself.</summary>
+    public static string Identity(MetalCompiledGuestShader shader) =>
+        shader.PayloadHash.ToString("X16", System.Globalization.CultureInfo.InvariantCulture);
 
     private static void PrewarmComputePipeline(
         ComputePrewarmRecord record,
@@ -665,7 +666,7 @@ internal static class MetalShaderPrewarm
         // Records that differ only in what the plan never reads translate to the same
         // MSL; about half of Demon's Souls' 1389 recorded computes repeat another one's
         // source, and a cold start compiled each copy again, side by side with the first.
-        var identity = Identity(metal.Payload);
+        var identity = Identity(metal);
         if (!_prewarmedShaderIdentities!.TryAdd(identity, 0))
         {
             Interlocked.Increment(ref _deduplicated);
@@ -785,7 +786,7 @@ internal static class MetalShaderPrewarm
             return;
         }
 
-        var identity = Identity(shader.Payload);
+        var identity = Identity(shader);
         runtime[identity] = 0;
         if (!_finished || !prewarmed.ContainsKey(identity))
         {

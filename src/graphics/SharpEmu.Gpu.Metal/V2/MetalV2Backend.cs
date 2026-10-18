@@ -49,7 +49,9 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
             return false;
         }
 
-        shader = new MetalCompiledGuestShader(compiled);
+        // The request is kept so the render host can drop the source once the library is
+        // built and translate it again if it is ever needed (MetalCompiledGuestShader).
+        shader = new MetalCompiledGuestShader(compiled, request);
         return true;
     }
 

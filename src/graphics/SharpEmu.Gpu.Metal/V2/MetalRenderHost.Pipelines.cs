@@ -74,8 +74,12 @@ internal sealed partial class MetalRenderHost
     {
         public nint Library;
         public nint Function;
-        public Gen5MslShader Shader = null!;
+        public MetalCompiledGuestShader Compiled = null!;
         public ulong Hash;
+
+        // The reflection data. Its source text is dropped once the library is built
+        // (BuildModule); Compiled.AcquireShader has the text again.
+        public Gen5MslShader Shader => Compiled.Shader;
 
         // The library compile on the module pool; Library and Function are set once it is
         // done, which RequireModule waits for.
@@ -109,7 +113,7 @@ internal sealed partial class MetalRenderHost
 
         var module = new MetalShaderModule
         {
-            Shader = metal.Shader,
+            Compiled = metal,
             Hash = hash,
         };
 
@@ -163,9 +167,13 @@ internal sealed partial class MetalRenderHost
     }
 
     // The library and the function of a module; on the module pool or the caller's thread.
+    // Everything that needs the source text has had it by the end (the translator's
+    // dump, the permutation and compiled-shader dumps, the compute prewarm identity, the
+    // library list's key and record), so the text is dropped there instead of being held
+    // for the host's lifetime.
     private void BuildModule(MetalShaderModule module, ShaderStage stage)
     {
-        var shader = module.Shader;
+        var shader = module.Compiled.AcquireShader();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         // The MSL front end runs here, and the driver's back end runs when a pipeline
         // state is made from the function. They are separate costs with separate
@@ -194,6 +202,8 @@ internal sealed partial class MetalRenderHost
             MetalNative.objc_autoreleasePoolPop(pool);
         }
 
+        module.Compiled.ReleaseSource();
+
         MetalV2Diagnostics.Trace(
             $"compiled module hash=0x{module.Hash:X16} entry={shader.EntryPoint} " +
             $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
@@ -209,7 +219,7 @@ internal sealed partial class MetalRenderHost
             }
 
             var library = CompileLibrary(
-                Gen5MslRectangleList.BuildSource(module.Shader), module.Hash, usesPerVertexInputs: false, prewarmable: true);
+                Gen5MslRectangleList.BuildSource(module.Compiled.AcquireShader()), module.Hash, usesPerVertexInputs: false, prewarmable: true);
             var function = MetalNative.Send(
                 library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(Gen5MslRectangleList.EntryPoint));
             if (function == 0)

@@ -197,7 +197,7 @@ internal static partial class MetalVideoPresenter
                 return shader.CachedLibrary;
             }
             if (preparation is not null) TraceLibraryPreparation("compile_begin", shader);
-            if (!TryCompileLibrary(device, shader.Shader.Source, out var library, out var error, traceGuestWork: preparation is null))
+            if (!TryCompileLibrary(device, shader.AcquireShader().Source, out var library, out var error, traceGuestWork: preparation is null))
             {
                 Console.Error.WriteLine($"[LOADER][WARN] Metal shader compile failed: {error}");
                 return 0;

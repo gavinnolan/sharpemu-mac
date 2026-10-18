@@ -779,7 +779,13 @@ internal sealed class ShaderProgramCache
         }
 
         _compiler.CountShaderCompilation();
-        ShaderPermutationDump.WriteModule(permutationDump, compiled.Payload, compiled.PayloadFileExtension);
+        // Payload is made on each read (the Metal one encodes the whole source), so only
+        // for a dump that is on.
+        if (permutationDump is not null)
+        {
+            ShaderPermutationDump.WriteModule(permutationDump, compiled.Payload, compiled.PayloadFileExtension);
+        }
+
         CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
         var id = ++_nextProgramId;
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
@@ -1276,9 +1282,12 @@ internal static class CompiledShaderDump
 
     public static void Write(string stage, ulong shaderAddress, ulong hash, IGuestCompiledShader shader, Gen5ShaderProgram program)
     {
-        if (shader.Payload.Length == 0 || !ShouldWrite(shaderAddress, hash)) return;
+        // The filter first: a backend may make Payload afresh on each read.
+        if (!ShouldWrite(shaderAddress, hash)) return;
+        var payload = shader.Payload;
+        if (payload.Length == 0) return;
         var basePath = GetBasePath(stage, shaderAddress, hash);
-        File.WriteAllBytes($"{basePath}.{shader.PayloadFileExtension}", shader.Payload);
+        File.WriteAllBytes($"{basePath}.{shader.PayloadFileExtension}", payload);
         var lines = new List<string>(program.Instructions.Count + 2)
         {
             $"address=0x{program.Address:X16}",
