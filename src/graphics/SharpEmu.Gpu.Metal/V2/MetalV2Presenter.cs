@@ -1154,7 +1154,23 @@ internal static partial class MetalV2Presenter
             $"host_hz={hostHz} seconds={window} published={published} adopt_blocked={blocked} " +
             $"flip_attempts={flips.Attempts} flip_no_buffer={flips.WithoutBuffer} " +
             $"flip_discarded={flips.Discarded} flip_published={flips.Published} " +
-            $"flip_refreshed={flips.Refreshed}");
+            $"flip_refreshed={flips.Refreshed} {DescribeGpuMemory()}");
+    }
+
+    private static readonly nint SelCurrentAllocatedSize = MetalNative.Selector("currentAllocatedSize");
+
+    // The device's whole allocation (MTLDevice.currentAllocatedSize: every buffer, texture
+    // and heap the process holds, including the no-copy guest windows) next to what the
+    // image cache itself believes it holds, so a growth in one can be told from the other.
+    private static string DescribeGpuMemory()
+    {
+        const double MiB = 1024d * 1024d;
+        var allocated = _device == 0 ? 0UL : MetalV2Native.SendValue64(_device, SelCurrentAllocatedSize);
+        var cache = _host?.ImageCache;
+        return string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"gpu_alloc_mb={allocated / MiB:F0} gpu_images={cache?.ImageCount ?? 0} " +
+            $"gpu_image_cache_mb={(cache?.TotalUsedMemory ?? 0) / MiB:F0}");
     }
 
     // The flip seam the command stream publishes through.

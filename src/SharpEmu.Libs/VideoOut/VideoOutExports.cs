@@ -108,6 +108,8 @@ public static partial class VideoOutExports
             Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
             "1",
             StringComparison.Ordinal);
+    // SHARPEMU_FRAME_TIMES=<path>: one timestamped line per guest flip request, for frame-time percentiles.
+    private static readonly FrameTimeLog? _frameTimes = FrameTimeLog.FromEnvironment();
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
     private static long _submittedFrameCount;
     private static int _diagnosticFlipCount;
