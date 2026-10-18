@@ -40,7 +40,12 @@ internal sealed class MetalStagedRangeCache
     public const ulong MinBytes = 256 * 1024;
     public const ulong MaxBytes = 64UL * 1024 * 1024;
     public const ulong ClassBytes = 1024 * 1024;
-    public const ulong DefaultBudgetBytes = 1024UL * 1024 * 1024;
+    // Every buffer of the pool is resident for every command buffer, so the budget is
+    // memory the GPU keeps wired. Reads of ranges that are merely scattered over the
+    // backing go through guest views (MetalGuestMemory.GuestViews.cs) and never reach the
+    // cache; what does is written bindings and reads behind a write in the same command
+    // buffer. At 1 GiB Demon's Souls filled 501 MB of it with read copies.
+    public const ulong DefaultBudgetBytes = 256UL * 1024 * 1024;
     private const ulong WatchPageBytes = 4096;
 
     internal static readonly bool Enabled =

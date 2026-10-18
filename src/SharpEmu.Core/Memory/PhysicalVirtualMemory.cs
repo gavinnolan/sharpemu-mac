@@ -1436,6 +1436,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return !_disposed && _backedSpace is { } backed && backed.TryResolveAliasSpan(address, size, out alias);
     }
 
+    // Backed views are mapped at their guest addresses, so a wholly backed range is its own
+    // host range however its pages are scattered over the backing.
+    public bool TryResolveBackedHostView(ulong address, ulong size, out ulong host)
+    {
+        host = 0;
+        if (size == 0 || size > ulong.MaxValue - address || !IsBackedRange(address, size))
+        {
+            return false;
+        }
+
+        host = address;
+        return true;
+    }
+
     public (ulong Base, ulong Size) BackingAliasRange =>
         !_disposed && _backedSpace is { } backed ? (backed.AliasBase, backed.BackingSize) : (0, 0);
 

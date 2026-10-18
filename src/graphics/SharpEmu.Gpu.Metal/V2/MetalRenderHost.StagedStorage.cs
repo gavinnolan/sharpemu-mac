@@ -35,6 +35,11 @@ internal sealed partial class MetalRenderHost
             return window;
         }
 
+        if (!written && TryBindGuestView(address, size, out var view))
+        {
+            return view;
+        }
+
         if (MetalStagedRangeCache.Eligible(size) && _stagedRanges is not null)
         {
             var cached = BindStagedRange(address, size, written);
@@ -85,6 +90,42 @@ internal sealed partial class MetalRenderHost
 
         staged.Add(address, size, staging, pristine, written);
         return staging;
+    }
+
+    private long _guestViewRefusedWrites;
+
+    /// <summary>
+    /// A read of a range no window covers through a guest view (MetalGuestMemory.GuestViews.cs):
+    /// guest memory itself, no copy. Not when this command buffer has recorded a write to any
+    /// of the bytes: that write went through another GPU address (a window, a fill, a staged
+    /// copy's writeback), and inside one command buffer a read through the view would not see
+    /// it. The staged paths gather such bytes behind the write instead.
+    /// </summary>
+    private bool TryBindGuestView(ulong address, ulong size, out MetalGuestRange range)
+    {
+        range = default;
+        if (!_guestMemory.MayUseGuestView(size))
+        {
+            return false;
+        }
+
+        if (_gpuWrites.PendingSerial(address, size, CompletedSerial) >= SubmissionSerial)
+        {
+            Interlocked.Increment(ref _guestViewRefusedWrites);
+            return false;
+        }
+
+        return _guestMemory.TryResolveGuestView(address, size, out range);
+    }
+
+    private string GuestViewCounters()
+    {
+        var v = _guestMemory.GuestViewCounts;
+        return $" guest_views={v.Alive} guest_view_mb={v.Bytes / (1024 * 1024)} guest_views_created={v.Created} " +
+            $"guest_views_released={v.Released} guest_view_binds={v.Binds} guest_view_bind_mb={v.BindBytes / (1024 * 1024)} " +
+            $"guest_view_unmapped={v.Invalidated} guest_view_refused={v.CreateFailures} guest_view_unbacked={v.Unbacked} " +
+            $"guest_view_refused_writes={Interlocked.Read(ref _guestViewRefusedWrites)} " +
+            $"oversized_staged={_guestMemory.OversizedStaged} oversized_prefix={_guestMemory.OversizedInPlace}";
     }
 
     /// <summary>

@@ -37,10 +37,14 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// used would have to change, the range is staged (read) or refused (write, which its caller
 /// splits or writes another way) for this command buffer, and the cut moves as the next one
 /// begins;</item>
-/// <item>a range that is not backed, not contiguous in the backing, or larger than the
-/// largest window (<see cref="DefaultMaxWindowBytes"/>) is staged through the per-submission
-/// upload ring, or binds a window-sized prefix in place when it is too large to stage, as
-/// before.</item>
+/// <item>a range that is backed but not contiguous in the backing (pages mapped one by one
+/// from scattered offsets), or that crosses a cut this command buffer may no longer move, is
+/// read through a guest view: a no-copy buffer over the guest's
+/// own mapping of it (MetalGuestMemory.GuestViews.cs), when nothing in the command buffer
+/// being recorded writes those bytes through another address;</item>
+/// <item>anything else no window covers is staged through the per-submission upload ring;
+/// a binding is staged whole up to the largest window (<see cref="DefaultMaxWindowBytes"/>),
+/// and one larger than that binds a window-sized prefix in place, as before.</item>
 /// </list>
 /// </para>
 ///
@@ -54,7 +58,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// (MetalRenderHost.DeviceAddressReach.cs).
 /// </para>
 /// </summary>
-internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
+internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 {
     // The granule is the size windows start at and are cut back to, and the unit the
     // device-address reach is learned in. Smaller wastes less around each referenced range
@@ -108,6 +112,10 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     }
 
     private const ulong MaxUploadBytes = 64UL * 1024 * 1024;
+
+    // The largest binding staged whole: one host span holds it (SHARPEMU_METAL_V2_WINDOW_MB
+    // may raise the largest window past what a span can).
+    private const ulong MaxWholeStageBytes = 1UL << 30;
     private const ulong RingBufferBytes = 32UL * 1024 * 1024;
     private const ulong RingAlignment = 256;
     public const ulong GdsBytes = ManagedCommandStreamHost.GdsBytes;
@@ -187,6 +195,7 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // The largest range the ring stages whole; a bigger one binds a prefix instead.
     private readonly ulong _maxUploadBytes;
     private long _oversizedInPlace;
+    private long _oversizedStaged;
     private readonly List<RingBuffer> _rings = new();
     private readonly nint _residencySet;
     private readonly nint _gdsBuffer;
@@ -284,6 +293,9 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
     /// <summary>How many ranges too large to stage bound a window prefix in place instead.</summary>
     public ulong OversizedInPlace => (ulong)Volatile.Read(ref _oversizedInPlace);
+
+    /// <summary>How many bindings past the ring's cap were staged whole rather than cut to a prefix.</summary>
+    public ulong OversizedStaged => (ulong)Volatile.Read(ref _oversizedStaged);
 
     // Shared memory the upload rings hold now, for the periodic counters line.
     public ulong RingBytes => (ulong)Volatile.Read(ref _ringBytes);
@@ -384,6 +396,8 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
             RetireReplaced();
         }
+
+        BeginGuestViewSubmission();
     }
 
     private readonly MetalWindowSet _touchedWindows;
@@ -505,6 +519,8 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         {
             ReleaseRetired();
         }
+
+        ReleaseRetiredViews();
     }
 
     // A ring is created when a range is not one backed run, which a title can do in
@@ -597,9 +613,11 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// <summary>
     /// The GPU view of a guest byte range. A range that is one backed run binds its window
     /// in place; anything else is staged into the upload ring, so the bytes the GPU reads
-    /// are the bytes the CPU can see right now.
+    /// are the bytes the CPU can see right now. A range past the ring's cap is staged whole
+    /// when <paramref name="whole"/> asks for it (a binding, which a prefix would cut short),
+    /// otherwise only a prefix is handed back, which the caller has to check.
     /// </summary>
-    public MetalGuestRange Resolve(ulong gpuVa, ulong size)
+    public MetalGuestRange Resolve(ulong gpuVa, ulong size, bool whole = false)
     {
         if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
         {
@@ -612,7 +630,7 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             return resolved;
         }
 
-        return Upload(gpuVa, size);
+        return Upload(gpuVa, size, whole);
     }
 
     /// <summary>
@@ -650,9 +668,9 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         return _windowBuffers.ContainsKey(range.Buffer);
     }
 
-    /// <summary>A ring copy of the guest bytes the CPU sees now.</summary>
+    /// <summary>A ring copy of the guest bytes the CPU sees now, whole up to the largest window.</summary>
     public MetalGuestRange Stage(ulong gpuVa, ulong size) =>
-        size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ? default : Upload(gpuVa, size);
+        size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ? default : Upload(gpuVa, size, whole: true);
 
     /// <summary>
     /// True when the whole range lives in the backing. A managed write to such a range
@@ -1023,9 +1041,22 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     }
 
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
-    private MetalGuestRange Upload(ulong gpuVa, ulong size)
+    private MetalGuestRange Upload(ulong gpuVa, ulong size, bool whole)
     {
-        if (size > _maxUploadBytes)
+        if (size > _maxUploadBytes && whole && size <= Math.Min(_maxWindowBytes, MaxWholeStageBytes))
+        {
+            // A binding no window covers whole, because its pages are scattered over the
+            // backing or a cut this command buffer already used crosses it, is staged whole:
+            // a prefix would hand the shader fewer bytes than the guest bound, and past it
+            // loads read zero and stores are dropped. One window could hold it, so it is not
+            // a whole heap bound as raw storage (those still bind a prefix, below).
+            Interlocked.Increment(ref _oversizedStaged);
+            MetalV2Diagnostics.InfoOnce(
+                $"oversized-staged:{size:X}",
+                $"A guest range no single window covers is larger than the ring's cap and is staged whole: " +
+                $"address=0x{gpuVa:X16} size=0x{size:X} ({DescribeResolve(gpuVa, size)}).");
+        }
+        else if (size > _maxUploadBytes)
         {
             // A range this large that no window covers is not data a draw reads whole;
             // bind its prefix rather than staging gigabytes per submission. When its
@@ -1137,7 +1168,11 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
     private RingBuffer Reserve(ulong size, ulong alignment, out ulong offset)
     {
-        var capacity = Math.Max(RingBufferBytes, (size + alignment) * 2);
+        // A range past the ring's cap (one staged whole) gets a ring of just its size: the
+        // spare half doubling leaves for later allocations would be hundreds of megabytes.
+        var capacity = size > MaxUploadBytes
+            ? (size + alignment + RingAlignment - 1) & ~(RingAlignment - 1)
+            : Math.Max(RingBufferBytes, (size + alignment) * 2);
         for (var index = 0; index < _rings.Count; index++)
         {
             var candidate = _rings[index];
@@ -1485,6 +1520,12 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                 {
                     Append(ref _submissionResidentBuffers, ref _submissionResidentCount, _residentBuffers[index]);
                 }
+
+                // Guest views, like windows, are named only by the submissions that bind them.
+                foreach (var view in _touchedViews)
+                {
+                    Append(ref _submissionResidentBuffers, ref _submissionResidentCount, view.Buffer);
+                }
             }
 
             return _submissionResidentBuffers.AsSpan(0, _submissionResidentCount);
@@ -1567,6 +1608,8 @@ internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             _retired.Clear();
             _windowBuffers.Clear();
         }
+
+        DisposeGuestViews();
 
         if (_gdsBuffer != 0)
         {
