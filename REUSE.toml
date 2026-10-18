@@ -30,3 +30,25 @@ path = "src/SharpEmu.LibAtrac9/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2018 Alex Barney"
 SPDX-License-Identifier = "MIT"
+
+# macOS fork: documentation, validation evidence, localisation data and test
+# fixtures. Formats here either cannot carry a header (binary, CSV, JSON) or
+# are generated/captured data, so they are annotated in one place.
+[[annotations]]
+path = [
+    "docs/**",
+    "src/SharpEmu.Application/Languages/**",
+    "tests/SharpEmu.ShaderCompiler.Metal.Tests/Conformance/**",
+    "tests/Fixtures/**",
+    "tools/re/**"
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "SharpEmu Emulator Project"
+SPDX-License-Identifier = "GPL-2.0-or-later"
+
+# AMD's MIT licence text retained next to the AddrLib-derived fixtures.
+[[annotations]]
+path = "tests/Fixtures/**/AMD-MIT-LICENSE.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "2007-2025 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"

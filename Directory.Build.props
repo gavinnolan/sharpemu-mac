@@ -12,17 +12,43 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SharpEmuVersion>0.0.6-mono</SharpEmuVersion>
     <Version>$(SharpEmuVersion)</Version>
 
+    <!-- Fork identity. Every GitHub URL the app uses at runtime — update
+         check, release download, latest-commit banner, "view source" links —
+         is derived from this one slug, surfaced to the app as
+         [AssemblyMetadata("SharpEmu.RepositorySlug")] and read by
+         SharpEmu.Application.ProjectLinks. It must name the repository this binary
+         was built from: a fork that queries upstream's releases would offer
+         upstream archives as an in-place update and overwrite itself with
+         binaries that do not contain its own changes. -->
+    <SharpEmuRepositorySlug Condition="'$(SharpEmuRepositorySlug)' == ''">sharpemu/sharpemu-mac</SharpEmuRepositorySlug>
+
     <RepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)'))</RepoRoot>
 
     <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And $([MSBuild]::IsOSPlatform('Windows'))">win</_HostRidOSPrefix>
     <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(_HostRidOSPrefix)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">linux</_HostRidOSPrefix>
     <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(_HostRidOSPrefix)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">osx</_HostRidOSPrefix>
-    <_HostRidArch Condition="'$(_HostRidOSPrefix)' != '' And '$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)' == 'Arm64'">arm64</_HostRidArch>
+    <!-- macOS is pinned to x64 regardless of the build host's architecture.
+         The CPU backend executes guest x86-64 instructions natively, so the
+         host process itself must be x86-64; on Apple Silicon that means
+         running the osx-x64 build under Rosetta 2. An osx-arm64 build would
+         compile but CheckHostArchitecture in SharpEmu.CLI rejects it at
+         startup, so defaulting an Apple Silicon host to osx-arm64 only ever
+         produced an unrunnable binary. Restore host-architecture detection
+         here once native ARM64 guest execution exists. -->
+    <_HostRidArch Condition="'$(_HostRidOSPrefix)' == 'osx'">x64</_HostRidArch>
+    <_HostRidArch Condition="'$(_HostRidOSPrefix)' != '' And '$(_HostRidArch)' == '' And '$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)' == 'Arm64'">arm64</_HostRidArch>
     <_HostRidArch Condition="'$(_HostRidOSPrefix)' != '' And '$(_HostRidArch)' == ''">x64</_HostRidArch>
     <RuntimeIdentifier Condition="'$(_HostRidOSPrefix)' != ''">$(_HostRidOSPrefix)-$(_HostRidArch)</RuntimeIdentifier>
 
     <BaseIntermediateOutputPath>$(RepoRoot)artifacts/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
     <BaseOutputPath>$(RepoRoot)artifacts/bin/</BaseOutputPath>
+
+    <!-- A bundle publish recompiles neutral project references too. Give that
+         whole graph its own output/cache profile so it cannot replace a DLL
+         being exercised by a developer's already-built test run. The ordinary
+         developer layout stays upstream-compatible when no profile is set. -->
+    <BaseIntermediateOutputPath Condition="'$(SharpEmuBuildProfile)' != ''">$(RepoRoot)artifacts/profiles/$(SharpEmuBuildProfile)/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath Condition="'$(SharpEmuBuildProfile)' != ''">$(RepoRoot)artifacts/profiles/$(SharpEmuBuildProfile)/bin/</BaseOutputPath>
 
     <AppendConfigurationToOutputPath>true</AppendConfigurationToOutputPath>
     <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
@@ -46,6 +72,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
        building in CI; empty locally. -->
   <ItemGroup>
     <AssemblyMetadata Include="SharpEmu.BuildConfiguration" Value="$(Configuration)" />
+    <AssemblyMetadata Include="SharpEmu.RepositorySlug" Value="$(SharpEmuRepositorySlug)" />
     <AssemblyMetadata Condition="'$(GITHUB_SHA)' != ''" Include="SharpEmu.BuildSha" Value="$(GITHUB_SHA)" />
     <AssemblyMetadata Condition="'$(GITHUB_REF_NAME)' != ''" Include="SharpEmu.BuildBranch" Value="$(GITHUB_REF_NAME)" />
     <AssemblyMetadata Condition="'$(GITHUB_REF)' != ''" Include="SharpEmu.BuildRef" Value="$(GITHUB_REF)" />

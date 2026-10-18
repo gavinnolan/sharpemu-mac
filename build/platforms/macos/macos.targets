@@ -1,0 +1,128 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  macOS output policy, imported by Directory.Build.targets for every project
+  whose target RuntimeIdentifier starts with "osx".
+
+  The macOS fork is Metal-only and osx-x64-only. A Vulkan loader, an ICD
+  manifest, a MoltenVK dylib or a sibling-OS native in the publish output means
+  something re-introduced a dependency this fork removed, or that a native asset
+  package was not scoped to its RID. This guard turns that into a failed
+  publish instead of a larger download that misbehaves on a user's machine.
+
+  The matching itself lives in check-macos-output.sh next to this file, not in
+  MSBuild item globs: MSBuild's glob engine silently matches nothing for
+  patterns such as "**/*SDL3*.dylib", which would leave a policy that always
+  reports success. The script is also what scripts/macos/build-app.sh runs
+  against the finished .app, so bundle and plain publish are held to one
+  definition.
+
+  The directory check alone is not enough for this application: SharpEmu.CLI
+  publishes as a compressed single file, so every managed assembly and every
+  native library it carries is inside the apphost and nothing is left loose to
+  find. SharpEmuMacValidatePublishClosure therefore checks the resolved publish
+  closure as well, before bundling, which is where a re-introduced managed
+  Vulkan or SDL dependency actually shows up.
+-->
+<Project>
+
+  <PropertyGroup>
+    <!-- The macOS runtime path is native - Metal, AppKit, GameController - so
+         SDL3 is forbidden in macOS outputs. The graphics/platform package split
+         removed SDL from the macOS closure; audio is CoreAudio and there
+         are no remaining SDL exceptions. -->
+    <SharpEmuMacForbidSdl Condition="'$(SharpEmuMacForbidSdl)' == ''">true</SharpEmuMacForbidSdl>
+    <!-- The strip hook, for the SDL-removal workstream and for any transitive
+         package that insists on shipping a forbidden native. Off by default on
+         purpose: a forbidden file is a dependency bug to fix where it
+         originates, and deleting it quietly hides that. -->
+    <SharpEmuMacStripForbiddenAssets Condition="'$(SharpEmuMacStripForbiddenAssets)' == ''">false</SharpEmuMacStripForbiddenAssets>
+    <!-- Escape hatch for bisecting a packaging problem; never set in CI. -->
+    <SharpEmuMacSkipOutputGuard Condition="'$(SharpEmuMacSkipOutputGuard)' == ''">false</SharpEmuMacSkipOutputGuard>
+
+    <SharpEmuMacOutputCheckScript>$(RepoRoot)build/platforms/macos/check-macos-output.sh</SharpEmuMacOutputCheckScript>
+    <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacStripForbiddenAssets)' == 'true'">$(_SharpEmuMacCheckFlags) --strip</_SharpEmuMacCheckFlags>
+    <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacForbidSdl)' == 'true'">$(_SharpEmuMacCheckFlags) --forbid-sdl</_SharpEmuMacCheckFlags>
+  </PropertyGroup>
+
+  <!-- Rosetta places the initial host stack relative to the executable layout.
+       A stock apphost puts it in fixed guest memory (ASTRO BOT's libc heap at
+       0x300000000). Move read-only linker metadata above the guest VA limit,
+       preserving code/data addresses and PIE. Patch each final output after
+       SDK apphost creation/single-file bundling; never modify the SDK template. -->
+  <Target Name="SharpEmuMacPlaceBuildHostStack" AfterTargets="Build"
+    Condition="'$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(RuntimeIdentifier)' == 'osx-x64' And '$(UseAppHost)' == 'true' And Exists('$(TargetDir)$(AssemblyName)')">
+    <Exec Command="python3 &quot;$(RepoRoot)build/platforms/macos/place-host-stack.py&quot; &quot;$(TargetDir)$(AssemblyName)&quot;" />
+  </Target>
+
+  <Target Name="SharpEmuMacPlacePublishHostStack" AfterTargets="Publish"
+    BeforeTargets="SharpEmuMacValidatePublishOutput"
+    Condition="'$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(RuntimeIdentifier)' == 'osx-x64' And '$(UseAppHost)' == 'true' And Exists('$(PublishDir)$(AssemblyName)')">
+    <Exec Command="python3 &quot;$(RepoRoot)build/platforms/macos/place-host-stack.py&quot; &quot;$(PublishDir)$(AssemblyName)&quot;" />
+  </Target>
+
+  <!-- Runs after the publish copy and after this project's own
+       PublishFfmpegRuntime/RemoveNativeDebugSymbols post-publish steps, so it
+       sees the artifact exactly as it ships. The script's non-zero exit is an
+       MSBuild error, which fails the publish. -->
+  <Target Name="SharpEmuMacValidatePublishOutput"
+    AfterTargets="Publish"
+    Condition="'$(SharpEmuMacSkipOutputGuard)' != 'true' And '$(PublishDir)' != '' And Exists('$(PublishDir)')">
+    <Exec Command="&quot;$(SharpEmuMacOutputCheckScript)&quot; &quot;$(PublishDir)&quot;$(_SharpEmuMacCheckFlags)"
+      StandardOutputImportance="high" />
+  </Target>
+
+  <!-- ===================================================================== -->
+  <!-- Publish-closure policy.                                               -->
+  <!--                                                                       -->
+  <!-- What the macOS build must not contain is now a project-reference fact, -->
+  <!-- not a file-layout one: SharpEmu.Gpu.Vulkan, SharpEmu.Adapters.Sdl,    -->
+  <!-- SharpEmu.ShaderCompiler.Vulkan and the Silk.NET packages are          -->
+  <!-- referenced only for win-*/linux-* RIDs (see SharpEmu.CLI.csproj), so  -->
+  <!-- their presence in an osx-* closure means a reference leaked back. This -->
+  <!-- runs before single-file bundling, so it sees the real closure even     -->
+  <!-- though the finished artifact is one compressed executable.            -->
+  <!-- ===================================================================== -->
+  <!-- The host-platform split moved SdlHostAudio into
+       SharpEmu.Adapters.Sdl and dropped ppy.SDL3-CS from SharpEmu.HLE, so the
+       SDL3-CS.dll / libSDL3.dylib exception is gone along with the matching
+       AllowedEdges entry in VulkanFreeSharedGpuTests. Nothing in a macOS
+       closure touches SDL: the window, keyboard, gamepads, haptics and the
+       display catalog are AppKit/GameController/CoreGraphics, audio is
+       CoreAudio, and the SDL adapter package is referenced only for
+       win-*/linux-* RIDs. -->
+
+  <Target Name="SharpEmuMacValidatePublishClosure"
+    AfterTargets="ComputeResolvedFilesToPublishList"
+    Condition="'$(SharpEmuMacSkipOutputGuard)' != 'true'">
+    <ItemGroup>
+      <_SharpEmuMacForbiddenClosure Include="@(ResolvedFileToPublish->'%(Filename)%(Extension)')"
+        Condition="$([System.String]::Copy('%(Filename)').StartsWith('Silk.NET'))
+                   Or '%(Filename)' == 'SharpEmu.ShaderCompiler.Vulkan'
+                   Or '%(Filename)' == 'SharpEmu.Gpu.Vulkan'
+                   Or '%(Filename)' == 'SharpEmu.Adapters.Sdl'
+                   Or $([System.String]::Copy('%(Filename)').StartsWith('Avalonia.Win32'))
+                   Or $([System.String]::Copy('%(Filename)').StartsWith('Avalonia.X11'))
+                   Or $([System.String]::Copy('%(Filename)').StartsWith('Avalonia.FreeDesktop'))
+                   Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('moltenvk'))
+                   Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().StartsWith('libvulkan'))" />
+      <_SharpEmuMacForbiddenClosure Include="@(ResolvedFileToPublish->'%(Filename)%(Extension)')"
+        Condition="'$(SharpEmuMacForbidSdl)' == 'true'
+                   And $([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('sdl3'))" />
+    </ItemGroup>
+    <Error Condition="'@(_SharpEmuMacForbiddenClosure)' != ''"
+      Text="macOS publish-closure policy violation: @(_SharpEmuMacForbiddenClosure, ', '). The macOS build is Metal/AppKit/GameController/CoreAudio only, so no Vulkan, MoltenVK or SDL dependency may enter an osx-* publish closure. Find the project or package reference that pulled it in and scope it to win-*/linux-*; see build/platforms/macos/macos.targets." />
+    <Message Condition="'@(_SharpEmuMacForbiddenClosure)' == ''" Importance="high"
+      Text="macOS publish closure: clean (GPU/SDL dependency policies passed)." />
+  </Target>
+
+  <!-- Deliberately not hooked to `Build`. The incremental build directory is a
+       developer convenience, not a shippable artifact, and it cannot be
+       stripped safely — deleting a file there makes the next build consider it
+       up to date and skip re-copying it. Only the publish output and the
+       assembled .app are held to this policy. -->
+
+</Project>

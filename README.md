@@ -56,9 +56,7 @@ This project is developed purely for research and educational purposes. There ar
 SharpEmu focuses exclusively on the PlayStation 5.  
 Our goal is **not** to emulate PS4 games, as there is already an excellent emulator dedicated to that platform: **ShadPS4**.
 
-## Selected Games
-
-A selection of games tested with SharpEmu. This is not an exhaustive list of supported titles.
+## Games Tested
 
 |               Demon's Souls Remake                   |                     ASTRO BOT                        |
 | :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
@@ -72,16 +70,12 @@ A selection of games tested with SharpEmu. This is not an exhaustive list of sup
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
 | ![GoW SOS](./.github/images/gow-sos.jpg) | ![Tomb Raider V](./.github/images/tomb-raider-v-remastered.jpg) |
 
-<p align="center">
-  <a href="https://sharpemu.app/compatibility/" target="_blank"><strong><i>And more..</i></strong></a>
-</p>
-
 ## Status
 
 The emulator can currently load the `eboot.bin` of real games, execute native CPU instructions, and partially handle gpu-related functionality. Included 3D games.
 
 SharpEmu supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
-Windows and Linux, and MoltenVK on macOS. Platform support is still experimental,
+Windows and Linux, and native Metal on macOS. Platform support is still experimental,
 so compatibility and performance vary by game, operating system, and GPU driver.
 
 ## Using
@@ -109,8 +103,9 @@ SharpEmu supports environment variables that can be configured from the GUI. Und
 
 You can set them per game or globally in the GUI, or pass them directly through the CLI.
 
-A Vulkan-capable GPU and current graphics driver are required. The macOS
-release includes the MoltenVK Vulkan implementation.
+Windows and Linux require a Vulkan-capable GPU and current graphics driver.
+macOS uses Metal directly; the macOS build runs as an x86-64 process, so Apple
+Silicon Macs need Rosetta 2 (`softwareupdate --install-rosetta`).
 
 See [Game patches](docs/patches.md) for downloading, enabling and writing game patches.
 
@@ -126,6 +121,40 @@ See [Game patches](docs/patches.md) for downloading, enabling and writing game p
 3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
 4. Build the project: `dotnet build` or `dotnet publish`
 5. Build artifacts will be located in the `artifacts` directory.
+
+<!-- macos-fork: keep this one block together so upstream merges stay trivial -->
+### macOS
+
+This fork targets macOS natively with Metal. There is no MoltenVK and no Vulkan
+on the macOS path.
+
+```sh
+scripts/macos/build-app.sh        # -> artifacts/macos/SharpEmu.app + a .zip
+```
+
+The script publishes `osx-x64`, assembles and ad-hoc signs `SharpEmu.app`, and
+verifies it. Set `SHARPEMU_CODESIGN_IDENTITY` to sign with a real identity;
+notarization runs only when `SHARPEMU_NOTARY_APPLE_ID`,
+`SHARPEMU_NOTARY_PASSWORD` and `SHARPEMU_NOTARY_TEAM_ID` are all set. Local
+builds never need it.
+
+**Rosetta 2 is required on Apple Silicon.** The CPU backend executes guest
+x86-64 instructions natively, so the host process has to be x86-64 — `osx-x64`
+is the only macOS target, and `osx-arm64` is rejected at build time. Install
+Rosetta with `softwareupdate --install-rosetta` if `arch -x86_64 /usr/bin/true`
+fails. Intel Macs run it natively.
+
+Settings, logs, save data and caches live next to the executable as on every
+other platform, except when running from `SharpEmu.app`: writing inside a
+signed bundle would invalidate its signature, so the bundle uses
+`~/Library/Application Support/SharpEmu`. Override it with `SHARPEMU_DATA_ROOT`,
+or create a `portable.txt` next to `SharpEmu.app` to keep the data beside the
+bundle instead.
+
+The `.app` bundle cannot update itself in place; the GUI reports new releases
+and opens the releases page. Upstream tracking is described in
+[`docs/mac/upstream-sync.md`](./docs/mac/upstream-sync.md).
+<!-- /macos-fork -->
 
 ## Disclaimer
 
