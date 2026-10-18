@@ -33,7 +33,6 @@ public readonly record struct ImageSpecialization(
     uint IndirectSearchIterations,
     bool Cube,
     int EmulatedCompareFunction = -1,
-    bool MipStatistics = false,
     uint PackedFormat = DescriptorConstants.InvalidFormat,
     uint BindlessTable = 0)
 {

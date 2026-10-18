@@ -11,6 +11,10 @@
 // the bound T# has no counter, MIN_LOD (unsigned 4.8) [27:16]. lod is the requested LOD
 // relative to the view, whose level 0 is BASE_LEVEL, before any clamp.
 //
+// Every eligible sample site carries the call, so the program does not depend on
+// MIP_STATS_ENABLE; the caller tests bit 15 first and skips the call (and the LOD it would
+// compute) when it is set, so this only runs for a T# with a counter.
+//
 // The counter id is read from per-draw shader data at an index the translator fixes, so
 // it is the same in every lane of the simdgroup: one lane does the atomics for all of
 // them. That lane must not be a helper thread (their atomics have no effect), and
@@ -19,7 +23,6 @@ constant uint sharpemu_mip_stats_entries = 257u;
 
 static inline void sharpemu_mip_stats(device atomic_uint* stats, uint field, float lod, bool active)
 {
-    active = active && (field & 0x8000u) == 0u;
     float base = (float)((field >> 8) & 0xFu);
     float requested = lod + base;
     // The finest mip is never below BASE_LEVEL: a magnified sample reads the base level.

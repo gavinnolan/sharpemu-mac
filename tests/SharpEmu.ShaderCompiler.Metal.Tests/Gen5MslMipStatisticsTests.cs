@@ -7,37 +7,70 @@ using Xunit.Abstractions;
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
 
 /// <summary>
-/// A pixel sample of a T# with MIP_STATS_ENABLE records the LOD it asked for into the
-/// GET_LOD_STATS counter bank (Templates/mip_stats_prelude.msl); a program specialized
-/// without it carries neither the binding nor the atomics.
+/// A pixel sample of an eligible image carries the recording into the GET_LOD_STATS counter
+/// bank (Templates/mip_stats_prelude.msl), guarded at run time by the image's shader-data
+/// field, so the bound T#'s MIP_STATS_ENABLE does not change the program; with lod
+/// statistics off a program carries neither the binding nor the atomics.
 /// </summary>
+// These tests set the process-wide ResourceMaterializer.RecordMipStatistics; nothing else
+// may apply a specialization while they do.
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class MipStatisticsSwitchCollection
+{
+    public const string Name = "MipStatisticsSwitch";
+}
+
+[Collection(MipStatisticsSwitchCollection.Name)]
 public sealed class Gen5MslMipStatisticsTests(ITestOutputHelper output)
 {
     private const ulong ShaderAddress = 0x1_0000_C000;
     private const uint UserDataCount = 20;
 
-    private static Gen5MslShader PixelSample(string opcode, bool recordStatistics)
+    private static Gen5ShaderProgram SampleProgram(string opcode)
     {
         var control = new Gen5ImageControl(0xF, 0, Enumerable.Range(0, 12).Select(static value => (uint)value).ToArray(),
             16, 8, 16, Gen5ImageFixtures.Dim2D, false, false, false, false, false);
-        var program = new Gen5ShaderProgram(ShaderAddress,
+        return new Gen5ShaderProgram(ShaderAddress,
         [
             new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Mimg, opcode, [], [], [], control),
             new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null),
         ]);
-        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x4D49505354415453UL, 0, UserDataCount);
+    }
+
+    private static uint[] SampleUserData(bool mipStatsEnabled)
+    {
         var userData = new uint[UserDataCount];
         userData[8] = 0x20;
         userData[9] = 71u << 20;
         userData[11] = (Gen5ImageFixtures.ImageType2D << 28) | Gen5ShaderTranslator.IdentityImageDstSelect;
-        userData[13] = 1u << 25;
+        userData[13] = mipStatsEnabled ? 1u << 25 : 0u;
         userData[14] = 7;
+        return userData;
+    }
+
+    // recordStatistics is the host's switch (ResourceMaterializer.RecordMipStatistics);
+    // mipStatsEnabled is the bound T#'s MIP_STATS_ENABLE.
+    private static Gen5MslShader PixelSample(string opcode, bool recordStatistics, bool mipStatsEnabled = true)
+    {
+        var program = SampleProgram(opcode);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x4D49505354415453UL, 0, UserDataCount);
+        var userData = SampleUserData(mipStatsEnabled);
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         Assert.True(ResourceMaterializer.Materialize(plan, new ResourceRuntimeInputs { UserData = userData },
             ref snapshot, ref specialization, out var failure), $"{failure}");
-        specialization.Images[0] = specialization.Images[0] with { MipStatistics = recordStatistics };
-        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var previous = ResourceMaterializer.RecordMipStatistics;
+        ResourceMaterializer.RecordMipStatistics = recordStatistics;
+        SpecializedResourceInfo resources;
+        try
+        {
+            resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        }
+        finally
+        {
+            ResourceMaterializer.RecordMipStatistics = previous;
+        }
+
         var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, UserDataCount),
             false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         Assert.Equal(recordStatistics ? 1u : 0u, layout.MipStatisticsCount);
@@ -67,16 +100,43 @@ public sealed class Gen5MslMipStatisticsTests(ITestOutputHelper output)
         Assert.Contains($"sharpemu_mip_stats(sharpemu_resources.{Gen5MslArgumentLayout.MipStatisticsName}, ", shader.Source);
         Assert.Contains("!simd_is_helper_thread()", shader.Source);
         Assert.Contains("atomic_fetch_min_explicit(", shader.Source);
+        // The slot's field is tested first; the LOD work and the call sit behind it.
+        var guard = shader.Source.IndexOf(" & 0x8000u) == 0u)", StringComparison.Ordinal);
+        Assert.True(guard >= 0, shader.Source);
+        Assert.True(shader.Source.IndexOf($"sharpemu_mip_stats(sharpemu_resources.", StringComparison.Ordinal) > guard);
         if (lodSource is null)
         {
             Assert.DoesNotContain("calculate_unclamped_lod(", shader.Source);
         }
         else
         {
-            Assert.Contains(lodSource, shader.Source);
+            Assert.True(shader.Source.IndexOf(lodSource, StringComparison.Ordinal) > guard, shader.Source);
         }
 
         CompileWhenRequired(shader.Source);
+    }
+
+    [Fact]
+    public void MipStatsEnableDoesNotSplitTheProgram()
+    {
+        var plan = ShaderResourcePlan.Extract(SampleProgram("ImageSample"), ShaderStage.Pixel, 0x4D49505354415453UL, 0, UserDataCount);
+        ResourceSpecialization Materialize(bool enabled)
+        {
+            var snapshot = new ResourceSnapshot();
+            var specialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, new ResourceRuntimeInputs { UserData = SampleUserData(enabled) },
+                ref snapshot, ref specialization, out var failure), $"{failure}");
+            return specialization;
+        }
+
+        var counted = Materialize(enabled: true);
+        var uncounted = Materialize(enabled: false);
+        Assert.Equal(counted, uncounted);
+        Assert.Equal(counted.GetHashCode(), uncounted.GetHashCode());
+
+        var countedSource = PixelSample("ImageSample", recordStatistics: true, mipStatsEnabled: true).Source;
+        Assert.Equal(countedSource, PixelSample("ImageSample", recordStatistics: true, mipStatsEnabled: false).Source);
+        Assert.Contains("sharpemu_mip_stats(sharpemu_resources.", countedSource);
     }
 
     [Fact]

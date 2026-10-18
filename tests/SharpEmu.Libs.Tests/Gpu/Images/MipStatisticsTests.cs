@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
@@ -147,6 +148,30 @@ public sealed class MipStatisticsTests
         Assert.Equal(0x2Au | (3u << 8) | (0x280u << 16), MipStatistics.ImageField(texture));
         texture[5] = 0;
         Assert.Equal(MipStatistics.NoCounterField, MipStatistics.ImageField(texture));
+    }
+
+    [Fact]
+    public void ImageFields_OfAnEligibleImageFollowItsBoundTexture()
+    {
+        // The program is the same whether the T# counts: the field alone turns recording off.
+        var layout = new BindingLayout { MipStatisticsCount = 3 };
+        var info = new ShaderResourceInfo
+        {
+            Images = [new() { MipStatistics = true }, new() { MipStatistics = true }, new() { MipStatistics = false }],
+        };
+        uint[][] images =
+        [
+            [0, 0, 0, 0, 0, CounterEnabled, 0x2A, 0],
+            [0, 0, 0, 0, 0, 0, 0x2B, 0],
+            [0, 0, 0, 0, 0, CounterEnabled, 0x2C, 0],
+        ];
+        var shaderData = new uint[layout.ShaderDataDwordCount];
+
+        MipStatistics.WriteImageFields(shaderData, layout, info, images);
+
+        Assert.Equal(0x2Au, shaderData[layout.MipStatisticsDword]);
+        Assert.Equal(MipStatistics.NoCounterField, shaderData[layout.MipStatisticsDword + 1]);
+        Assert.Equal(MipStatistics.NoCounterField, shaderData[layout.MipStatisticsDword + 2]);
     }
 
     [Fact]

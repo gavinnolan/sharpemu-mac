@@ -96,7 +96,8 @@ public static partial class Gen5MslTranslator
         private bool _hasFlattenedTable;
         private bool _hasSamplers;
         // The layout binds the mip-statistics counters (BindingLayout.MipStatisticsCount):
-        // some image of this program has its T# MIP_STATS_ENABLE bit set.
+        // some sampled image of this pixel program is eligible to record (the T#'s
+        // MIP_STATS_ENABLE decides at run time).
         private bool _hasMipStatistics;
         // A sample records into them, so the module carries mip_stats_prelude.
         private bool _usesMipStatistics;

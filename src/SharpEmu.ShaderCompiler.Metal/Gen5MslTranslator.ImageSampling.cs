@@ -241,9 +241,12 @@ public static partial class Gen5MslTranslator
         // An S# LOD_BIAS (signed 6.8 fixed point) as an exact float expression.
         private static string SamplerLodBiasLiteral(int bias) => $"({bias}.0f / 256.0f)";
 
-        // A pixel-stage sample of a T# whose MIP_STATS_ENABLE bit the materializer saw (the
-        // program is specialized on it) counts into the GET_LOD_STATS bank. Storage,
-        // multisampled and cube views are left out, as the SPIR-V backend leaves them.
+        // A pixel-stage sample of an image the materializer made eligible
+        // (ImageResource.MipStatistics: GPU lod statistics are on and the image is sampled)
+        // can count into the GET_LOD_STATS bank. Whether it does is the bound T#'s
+        // MIP_STATS_ENABLE, runtime state in the image's shader-data field, so the program is
+        // the same either way. Storage, multisampled and cube views are left out, as the
+        // SPIR-V backend leaves them.
         private bool RecordsMipStatistics(int resourceIndex, MslImageClass imageClass) =>
             _hasMipStatistics && _stage == Gen5MslStage.Pixel &&
             resourceIndex >= 0 && resourceIndex < _request.Resources.Info.Images.Count &&
@@ -251,14 +254,23 @@ public static partial class Gen5MslTranslator
             !imageClass.IsStorage && !imageClass.Multisampled && !imageClass.Cube;
 
         // The requested LOD, relative to the view, goes to the counter of the image's field
-        // (MipStatistics.ImageField, which the host writes into the shader data). Only lanes
-        // in EXEC that are not helper threads count (Templates/mip_stats_prelude.msl).
-        private void RecordMipStatistics(int resourceIndex, string requestedLod)
+        // (MipStatistics.ImageField, which the host writes into the shader data). A field with
+        // bit 15 set (MipStatistics.NoCounterField: the bound T# has MIP_STATS_ENABLE clear)
+        // skips everything, the LOD computation included: one shader-data load and a branch
+        // uniform across the draw. requestedLod emits that computation, inside the branch.
+        // Only lanes in EXEC that are not helper threads count (Templates/mip_stats_prelude.msl).
+        private void RecordMipStatistics(int resourceIndex, Func<string> requestedLod)
         {
             _usesMipStatistics = true;
             var field = Temp("uint", ShaderDataDword(_request.Bindings.MipStatisticsDword + (uint)resourceIndex));
-            Line($"sharpemu_mip_stats({ResourcesName}.{Gen5MslArgumentLayout.MipStatisticsName}, {field}, {requestedLod}, " +
+            Line($"if (({field} & 0x8000u) == 0u)");
+            Line("{");
+            _indent++;
+            var lod = requestedLod();
+            Line($"sharpemu_mip_stats({ResourcesName}.{Gen5MslArgumentLayout.MipStatisticsName}, {field}, {lod}, " +
                  $"{ExecCondition("!simd_is_helper_thread()")});");
+            _indent--;
+            Line("}");
         }
 
         // The isotropic LOD of explicit derivatives: log2 of the longer screen-axis footprint
@@ -427,10 +439,9 @@ public static partial class Gen5MslTranslator
             if (RecordsMipStatistics(resourceIndex, imageClass))
             {
                 var planar = spatialComponents == 1 ? $"float2({coordinates}, 0.5f)" : coordinates;
-                var requestedLod = givenLod ?? (useGradients
+                RecordMipStatistics(resourceIndex, () => givenLod ?? (useGradients
                     ? GradientLod(texture, imageClass, gradientX, gradientY)
-                    : Temp("float", $"{texture}.calculate_unclamped_lod({samplerName}, {planar}) + {bias}"));
-                RecordMipStatistics(resourceIndex, requestedLod);
+                    : Temp("float", $"{texture}.calculate_unclamped_lod({samplerName}, {planar}) + {bias}")));
             }
 
             if (unorm)

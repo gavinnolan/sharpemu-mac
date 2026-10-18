@@ -198,7 +198,10 @@ public static partial class Gen5SpirvTranslator
             uint ConversionFormat = 0,
             uint ShaderSwizzle = 0,
             int EmulatedCompareFunction = -1,
-            int ResourceIndex = -1);
+            int ResourceIndex = -1,
+            // The loaded sampler a sampled access combined with the image; another block that
+            // needs the combined object makes its own (OpSampledImage is block-local).
+            uint Sampler = 0);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -5425,7 +5428,6 @@ public static partial class Gen5SpirvTranslator
 
                 RecordMipStatistics(
                     resource,
-                    imageObject,
                     coordinates,
                     hasZeroLod || hasLod ? lod : null,
                     hasBias ? lodOrBias : Float(0));
