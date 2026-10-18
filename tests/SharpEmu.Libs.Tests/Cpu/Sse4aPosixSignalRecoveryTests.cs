@@ -36,7 +36,13 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
 
     private static Assembly? LoadPosixExecutionPackage()
     {
-        foreach (var name in new[] { "SharpEmu.Cpu.DirectExecution.MacOS.X64", "SharpEmu.Cpu.DirectExecution.Linux.X64" })
+        // Only this host's package: every project builds into the shared artifacts directory,
+        // so the other OS's package can be loadable here although nothing references it, and
+        // its signal layout is not the one the fabricated frames below use.
+        var names = OperatingSystem.IsMacOS() ? new[] { "SharpEmu.Cpu.DirectExecution.MacOS.X64" }
+            : OperatingSystem.IsLinux() ? new[] { "SharpEmu.Cpu.DirectExecution.Linux.X64" }
+            : Array.Empty<string>();
+        foreach (var name in names)
         {
             try
             {
