@@ -8,11 +8,14 @@
 #
 #   game     ds | sarah | octo | poppy | quake | sh | superl | oregon | void (under $SHARPEMU_GAMES_DIR),
 #            or a path to an eboot.bin
-#   seconds  run length, capped at 150 (600 with SHARPEMU_GAME_ENTRY_RUN=1)
+#   seconds  run length, capped at 150 (600 with SHARPEMU_GAME_ENTRY_RUN=1, 2400 with
+#            SHARPEMU_GAME_SESSION_RUN=1 for 30-minute play sessions)
 #   keyplan  comma list "t:key[:hold]" pressed through SHARPEMU_INPUT_FILE, e.g. "20:enter,30:down:1",
 #            or "-" for none
 #            SHARPEMU_INPUT_START_AFTER_LOG makes these times relative to the first
 #            observed literal game-log marker, e.g. 'Quake Initialized'.
+#            Several phases ("[@log=TEXT|flips=N|after=S[~timeout]|]steps;...") and named
+#            segment markers ("t:mark:<name>") are described in input-plan.py.
 #
 # Only one game runs on the machine at a time: runs take a machine-wide lock directory
 # ($SHARPEMU_GAME_LOCK) shared with other harnesses, and wait while any SharpEmu process is alive.
@@ -21,8 +24,10 @@
 #
 # Output: artifacts/runs/<timestamp>-<game>-<tag>/ with game.log, game.tlog (game.log lines
 # prefixed with seconds since launch), result.txt, keys.log,
-# footprint.log ("seconds footprint_mb rss_mb" per second), screenshots (when a window-id
-# helper is available) and run.env. SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
+# footprint.log ("seconds footprint_mb rss_mb" per second), frame-times.txt (one line per guest
+# flip, SHARPEMU_FRAME_TIMES), markers.tsv (epoch<TAB>name per plan marker), screenshots (every
+# SHARPEMU_SHOT_EVERY seconds and one shot-mark-<name>.png per marker, when a window-id
+# helper is available; SHARPEMU_HUD_WATCH=1 adds the `hud` marker, see hud-detect.py) and run.env (launch_epoch is the wall clock at launch). SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -61,8 +66,10 @@ shift 3; [[ $# -gt 0 ]] && shift
 [[ -x "$APP_DIR/SharpEmu" ]] || { echo "no SharpEmu in $APP_DIR (run scripts/macos/build-app.sh)" >&2; exit 2; }
 MAX_SECONDS=150
 [[ "${SHARPEMU_GAME_ENTRY_RUN:-0}" == "1" ]] && MAX_SECONDS=600
+# Only an explicit session opt-in lifts the cap, and it takes the input scheduler's bound with it.
+[[ "${SHARPEMU_GAME_SESSION_RUN:-0}" == "1" ]] && MAX_SECONDS=2400
 [[ "$SECONDS_LIMIT" =~ ^[0-9]+$ ]] && (( 10#$SECONDS_LIMIT >= 1 && 10#$SECONDS_LIMIT <= MAX_SECONDS )) || {
-  echo "refusing ${SECONDS_LIMIT}s (allowed 1..${MAX_SECONDS}; extended runs require SHARPEMU_GAME_ENTRY_RUN=1)" >&2
+  echo "refusing ${SECONDS_LIMIT}s (allowed 1..${MAX_SECONDS}; extended runs require SHARPEMU_GAME_ENTRY_RUN=1, or SHARPEMU_GAME_SESSION_RUN=1 for up to 2400)" >&2
   exit 2
 }
 python3 "$REPO_ROOT/scripts/macos/input-plan.py" --plan "$PLAN" --start-after-log "$INPUT_ANCHOR" --validate || exit 2
@@ -79,6 +86,7 @@ KEYS="$OUT/keys.state"
   echo "keyplan=$PLAN"
   echo "input_start_after_log=$INPUT_ANCHOR"
   echo "entry_run=${SHARPEMU_GAME_ENTRY_RUN:-0}"
+  echo "session_run=${SHARPEMU_GAME_SESSION_RUN:-0}"
   echo "seconds_limit=$SECONDS_LIMIT"
   for e in "$@"; do echo "$e"; done
 } > "$OUT/run.env"
@@ -180,12 +188,15 @@ shot() {
   # Same gen0 budget the app bundle's Info.plist sets (GCgen0size is environment-only).
   export DOTNET_GCgen0size="${DOTNET_GCgen0size:-0x4000000}"
   for e in "$@"; do export "${e?}"; done
+  # Per-flip timestamps for ds-metrics.py; an ENV=VALUE argument above may name another path.
+  export SHARPEMU_FRAME_TIMES="${SHARPEMU_FRAME_TIMES:-$OUT/frame-times.txt}"
   export SHARPEMU_INPUT_FILE="$KEYS"
   export SHARPEMU_RUN_OUT="$OUT"
   exec ./SharpEmu ${SHARPEMU_ARGS:-} "$EBOOT"
 ) > "$OUT/game.log" 2>&1 &
 GPID=$!
 start=$(date +%s)
+echo "launch_epoch=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> "$OUT/run.env"
 # game.tlog: game.log with seconds since launch on each line, for load timelines.
 perl -MTime::HiRes=time,sleep -e '
   my ($log, $pid) = @ARGV; my $t0 = time; $| = 1;
@@ -196,9 +207,15 @@ perl -MTime::HiRes=time,sleep -e '
   $drain->();' "$OUT/game.log" "$GPID" > "$OUT/game.tlog" 2>/dev/null &
 python3 "$REPO_ROOT/scripts/macos/input-plan.py" --plan "$PLAN" --keys "$KEYS" \
   --events "$OUT/keys.log" --game-log "$OUT/game.log" --start-after-log "$INPUT_ANCHOR" \
+  --markers "$OUT/markers.tsv" --frame-times "$OUT/frame-times.txt" \
   --run-limit "$SECONDS_LIMIT" > "$OUT/input-plan.log" 2>&1 &
 INPUT_PID=$!
 next_shot=5
+marks_shot=0
+# SHARPEMU_HUD_WATCH=1: every 2 s look at the window for Demon's Souls' in-world HUD (hud-detect.py)
+# and write the `hud` marker the first time it is on screen, the run's "controllable gameplay" signal.
+hud_seen=0
+hud_probe_at=-2
 shot_every="${SHARPEMU_SHOT_EVERY:-10}"
 peak_mb=0
 peak_fp_mb=0
@@ -253,6 +270,29 @@ while :; do
     fs_usage_at=("${fs_usage_at[@]:1}")
   fi
   if (( fp_mb > MEM_LIMIT_MB )); then status="memory limit footprint ${fp_mb}MB > ${MEM_LIMIT_MB}MB at ${now}s"; break; fi
+  if [[ -f "$OUT/markers.tsv" ]]; then
+    # One screenshot per plan marker, at the first sample after the marker was written.
+    marks_now=$(wc -l < "$OUT/markers.tsv" | tr -d ' ')
+    while (( marks_shot < marks_now )); do
+      marks_shot=$(( marks_shot + 1 ))
+      mark_name="$(sed -n "${marks_shot}p" "$OUT/markers.tsv" | cut -f2)"
+      shot "$OUT/shot-mark-${mark_name}.png"
+      # A plan marker named "stop" ends the run (SIGTERM, as at the time limit) once its screenshot is taken.
+      [[ "$mark_name" == stop ]] && { status="stopped at the plan's stop marker after ${now}s"; break 2; }
+    done
+  fi
+  if [[ "${SHARPEMU_HUD_WATCH:-0}" == 1 ]] && (( ! hud_seen )) && (( now - hud_probe_at >= 2 )); then
+    hud_probe_at=$now
+    shot "$OUT/hud-probe.png"
+    hud_rc=0
+    python3 "$REPO_ROOT/scripts/macos/hud-detect.py" "$OUT/hud-probe.png" > "$OUT/hud-probe.txt" 2> "$OUT/hud-probe.err" || hud_rc=$?
+    # Every probe is logged (second, exit code, bar coverages or the error) so a missing marker can be diagnosed.
+    echo "$now rc=$hud_rc $(cat "$OUT/hud-probe.txt" "$OUT/hud-probe.err" 2>/dev/null | tr '\n' ' ')" >> "$OUT/hud-detect.log"
+    if (( hud_rc == 0 )); then
+      hud_seen=1
+      printf '%s\thud\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> "$OUT/markers.tsv"
+    fi
+  fi
   if (( now >= next_shot )); then shot "$OUT/shot-$(printf %04d "$now").png"; next_shot=$(( now + shot_every )); fi
   if [[ -n "$INPUT_PID" ]] && ! kill -0 "$INPUT_PID" 2>/dev/null; then
     wait "$INPUT_PID"; input_rc=$?
@@ -272,6 +312,7 @@ if [[ -n "$GPID" ]]; then
     sample "$GPID" 3 -file "$OUT/sample.txt" >/dev/null 2>&1 || true
   fi
 fi
+rm -f "$OUT/hud-probe.png" "$OUT/hud-probe.txt" "$OUT/hud-probe.err"
 echo "$status" > "$OUT/result.txt"
 echo "peak_footprint_mb=$peak_fp_mb" >> "$OUT/result.txt"
 echo "peak_rss_mb=$peak_mb" >> "$OUT/result.txt"

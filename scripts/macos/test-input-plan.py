@@ -92,6 +92,100 @@ class InputPlanTests(unittest.TestCase):
             self.assertIn("held=w", events.read_text())
             self.assertEqual("", keys.read_text())
 
+    def test_markers_and_phases_parse(self):
+        phases = module.parse_phases("0:a:1,2:mark:intro;@log=Starting main loop~30|0:mark:menu,1:enter;@flips=5|0:mark:end")
+        self.assertEqual(3, len(phases))
+        self.assertEqual([(2.0, "intro")], phases[0].marks)
+        self.assertEqual(("log", "Starting main loop", 30.0), phases[1].anchor)
+        self.assertEqual(("flips", 5.0, None), phases[2].anchor)
+        self.assertEqual(1.4, phases[1].duration)
+
+    def test_repeating_steps_press_every_period_and_do_not_extend_the_phase(self):
+        phase = module.parse_phases("0:rep:enter:6:2,3:mark:m")[0]
+        self.assertEqual(3.0, phase.duration)
+        self.assertEqual(["enter"], module.held_keys(phase.steps, 1.0, phase.reps))
+        self.assertEqual([], module.held_keys(phase.steps, 3.0, phase.reps))
+        self.assertEqual(["enter"], module.held_keys(phase.steps, 6.5, phase.reps))
+        for bad in ["0:rep:enter", "0:rep:enter:1:2", "0:rep:nope:5", "0:rep:enter:5:0.05"]:
+            with self.subTest(plan=bad), self.assertRaises(ValueError):
+                module.parse_phases(bad)
+
+    def test_bad_markers_and_anchors_decline(self):
+        for plan in ["0:mark", "0:mark:bad name", "0:mark:", "@bogus=1|0:w", "@log=x", "@after=-1|0:w", "0:w;@flips=nan|0:w"]:
+            with self.subTest(plan=plan), self.assertRaises(ValueError):
+                module.parse_phases(plan)
+        with self.assertRaises(ValueError):
+            module.parse_plan("0:w;0:d")
+
+    def test_second_phase_waits_for_its_anchor_and_after_the_first_phases_steps(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keys, events, log, marks = [Path(folder) / n for n in ("keys.state", "keys.log", "game.log", "markers.tsv")]
+            log.write_text("")
+            process = subprocess.Popen([sys.executable, str(SCRIPT), "--plan", "0:mark:one,0:a:0.4;@log=go now~20|0:mark:two,0:w:0.5",
+                "--keys", str(keys), "--events", str(events), "--game-log", str(log), "--markers", str(marks), "--run-limit", "6"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.until(lambda: marks.exists() and "one" in marks.read_text())
+                time.sleep(0.6)
+                self.assertNotIn("two", marks.read_text())
+                log.write_text("go now\n")
+                self.until(lambda: "two" in marks.read_text())
+                self.until(lambda: keys.read_text().strip() == "w")
+                self.assertIn("via=anchor", events.read_text())
+            finally:
+                process.terminate()
+                process.communicate(timeout=3)
+
+    def test_mark_anchor_waits_for_a_marker_written_by_someone_else(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keys, events, marks = [Path(folder) / n for n in ("keys.state", "keys.log", "markers.tsv")]
+            marks.write_text(f"{time.time() - 100:.3f}\thud\n")  # an old one must not count
+            process = subprocess.Popen([sys.executable, str(SCRIPT), "--plan", "0:mark:one;@mark=hud~30|0:mark:two",
+                "--keys", str(keys), "--events", str(events), "--markers", str(marks), "--run-limit", "6"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.until(lambda: "one" in marks.read_text())
+                time.sleep(0.4)
+                self.assertNotIn("two", marks.read_text())
+                with marks.open("a") as handle:
+                    handle.write(f"{time.time():.3f}\thud\n")
+                self.until(lambda: "two" in marks.read_text())
+                self.assertIn("via=anchor", events.read_text())
+            finally:
+                process.terminate()
+                process.communicate(timeout=3)
+
+    def test_anchor_timeout_starts_the_phase_anyway(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keys, events, log, marks = [Path(folder) / n for n in ("keys.state", "keys.log", "game.log", "markers.tsv")]
+            process = subprocess.Popen([sys.executable, str(SCRIPT), "--plan", "0:mark:one;@log=never~0.5|0:mark:two",
+                "--keys", str(keys), "--events", str(events), "--game-log", str(log), "--markers", str(marks), "--run-limit", "4"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.until(lambda: marks.exists() and "two" in marks.read_text(), seconds=3)
+                self.assertIn("via=timeout", events.read_text())
+            finally:
+                process.terminate()
+                process.communicate(timeout=3)
+
+    def test_flip_count_anchor_counts_flips_after_the_previous_phase_started(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keys, events, log, marks, flips = [Path(folder) / n for n in ("keys.state", "keys.log", "game.log", "markers.tsv", "flips.txt")]
+            flips.write_text("# header\n1 100\n2 200\n")
+            process = subprocess.Popen([sys.executable, str(SCRIPT), "--plan", "0:mark:one;@flips=3~30|0:mark:two",
+                "--keys", str(keys), "--events", str(events), "--frame-times", str(flips), "--markers", str(marks), "--run-limit", "6"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.until(lambda: marks.exists() and "one" in marks.read_text())
+                time.sleep(0.4)
+                self.assertNotIn("two", marks.read_text())
+                with flips.open("a") as handle:
+                    handle.write("3 300\n4 400\n5 500\n")
+                self.until(lambda: "two" in marks.read_text())
+            finally:
+                process.terminate()
+                process.communicate(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()

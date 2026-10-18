@@ -154,6 +154,7 @@ public static partial class VideoOutExports
         }
 
         requestId = request.RequestId;
+        _frameTimes?.Record();
         return 0;
     }
 
