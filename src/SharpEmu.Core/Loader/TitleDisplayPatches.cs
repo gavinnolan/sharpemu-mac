@@ -13,8 +13,9 @@ namespace SharpEmu.Core.Loader;
 /// title stays in its 4K mode. The fastest, but Demon's Souls' UI keeps its 4K layout on the
 /// shrunken canvas, so the HUD comes out 2x (1080p) or 3x (720p) and its item cells break.</item>
 /// <item><c>mode</c>: run the title in its own HD display mode, held there
-/// (<see cref="DisplayModeProfile"/>). Its UI canvas, layout and UI coordinates stay native HD;
-/// below 1080p only the HD mode's render targets shrink to the display.</item>
+/// (<see cref="DisplayModeProfile"/>), the PS5's own path for a 1080p television: the output,
+/// the display buffers and the UI stay 1920x1080 and the presenter scales that to the window;
+/// below 1080p only the internal scene size shrinks to the display.</item>
 /// <item><c>0</c>: the title's own sizes, as a PS5 runs it: Demon's Souls outputs 4K
 /// whatever the television is and the system scales it.</item>
 /// </list>
@@ -66,9 +67,10 @@ internal static class TitleDisplayPatches
     /// <summary>A title that picks its display mode as "override, else a compiled default".
     /// Each <see cref="DefaultModeSites"/> offset is the imm32 of a <c>mov r32, OldDefaultMode</c>
     /// that becomes <see cref="HdMode"/>; <see cref="OverrideSites"/> drop the overrides (a saved
-    /// visual-mode option among them) so the mode holds. Below the HD size,
-    /// <see cref="HdOutputSites"/> (the HD output and display-buffer sizes) become the display
-    /// size and <see cref="HdInternalSites"/> shrink to it.</summary>
+    /// visual-mode option among them) so the mode holds. The HD output stays
+    /// <see cref="HdWidth"/> x <see cref="HdHeight"/>: the title composites its UI over the
+    /// scene at that size, so the output, display buffers and UI canvas must agree on it. Below
+    /// it only <see cref="HdInternalSites"/>, the internal scene size, shrink to the display.</summary>
     internal sealed record DisplayModeProfile(
         IReadOnlyList<ulong> DefaultModeSites,
         uint OldDefaultMode,
@@ -76,7 +78,6 @@ internal static class TitleDisplayPatches
         IReadOnlyList<CodeSite> OverrideSites,
         uint HdWidth,
         uint HdHeight,
-        IReadOnlyList<Site> HdOutputSites,
         IReadOnlyList<Site> HdInternalSites)
     {
         /// <summary>The mode for the display; null keeps the title's own 4K mode.</summary>
@@ -145,16 +146,20 @@ internal static class TitleDisplayPatches
     // display-size getters (0x9E7F80 / 0x9E7FB0), the window margins (0x945745), the UI canvas
     // ({1920,3840} x {1080,2160} at 0x2172C00 / 0x2172A08, read at 0xEB4022 and 0xECBCCE) and
     // the UI's 4K layout switch (0xEB43B9). A saved visual mode (r_Wants4K_Game 3 or 4) takes
-    // over from the default once the save loads, so the two cmovne at each site go.
+    // over from the default once the save loads, so the two cmovne at each site go. The mode
+    // (video-out object +0x3C, renderer copy at cfg+0xD18) has no other reader: no quality,
+    // shadow, LOD or frame-rate setting keys off it, and the flip-rate calls (0x94531C,
+    // 0x94560E, 0x9456D6, 0x9457F3) do not depend on it.
     //
-    // Below 1080p the HD mode's render targets shrink: the output size (table index 1) and the
-    // 1920x1080 views of the display buffers (0x9453E1 / 0x94547A, whose sizes 0x944CB7 hands
-    // to sceVideoOutSetBufferAttribute2 in the HD mode) become the display size, and the
-    // internal size shrinks to it. The UI keeps its native HD units: its canvas tables and the
-    // display-size getters, which the UI uses for safe-area coordinates (0xC29B56, 0xC3DE66,
-    // 0xC43570), stay 1920x1080. The UI maps its canvas onto the target rather than assuming
-    // canvas pixels are target pixels: a 1920x1080 canvas on a 4K target is a state it handles
-    // (the 0.5 / 2.0 canvas scale at 0xEB43DA).
+    // Mode 2, not 1: its internal size is the HD output, so at 1080p the scene renders at
+    // 1920x1080 as the all-sites rewrite renders it. The title composites its UI over the
+    // upscaled scene at the output size, drawing the canvas 1:1 into it, and the HD output
+    // (table index 1), the 1920x1080 views of the display buffers (0x9453E1 / 0x94547A, which
+    // 0x944CB7 hands to sceVideoOutSetBufferAttribute2), the canvas tables and the display-size
+    // getters all say 1920x1080. They stay so: a smaller registered buffer shows only its corner
+    // of the composite. Below 1080p only the internal scene size (table index 1) shrinks, the
+    // title upscales it to 1080 as it does from 1600x900 in mode 1, and the presenter scales
+    // the 1920x1080 buffer to the window.
     private static readonly byte[] Nop3 = [0x0F, 0x1F, 0x00];
 
     private static readonly DisplayModeProfile DemonsSoulsModes = new(
@@ -171,14 +176,6 @@ internal static class TitleDisplayPatches
         ],
         HdWidth: 1920,
         HdHeight: 1080,
-        [
-            new(0x1FFA5D4, Slot.Width, 1920, 1080, Role.Output),
-            new(0x1FFBE34, Slot.Height, 1920, 1080, Role.Output),
-            new(0x9453E2, Slot.Width, 1920, 1080, Role.Output),
-            new(0x9453E7, Slot.Height, 1920, 1080, Role.Output),
-            new(0x94547B, Slot.Width, 1920, 1080, Role.Output),
-            new(0x945480, Slot.Height, 1920, 1080, Role.Output),
-        ],
         [
             new(0x1FFBE24, Slot.Width, 1920, 1080, Role.Internal),
             new(0x1FFD754, Slot.Height, 1920, 1080, Role.Internal),
@@ -259,7 +256,8 @@ internal static class TitleDisplayPatches
     }
 
     /// <summary>The rewrites that hold the title in its HD mode and, below the HD size, shrink
-    /// that mode's render targets to the display. Nothing the UI lays out in is touched.</summary>
+    /// that mode's internal scene size to the display. The output, display buffers and
+    /// everything the UI lays out in keep the HD size.</summary>
     internal static List<GuestBytePatcher.Patch> BuildDisplayModePatches(
         DisplayModeProfile profile, uint width, uint height)
     {
@@ -283,11 +281,10 @@ internal static class TitleDisplayPatches
             patches.Add(CreatePatch(site.Offset, site.Old, site.New));
         }
 
-        // Render targets only shrink: a display between 1080p and 4K keeps the HD sizes.
-        var targetWidth = Math.Min(width, profile.HdWidth);
-        var targetHeight = Math.Min(height, profile.HdHeight);
-        patches.AddRange(BuildPatches(profile.HdOutputSites, targetWidth, targetHeight));
-        patches.AddRange(BuildPatches(profile.HdInternalSites, targetWidth, targetHeight));
+        // The scene only shrinks: a display between 1080p and 4K keeps the HD size.
+        var sceneWidth = Math.Min(width, profile.HdWidth);
+        var sceneHeight = Math.Min(height, profile.HdHeight);
+        patches.AddRange(BuildPatches(profile.HdInternalSites, sceneWidth, sceneHeight));
         return patches;
     }
 
