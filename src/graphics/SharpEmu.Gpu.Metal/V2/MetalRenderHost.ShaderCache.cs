@@ -339,7 +339,7 @@ internal sealed partial class MetalRenderHost
             var description = entry.ComputeDescription ??
                 throw Fatal($"A released compute pipeline has no description to build it again from: pipeline={entry.Id}.");
             var module = RequireModule(description.Program);
-            entry.State = BuildComputePipelineState(module.Function, description.Stage.Hash);
+            entry.State = BuildComputePipelineState(module.Function, description.Stage.Hash, module.ArchiveKey);
         }
 
         Interlocked.Increment(ref _residentPipelines);
