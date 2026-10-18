@@ -1,0 +1,198 @@
+{
+  "date": "2026-10-07",
+  "scope": "Planning document and proposed graph validation only; no source/runtime/build verification",
+  "checks": {
+    "localMarkdownLinks": 38,
+    "proposedRuntimeProjects": 40,
+    "profiles": 8,
+    "workPackages": 30,
+    "packageGraphAcyclic": true,
+    "workDependencyGraphAcyclic": true,
+    "sharedNativeAdapterClosureExcluded": true,
+    "cliAvaloniaExcluded": true,
+    "metalVulkanExcluded": true,
+    "visualWidthsChecked": [
+      360,
+      728
+    ],
+    "visualPlatformSwitchingChecked": [
+      "windows",
+      "linux",
+      "macos"
+    ],
+    "visualConsoleErrors": 0
+  },
+  "workPrerequisites": {
+    "W01": [],
+    "W02": [
+      "W01"
+    ],
+    "W03": [
+      "W01",
+      "W02"
+    ],
+    "W04": [
+      "W01",
+      "W03"
+    ],
+    "W05": [
+      "W02",
+      "W03"
+    ],
+    "W06": [
+      "W02",
+      "W05"
+    ],
+    "W07": [
+      "W06"
+    ],
+    "W08": [
+      "W06"
+    ],
+    "W09": [
+      "W06",
+      "W07",
+      "W08"
+    ],
+    "W10": [
+      "W02",
+      "W07",
+      "W08",
+      "W09",
+      "W13"
+    ],
+    "W11": [
+      "W02",
+      "W05",
+      "W06"
+    ],
+    "W12": [
+      "W06",
+      "W11"
+    ],
+    "W13": [
+      "W06",
+      "W07",
+      "W08",
+      "W11"
+    ],
+    "W14": [
+      "W06",
+      "W10",
+      "W11",
+      "W12",
+      "W13"
+    ],
+    "W15": [
+      "W04",
+      "W10",
+      "W11",
+      "W12",
+      "W13",
+      "W14"
+    ],
+    "W16": [
+      "W11",
+      "W12",
+      "W13",
+      "W14",
+      "W04"
+    ],
+    "W17": [
+      "W11",
+      "W16"
+    ],
+    "W18": [
+      "W11",
+      "W14",
+      "W15",
+      "W16"
+    ],
+    "W19": [
+      "W13",
+      "W14",
+      "W15",
+      "W16"
+    ],
+    "W20": [
+      "W13",
+      "W14",
+      "W16"
+    ],
+    "W21": [
+      "W06",
+      "W07",
+      "W08",
+      "W14"
+    ],
+    "W22": [
+      "W07",
+      "W08",
+      "W14"
+    ],
+    "W23": [
+      "W12",
+      "W13",
+      "W14",
+      "W15",
+      "W16"
+    ],
+    "W24": [
+      "W16",
+      "W17",
+      "W18",
+      "W19",
+      "W20",
+      "W23"
+    ],
+    "W25": [
+      "W09",
+      "W14"
+    ],
+    "W26": [
+      "W12",
+      "W14",
+      "W25"
+    ],
+    "W27": [
+      "W03",
+      "W16",
+      "W26"
+    ],
+    "W28": [
+      "W16",
+      "W26",
+      "W27"
+    ],
+    "W29": [
+      "W01"
+    ],
+    "W30": []
+  },
+  "inputFiles": [
+    {
+      "path": "docs/README.md",
+      "sha256": "8a9ab9c4906de2787ed32527c6bd313e042cb8855e7ae7e45fa0fd3e7e8b8723"
+    },
+    {
+      "path": "docs/platform-packages.md",
+      "sha256": "4b5ae243faf4b8faaddcc535957a2ec95b05043552ca439c2bc4a5374d3441d6"
+    },
+    {
+      "path": "docs/implementation-plan.md",
+      "sha256": "867c59c9f0d883dbd4364b73f05f853e35f130198777c75308b52723cbd31c1f"
+    },
+    {
+      "path": "docs/decisions/0001-platform-packages.md",
+      "sha256": "c224c32aa69a0cb8e2db85ab83d3613434f30b40fbcaec1a00157d0fe7645321"
+    },
+    {
+      "path": "docs/audit/package-plan.json",
+      "sha256": "6269ccdd021a028263e84d3b17ecc5efc9d9c5af959c95a6a63f248297b57043"
+    },
+    {
+      "path": "docs/visuals/platform-package-map.html",
+      "sha256": "9c8401ef72d8442dc195af96bd05c020172a5eba47d6c23030360f3dc99fe367"
+    }
+  ]
+}

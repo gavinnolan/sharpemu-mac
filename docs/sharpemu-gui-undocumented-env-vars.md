@@ -21,7 +21,7 @@ The GUI exposes these variables on its **Options** and **Game options** pages:
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
 `SHARPEMU_RENDERDOC`, `SHARPEMU_SKIP_RT`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
 
-The list contains 269 variables. The source was examined on 2026-09-19, branch `dev`.
+The list contains 270 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
 ## Ray-tracing compute skip (GUI Debug option)
@@ -56,7 +56,7 @@ result filters, mutex warning sampling, and diagnostic selection.
 | Metal | 10 |
 | Audio and video | 6 |
 | Input | 5 |
-| Memory and CPU | 19 |
+| Memory and CPU | 20 |
 | Loader | 11 |
 | Debugger | 1 |
 | Log channels | 72 |
@@ -110,7 +110,6 @@ These variables change the GPU path or the Vulkan presenter.
 | `SHARPEMU_CAPTURE_PIXEL_VGPR_POINTS` | list (`pc:source:destination` triples) | At each given instruction PC, the pixel shader copies the source VGPR register to the destination register. Register numbers must be less than 256. `SHARPEMU_CAPTURE_PIXEL_VGPR_ADDRESS` must match the shader address. | `Gen5SpirvTranslator.cs` |
 | `SHARPEMU_CAPTURE_PIXEL_VGPR_SOURCES` | list (one to four register numbers) | Gives the source VGPR registers that the translator copies at `SHARPEMU_CAPTURE_PIXEL_VGPR_PC`. The copies go to the registers that start at the destination base. | `Gen5SpirvTranslator.cs` |
 | `SHARPEMU_DETILE` | `1` or `0` | Controls the detile step for tiled surfaces. The default detiles only the trusted swizzle modes. `1` also detiles the approximate modes and `0` uploads all surfaces as raw data. | `GnmTiling.cs` |
-| `SHARPEMU_DISABLE_FILL_CLEAR` | `1` | Stops the adaptation that treats a transparent premultiplied fill draw as a target overwrite. The default keeps the adaptation on. | `ShaderPipelineCache.Adaptations.cs` |
 | `SHARPEMU_ENABLE_CHUNKED_DRAWS` | `1` | The Vulkan presenter reads the value into a field. No code uses the field, so the variable has no effect. | `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_FORCE_ATTRIBUTE_FRAGMENT` | number (attribute location) | The Vulkan presenter reads the number into a field. No code uses the field, so the variable has no effect. | `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_FORCE_DEFAULT_RASTER_STATE` | `1` | The Vulkan presenter reads the value into a field. No code uses the field, so the variable has no effect. | `VulkanVideoPresenter.Draws.Recording.cs` |
@@ -134,7 +133,7 @@ These variables change the GPU path or the Vulkan presenter.
 | `SHARPEMU_FORCE_TITLE_SINGLE_MRT` | `1` | The translator declares only the first pixel output for the pixel shader at guest address 0x0000000500781200. It does not declare the other render target outputs. Default is off. | `Gen5SpirvTranslator.cs` |
 | `SHARPEMU_FORCE_TITLE_SOLID_FRAGMENT` | `1` | The Vulkan presenter reads the value into a field. No code uses the field, so the variable has no effect at this time. | `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_FORCE_TITLE_VERTEX_OUTPUTS_ONE` | `1` | Vertex export targets 32 to 35 write the vector (1, 1, 1, 1). This applies only to the vertex shader at guest address 0x0000000500780000. Default is off. | `Gen5SpirvTranslator.cs` |
-| `SHARPEMU_GPU_BACKEND` | `vulkan` or `metal` | Selects the guest GPU backend. The default is Vulkan. The value `metal` works only on macOS, and other hosts show a warning and use Vulkan. | `GuestGpu.cs` |
+| `SHARPEMU_GPU_BACKEND` | `vulkan` or `metal` | Optional assertion of the guest GPU backend. Each host has exactly one backend (Metal on macOS, Vulkan on Windows and Linux); any other value stops startup with an error. | `GuestGpu.cs` |
 | `SHARPEMU_GPU_WAIT_SPIN_US` | number (microseconds) | Sets how long a wait for GPU work polls before it blocks. A short poll saves the wake-up delay when the GPU finishes soon. `0` blocks at once. The default is 150. | `GpuWaitSpin.cs` |
 | `SHARPEMU_GRAPHICS_SUBGROUPS` | `0` or `1` | Set `1` to use native Vulkan subgroup operations in graphics shaders. Set `0` to use the fallback path. When unset, the presenter uses them only if the subgroup size is 32 and the vertex and fragment stages support subgroups. | `VulkanVideoPresenter.cs`, `VulkanVideoPresenter.Device.Setup.cs` |
 | `SHARPEMU_IMAGE_LOOKUP_MEMO` | `0` | `0` turns off the image lookup memo. The default keeps the result of each image lookup that found an image with the same backing, and gives it again for the same request until an image is registered or removed. | `GuestImageCache.Lookup.cs` |
@@ -207,6 +206,7 @@ These variables apply to guest memory and guest code execution.
 
 | Variable | Value | Function | Code that reads it |
 | --- | --- | --- | --- |
+| `SHARPEMU_DIRECT_MEMORY_MB` | number | Sets the direct memory size that `sceKernelGetDirectMemorySize` reports, in MiB. The default is the 12736 MiB title total less the flexible size (12288 MiB at the 448 MiB default). The value is capped so the flexible share of the backing object stays free. A zero or invalid value is ignored. | `KernelMemoryCompatExports.Budget.cs` |
 | `SHARPEMU_DISABLE_GUEST_ALLOCATOR_HOLE_RECOVERY` | `1` | Stops the Windows fault recovery for a guest allocator that reads an empty pool node. The default recovers the fault and continues at the allocator fallback code. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_DISABLE_MITIGATION_RELAUNCH` | `1` | Stops the Windows relaunch of the emulator as a child process with Control Flow Guard and CET shadow stacks off. The default starts the child process. | `Program.cs`, `SelfLoader.cs` |
 | `SHARPEMU_DISABLE_NATIVE_GUEST_WORKERS` | `1` | Stops the use of native worker threads for guest thread execution on Windows. The default uses the native workers. | `DirectExecutionBackend.NativeWorker.cs` |
@@ -265,10 +265,11 @@ Each variable adds one group of messages to the log. The default is off.
 | `SHARPEMU_TRACE_MESH` | `1` | Traces geometry draw selection, mesh setup, resources, transfers, and queue submission. Output and history are bounded. Default is off. See [Mesh draw tracing](mesh-draw-tracing.md). | `MeshDrawTrace.cs` |
 | `SHARPEMU_LOG_AJM` | `1` | Writes `ajm.` trace lines to stderr: context initialization, codec registration, split buffer descriptors and ATRAC9 decode state. Default is off. | `AjmExports.cs`, `Atrac9DecodeState.cs` |
 | `SHARPEMU_LOG_ALLOC_IMPORTS` | `1` | Writes more trace lines for `sceKernelGetGPI` (the returned mask) and for the PRT aperture set call (the raw register values). Default is off. | `KernelRuntimeCompatExports.cs` |
-| `SHARPEMU_LOG_ALL_IMPORTS` | `1` | Writes a debug line for each import stub during setup. The lines show if the import uses a direct bridge, a trampoline, HLE or a runtime symbol. Default is off. | `DirectExecutionBackend.cs` |
+| `SHARPEMU_LOG_ALL_IMPORTS` | `1` | Writes a debug line for each import stub during setup. The lines show if the import uses a direct bridge, a trampoline, HLE or a runtime symbol. Default is off. **It does not trace leaf-dispatched imports** (`scePadReadState`, `memcpy`, `memset`, …): those answer the guest and return before the trace, so they leave no line and an import missing from this log may still be called millions of times. The run warns once about this; use `SHARPEMU_PERF_HLE=1` for counts that include leaves. | `DirectExecutionBackend.cs` |
 | `SHARPEMU_LOG_AMPR_READS` | `1` | Writes only the AMPR file read trace lines and the pak directory tracker lines. `SHARPEMU_LOG_AMPR=1` also turns this on. Default is off. | `AmprExports.cs`, `PakDirectoryTracker.cs` |
 | `SHARPEMU_LOG_AMPR` | `1` | Writes trace lines for AMPR command buffers, APR submissions and waits, and the pak directory tracker. It also turns on the AMPR read trace. Default is off. | `AmprExports.cs`, `KernelAprCompatExports.cs`, `PakDirectoryTracker.cs` |
 | `SHARPEMU_LOG_APP_CONTENT` | `1` | Writes an `app_content` trace line to stderr for each AppContent call. The default is off. | `AppContentExports.cs` |
+| `SHARPEMU_INPUT_FILE` | file path | Test automation. The file holds the keys held right now as whitespace-separated names (`enter`, `esc`, `tab`, `backspace`, `space`, arrows, or one letter or digit). It is polled every 30 ms and works without window focus. `scripts/macos/run-game.sh` uses it for key plans. | `ScriptedKeyInput.cs` |
 | `SHARPEMU_LOG_AUDIO_OUT2` | `1` | Writes an `audio_out2` trace line to stderr for each AudioOut2 operation. The default is off. | `AudioOut2Exports.cs` |
 | `SHARPEMU_LOG_AUDIO_OUT` | `1` | Records `sceAudioOutOutput` calls and the peak amplitude of the submitted samples. It writes the first 8 calls and then every 200th call. The emulator reads the value one time at start. | `AudioOutExports.cs` |
 | `SHARPEMU_LOG_BOOTSTRAP` | `1` | Writes a trace line for each call through the bootstrap bridge import. The line shows the handle, the symbol name and the output address. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
@@ -343,6 +344,7 @@ Each variable records a detailed sequence of events. Traces can be large.
 | Variable | Value | Function | Code that reads it |
 | --- | --- | --- | --- |
 | `SHARPEMU_LOG_IMPORT_FILTER` | text | Writes a trace line for each import that contains this text. The emulator compares the text with the library name, the export name and the NID, and ignores case. When unset, the filter selects no imports. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
+| `SHARPEMU_LOG_IMPORT_FILTER` leaf coverage | — | Unlike `SHARPEMU_LOG_ALL_IMPORTS`, a filtered trace *does* cover leaf-dispatched imports, and its lines carry `rax` as well as the arguments. Use it to answer "is this import ever called, and what does it answer" for anything the all-imports log cannot see, e.g. `SHARPEMU_LOG_IMPORT_FILTER=Dialog`. | `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_IMPORT_FRAMES` | `1` | Adds the guest frame chain to each traced import. It applies only to imports that `SHARPEMU_LOG_ALL_IMPORTS` or `SHARPEMU_LOG_IMPORT_FILTER` selects. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_IMPORT_PERIODIC` | `1` | Starts the periodic import trace. It shows the early import bands and every 100000th import dispatch. The default is off because the stderr output decreases the speed. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_IMPORT_RECENT` | `1` | Writes the recent import history after each traced import. It applies only to imports that `SHARPEMU_LOG_ALL_IMPORTS` or `SHARPEMU_LOG_IMPORT_FILTER` selects. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |

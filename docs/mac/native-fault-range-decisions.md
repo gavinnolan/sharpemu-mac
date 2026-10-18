@@ -1,0 +1,13 @@
+# Native fault range decisions (schema 3)
+
+This default-off diagnostic extends the fixed 160-byte scalar record with Kind8 tracker branch observations. It changes no recovery ordering, acceptance, native ABI, permission operation or ownership policy. Enable the preallocated process-lifetime file using `SHARPEMU_NATIVE_FAULT_TRACE_PATH` before handler installation.
+
+Positive native invocation IDs retain exact-byte-range and shared-boundary-page decisions: owner identity and requested byte extent, aligned logical tracking extent, separately observed owner state/arm epoch, the actual CAS return state, and the branch's handled result. Watcher-removal-succeeded means watcher bookkeeping completed; it is not a native protection receipt. Tracking geometry remains 4KiB and does not assert native page ownership.
+
+Kind8 decisions with invocation <=0 are excluded before clock and owner reads, except the explicit startup PreflightWarmup marker. Ordinary `NotifyManagedWrite` page visits and uncorrelated legacy Core tracker calls therefore remain uncollected; never assign their decisions to a later native fault. Other existing state/protection events are unchanged. This prevents ordinary per-page declines from consuming the bounded native-decision slots. Capacity remains 4,096 and overflow must still be reported; missing entries or finals are unknown.
+
+The AE Poppy run demonstrated the coverage failure: 4,096 published slots and 28,720 drops; 4,065 invocation-zero decisions (4,064 no-range declines and one startup protection-warmup watcher removal) saturated the retained prefix roughly 12.222s after startup, before the 29s SIGBUS. The explicit PreflightWarmup marker instead had invocation1. No target-RIP entry was retained. Filtering is a diagnostic coverage correction, not a Poppy recovery fix.
+
+Kind8 `RawAddress` stores requested ByteCount and `ErrorCode` stores aligned tracking Start; those fields retain raw signal address/x86 error meanings for native-entry events. The decoder emits explicit requested/tracking labels and saturates requested end on overflow. Route is decision pass; Reason is branch enum; Reserved is CAS prior state (-1 without CAS). Later owner observations are not atomic with CAS, not kernel trap chronology, and not a mapping lifetime or write-authorization receipt.
+
+The reader retains schema1/2 compatibility. Before schema3 per-range decisions are explicitly uncollected. Schema3 missing/duplicate native finals remain visible. Tests use phantom metadata only (no provider, page protection, handlers or guest code), preserve positive-ID scalars, reject >capacity uncorrelated calls without drops, retain preflight, and verify warmed allocation behavior. Failed removal encoding does not qualify a failed native syscall.
