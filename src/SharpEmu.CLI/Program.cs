@@ -978,7 +978,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--shader-cache=<on|off>] [--shader-learn=<on|off>] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1221,6 +1221,25 @@ internal static partial class Program
                 continue;
             }
 
+            // The shader cache's static precompile of programs not drawn yet (on by default),
+            // and learn mode, which writes the title's shader seed when the session ends.
+            // Upstream's names and values (PR #1074).
+            if (TrySplitOption(argument, "--shader-cache", out var shaderCacheText) ||
+                TrySplitOption(argument, "--shader-learn", out shaderCacheText))
+            {
+                if (!TryParseOnOff(shaderCacheText, out var shaderCacheEnabled))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+
+                Environment.SetEnvironmentVariable(
+                    argument.StartsWith("--shader-cache", StringComparison.OrdinalIgnoreCase) ? "SHARPEMU_SHADER_CACHE" : "SHARPEMU_SHADER_LEARN",
+                    shaderCacheEnabled ? "on" : "off");
+                continue;
+            }
+
             // The debug-server endpoint is parsed separately (see
             // TryGetDebugServerOptions); accept the flag here so it is not
             // rejected as an unknown option or mistaken for the eboot path.
@@ -1446,6 +1465,22 @@ internal static partial class Program
             Console.Error.WriteLine(
                 $"[LOADER][WARN] GUI video settings could not be loaded; using defaults: {exception.Message}");
             return defaults;
+        }
+    }
+
+    private static bool TryParseOnOff(string text, out bool enabled)
+    {
+        switch (text.Trim().ToLowerInvariant())
+        {
+            case "1" or "on" or "true" or "yes" or "enabled":
+                enabled = true;
+                return true;
+            case "0" or "off" or "false" or "no" or "disabled":
+                enabled = false;
+                return true;
+            default:
+                enabled = false;
+                return false;
         }
     }
 
