@@ -13,6 +13,7 @@ namespace SharpEmu.Libs.Tests.Memory;
 /// invariants back the presenter's stale-upload detection for CPU-rewritten
 /// images (video planes, streamed font atlases).
 /// </summary>
+[Collection("GuestImageWriteTracker")]
 public sealed unsafe class GuestImageWriteTrackerTests
 {
     // The tracker aligns to the guest's 4 KiB pages; the mprotect underneath

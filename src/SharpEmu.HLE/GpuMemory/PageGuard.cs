@@ -44,7 +44,7 @@ public sealed class PageGuard : IDisposable
             return GuestPageProtection.Read | GuestPageProtection.Write;
         }
 
-        public int ChangeWatchCount(int delta, bool isRead, ulong address)
+        public int ChangeWatchCount(int delta, bool isRead, ulong address, int writeWatchLimit)
         {
             if (isRead)
             {
@@ -72,7 +72,7 @@ public sealed class PageGuard : IDisposable
 
             if (delta == 1)
             {
-                if (WriteWatchCount == 0x7f)
+                if (WriteWatchCount >= writeWatchLimit)
                 {
                     OnFatal($"Cannot add a write watch. The count is at its limit at 0x{address:X16}.");
                 }
@@ -136,6 +136,21 @@ public sealed class PageGuard : IDisposable
     }
 
     public GuestPermissionLedger Permissions { get; } = new();
+
+    /// <summary>The most write watches one page holds: 7 bits of its count byte.</summary>
+    public const int MaxWriteWatchesPerPage = 0x7f;
+
+    // A test lowers it to reach the limit in a few watches.
+    internal int WriteWatchLimit { get; init; } = MaxWriteWatchesPerPage;
+
+    private long _liveWriteWatches;
+    private int _peakPageWriteWatches;
+
+    /// <summary>Write watches held now, one per watcher per page.</summary>
+    public long LiveWriteWatches => Interlocked.Read(ref _liveWriteWatches);
+
+    /// <summary>The highest write-watch count an add left on one page since the last call.</summary>
+    public int TakePeakPageWriteWatches() => Interlocked.Exchange(ref _peakPageWriteWatches, 0);
 
     public void Dispose()
     {
@@ -278,13 +293,19 @@ public sealed class PageGuard : IDisposable
         return derived;
     }
 
-    private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess)
+    private GuestPageProtection Derive(ulong address, in PageCounts counts) => Derive(Permissions.Lookup(address), counts.GetAllowedAccess());
+
+    private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess,
+        GuestPageProtection guestAccess, bool ordinaryEnrollment)
     {
         using var profile = GpuMemoryAccessProfile.MeasureAccess(
             GpuMemoryAccessProfile.Operation.HostProtection, GpuMemoryAccessProfile.Operation.FaultHostProtection, size);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"host-protect derived={allowedAccess}");
-        if (!_addressSpace.TryProtect(address, size, allowedAccess))
+        var changed = _addressSpace is IGuestDerivedProtectionAddressSpace explicitSpace
+            ? explicitSpace.TryApplyDerivedProtection(address, size, guestAccess, allowedAccess, ordinaryEnrollment)
+            : _addressSpace.TryProtect(address, size, allowedAccess);
+        if (!changed)
         {
             OnFatal($"Could not change page access at 0x{address:X16}, new=0x{(uint)allowedAccess:X8}.");
         }
@@ -294,24 +315,26 @@ public sealed class PageGuard : IDisposable
     {
         var runStart = begin;
         var runAllowedAccess = GuestPageProtection.None;
-        var guest = GuestPageProtection.None;
+        var runGuestAccess = GuestPageProtection.None;
+        var guestAccess = GuestPageProtection.None;
         var guestValidEnd = 0UL;
         for (var address = begin; address < end; address += PageBytes)
         {
             // Neighbouring pages mostly share a ledger record: look up again only where its answer stops holding.
             if (address >= guestValidEnd)
-                guest = Permissions.Lookup(address, out guestValidEnd);
-            var allowedAccess = Derive(guest, block.Pages[(int)(address % BlockBytes / PageBytes)].GetAllowedAccess());
-            if (address != begin && allowedAccess != runAllowedAccess)
+                guestAccess = Permissions.Lookup(address, out guestValidEnd);
+            var allowedAccess = Derive(guestAccess, block.Pages[(int)(address % BlockBytes / PageBytes)].GetAllowedAccess());
+            if (address != begin && (allowedAccess != runAllowedAccess || guestAccess != runGuestAccess))
             {
-                ApplyAccess(runStart, address - runStart, runAllowedAccess);
+                ApplyAccess(runStart, address - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true);
                 runStart = address;
             }
 
             runAllowedAccess = allowedAccess;
+            runGuestAccess = guestAccess;
         }
 
-        ApplyAccess(runStart, end - runStart, runAllowedAccess);
+        ApplyAccess(runStart, end - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true);
     }
 
     private void UpdateBlock(PageBlock block, ulong blockBase, int first, int last, bool track, bool isRead, bool masked, in PageMask mask)
@@ -324,16 +347,20 @@ public sealed class PageGuard : IDisposable
         // Neighbouring pages mostly share a ledger record: look up again only where its answer stops holding.
         // A ledger change waits for this block lock and then derives its pages again (Reapply).
         var guest = Permissions.Lookup(blockBase + (ulong)first * PageBytes, out var guestValidEnd);
+        var runGuestAccess = guest;
         var allowedAccess = Derive(guest, pages[first].GetAllowedAccess());
         var rangeBegin = 0;
         var rangeBytes = 0UL;
         var potentialRangeBytes = 0UL;
+        var writeWatchDelta = 0L;
+        var peakWriteWatches = 0;
 
         void ReleasePending()
         {
             if (rangeBytes != 0)
             {
-                ApplyAccess(blockBase + (ulong)rangeBegin * PageBytes, rangeBytes, allowedAccess);
+                ApplyAccess(blockBase + (ulong)rangeBegin * PageBytes, rangeBytes, allowedAccess, runGuestAccess,
+                    ordinaryEnrollment: false);
                 rangeBytes = 0;
                 potentialRangeBytes = 0;
             }
@@ -347,7 +374,13 @@ public sealed class PageGuard : IDisposable
             if (address >= guestValidEnd)
                 guest = Permissions.Lookup(address, out guestValidEnd);
             var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
-            var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address);
+            var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address, WriteWatchLimit);
+            if (update && !isRead)
+            {
+                writeWatchDelta += track ? 1 : -1;
+                if (track) peakWriteWatches = Math.Max(peakWriteWatches, newCount);
+            }
+
             var newAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
             if (update && block.WriteRestorations is { } restorations)
             {
@@ -366,10 +399,11 @@ public sealed class PageGuard : IDisposable
                 GuestGpuMemoryHook.Trace(address, PageBytes,
                     $"watch track={track} block_reads={isRead} guest={guest} read_watch={pages[pageIndex].ReadWatchCount} write_watch={pages[pageIndex].WriteWatchCount} old={oldAllowedAccess} new={newAllowedAccess}");
 
-            if (newAllowedAccess != allowedAccess)
+            if (newAllowedAccess != allowedAccess || guest != runGuestAccess)
             {
                 ReleasePending();
                 allowedAccess = newAllowedAccess;
+                runGuestAccess = guest;
             }
             else if (rangeBytes != 0)
             {
@@ -395,6 +429,20 @@ public sealed class PageGuard : IDisposable
         }
 
         ReleasePending();
+        if (writeWatchDelta != 0)
+        {
+            Interlocked.Add(ref _liveWriteWatches, writeWatchDelta);
+        }
+
+        for (var peak = Volatile.Read(ref _peakPageWriteWatches);
+             peakWriteWatches > peak;
+             peak = Volatile.Read(ref _peakPageWriteWatches))
+        {
+            if (Interlocked.CompareExchange(ref _peakPageWriteWatches, peakWriteWatches, peak) == peak)
+            {
+                break;
+            }
+        }
     }
 
     private void UpdatePages(ulong address, ulong size, bool track, bool isRead)

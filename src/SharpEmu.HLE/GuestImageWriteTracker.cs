@@ -25,6 +25,20 @@ public static unsafe partial class GuestImageWriteTracker
         long Generation,
         bool Active);
 
+    /// <summary>
+    /// Safe-context content observation of the protected and managed-watch
+    /// owners at one address. Owner identities prevent counter reset after
+    /// untracking from making old copied bytes appear current. A token is not
+    /// a memory mapping lease, native protection receipt or signal retry claim.
+    /// </summary>
+    public readonly record struct ContentToken(
+        long ProtectedIdentity,
+        long ProtectedGeneration,
+        long WatchIdentity,
+        long WatchGeneration,
+        ulong ProtectedByteCount,
+        ulong WatchByteCount);
+
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;
     private const int ProtExec = 0x4;
@@ -50,6 +64,8 @@ public static unsafe partial class GuestImageWriteTracker
         public ulong End;
         public int Dirty;
         public int Armed;
+        public readonly long DiagnosticIdentity = Interlocked.Increment(ref _nativeDiagnosticOwnerIdentity);
+        public long DiagnosticArmEpoch;
         /// <summary>
         /// When false the range is watch-only: managed writes still dirty it via
         /// <see cref="NotifyManagedWrite"/>, but pages are never write-protected
@@ -59,6 +75,7 @@ public static unsafe partial class GuestImageWriteTracker
         public bool Executable;
         public PageState[] Pages = [];
         public int FirstCpuWriteSeen;
+        public long FirstCpuWriteInvocation;
         public int PendingFirstCpuWrite;
         public long WriteGeneration;
         public bool TraceLifetime;
@@ -290,6 +307,7 @@ public static unsafe partial class GuestImageWriteTracker
                 var writeGeneration = Volatile.Read(ref range.WriteGeneration);
                 var keepProtect = range.Protect || protect;
                 DisarmLocked(range, "replace-range");
+                RecordNativeRangeState(range, retired: true);
                 _rangesByAddress.Remove(address);
                 range = new TrackedRange
                 {
@@ -360,6 +378,7 @@ public static unsafe partial class GuestImageWriteTracker
             if (_rangesByAddress.TryGetValue(address, out var range))
             {
                 DisarmLocked(range, "untrack");
+                RecordNativeRangeState(range, retired: true);
                 _rangesByAddress.Remove(address);
                 RebuildSnapshotLocked();
             }
@@ -382,6 +401,7 @@ public static unsafe partial class GuestImageWriteTracker
             if (_rangesByAddress.TryGetValue(address, out var range))
             {
                 DisarmLocked(range, "untrack");
+                RecordNativeRangeState(range, retired: true);
                 _rangesByAddress.Remove(address);
                 RebuildSnapshotLocked();
             }
@@ -428,6 +448,177 @@ public static unsafe partial class GuestImageWriteTracker
         }
     }
 
+    // Ordinary-thread deterministic phase seam only, never invoked by a signal.
+    private static Action? _afterProtectedDirtyConsumeForControl = null;
+
+    /// <summary>Consume only a dirty flag already covered by the exact original
+    /// protected observation. Managed-watch owners deliberately decline: their
+    /// notification has no Armed CAS before generation publication. This is an
+    /// ordinary generation acknowledgment, not write completion authorization.</summary>
+    public static bool TryConsumeDirtyAtProtectedToken(ulong address, ulong byteCount, ContentToken expected)
+    {
+        if (!_enabled || address == 0 || byteCount == 0 || expected.WatchIdentity != 0 ||
+            expected.WatchGeneration != -1 || expected.WatchByteCount != 0 || expected.ProtectedIdentity <= 0)
+            return false;
+        lock (_gate)
+        {
+            if (!_rangesByAddress.TryGetValue(address, out var range) || !range.Protect ||
+                range.DiagnosticIdentity != expected.ProtectedIdentity || range.ByteCount != expected.ProtectedByteCount ||
+                range.ByteCount < byteCount || _watchRangesByAddress.ContainsKey(address) ||
+                Volatile.Read(ref range.Armed) != RangeArmed ||
+                Volatile.Read(ref range.WriteGeneration) != expected.ProtectedGeneration) return false;
+            Interlocked.Exchange(ref range.Dirty, 0);
+            try { _afterProtectedDirtyConsumeForControl?.Invoke(); }
+            catch { Interlocked.Exchange(ref range.Dirty, 1); throw; }
+            // A fault claims Armed->Invalidating before publishing Dirty/Gen.
+            // This recheck prevents acknowledgment from losing that publication.
+            if (Volatile.Read(ref range.Armed) != RangeArmed ||
+                Volatile.Read(ref range.WriteGeneration) != expected.ProtectedGeneration)
+            { Interlocked.Exchange(ref range.Dirty, 1); return false; }
+            return true;
+        }
+    }
+
+    /// <summary>Conservative rollback of an ordinary acknowledgment if its exact
+    /// presenter owner subsequently changes. Never changes counters or rearms.</summary>
+    public static void RestoreDirtyAtProtectedOwner(ulong address, ContentToken expected)
+    {
+        lock (_gate)
+            if (_rangesByAddress.TryGetValue(address, out var range) && range.Protect &&
+                range.DiagnosticIdentity == expected.ProtectedIdentity && range.ByteCount == expected.ProtectedByteCount)
+                Interlocked.Exchange(ref range.Dirty, 1);
+    }
+
+    private static readonly bool _dirtyCausalityEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_DIRTY") == "1";
+    private static int _dirtyCausalityCount;
+    private static int _managedDirtyAttemptCount;
+    private static int _managedDirtyCompletionCount;
+
+    // Detached diagnostic scalars, never a native-content or ownership receipt.
+    public readonly record struct DirtyImageDiagnosticState(bool Present, bool GpuWritten,
+        bool Initialized, bool NativeHandlePresent, int PendingGuestWork, bool BatchOpen,
+        uint NativeType, uint NativeFormat, uint Depth, uint Layers, uint Width, uint Height,
+        uint Pitch, ulong PhysicalBytes, uint BytesPerPixel);
+
+    private static readonly bool _selectedCopyWriterDiagnostics =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_SELECTED_COPY_DIAGNOSTICS") == "1";
+    private static int _selectedCopyWriterRows;
+
+    // Diagnostic-only ordinary producer observation, never a dirty consumer or
+    // native/signal writer completion receipt. Counter is bounded under Gate.
+    public static void TraceSelectedCopyWriterState(ulong address, int row, int attempt, string reason)
+    {
+        if (!_selectedCopyWriterDiagnostics) return;
+        lock (_gate)
+        {
+            if (_selectedCopyWriterRows >= 64) return;
+            _selectedCopyWriterRows++;
+            try
+            {
+                _rangesByAddress.TryGetValue(address, out var range);
+                _watchRangesByAddress.TryGetValue(address, out var watch);
+                var published = range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2;
+                Console.Error.WriteLine($"[WT][SELECTED-COPY] row={row} address=0x{address:X} attempt={attempt} reason={reason}" +
+                    $" protected_dirty={range is not null && Volatile.Read(ref range.Dirty) != 0} watch_dirty={watch is not null && Volatile.Read(ref watch.Dirty) != 0}" +
+                    $" protected_id={range?.DiagnosticIdentity ?? 0} protected_generation={(range is null ? -1 : Volatile.Read(ref range.WriteGeneration))}" +
+                    $" protected_bytes={range?.ByteCount ?? 0} arm_epoch={range?.DiagnosticArmEpoch ?? 0}" +
+                    $" protected_source='{range?.Source}' protected_source_sequence={range?.SourceSequence ?? 0}" +
+                    $" watch_id={watch?.DiagnosticIdentity ?? 0} watch_generation={(watch is null ? -1 : Volatile.Read(ref watch.WriteGeneration))}" +
+                    $" watch_bytes={watch?.ByteCount ?? 0} watch_source='{watch?.Source}' watch_source_sequence={watch?.SourceSequence ?? 0}" +
+                    $" first_record_published={published} first_fault=0x{(published ? range!.FirstCpuWriteAddress : 0):X}" +
+                    $" first_invocation={(published ? range!.FirstCpuWriteInvocation : -1)} correlation0_is_unknown_writer_route=true");
+            }
+            catch { } // No mutation, consumption or retry policy follows from these sampled fields.
+        }
+    }
+
+    // Ordinary diagnostic only. Called before ConsumeDirty, never from a fault
+    // callback; a first trap/pre-notification is not completed write coverage.
+    public static void TraceDirtyBeforeConsume(ulong address, long session,
+        ContentToken? originalToken = null, long originalMappingEpoch = -1,
+        long currentMappingEpoch = -1, long originalSession = -1,
+        bool originalObserved = false, ulong originalFootprintBytes = 0, int imageVersion = -1,
+        DirtyImageDiagnosticState image = default)
+    {
+        if (!_dirtyCausalityEnabled) return;
+        lock (_gate)
+        {
+            _rangesByAddress.TryGetValue(address, out var range);
+            _watchRangesByAddress.TryGetValue(address, out var watch);
+            var protectedDirty = range is not null && Volatile.Read(ref range.Dirty) != 0;
+            var watchDirty = watch is not null && Volatile.Read(ref watch.Dirty) != 0;
+            if ((!protectedDirty && !watchDirty) || _dirtyCausalityCount >= 64) return;
+            _dirtyCausalityCount++;
+            try
+            {
+                var current = new ContentToken(range?.DiagnosticIdentity ?? 0,
+                    range is null ? -1 : Volatile.Read(ref range.WriteGeneration),
+                    watch?.DiagnosticIdentity ?? 0,
+                    watch is null ? -1 : Volatile.Read(ref watch.WriteGeneration),
+                    range?.ByteCount ?? 0, watch?.ByteCount ?? 0);
+                Console.Error.WriteLine($"[WT][DIRTY] event=before-consume address=0x{address:X} session={session}" +
+                    $" original_seed_present={originalToken.HasValue} original_observed={originalObserved}" +
+                    $" original_session={originalSession} image_version={imageVersion}" +
+                    $" image_present={image.Present} gpu_written={image.GpuWritten}" +
+                    $" initialized={image.Initialized} native_handle_present={image.NativeHandlePresent}" +
+                    $" pending_guest_work={image.PendingGuestWork} batch_open={image.BatchOpen}" +
+                    $" native_type={image.NativeType} native_format={image.NativeFormat}" +
+                    $" depth={image.Depth} layers={image.Layers} image_size={image.Width}x{image.Height}" +
+                    $" layout_pitch={image.Pitch} layout_physical_bytes={image.PhysicalBytes} layout_bpp={image.BytesPerPixel}" +
+                    $" original_mapping_epoch={originalMappingEpoch} current_mapping_epoch={currentMappingEpoch}" +
+                    $" original_footprint_bytes={originalFootprintBytes}" +
+                    $" original_protected_identity={originalToken?.ProtectedIdentity ?? 0}" +
+                    $" original_protected_generation={originalToken?.ProtectedGeneration ?? -1}" +
+                    $" original_protected_bytes={originalToken?.ProtectedByteCount ?? 0}" +
+                    $" original_watch_identity={originalToken?.WatchIdentity ?? 0}" +
+                    $" original_watch_generation={originalToken?.WatchGeneration ?? -1}" +
+                    $" original_watch_bytes={originalToken?.WatchByteCount ?? 0}" +
+                    $" token_equal_to_original={originalToken.HasValue && current == originalToken.Value}" +
+                    $" protected_dirty={protectedDirty} watch_dirty={watchDirty}" +
+                    $" protected_bytes={range?.ByteCount ?? 0} protected_generation={current.ProtectedGeneration}" +
+                    $" protected_identity={range?.DiagnosticIdentity ?? 0} arm_epoch={range?.DiagnosticArmEpoch ?? 0}" +
+                    $" watch_identity={watch?.DiagnosticIdentity ?? 0}" +
+                    $" watch_bytes={watch?.ByteCount ?? 0} watch_generation={current.WatchGeneration}" +
+                    $" protected_start=0x{range?.Start ?? 0:X} protected_end=0x{range?.End ?? 0:X}" +
+                    $" protected_source='{range?.Source}' protected_source_sequence={range?.SourceSequence ?? 0}" +
+                    $" first_record_published={range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2}" +
+                    $" first_fault=0x{(range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2 ? range.FirstCpuWriteAddress : 0):X}" +
+                    $" first_invocation={(range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2 ? range.FirstCpuWriteInvocation : -1)}");
+            }
+            catch { } // Diagnostics must not consume/change the dirty event.
+        }
+    }
+
+    public static void TraceManagedDirtyCompletion(ulong address, ulong byteCount) =>
+        TraceManagedDirtyWrite(address, SaturatingEnd(address, byteCount), completed: true);
+
+    private static void TraceManagedDirtyWrite(ulong address, ulong end, bool completed, string source = "managed")
+    {
+        if (!_dirtyCausalityEnabled) return;
+        lock (_gate)
+        {
+            ref var count = ref (completed ? ref _managedDirtyCompletionCount : ref _managedDirtyAttemptCount);
+            if (count >= 64 || end <= address) return;
+            try
+            {
+                // First match only, not an inventory of all affected owners.
+                TrackedRange? range = null;
+                TrackedRange? watch = null;
+                foreach (var candidate in _rangesByAddress.Values)
+                    if (candidate.Start < end && address < candidate.End) { range = candidate; break; }
+                foreach (var candidate in _watchRangesByAddress.Values)
+                    if (candidate.Address < end && address < candidate.End) { watch = candidate; break; }
+                if (range is null && watch is null) return;
+                count++;
+                Console.Error.WriteLine($"[WT][DIRTY] event={(source == "managed" ? completed ? "managed-completed" : "managed-attempt-not-completed" : "canonical-gpu-completed")} source={source} address=0x{address:X} bytes={end - address}" +
+                    $" first_matched_protected=0x{range?.Address ?? 0:X} first_matched_watch=0x{watch?.Address ?? 0:X}" +
+                    $"{Environment.NewLine}{Environment.StackTrace}");
+            }
+            catch { }
+        }
+    }
+
     /// <summary>
     /// Non-consuming variant of <see cref="ConsumeDirty"/>: reports whether
     /// the range has been written since it was last re-armed, leaving the
@@ -469,6 +660,98 @@ public static unsafe partial class GuestImageWriteTracker
     }
 
     /// <summary>
+    /// Observes both tracker owners in ordinary managed execution. Capture
+    /// after establishing observation and before copying bytes, then compare
+    /// again afterwards and before using the copy. An absent component is
+    /// identity zero/generation minus one/byte count zero; false means neither
+    /// owner exists. Callers must establish coverage of the copied footprint;
+    /// a present owner of a smaller view does not cover a larger allocation.
+    /// Registry identities are coherent under the tracker gate. Concurrent
+    /// writes can still advance the individually observed counters, so this
+    /// does not reserve content or exclude later writes or mapping changes.
+    /// </summary>
+    public static bool TryGetContentToken(ulong address, out ContentToken token)
+    {
+        lock (_gate)
+        {
+            _rangesByAddress.TryGetValue(address, out var protectedRange);
+            _watchRangesByAddress.TryGetValue(address, out var watchRange);
+            token = new ContentToken(
+                protectedRange?.DiagnosticIdentity ?? 0,
+                protectedRange is null ? -1 : Volatile.Read(ref protectedRange.WriteGeneration),
+                watchRange?.DiagnosticIdentity ?? 0,
+                watchRange is null ? -1 : Volatile.Read(ref watchRange.WriteGeneration),
+                protectedRange?.ByteCount ?? 0,
+                watchRange?.ByteCount ?? 0);
+            return protectedRange is not null || watchRange is not null;
+        }
+    }
+
+    /// <summary>
+    /// Observes owner identities/counters only when tracker metadata describes
+    /// complete armed protection or an explicitly managed-writer footprint.
+    /// Ordinary watch-only registrations and incomplete or transitional native
+    /// owners do not qualify. Call only from ordinary managed execution.
+    /// This is not a kernel permission receipt, copy-serialization protocol or
+    /// backing lease: notification precedes managed copies, and fault handling
+    /// precedes the resumed store. Compare observations around a separately
+    /// qualified copy; neither a true result nor equality excludes later writes.
+    /// </summary>
+    public static bool TryGetObservedContentToken(ulong address, ulong byteCount, out ContentToken token)
+    {
+        token = new ContentToken(0, -1, 0, -1, 0, 0);
+        if (!_enabled || address == 0 || byteCount == 0 || address > ulong.MaxValue - byteCount)
+            return false;
+
+        lock (_gate)
+        {
+            if (!_enabled) return false;
+            _rangesByAddress.TryGetValue(address, out var protectedRange);
+            _watchRangesByAddress.TryGetValue(address, out var watchRange);
+            var managedCoverage = watchRange is { ManagedWriter: true } && watchRange.ByteCount >= byteCount;
+            var protectedCoverage = protectedRange is { Protect: true } && protectedRange.ByteCount >= byteCount &&
+                Volatile.Read(ref protectedRange.Armed) == RangeArmed;
+            if (!managedCoverage && !protectedCoverage) return false;
+
+            var observed = new ContentToken(
+                protectedRange?.DiagnosticIdentity ?? 0,
+                protectedRange is null ? -1 : Volatile.Read(ref protectedRange.WriteGeneration),
+                watchRange?.DiagnosticIdentity ?? 0,
+                watchRange is null ? -1 : Volatile.Read(ref watchRange.WriteGeneration),
+                protectedRange?.ByteCount ?? 0,
+                watchRange?.ByteCount ?? 0);
+            // A signal handler can start invalidating without taking this gate.
+            // It cannot rearm while the safe-side registry gate is held.
+            if (!managedCoverage && Volatile.Read(ref protectedRange!.Armed) != RangeArmed)
+                return false;
+            token = observed;
+            return true;
+        }
+    }
+
+    /// <summary>Native-protected complete observation, excluding managed-only
+    /// coverage. Still a conservative veto, not a kernel receipt or write-completion lease.</summary>
+    public static bool TryGetProtectedObservedContentToken(ulong address, ulong byteCount, out ContentToken token)
+    {
+        token = default;
+        if (!_enabled || address == 0 || byteCount == 0 || address > ulong.MaxValue - byteCount) return false;
+        lock (_gate)
+        {
+            if (!_enabled || !_rangesByAddress.TryGetValue(address, out var range) || !range.Protect ||
+                range.ByteCount < byteCount || Volatile.Read(ref range.Armed) != RangeArmed) return false;
+            _watchRangesByAddress.TryGetValue(address, out var watch);
+            // Both owner identities/extents come from THIS same registry lock;
+            // never combine a formerly sampled watch with a later protected owner.
+            var found = new ContentToken(range.DiagnosticIdentity, Volatile.Read(ref range.WriteGeneration),
+                watch?.DiagnosticIdentity ?? 0, watch is null ? -1 : Volatile.Read(ref watch.WriteGeneration),
+                range.ByteCount, watch?.ByteCount ?? 0);
+            if (Volatile.Read(ref range.Armed) != RangeArmed) return false;
+            token = found;
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Returns the monotonic first-write generation for a tracked allocation.
     /// Unlike the consuming dirty flag, this remains changed after another
     /// cache owner consumes and re-arms the range.
@@ -503,6 +786,25 @@ public static unsafe partial class GuestImageWriteTracker
     /// a resumable guest fault. Visit every page in the write span up front so
     /// all overlapping texture owners are dirtied and made writable.
     /// </summary>
+    /// <summary>Ordinary notification after an exact completed GPU command and
+    /// Applied original mapped publication. This only invalidates intersecting
+    /// virtual observers: no mprotect, rearm, token refresh or content certificate.
+    /// Unknown/partial publication must never call it.</summary>
+    public static void NotifyCompletedMappedGpuWrite(ulong address, ulong byteCount)
+    {
+        if (address == 0 || byteCount == 0 || byteCount > ulong.MaxValue - address) return;
+        var end = address + byteCount;
+        MarkManagedWatchRanges(address, end);
+        lock (_gate)
+            foreach (var range in _rangesByAddress.Values)
+                if ((UInt128)range.Address < end && (UInt128)address < (UInt128)range.Address + range.ByteCount)
+                {
+                    Interlocked.Exchange(ref range.Dirty, 1);
+                    Interlocked.Increment(ref range.WriteGeneration);
+                }
+        TraceManagedDirtyWrite(address, end, completed: true, source: "canonical-gpu-publication");
+    }
+
     public static void NotifyManagedWrite(ulong address, ulong byteCount)
     {
         if (address == 0 || byteCount == 0)
@@ -519,6 +821,7 @@ public static unsafe partial class GuestImageWriteTracker
         // bounds live inside the snapshot so they are always consistent with
         // the ranges the per-page visit below would consult.
         MarkManagedWatchRanges(address, end);
+        TraceManagedDirtyWrite(address, end, completed: false);
 
         if (!_enabled)
         {
@@ -574,10 +877,16 @@ public static unsafe partial class GuestImageWriteTracker
     /// range, restore write access, mark the range dirty, and return true so
     /// the faulting write can be retried. Must not allocate or lock.
     /// </summary>
-    public static bool TryHandleWriteFault(ulong faultAddress)
+    public static bool TryHandleWriteFault(ulong faultAddress) =>
+        TryHandleWriteFaultWithNativeDiagnostics(faultAddress, 0);
+
+    /// <summary>Same recovery semantics with an explicit diagnostic invocation scalar.</summary>
+    public static bool TryHandleWriteFaultWithNativeDiagnostics(ulong faultAddress, long invocation)
     {
         if (!_enabled || faultAddress == 0)
         {
+            RecordNativeRangeDecision(null, faultAddress, invocation, NativeRangeDecisionPass.EntryGuard,
+                !_enabled ? NativeRangeDecisionReason.Disabled : NativeRangeDecisionReason.ZeroAddress, -1, false);
             return false;
         }
 
@@ -607,17 +916,25 @@ public static unsafe partial class GuestImageWriteTracker
                 RangeArmed);
             if (previousState is RangeInvalidating or RangeArming)
             {
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                    previousState == RangeInvalidating ? NativeRangeDecisionReason.BusyInvalidating : NativeRangeDecisionReason.BusyArming,
+                    previousState, true);
                 handled = true;
                 continue;
             }
             if (previousState != RangeArmed)
             {
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                    NativeRangeDecisionReason.NonArmedSkipped, previousState, false);
                 continue;
             }
 
-            if (!RemovePageWatchers(range, out var changedBytes))
+            if (!RemovePageWatchers(range, out var changedBytes, invocation))
             {
                 Volatile.Write(ref range.Armed, RangeDisarmed);
+                RecordNativeRangeState(range, invocation: invocation);
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                    NativeRangeDecisionReason.WatcherRemovalFailed, previousState, false);
                 return false;
             }
 
@@ -627,8 +944,11 @@ public static unsafe partial class GuestImageWriteTracker
                 Interlocked.Increment(ref range.ProfileFaultCount);
                 Interlocked.Add(ref range.ProfileFaultBytes, changedBytes);
             }
-            MarkFaultedRange(range, faultAddress);
+            MarkFaultedRange(range, faultAddress, invocation);
             Volatile.Write(ref range.Armed, RangeDisarmed);
+            RecordNativeRangeState(range, invocation: invocation);
+            RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                NativeRangeDecisionReason.WatcherRemovalSucceeded, previousState, true);
             handled = true;
         }
 
@@ -654,17 +974,25 @@ public static unsafe partial class GuestImageWriteTracker
                     RangeArmed);
                 if (previousState is RangeInvalidating or RangeArming)
                 {
+                    RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                        previousState == RangeInvalidating ? NativeRangeDecisionReason.BusyInvalidating : NativeRangeDecisionReason.BusyArming,
+                        previousState, true);
                     handled = true;
                     continue;
                 }
                 if (previousState != RangeArmed)
                 {
+                    RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                        NativeRangeDecisionReason.NonArmedSkipped, previousState, false);
                     continue;
                 }
 
-                if (!RemovePageWatchers(range, out var changedBytes))
+                if (!RemovePageWatchers(range, out var changedBytes, invocation))
                 {
                     Volatile.Write(ref range.Armed, RangeDisarmed);
+                    RecordNativeRangeState(range, invocation: invocation);
+                    RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                        NativeRangeDecisionReason.WatcherRemovalFailed, previousState, false);
                     return false;
                 }
 
@@ -674,14 +1002,19 @@ public static unsafe partial class GuestImageWriteTracker
                     Interlocked.Increment(ref range.ProfileFaultCount);
                     Interlocked.Add(ref range.ProfileFaultBytes, changedBytes);
                 }
-                MarkFaultedRange(range, faultAddress);
+                MarkFaultedRange(range, faultAddress, invocation);
                 Volatile.Write(ref range.Armed, RangeDisarmed);
+                RecordNativeRangeState(range, invocation: invocation);
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                    NativeRangeDecisionReason.WatcherRemovalSucceeded, previousState, true);
                 handled = true;
             }
         }
 
         if (!handled)
         {
+            RecordNativeRangeDecision(null, faultAddress, invocation, NativeRangeDecisionPass.Completion,
+                NativeRangeDecisionReason.NoHandledRange, -1, false);
             return false;
         }
 
@@ -705,6 +1038,9 @@ public static unsafe partial class GuestImageWriteTracker
             return;
         }
 
+        Interlocked.Increment(ref range.DiagnosticArmEpoch);
+        RecordNativeRangeState(range);
+
         // A new publication/rearm starts a new first-write lifetime.
         Volatile.Write(ref range.FirstCpuWriteSeen, 0);
         var failed = !AddPageWatchers(range, out var protectedBytes);
@@ -724,6 +1060,7 @@ public static unsafe partial class GuestImageWriteTracker
             }
         }
 
+        RecordNativeRangeState(range);
         if (range.TraceLifetime)
         {
             TraceLifetime(
@@ -748,6 +1085,7 @@ public static unsafe partial class GuestImageWriteTracker
             }
         }
 
+        RecordNativeRangeState(range);
         if (range.TraceLifetime)
         {
             TraceLifetime(
@@ -836,7 +1174,7 @@ public static unsafe partial class GuestImageWriteTracker
                         ref runEnd,
                         runExecutable,
                         writable: false,
-                        ref protectedBytes))
+                        ref protectedBytes, range))
                 {
                     _ = RemovePageWatchers(range, processedPages, out _);
                     return false;
@@ -855,7 +1193,7 @@ public static unsafe partial class GuestImageWriteTracker
                     ref runEnd,
                     runExecutable,
                     writable: false,
-                    ref protectedBytes))
+                    ref protectedBytes, range))
             {
                 _ = RemovePageWatchers(range, processedPages, out _);
                 return false;
@@ -871,7 +1209,7 @@ public static unsafe partial class GuestImageWriteTracker
                 ref runEnd,
                 runExecutable,
                 writable: false,
-                ref protectedBytes))
+                ref protectedBytes, range))
         {
             return true;
         }
@@ -880,13 +1218,14 @@ public static unsafe partial class GuestImageWriteTracker
         return false;
     }
 
-    private static bool RemovePageWatchers(TrackedRange range, out long writableBytes) =>
-        RemovePageWatchers(range, range.Pages.Length, out writableBytes);
+    private static bool RemovePageWatchers(TrackedRange range, out long writableBytes, long invocation = 0) =>
+        RemovePageWatchers(range, range.Pages.Length, out writableBytes, invocation);
 
     private static bool RemovePageWatchers(
         TrackedRange range,
         int pageCount,
-        out long writableBytes)
+        out long writableBytes,
+        long invocation = 0)
     {
         writableBytes = 0;
         var runStart = 0UL;
@@ -910,7 +1249,7 @@ public static unsafe partial class GuestImageWriteTracker
                         ref runEnd,
                         runExecutable,
                         writable: true,
-                        ref writableBytes))
+                        ref writableBytes, range, invocation))
                 {
                     return false;
                 }
@@ -928,7 +1267,7 @@ public static unsafe partial class GuestImageWriteTracker
                     ref runEnd,
                     runExecutable,
                     writable: true,
-                    ref writableBytes))
+                    ref writableBytes, range, invocation))
             {
                 return false;
             }
@@ -943,7 +1282,7 @@ public static unsafe partial class GuestImageWriteTracker
             ref runEnd,
             runExecutable,
             writable: true,
-            ref writableBytes);
+            ref writableBytes, range, invocation);
     }
 
     private static bool FlushProtectionRun(
@@ -951,7 +1290,9 @@ public static unsafe partial class GuestImageWriteTracker
         ref ulong runEnd,
         bool executable,
         bool writable,
-        ref long changedBytes)
+        ref long changedBytes,
+        TrackedRange? initiatingRange = null,
+        long invocation = 0)
     {
         if (runEnd <= runStart)
         {
@@ -959,7 +1300,7 @@ public static unsafe partial class GuestImageWriteTracker
         }
 
         var byteCount = runEnd - runStart;
-        if (!TrySetProtection(runStart, byteCount, writable, executable))
+        if (!TrySetProtection(runStart, byteCount, writable, executable, initiatingRange, invocation))
         {
             return false;
         }
@@ -986,11 +1327,11 @@ public static unsafe partial class GuestImageWriteTracker
         return false;
     }
 
-    private static void MarkFaultedRange(TrackedRange range, ulong faultAddress)
+    private static void MarkFaultedRange(TrackedRange range, ulong faultAddress, long invocation)
     {
         Interlocked.Exchange(ref range.Dirty, 1);
         Interlocked.Increment(ref range.WriteGeneration);
-        if (!range.TraceLifetime ||
+        if ((!range.TraceLifetime && !_dirtyCausalityEnabled) ||
             Interlocked.CompareExchange(ref range.FirstCpuWriteSeen, 1, 0) != 0)
         {
             return;
@@ -998,11 +1339,12 @@ public static unsafe partial class GuestImageWriteTracker
 
         // Signal context: capture preallocated scalar fields only. Formatting
         // and I/O are deferred to a locked safe path.
-        range.FirstCpuWriteTraceSequence = Interlocked.Increment(ref _lifetimeTraceSequence);
-        range.FirstCpuWriteTimestampNanoseconds = GetMonotonicNanoseconds();
+        range.FirstCpuWriteTraceSequence = range.TraceLifetime ? Interlocked.Increment(ref _lifetimeTraceSequence) : 0;
+        range.FirstCpuWriteTimestampNanoseconds = range.TraceLifetime ? GetMonotonicNanoseconds() : 0;
         range.FirstCpuWriteAddress = faultAddress;
+        range.FirstCpuWriteInvocation = invocation;
         range.FirstCpuWritePage = faultAddress & ~(TrackingPageSize - 1);
-        Volatile.Write(ref range.PendingFirstCpuWrite, 1);
+        Volatile.Write(ref range.PendingFirstCpuWrite, range.TraceLifetime ? 1 : 0);
         Volatile.Write(ref range.FirstCpuWriteSeen, 2);
     }
 
@@ -1156,10 +1498,13 @@ public static unsafe partial class GuestImageWriteTracker
                 continue;
             }
 
-            if (Interlocked.Exchange(ref range.Dirty, 1) == 0)
-            {
-                Interlocked.Increment(ref range.WriteGeneration);
-            }
+            // Dirty is a coalesced notification; a copied-byte observation
+            // must be revoked by EVERY overlapping managed write, including
+            // later writes while another owner has not consumed Dirty yet.
+            // This counter observes notifications, not write completion or
+            // coverage of raw/native writers through untracked aliases.
+            Interlocked.Exchange(ref range.Dirty, 1);
+            Interlocked.Increment(ref range.WriteGeneration);
         }
     }
 
@@ -1312,7 +1657,9 @@ public static unsafe partial class GuestImageWriteTracker
         ulong start,
         ulong length,
         bool writable,
-        bool executable)
+        bool executable,
+        TrackedRange? initiatingRange = null,
+        long invocation = 0)
     {
         if (length == 0)
         {
@@ -1322,10 +1669,14 @@ public static unsafe partial class GuestImageWriteTracker
         var protection = ProtRead |
             (writable ? ProtWrite : 0) |
             (executable ? ProtExec : 0);
-        return Mprotect(
-            (nint)start,
-            (nuint)length,
-            protection) == 0;
+        var operation = Volatile.Read(ref _nativeDiagnosticBuffer) is null
+            ? 0 : Interlocked.Increment(ref _nativeDiagnosticOperation);
+        RecordNativeProtection(start, length, protection, 0, 0, false, operation, invocation, initiatingRange);
+        var result = Mprotect((nint)start, (nuint)length, protection);
+        // Capture before clock/telemetry can disturb native errno.
+        var error = result == 0 ? 0 : Marshal.GetLastPInvokeError();
+        RecordNativeProtection(start, length, protection, result, error, true, operation, invocation, initiatingRange);
+        return result == 0;
     }
 
     private static bool IsExecutableMapping(ulong address)

@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Loader;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
 using SharpEmu.HLE.Host;
@@ -14,7 +15,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -216,14 +217,16 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private sealed class CrossPlatformHostMemory : IHostMemory
     {
         public static readonly CrossPlatformHostMemory Instance = new();
-        private static readonly IHostMemory? AllocationQueryHost =
-            OperatingSystem.IsWindows() ? new WindowsHostMemory() : null;
-
+        // The installed host backend answers allocation-bound queries; hosts
+        // without that query keep the interface default (unknown).
         public bool TryQueryAllocation(ulong address, out HostAddressRange range)
         {
             range = default;
-            return AllocationQueryHost is not null && AllocationQueryHost.TryQueryAllocation(address, out range);
+            return HostMemoryAuthority.IsInitialized && HostMemoryAuthority.Current.TryQueryAllocation(address, out range);
         }
+
+        public bool CanEmitOrdinaryWriteDiagnostic =>
+            HostMemoryAuthority.IsInitialized && HostMemoryAuthority.Current.CanEmitOrdinaryWriteDiagnostic;
 
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
             unchecked((ulong)HostMemory.Alloc(
@@ -1281,6 +1284,189 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         };
     }
 
+    public CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(CpuMappedCopyObservation original,
+        out CpuMappedReadValidation? validation)
+    {
+        validation = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedReadWatchSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedReadValidation(original, out validation);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public bool CanWaitForMappedPublicationValidation =>
+        !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+        !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+        _backedSpace is ICpuMappedPublicationSource source && source.CanWaitForMappedPublicationValidation;
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublicationValidation(original, out validation);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        validation = null; refusal = default;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublicationValidation(original, out validation, out refusal);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        validation?.Dispose(); validation = null; refusal = default; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+        => TryPrepareMappedPublication(original, runs, out publication, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
+    {
+        publication = null; refusal = default;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublication(original, runs, out publication, out refusal);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        publication?.Dispose(); publication = null; refusal = default; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        var space = _backedSpace;
+        var disposedBefore = Volatile.Read(ref _disposed);
+        if (disposedBefore || space is not ICpuMappedReadWatchSource source)
+        {
+            TraceMappedCopyRefusal(disposedBefore ? "pre-provider-disposed" : "pre-provider-capability-unavailable",
+                CpuMappedCopyResult.Unavailable, footprintAddress, footprintByteCount, sourceAddress, destination.Length, true);
+            return CpuMappedCopyResult.Unavailable;
+        }
+        var result = source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        var disposedAfter = Volatile.Read(ref _disposed);
+        if (!disposedAfter && ReferenceEquals(_backedSpace, space)) return result;
+        if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
+        observation = null;
+        TraceMappedCopyRefusal(disposedAfter ? "post-provider-disposed" : "post-provider-backing-replaced",
+            CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress, destination.Length, true);
+        return CpuMappedCopyResult.Rejected;
+    }
+    public bool CanWaitForMappedReadWatchStatus =>
+        !Volatile.Read(ref _disposed) && !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+        !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+        _backedSpace is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchStatus;
+
+    public bool CanWaitForMappedReadWatchEnrollment =>
+        !Volatile.Read(ref _disposed) && !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+        !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+        _backedSpace is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchEnrollment;
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    {
+        ArgumentNullException.ThrowIfNull(originalStillCurrent);
+        observation = null;
+        var space = _backedSpace;
+        if (space is not ICpuMappedReadWatchSource source) return CpuMappedCopyResult.Unavailable;
+        bool WrapperCurrent() => !Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space) &&
+            CanWaitForMappedReadWatchEnrollment;
+        bool OriginalWrapper() => WrapperCurrent() && originalStillCurrent() && WrapperCurrent();
+        if (!OriginalWrapper()) return CpuMappedCopyResult.Rejected;
+        var result = source.TryReadMappedCopyWithWriteWatchAdmissionWait(footprintAddress, footprintByteCount,
+            sourceAddress, destination, OriginalWrapper, out observation);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
+        observation = null; return CpuMappedCopyResult.Rejected;
+    }
+
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = new() { VirtualClosure = "pvm-pre-disposed", BooleanCurrent = false }; return false; }
+        if (_backedSpace is not ICpuMappedReadWatchSource source)
+        { diagnostic = new() { VirtualClosure = "pvm-pre-capability-unavailable", BooleanCurrent = false }; return false; }
+        return source.IsMappedCopyWriteWatchCurrent(observation, out diagnostic);
+    }
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation)
+    {
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedReadWatchSource source) return CpuMappedReadWatchStatus.Stale;
+        var status = source.GetMappedCopyWriteWatchStatus(observation);
+        return !Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space) ? status : CpuMappedReadWatchStatus.Stale;
+    }
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
+    { if (_backedSpace is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
+
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = new() { VirtualClosure = "pvm-pre-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        if (space is not ICpuMappedReadWatchSource source)
+        { diagnostic = new() { VirtualClosure = "pvm-pre-capability-unavailable" }; return CpuMappedReadWatchStatus.Stale; }
+        var status = source.GetMappedCopyWriteWatchStatus(observation, out diagnostic);
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = diagnostic with { VirtualClosure = "pvm-post-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        if (!ReferenceEquals(_backedSpace, space))
+        { diagnostic = diagnostic with { VirtualClosure = "pvm-post-space-replaced" }; return CpuMappedReadWatchStatus.Stale; }
+        return status;
+    }
+
+    public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        var space = _backedSpace;
+        var disposedBefore = Volatile.Read(ref _disposed);
+        if (disposedBefore || space is not ICpuMappedCopySource source)
+        {
+            TraceMappedCopyRefusal(disposedBefore ? "pre-provider-disposed" : "pre-provider-capability-unavailable",
+                CpuMappedCopyResult.Unavailable, footprintAddress, footprintByteCount, sourceAddress, destination.Length, false);
+            return CpuMappedCopyResult.Unavailable;
+        }
+        // The participating provider resolves its actual immutable mapping and
+        // copies only through the pinned alias. No lazy commit/protection repair
+        // and no PVM gate is held across the copy or any lifetime drain.
+        var result = source.TryReadMappedCopy(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        var disposedAfter = Volatile.Read(ref _disposed);
+        if (disposedAfter || !ReferenceEquals(_backedSpace, space))
+        {
+            observation = null;
+            TraceMappedCopyRefusal(disposedAfter ? "post-provider-disposed" : "post-provider-backing-replaced",
+                CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress, destination.Length, false);
+            return CpuMappedCopyResult.Rejected;
+        }
+        return result;
+    }
+    private static void TraceMappedCopyRefusal(string reason, CpuMappedCopyResult result,
+        ulong footprint, ulong footprintBytes, ulong source, int copyBytes, bool watched)
+    {
+        if (!CpuMappedCopyDiagnostics.Enabled) return;
+        CpuMappedCopyDiagnostics.Emit(new("pvm", reason, result, footprint, footprintBytes, source, copyBytes, watched));
+    }
+
+    public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedCopySource source &&
+        source.IsMappedCopyObservationCurrent(observation);
+
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
     {
         _gate.EnterReadLock();
@@ -1296,6 +1482,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
+        // The same lock-free single-view read TryRead takes first. The resource cache
+        // validates every reused materialization through here, a few dozen ranges per
+        // draw, and taking the gate for each one queued it behind every writer waiting
+        // on the gate (a protection change, a mapping) for no reason: one view covering
+        // the range is read through its alias with no lock either way.
+        if (!data.IsEmpty && _backedSpace is { } backed && !_disposed &&
+            backed.TryReadSingleView(address, data))
+        {
+            return true;
+        }
+
         _gate.EnterReadLock();
         try
         {
@@ -1319,6 +1516,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return !_disposed && _backedSpace is { } backed && backed.TryResolveAlias(address, size, out alias);
     }
 
+    public bool TryResolveBackingAliasSpan(ulong address, ulong size, out ulong alias)
+    {
+        alias = 0;
+        return !_disposed && _backedSpace is { } backed && backed.TryResolveAliasSpan(address, size, out alias);
+    }
+
+    // Backed views are mapped at their guest addresses, so a wholly backed range is its own
+    // host range however its pages are scattered over the backing.
+    public bool TryResolveBackedHostView(ulong address, ulong size, out ulong host)
+    {
+        host = 0;
+        if (size == 0 || size > ulong.MaxValue - address || !IsBackedRange(address, size))
+        {
+            return false;
+        }
+
+        host = address;
+        return true;
+    }
+
+    public (ulong Base, ulong Size) BackingAliasRange =>
+        !_disposed && _backedSpace is { } backed ? (backed.AliasBase, backed.BackingSize) : (0, 0);
+
     private bool HasBackingOwner() => !_disposed && _backedSpace != null;
 
     // A span may cross adjacent view records; the owner validates full coverage.
@@ -1334,6 +1554,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private void NotifyBackedWriteWatch(ulong address, ulong length)
     {
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(address, length);
         if (!GuestWriteWatch.Armed)
         {
             return;
@@ -1466,8 +1687,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     return true;
                 }
 
-                // POSIX cannot query foreign host mappings. The free ranges were
-                // reserved at startup, so a failed candidate means the gap is taken.
+                // When the host cannot be asked about foreign mappings, the free
+                // ranges reserved at startup are all we know, so a failed
+                // candidate means the gap is taken.
                 if (!OperatingSystem.IsWindows() && reservedCandidate != 0)
                 {
                     address = reservedCandidate;
@@ -1475,6 +1697,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
 
                 start = candidate + GuestMemoryLayout.GuestPage;
+
+                // Stepping one guest page per failure is hopeless on hosts that
+                // keep a very large span of the low address space to themselves:
+                // Apple Silicon refuses fixed placement for every address below
+                // the kernel's own allocation base, hundreds of gigabytes up, so
+                // a page-by-page walk needs tens of millions of iterations to
+                // reach the first address it can take. Ask the host where its
+                // mappings end and jump there when it knows.
+                var unmapped = _backedSpace!.FindUnmappedHostRange(start, size, limit);
+                if (unmapped > start)
+                {
+                    start = unmapped;
+                }
+
                 if (OperatingSystem.IsWindows() && TryQueryReservationAllocation(candidate, out var allocation) &&
                     allocation.Address <= candidate && allocation.Size > candidate - allocation.Address &&
                     allocation.Address < limit && allocation.Size <= limit - allocation.Address)
@@ -1643,7 +1879,38 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    public ulong BackingChunkBytes => HasBackingOwner() ? _backedSpace!.BackingChunkBytes : 0;
+
+    public ulong BackingObjectBytes => HasBackingOwner() ? _backedSpace!.BackingObjectBytes : 0;
+
+    public SharpEmu.HLE.GuestMemory.GuestSingleCopy? SingleCopy => HasBackingOwner() ? _backedSpace!.SingleCopy : null;
+
+    public bool TryReleaseBacking(ulong offset, ulong size)
+    {
+        _gate.EnterWriteLock();
+        try
+        {
+            return HasBackingOwner() && _backedSpace!.ReleaseBacking(offset, size) != 0;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
     public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
+        => TryProtectCore(address, size, protection, null, false);
+
+    public bool TryApplyDerivedProtection(ulong address, ulong size, GuestPageProtection guestAccess,
+        GuestPageProtection derivedAccess, bool ordinaryEnrollment)
+    {
+        if ((guestAccess & ~(GuestPageProtection.Read | GuestPageProtection.Write | GuestPageProtection.Execute)) != 0 ||
+            (derivedAccess & ~guestAccess) != 0) return false;
+        return TryProtectCore(address, size, derivedAccess, guestAccess, ordinaryEnrollment);
+    }
+
+    private bool TryProtectCore(ulong address, ulong size, GuestPageProtection protection,
+        GuestPageProtection? originalGuestAccess, bool ordinaryEnrollment)
     {
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"address-space-protect access={protection}");
@@ -1652,11 +1919,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        using (GpuMemoryAccessProfile.MeasureAddressSpaceProtectionWait()) _gate.EnterReadLock();
+        long dsProtectLock;
+        using (GpuMemoryAccessProfile.MeasureAddressSpaceProtectionWait()) dsProtectLock = DsLock.EnterRead(_gate, 5);
         try
         {
             var access = ResolveProtection(protection);
-            if (_backedSpace is not null && !_backedSpace.SetTransientAccess(address, size, access))
+            if (_backedSpace is not null && !(originalGuestAccess.HasValue
+                ? _backedSpace.SetDerivedAccess(address, size, originalGuestAccess.Value, access, ordinaryEnrollment)
+                : _backedSpace.SetTransientAccess(address, size, access)))
             {
                 return false;
             }
@@ -1716,7 +1986,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
-            _gate.ExitReadLock();
+            DsLock.ExitRead(_gate, 5, dsProtectLock);
         }
     }
 
@@ -1860,6 +2130,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 AllocateAt(mapStart, mapSize, isExecutable, allowAlternative: false);
             }
 
+            // Memory AllocateAt just obtained from the host is already zero (it commits
+            // only pages that were free or reserved). Clearing it again touched every page
+            // of each guest thread stack and .bss, committing memory the guest may never use.
+            var alreadyZero = existingRegion == null;
+
             var stageProtection = (protection & ProgramHeaderFlags.Execute) != 0
                 ? ProgramHeaderFlags.Read | ProgramHeaderFlags.Write | ProgramHeaderFlags.Execute
                 : ProgramHeaderFlags.Read | ProgramHeaderFlags.Write;
@@ -1875,7 +2150,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var zeroFillSize = memorySize - (ulong)fileData.Length;
-            if (zeroFillSize != 0)
+            if (zeroFillSize != 0 && !alreadyZero)
             {
                 NativeMemory.Clear((void*)(virtualAddress + (ulong)fileData.Length), (nuint)zeroFillSize);
             }
@@ -2057,14 +2332,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // Backed guest memory is the shared backing itself, and the backing's view table
         // is readable without a lock; only other memory needs _gate to find its region.
         // Descriptor evaluation alone reads guest words ~40 at a time per draw here.
-        if (!destination.IsEmpty && _backedSpace is { } backed && !_disposed &&
-            backed.TryReadSingleView(virtualAddress, destination))
+        if (!destination.IsEmpty && _backedSpace is { } backed && !_disposed)
         {
-            return true;
+            if (backed.TryReadSingleView(virtualAddress, destination))
+            {
+                DsLock.Count(9, true);
+                return true;
+            }
+
+            DsLock.Count(9, false);
         }
 
         var requiresExclusiveAccess = false;
-        _gate.EnterReadLock();
+        var dsReadLock = DsLock.EnterRead(_gate, 1);
         try
         {
             var region = FindRegion(virtualAddress, (ulong)destination.Length);
@@ -2111,7 +2391,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
-            _gate.ExitReadLock();
+            DsLock.ExitRead(_gate, 1, dsReadLock);
         }
 
         if (!requiresExclusiveAccess)
@@ -2119,14 +2399,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        _gate.EnterWriteLock();
+        var dsWriteLock = DsLock.EnterWrite(_gate, 2);
         try
         {
             return TryReadExclusive(virtualAddress, destination);
         }
         finally
         {
-            _gate.ExitWriteLock();
+            DsLock.ExitWrite(_gate, 2, dsWriteLock);
         }
     }
 
@@ -2284,6 +2564,61 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        OrdinaryWriteFailure failure = default;
+        GuestSpaceOwner? diagnosticSpace = null;
+        try { return TryWriteCore(virtualAddress, source, out failure, out diagnosticSpace); }
+        finally
+        {
+            // All OUR write/read lock scopes have unwound. Recursive callers
+            // with inherited gates must not format optional output here.
+            try
+            {
+                if (OrdinaryWriteFailureDiagnostics.Enabled && failure.Reason is not null &&
+                    !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+                    !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+                    !Monitor.IsEntered(HostViewRegions.Gate) &&
+                    _hostMemory.CanEmitOrdinaryWriteDiagnostic &&
+                    (diagnosticSpace is null || diagnosticSpace.CanEmitOrdinaryWriteDiagnostic))
+                    OrdinaryWriteFailureDiagnostics.Emit(failure);
+            }
+            catch { } // Even an optional gate-capability getter cannot replace the write cause.
+        }
+    }
+
+    // In-place counterpart of TryWriteCore's lock-free single-view path: fill writes the
+    // canonical alias of a backed range directly. The alias is not the guest-visible
+    // mapping, so guest page guards cannot fault the fill (exactly as for the memcpy
+    // there). Anything else - a range without a single view, a refused admission, or an
+    // armed GuestWriteWatch, whose check needs the written bytes after the alias pin is
+    // gone - declines so the caller stages through TryWrite.
+    public bool TryFillInPlace<TState>(ulong virtualAddress, int length, TState state, GuestSpanFill<TState> fill, out int filled)
+    {
+        filled = 0;
+        if (length <= 0 || GuestWriteWatch.Armed || _disposed || _backedSpace is not { } backed ||
+            !backed.TryResolveAlias(virtualAddress, (ulong)length, out _))
+        {
+            return false;
+        }
+
+        // TryWriteCore's pre-visit, issued only once the range has a single view so a
+        // declined fill seldom repeats it in the caller's TryWrite.
+        GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)length);
+        GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)length);
+        if (!backed.TryFillSingleView(virtualAddress, length, state, fill, out filled))
+        {
+            return false;
+        }
+
+        // NotifyGuestWriteWatch minus the check that declined above.
+        GuestGpuMemoryHook.MarkCpuWriteLanded(virtualAddress, (ulong)filled);
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(virtualAddress, (ulong)filled);
+        return true;
+    }
+
+    private bool TryWriteCore(ulong virtualAddress, ReadOnlySpan<byte> source,
+        out OrdinaryWriteFailure failure, out GuestSpaceOwner? diagnosticSpace)
+    {
+        failure = default; diagnosticSpace = null;
         // A managed write into a page the guest-image write tracker has
         // protected surfaces as a fatal AccessViolation — the runtime turns
         // SIGSEGV in managed code into an exception before the resumable
@@ -2293,7 +2628,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // host-identical, matching the tracker's fault addresses.
         GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)source.Length);
         GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)source.Length);
-        var written = TryWriteCore(virtualAddress, source);
+        var written = TryWriteBytesCore(virtualAddress, source, out failure, out diagnosticSpace);
 
         // Backed writes go through an alias no page watch covers: an upload between the mark above
         // and the write took the old bytes and left the pages clean, and no fault reports the new ones.
@@ -2301,32 +2636,51 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return written;
     }
 
-    private bool TryWriteCore(ulong virtualAddress, ReadOnlySpan<byte> source)
+    private bool TryWriteBytesCore(ulong virtualAddress, ReadOnlySpan<byte> source,
+        out OrdinaryWriteFailure failure, out GuestSpaceOwner? diagnosticSpace)
     {
-        if (!source.IsEmpty && _backedSpace is { } backed && !_disposed &&
-            backed.TryWriteSingleView(virtualAddress, source))
+        failure = default; diagnosticSpace = null;
+        if (!source.IsEmpty && _backedSpace is { } backed && !_disposed)
         {
-            NotifyGuestWriteWatch(virtualAddress, source);
-            return true;
+            if (backed.TryWriteSingleView(virtualAddress, source))
+            {
+                DsLock.Count(10, true);
+                NotifyGuestWriteWatch(virtualAddress, source);
+                return true;
+            }
+
+            DsLock.Count(10, false);
         }
 
         var requiresExclusiveAccess = false;
-        _gate.EnterReadLock();
+        OrdinaryBackingWriteReservation? publicationBusy = null;
+        GuestSpaceOwner? originalSpace = null;
+        OriginalBackedWriteRegion originalRegion = default;
+        var dsReadLock = DsLock.EnterRead(_gate, 3);
         try
         {
             var region = FindRegion(virtualAddress, (ulong)source.Length);
+            if (OrdinaryWriteFailureDiagnostics.Enabled)
+                failure = new(null, virtualAddress, (ulong)source.Length, region is not null,
+                    region?.VirtualAddress ?? 0, region?.Size ?? 0, region?.Protection ?? 0,
+                    region?.IsBackedView ?? false, region?.IsReservedOnly ?? false, default, null);
             if (IsBackedSpan(region, virtualAddress, (ulong)source.Length))
             {
-                var written = _backedSpace!.TryWriteBacking(virtualAddress, source);
-                if (written)
+                originalSpace = _backedSpace!; diagnosticSpace = originalSpace;
+                originalRegion = new(region); // BEFORE the first admission attempt.
+                var written = originalSpace.TryWriteBacking(virtualAddress, source, out publicationBusy, out var sharedFailure);
+                if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Shared = sharedFailure };
+                if (publicationBusy is null)
                 {
-                    NotifyGuestWriteWatch(virtualAddress, source);
+                    if (written) NotifyGuestWriteWatch(virtualAddress, source);
+                    else if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "backed-first-attempt-refused" };
+                    return written;
                 }
-
-                return written;
+                // This receipt exists only for an exact pre-byte publication
+                // refusal. Keep the ORIGINAL region and alias lifetime, then
+                // release this gate before bounded ordinary writer admission.
             }
-
-            if (region is not null &&
+            else if (region is not null &&
                 TryResolveRegionOffset(
                     virtualAddress,
                     (ulong)source.Length,
@@ -2343,6 +2697,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     if (!EnsureRangeCommitted((ulong)destPtr, (ulong)source.Length, region))
                     {
+                        if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "initial-reserved-commit-failed" };
                         return false;
                     }
                 }
@@ -2365,27 +2720,120 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
-            _gate.ExitReadLock();
+            DsLock.ExitRead(_gate, 3, dsReadLock);
         }
+
+        if (publicationBusy is not null)
+            return TryWriteOriginalBackedAfterPublication(virtualAddress, source,
+                originalSpace!, originalRegion, publicationBusy, true, ref failure);
 
         if (!requiresExclusiveAccess)
         {
+            if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "no-original-containing-region" };
             return false;
         }
 
-        _gate.EnterWriteLock();
+        var dsWriteLock = DsLock.EnterWrite(_gate, 4);
         try
         {
-            return TryWriteExclusive(virtualAddress, source);
+            var written = TryWriteExclusive(virtualAddress, source, out var exclusiveReason);
+            if (!written && OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = exclusiveReason };
+            return written;
         }
         finally
         {
-            _gate.ExitWriteLock();
+            DsLock.ExitWrite(_gate, 4, dsWriteLock);
         }
+    }
+
+    // An unchanged pointer/backing value is not enough: hold the original
+    // alias pin while waiting and revalidate exact region + immutable view
+    // snapshot before ONE write. There is no file operation or partial-copy retry.
+    private bool TryWriteOriginalBackedAfterPublication(ulong address, ReadOnlySpan<byte> source,
+        GuestSpaceOwner originalSpace, OriginalBackedWriteRegion originalRegion,
+        OrdinaryBackingWriteReservation reservation, bool notifyWriteWatch, ref OrdinaryWriteFailure failure)
+    {
+        Exception? primary = null;
+        try
+        {
+            // Recursive callers may still own an inherited PVM gate. They
+            // must decline without waiting, not drop somebody else's lock.
+            if (_gate.IsReadLockHeld || _gate.IsWriteLockHeld || _gate.IsUpgradeableReadLockHeld ||
+                Monitor.IsEntered(_guestAllocationGate) || Monitor.IsEntered(_allocationSearchHintGate))
+            {
+                if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "inherited-pvm-or-allocation-gate" };
+                return false;
+            }
+            originalSpace.RequireOrdinaryWriteWaitOutsideGates();
+            OrdinaryBackingWriteCurrentnessFailure acquisitionCurrentness = default;
+            var outcome = OrdinaryWriteFailureDiagnostics.Enabled
+                ? reservation.TryAcquire(TimeSpan.FromMilliseconds(500), out acquisitionCurrentness)
+                : reservation.TryAcquire(TimeSpan.FromMilliseconds(500));
+            if (OrdinaryWriteFailureDiagnostics.Enabled)
+                failure = failure with { WaitOutcome = outcome, Currentness = acquisitionCurrentness };
+            if (outcome != OrdinaryBackingWriteAdmission.Admitted)
+            {
+                if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "original-write-wait-declined" };
+                return false;
+            }
+            _gate.EnterReadLock();
+            try
+            {
+                var region = FindRegion(address, (ulong)source.Length);
+                OrdinaryBackingWriteCurrentnessFailure currentness = default;
+                var refusal = _disposed ? "pvm-disposed-after-admission"
+                    : !ReferenceEquals(_backedSpace, originalSpace) ? "backed-owner-replaced-after-admission"
+                    : !originalRegion.Matches(region) ? "original-region-changed-after-admission"
+                    : !(OrdinaryWriteFailureDiagnostics.Enabled
+                        ? reservation.TryIsOriginalCurrent(out currentness)
+                        : reservation.IsOriginalCurrent) ? "original-mapping-changed-after-admission"
+                    : !IsBackedSpan(region, address, (ulong)source.Length) ? "original-no-longer-backed-after-admission" : null;
+                if (refusal is not null)
+                {
+                    if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = refusal, Currentness = currentness };
+                    return false;
+                }
+                reservation.BeginWriteAttempt();
+                var written = originalSpace.TryWriteBacking(address, source);
+                written = reservation.CompleteWriteAttempt(written);
+                if (!written && OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "reserved-single-write-or-completion-failed" };
+                if (written && notifyWriteWatch) NotifyGuestWriteWatch(address, source);
+                return written;
+            }
+            finally { _gate.ExitReadLock(); }
+        }
+        catch (Exception error) { primary = error; throw; }
+        finally
+        {
+            try { reservation.Dispose(); }
+            catch (Exception cleanup) when (primary is not null)
+            {
+                // Failure diagnostics must not replace the original copy cause.
+                try { primary.Data["OrdinaryBackingWriteCleanup"] = cleanup; } catch { }
+            }
+        }
+    }
+
+    private readonly record struct OriginalBackedWriteRegion
+    {
+        private readonly MemoryRegion? owner;
+        private readonly ulong address, size;
+        private readonly bool executable, reserved, backed;
+        private readonly uint protection;
+        internal OriginalBackedWriteRegion(MemoryRegion? region)
+        {
+            owner = region; address = region?.VirtualAddress ?? 0; size = region?.Size ?? 0;
+            executable = region?.IsExecutable ?? false; reserved = region?.IsReservedOnly ?? false;
+            backed = region?.IsBackedView ?? false; protection = region?.Protection ?? 0;
+        }
+        internal bool Matches(MemoryRegion? region) => owner is not null && ReferenceEquals(owner, region) &&
+            region!.VirtualAddress == address && region.Size == size && region.IsExecutable == executable &&
+            region.IsReservedOnly == reserved && region.IsBackedView == backed && region.Protection == protection;
     }
 
     private static void NotifyGuestWriteWatch(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(virtualAddress, (ulong)source.Length);
         if (GuestWriteWatch.Armed)
         {
             GuestWriteWatch.Check(virtualAddress, source);
@@ -2526,8 +2974,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return false;
     }
 
-    private bool TryWriteExclusive(ulong virtualAddress, ReadOnlySpan<byte> source)
+    private bool TryWriteExclusive(ulong virtualAddress, ReadOnlySpan<byte> source, out string? refusal)
     {
+        refusal = null;
         var region = FindRegion(virtualAddress, (ulong)source.Length);
         if (region is not null &&
             TryResolveRegionOffset(
@@ -2539,6 +2988,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             var destPtr = (void*)(region.VirtualAddress + offset);
             if (!EnsureRangeCommitted((ulong)destPtr, (ulong)source.Length, region))
             {
+                refusal = "exclusive-commit-failed";
                 return false;
             }
 
@@ -2558,6 +3008,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 : HostPageProtection.ReadWrite;
             if (!_hostMemory.Protect((ulong)destPtr, (ulong)source.Length, writeProtection, out var oldProtect))
             {
+                refusal = "exclusive-protection-change-failed";
                 return false;
             }
 
@@ -2581,6 +3032,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return true;
         }
 
+        refusal = "exclusive-containing-region-unavailable";
         return false;
     }
 
@@ -2955,7 +3407,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         for (var pageAddress = startPage; pageAddress < endPage; pageAddress += PageSize)
         {
-            if (!_hostMemory.Protect(pageAddress, PageSize, temporaryProtection, out var oldProtection))
+            var dsProtect = DsLock.ProtectBegin();
+            var protectedForRead = _hostMemory.Protect(pageAddress, PageSize, temporaryProtection, out var oldProtection);
+            DsLock.ProtectEnd(dsProtect);
+            if (!protectedForRead)
             {
                 RestorePageProtections(touchedPages);
                 touchedPages.Clear();
@@ -2972,7 +3427,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         foreach (var (pageAddress, protection) in touchedPages)
         {
+            var dsProtect = DsLock.ProtectBegin();
             _hostMemory.ProtectRaw(pageAddress, PageSize, protection, out _);
+            DsLock.ProtectEnd(dsProtect);
         }
     }
 

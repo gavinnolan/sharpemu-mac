@@ -12,6 +12,13 @@ namespace SharpEmu.HLE.Host;
 public interface IHostMemory
 {
     /// <summary>
+    /// Diagnostic-only: true only when this thread holds none of this provider's
+    /// native or mapping gates. Unknown providers suppress optional formatting.
+    /// This property grants no memory access or write admission.
+    /// </summary>
+    bool CanEmitOrdinaryWriteDiagnostic => false;
+
+    /// <summary>
     /// Reserves and commits pages in one step. <paramref name="desiredAddress"/> of 0
     /// lets the OS choose the address. Returns the base address, or 0 on failure.
     /// The OS may satisfy the request at a different address than desired; callers

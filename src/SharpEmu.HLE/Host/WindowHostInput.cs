@@ -6,7 +6,12 @@ namespace SharpEmu.HLE.Host;
 /// <summary>
 /// Routes emulated input through the active cross-platform host window.
 /// </summary>
-internal sealed class WindowHostInput : IHostInput
+/// <remarks>
+/// Host-package contract: every <c>SharpEmu.Host.*</c> package returns this as
+/// its <see cref="IHostPlatform.Input"/>, because the window - not the OS host
+/// layer - is what owns device discovery and the input pump.
+/// </remarks>
+public sealed class WindowHostInput : IHostInput
 {
     public void EnsureStarted()
     {
@@ -36,8 +41,10 @@ internal sealed class WindowHostInput : IHostInput
     public void ResetLightbar() => HostWindowInputSource.Current?.ResetLightbar();
 
     public bool IsHostWindowFocused() =>
-        HostWindowInputSource.Current?.HasKeyboardFocus ?? false;
+        (HostWindowInputSource.Current?.HasKeyboardFocus ?? false) ||
+        (ScriptedKeyInput.IsEnabled && ScriptedKeyInput.AnyHeld);
 
     public bool IsKeyDown(int virtualKey) =>
-        HostWindowInputSource.Current?.IsKeyDown(virtualKey) ?? false;
+        (ScriptedKeyInput.IsEnabled && ScriptedKeyInput.IsHeld(virtualKey)) ||
+        (HostWindowInputSource.Current?.IsKeyDown(virtualKey) ?? false);
 }

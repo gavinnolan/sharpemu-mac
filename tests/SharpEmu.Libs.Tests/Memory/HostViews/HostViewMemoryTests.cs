@@ -3,8 +3,6 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.Host;
-using SharpEmu.HLE.Host.Posix;
-using SharpEmu.HLE.Host.Windows;
 using Xunit;
 using static SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport;
 
@@ -223,7 +221,7 @@ public sealed unsafe class HostViewMemoryTests
         var baseAddress = ReserveFreeHole(views, hole);
 
         Assert.True(views.SplitHole(baseAddress, Segment));
-        WindowsHostViews.FailProtectForTests = true;
+        HostBackendUnderTest.SetViewProtectFailure(true);
         try
         {
             Assert.False(views.TryMapView(backing, baseAddress, 0, Segment, HostPageProtection.NoAccess, out var failure));
@@ -231,7 +229,7 @@ public sealed unsafe class HostViewMemoryTests
         }
         finally
         {
-            WindowsHostViews.FailProtectForTests = false;
+            HostBackendUnderTest.SetViewProtectFailure(false);
         }
 
         Assert.Equal(MEM_RESERVE, QueryState(baseAddress));
@@ -365,17 +363,7 @@ public sealed unsafe class HostViewMemoryTests
         return failure;
     }
 
-    private static void SetAliasFailure(bool fail)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            WindowsHostViews.FailAliasMapForTests = fail;
-        }
-        else
-        {
-            PosixHostViews.FailAliasMapForTests = fail;
-        }
-    }
+    private static void SetAliasFailure(bool fail) => HostBackendUnderTest.SetViewAliasFailure(fail);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MemoryBasicInformation

@@ -1,4 +1,4 @@
-﻿<!--
+<!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
@@ -14,7 +14,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Core" />
-    <InternalsVisibleTo Include="SharpEmu.Libs" />
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
   </ItemGroup>
 
@@ -23,7 +22,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="ppy.SDL3-CS" />
     <PackageReference Include="ZstdSharp.Port" />
   </ItemGroup>
 
@@ -40,7 +38,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
        scripts/generate_aerolib_binary.py. -->
   <PropertyGroup>
     <SharpEmuAerolibNamesFile>$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt</SharpEmuAerolibNamesFile>
-    <SharpEmuAerolibTaskAssembly>$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll</SharpEmuAerolibTaskAssembly>
+    <SharpEmuAerolibTaskAssembly>$(BaseOutputPath)$(Configuration)/netstandard2.0/SharpEmu.SourceGenerators.dll</SharpEmuAerolibTaskAssembly>
   </PropertyGroup>
 
   <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"

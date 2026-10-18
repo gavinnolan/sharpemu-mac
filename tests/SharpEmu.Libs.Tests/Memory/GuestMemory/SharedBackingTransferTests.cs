@@ -53,7 +53,6 @@ public sealed unsafe class SharedBackingTransferTests
         using var mapping = new TransferMappings();
         const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
         var access = typeof(SharedBackingViews).GetMethod("TryAccessSingleView", flags)!;
-        var active = typeof(SharedBackingViews).GetField("_activeAccesses", flags)!;
         var blocked = typeof(SharedBackingViews).GetField("_copyAccessBlocked", flags)!;
         Assert.True(aliasAccess ? mapping.Store.TryEnterAliasAccess() :
             (bool)access.Invoke(mapping.Store, [mapping.Address, 8UL, 0UL])!);
@@ -81,8 +80,9 @@ public sealed unsafe class SharedBackingTransferTests
         finally
         {
             // Release the private access lease held by this test. No other lease can enter.
-            if (aliasAccess) mapping.Store.ExitAliasAccess();
-            else active.SetValue(mapping.Store, 0);
+            // A single-view access is an alias access that also pins the backing, so both
+            // kinds are released the same way.
+            mapping.Store.ExitAliasAccess();
             Assert.True(transfer.Join(TimeSpan.FromSeconds(10)));
         }
         Assert.Null(failure);

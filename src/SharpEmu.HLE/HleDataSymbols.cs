@@ -12,6 +12,26 @@ public static class HleDataSymbols
     private const string ProgNameNid = "djxxOmW6-aw";
     private const string LibcNeedFlagNid = "P330P3dFF68";
     private const string LibcInternalNeedFlagNid = "ZT4ODD2Ts9o";
+    // char **environ: the process starts with an empty environment.
+    private const string EnvironNid = "+2thxYZ4syk";
+    // FreeBSD libc FILE * variables and the Dinkumware FILE objects they
+    // point at. Used only when no loaded libc module defines them
+    // (SharpEmuRuntime.MergeKnownHleDataSymbols skips symbols a module has).
+    private const string StdinPointerNid = "bgAcsbcEznc";   // __stdinp
+    private const string StdoutPointerNid = "zqJhBxAKfsc";  // __stdoutp
+    private const string StderrPointerNid = "as8Od-tH1BI";  // __stderrp
+    private const string StdinObjectNid = "1TDo-ImqkJc";    // _Stdin
+    private const string StdoutObjectNid = "2sWzhYqFH4E";   // _Stdout
+    private const string StderrObjectNid = "H8AprKeZtNg";   // _Stderr
+    // Opaque, zeroed FILE storage. The guest owns the layout and writes it:
+    // the PS5 libc.prx copies a whole 0x1C8-byte FILE image into each of these
+    // at startup (Quake), so every object must hold at least that much. They
+    // sit in the host malloc heap; an object smaller than the guest's FILE lets
+    // that copy run into the next host allocation (CoreCLR's string-literal
+    // table, its hash maps), which aborts the process seconds later from an
+    // unrelated thread. Twice the observed size leaves room for other layouts.
+    internal const int MinimumGuestFileSize = 0x1C8;
+    internal const int StdioObjectSize = 0x400;
     private const int ProgNameMaxBytes = 511;
     // Terminator canaries reserve the low byte as NUL. Keep the process data
     // symbol and every per-thread TLS copy byte-for-byte identical.
@@ -24,6 +44,10 @@ public static class HleDataSymbols
     private static readonly nint _argumentVectorAddress = Allocate(nint.Size * 2);
     private static readonly nint _libcNeedFlagAddress = Allocate(sizeof(uint));
     private static readonly nint _libcInternalNeedFlagAddress = Allocate(sizeof(uint));
+    private static readonly nint _environVectorAddress = Allocate(nint.Size);
+    private static readonly nint _environPointerAddress = Allocate(nint.Size);
+    private static readonly nint _stdioObjectsAddress = Allocate(StdioObjectSize * 3);
+    private static readonly nint _stdioPointersAddress = Allocate(nint.Size * 3);
 
     static HleDataSymbols()
     {
@@ -45,8 +69,34 @@ public static class HleDataSymbols
             Marshal.WriteInt32(_libcInternalNeedFlagAddress, 1);
         }
 
+        if (_environPointerAddress != 0 && _environVectorAddress != 0)
+        {
+            // environ -> { NULL }
+            WritePointer(_environPointerAddress, _environVectorAddress);
+        }
+
+        if (_stdioObjectsAddress != 0 && _stdioPointersAddress != 0)
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                WritePointer(IntPtr.Add(_stdioPointersAddress, i * nint.Size), StdioObject(i));
+            }
+        }
+
         ConfigureProcessImageName("eboot.bin");
     }
+
+    private static nint StdioObject(int index) =>
+        _stdioObjectsAddress == 0 ? 0 : IntPtr.Add(_stdioObjectsAddress, index * StdioObjectSize);
+
+    private static nint StdioPointer(int index) =>
+        _stdioPointersAddress == 0 ? 0 : IntPtr.Add(_stdioPointersAddress, index * nint.Size);
+
+    /// <summary>
+    /// The HLE FILE object for stdin (0), stdout (1) or stderr (2), or 0.
+    /// </summary>
+    public static ulong StandardStreamAddress(int index) =>
+        index is >= 0 and <= 2 ? unchecked((ulong)StdioObject(index)) : 0;
 
     public static IEnumerable<string> EnumerateKnownNids()
     {
@@ -54,6 +104,13 @@ public static class HleDataSymbols
         yield return ProgNameNid;
         yield return LibcNeedFlagNid;
         yield return LibcInternalNeedFlagNid;
+        yield return EnvironNid;
+        yield return StdinPointerNid;
+        yield return StdoutPointerNid;
+        yield return StderrPointerNid;
+        yield return StdinObjectNid;
+        yield return StdoutObjectNid;
+        yield return StderrObjectNid;
     }
 
     public static int ProcessArgumentCount =>
@@ -99,6 +156,13 @@ public static class HleDataSymbols
             ProgNameNid => _progNamePointerAddress,
             LibcNeedFlagNid => _libcNeedFlagAddress,
             LibcInternalNeedFlagNid => _libcInternalNeedFlagAddress,
+            EnvironNid => _environPointerAddress,
+            StdinPointerNid => StdioPointer(0),
+            StdoutPointerNid => StdioPointer(1),
+            StderrPointerNid => StdioPointer(2),
+            StdinObjectNid => StdioObject(0),
+            StdoutObjectNid => StdioObject(1),
+            StderrObjectNid => StdioObject(2),
             _ => 0,
         };
 

@@ -37,6 +37,9 @@ public sealed class RegionLock
 
     public Held Hold() => new(this);
 
+    /// <summary>True when the calling thread is the one holding the lock.</summary>
+    public bool IsHeldByCurrentThread => Volatile.Read(ref _owner) == Environment.CurrentManagedThreadId;
+
     public void Enter()
     {
         var thread = Environment.CurrentManagedThreadId;
@@ -49,9 +52,15 @@ public sealed class RegionLock
         if (Interlocked.CompareExchange(ref _held, 1, 0) != 0)
         {
             var waitStarted = GpuMemoryAccessProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
+            // Spins briefly, then yields the core to whoever holds the lock, so a crowd of
+            // writers does not starve the holder of the CPU it needs to finish. It never
+            // sleeps for a period (no Sleep(1)): Yield and Sleep(0) only give up the rest
+            // of the time slice, and are plain calls into the kernel like the protection
+            // changes the fault handler already makes under this lock.
+            var spinner = new SpinWait();
             do
             {
-                Thread.SpinWait(1);
+                spinner.SpinOnce(sleep1Threshold: -1);
             }
             while (Interlocked.CompareExchange(ref _held, 1, 0) != 0);
             if (GpuMemoryAccessProfile.Enabled)

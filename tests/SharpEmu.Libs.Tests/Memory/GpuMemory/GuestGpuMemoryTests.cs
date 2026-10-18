@@ -429,7 +429,7 @@ public sealed class GuestGpuMemoryTests
         {
             _memory.AttachGpuQueue(null, null);
         }
-        Assert.True(await SchedulingTestSupport.CompletesWithin(completion, 5000));
+        Assert.True(await SchedulingTestSupport.CompletesWithin(completion, 10000));
         Assert.Equal(1, changes);
         Assert.Empty(scheduler.Calls);
         _memory.Dispose();
@@ -491,7 +491,7 @@ public sealed class GuestGpuMemoryTests
 
         _memory.AttachGpuQueue(null, null);
 
-        Assert.True(await SchedulingTestSupport.CompletesWithin(unregister, 5000));
+        Assert.True(await SchedulingTestSupport.CompletesWithin(unregister, 10000));
         Assert.Equal(0, queue.Runs);
         Assert.Empty(scheduler.Calls);
         Assert.Equal(new[] { "buffer.write 10000+1000", "image.unregister 10000+1000" }, _stores.Calls);

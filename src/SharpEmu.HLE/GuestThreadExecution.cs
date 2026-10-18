@@ -99,6 +99,15 @@ public interface IGuestThreadScheduler
     int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue);
 
     /// <summary>
+    /// Readies the one thread parked on <paramref name="waiter"/> after its wait completed,
+    /// without scanning other threads. False when the thread is not (yet) parked on that
+    /// waiter; a thread that parks later re-checks <see cref="IGuestThreadBlockWaiter.TryWake"/>
+    /// itself, so no wake is lost. The default falls back to the key-based scan.
+    /// </summary>
+    bool WakeBlockedWaiter(ulong threadHandle, IGuestThreadBlockWaiter waiter, string wakeKey) =>
+        WakeBlockedThreads(wakeKey) > 0;
+
+    /// <summary>
     /// Reports whether the current guest thread has an exception that waits for an import safe point.
     /// </summary>
     bool HasPendingGuestExceptionForCurrentThread();
@@ -302,6 +311,26 @@ public static class GuestThreadExecution
         catch
         {
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// Raised on a scheduler guest thread whose start routine returned (including through
+    /// pthread_exit), before the thread is marked exited, with the thread still current and
+    /// no scheduler lock held. Libs run TLS-key and thread_atexit destructors here, as
+    /// libthr does at thread exit.
+    /// </summary>
+    public static event Action<CpuContext>? GuestThreadEntryReturned;
+
+    public static void NotifyGuestThreadEntryReturned(CpuContext context)
+    {
+        try
+        {
+            GuestThreadEntryReturned?.Invoke(context);
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] thread-exit destructors failed: {error.Message}");
         }
     }
 

@@ -66,6 +66,13 @@ public sealed class GuestGpuMemory : IDisposable
     public bool TryResolveFault(FaultKind kind, ulong address)
     {
         using var profile = GpuMemoryAccessProfile.MeasureFault(kind);
+        // The slot trap owns its own pages and always resolves them: it reports the guest
+        // instruction and then releases the watch, so the store that faulted can land.
+        if (GuestSlotTrap.TryHandleFault(kind, address))
+        {
+            return true;
+        }
+
         // The fault names a byte in the page whose protection stopped the access, so the range ends
         // with that page: a store to the last bytes of a span is still the span's, and an access
         // that reaches into the next page faults again there.
@@ -80,6 +87,14 @@ public sealed class GuestGpuMemory : IDisposable
         {
             TraceFault("guest-denied");
             return false;
+        }
+
+        // A chunk whose guest copy a texture holds (single-copy textures) is restored before
+        // anything else sees the access; its read watch is what faulted.
+        if (AddressSpace is IGuestBackedSpace { SingleCopy.Handler: { } singleCopy } && singleCopy.TryResolveFault(address, kind is FaultKind.Write or FaultKind.Unknown))
+        {
+            TraceFault("single-copy-restored");
+            return true;
         }
 
         var buffers = Buffers;
@@ -147,7 +162,7 @@ public sealed class GuestGpuMemory : IDisposable
         }
 
         _ = Buffers?.MarkCpuWrite(address, size);
-        _ = Images?.MarkCpuWrite(address, size);
+        _ = Images?.MarkPreciseCpuWrite(address, size);
         return true;
     }
 

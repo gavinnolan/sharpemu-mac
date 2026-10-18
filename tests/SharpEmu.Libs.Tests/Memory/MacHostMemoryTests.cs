@@ -3,12 +3,14 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.Host;
-using SharpEmu.HLE.Host.Posix;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Memory;
 
-public sealed unsafe class PosixHostMemoryTests
+// Only compiled on macOS: SharpEmu.Host.MacOS is the only host package the test
+// project references there (see SharpEmu.Libs.Tests.csproj).
+#if SHARPEMU_HOST_MACOS
+public sealed unsafe class MacHostMemoryTests
 {
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;
@@ -39,7 +41,7 @@ public sealed unsafe class PosixHostMemoryTests
             var sentinel = new Span<byte>((void*)externalMapping, checked((int)size));
             sentinel.Fill(0xA5);
 
-            var hostMemory = new PosixHostMemory();
+            var hostMemory = HostBackendUnderTest.CreateMemory();
             var result = hostMemory.Allocate(
                 (ulong)externalMapping,
                 (ulong)size,
@@ -60,3 +62,4 @@ public sealed unsafe class PosixHostMemoryTests
     [DllImport("libc", SetLastError = true)]
     private static extern int munmap(nint addr, nuint length);
 }
+#endif

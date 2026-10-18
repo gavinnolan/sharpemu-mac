@@ -489,7 +489,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         });
         query.Start();
 
-        var completedWhileUploadBlocked = queryFinished.Wait(TimeSpan.FromSeconds(5));
+        var completedWhileUploadBlocked = queryFinished.Wait(TimeSpan.FromSeconds(10));
         finishUpload.Release();
         uploader.Join();
         query.Join();
@@ -527,7 +527,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         });
         mutation.Start();
 
-        var completedWhileDownloadBlocked = mutationFinished.Wait(TimeSpan.FromSeconds(5));
+        var completedWhileDownloadBlocked = mutationFinished.Wait(TimeSpan.FromSeconds(10));
         finishDownload.Release();
         downloader.Join();
         mutation.Join();

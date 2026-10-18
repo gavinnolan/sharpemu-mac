@@ -13,10 +13,14 @@ public sealed unsafe partial class SharedBackingViews
              (offset < Destination + Size && Destination < offset + size));
     }
 
+    // Reserves the backing ranges of a copy inside one source and one destination view so it
+    // can run outside the metadata lock. The lease keeps the alias alive and must be disposed.
     internal bool TryReserveCopy(ulong destination, ulong source, ulong size, out CopyLease lease)
     {
         lease = default;
         if (size == 0 || size > int.MaxValue) return false;
+        int index;
+        ulong sourceOffset, destinationOffset;
         lock (_lock)
             while (true)
             {
@@ -28,27 +32,37 @@ public sealed unsafe partial class SharedBackingViews
 
                 if (!IsAvailable || !TryFindRecord(source, size, out var sourceRecord) ||
                     !TryFindRecord(destination, size, out var destinationRecord)) return false;
-                var sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
-                var destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
+                sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
+                destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
                 if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size)) return false;
                 if (WaitForCopyConflict(sourceOffset, size, destinationOffset, size)) continue;
+                // A released single-copy chunk is restored by the locked path's hooks; this one
+                // runs none. The mark and a reservation are both taken under the lock, and
+                // neither is taken over the other (TryMarkSingleCopyReleased), so a reserved
+                // range never holds a released chunk.
+                if (_singleCopy is { } singleCopy &&
+                    (singleCopy.AnyReleased(sourceOffset, size) || singleCopy.AnyReleased(destinationOffset, size))) return false;
+                if (!TryEnterLifetimeAccess()) return false;
 
                 _copyReservations ??= new CopyReservation[4];
-                var index = 0;
+                index = 0;
                 while (index < _copyReservations.Length && _copyReservations[index].Size != 0) index++;
                 if (index == _copyReservations.Length) Array.Resize(ref _copyReservations, checked(index * 2));
-                if (_activeCopies == 0)
-                {
-                    // Close admission before checking access leases. The exchange prevents reordering.
-                    Interlocked.Exchange(ref _copyAccessBlocked, 1);
-                    var spin = new SpinWait();
-                    while (Volatile.Read(ref _activeAccesses) != 0) spin.SpinOnce();
-                }
+                // Close admission before checking access leases. The exchange prevents reordering.
+                if (_activeCopies == 0) Interlocked.Exchange(ref _copyAccessBlocked, 1);
                 _copyReservations[index] = new CopyReservation(sourceOffset, destinationOffset, size);
                 _activeCopies++;
-                lease = new CopyLease(this, index, AliasBase + sourceOffset, AliasBase + destinationOffset);
-                return true;
+                break;
             }
+
+        // Alias accesses admitted before the gate closed touch bytes without checking the
+        // reservation; let them finish. Waiting outside the lock keeps every locked path (and
+        // a lifetime-pinned receipt retrying through one) free to make progress meanwhile;
+        // those see the reservation already and wait only if they overlap it.
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _activeAccesses) != 0) spin.SpinOnce();
+        lease = new CopyLease(this, index, AliasBase + sourceOffset, AliasBase + destinationOffset);
+        return true;
     }
 
     private bool WaitForBufferCopyConflict(ulong backingOffset, ReadOnlySpan<byte> buffer)
@@ -66,15 +80,14 @@ public sealed unsafe partial class SharedBackingViews
 
             // A caller buffer can span views with different backing offsets.
             var end = address + size;
-            var record = _views.FindAtOrBelow(address);
-            if (record.Size == 0 || record.Address + record.Size <= address)
-                record = _views.FindAtOrAbove(address);
-            while (record.Size != 0 && record.Address < end)
+            var index = Math.Max(0, RangeSearch.FindLastIndexAtOrBelow(_views, address));
+            for (; index < _views.Count; index++)
             {
+                var record = _views.Values[index];
+                if (record.Address >= end) break;
                 var start = Math.Max(address, record.Address);
                 var partEnd = Math.Min(end, record.Address + record.Size);
                 if (start < partEnd && WaitForCopyConflict(record.Offset + start - record.Address, partEnd - start)) return true;
-                record = _views.FindAtOrAbove(record.Address + record.Size);
             }
 
             return false;
@@ -93,6 +106,18 @@ public sealed unsafe partial class SharedBackingViews
                 return true;
             }
         }
+        return false;
+    }
+
+    // Under the lock: whether an unlocked copy has reserved any of [offset, offset + size).
+    private bool OverlapsCopyReservation(ulong offset, ulong size)
+    {
+        if (_activeCopies == 0) return false;
+        foreach (var reservation in _copyReservations!)
+        {
+            if (reservation.Overlaps(offset, size)) return true;
+        }
+
         return false;
     }
 
@@ -134,6 +159,7 @@ public sealed unsafe partial class SharedBackingViews
             if (_activeCopies == 0) Volatile.Write(ref _copyAccessBlocked, 0);
             if (_copyWaiters != 0) Monitor.PulseAll(_lock);
         }
+        ExitLifetimeAccess();
     }
 
     internal readonly ref struct CopyLease(SharedBackingViews owner, int index, ulong source, ulong destination)
