@@ -84,7 +84,13 @@ case "$MODE" in
     # SHARPEMU_DS_INWORLD_SECONDS (default 30) is how long the character stands at the spawn
     # before the run stops: memory and session measurements need minutes in the world.
     INWORLD="${SHARPEMU_DS_INWORLD_SECONDS:-30}"
-    PLAN+=";@mark=hud~560|0:mark:spawn-idle,$INWORLD:mark:end,$((INWORLD + 1)):mark:stop" ;;
+    # SHARPEMU_DS_INWORLD_MOVE=1 keeps the view changing instead of standing still, so the texture
+    # streamer refines and coarsens what it holds: every 40 s walk forward 8 s (W), back 8 s (S), and
+    # pan the camera (L = right stick right) 1.5 s after each walk. Backpedalling keeps the character
+    # near the spawn, out of fights.
+    MOVE=""
+    [[ "${SHARPEMU_DS_INWORLD_MOVE:-0}" == 1 ]] && MOVE=",5:rep:w:40:8,14:rep:l:20:1.5,25:rep:s:40:8"
+    PLAN+=";@mark=hud~560|0:mark:spawn-idle$MOVE,$INWORLD:mark:end,$((INWORLD + 1)):mark:stop" ;;
   full)
     # Segments are named plan markers (metrics.md has one row each). Status of each is in the
     # comments; "pending" ones have inputs derived from research but could not be timed because
