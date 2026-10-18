@@ -243,7 +243,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 viewMip = -1;
                 viewLayer = -1;
                 var merged = result.IsValid ? _slots[result].Description : request.Description;
-                var overlap = ResolveOverlap(in merged, request.Role, candidate, result, exactFormat);
+                var overlap = ResolveOverlap(in merged, in request, candidate, result, exactFormat);
                 if (overlap.Image.IsValid)
                 {
                     result = overlap.Image;
@@ -739,6 +739,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         MaterializeSampledDccClear(imageIdentifier, image, in request);
+        if (request.Role == ImageRole.Texture && image.Description.IsDepth &&
+            TryDepthTwinView(image, in request.View, out var depthView))
+        {
+            // A colour twin sampled through the depth texture: a same-format view, whose
+            // swizzle needs no usage the depth texture lacks.
+            return image.GetOrCreateView(depthView, out resourceId, sameFormatSwizzle: true);
+        }
+
         EnsureViewUsageLocked(image, in request.View);
         return image.GetOrCreateView(request.View, out resourceId);
     }
@@ -1408,7 +1416,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // dropped instead of being copied image-to-image.
     private OverlapResolution ResolveOverlap(
         in ImageDescription requested,
-        ImageRole role,
+        in ImageRequest request,
         ResourceSlotIdentifier cachedImageIdentifier,
         ResourceSlotIdentifier mergedImageIdentifier,
         bool exactFormat)
@@ -1419,6 +1427,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         ref var cachedInfo = ref cached.Description;
+        var role = request.Role;
         var safeToDelete = _collectionTick - Math.Min(_collectionTick, cached.LastAccessTick) > TicksBeforeRemoval;
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
@@ -1459,6 +1468,26 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             ReportRelease(MetalImageReleaseCause.SubsetOfLarger, cachedInfo, requested, default);
             ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SubsetOfLarger);
             return new OverlapResolution(mergedImageIdentifier);
+        }
+
+        if (sameSurface && !exactFormat)
+        {
+            // A depth surface sampled as its colour twin binds the depth texture itself
+            // (MetalImageCache.DepthTwin.cs), and a colour twin that only served samples
+            // gives way to the depth target that now owns the bytes.
+            if (ServesAsDepthTwin(cached, in requested, in request))
+            {
+                _depthTwinBinds++;
+                return new OverlapResolution(mergedImageIdentifier.IsValid ? mergedImageIdentifier : cachedImageIdentifier);
+            }
+
+            if (IsReleasableColorTwin(cached, in requested, role))
+            {
+                _depthTwinReleases++;
+                ReportRelease(MetalImageReleaseCause.SameAddressReplaced, cachedInfo, requested, default);
+                ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SameAddressReplaced);
+                return new OverlapResolution(mergedImageIdentifier);
+            }
         }
 
         if (sameSurface)

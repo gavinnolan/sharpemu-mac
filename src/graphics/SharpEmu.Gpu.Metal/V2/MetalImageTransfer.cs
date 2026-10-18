@@ -266,6 +266,37 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return true;
     }
 
+    /// <summary>
+    /// Whether the depth image's own texture, sampled in its own format, reads texel for
+    /// texel what a texture of the colour description over the same guest bytes would hold
+    /// after an upload: a 32-bit float depth plane against R32 float, or a 16-bit unorm
+    /// depth plane against R16 unorm. Both sides must take their texels from the same
+    /// guest bytes untouched (no widening, no channel swap) in the same tile mode, pitch and
+    /// footprint, the same pair <see cref="TryEncodeTextureToTexture"/> copies bit for bit.
+    /// </summary>
+    public bool SamplesAsDepthTwin(in ImageDescription depthDescription, in ImageDescription colorDescription)
+    {
+        var pairs = (depthDescription.PixelFormat, colorDescription.PixelFormat) is
+            (GpuFormat.D32Sfloat or GpuFormat.D32SfloatS8Uint, GpuFormat.R32Sfloat) or
+            (GpuFormat.D16Unorm, GpuFormat.R16Unorm);
+        if (_disposed || !pairs || !depthDescription.IsDepth || colorDescription.IsDepth ||
+            !SameTransferGrid(depthDescription, colorDescription) ||
+            depthDescription.TileMode != colorDescription.TileMode ||
+            depthDescription.Pitch != colorDescription.Pitch ||
+            depthDescription.Data.Size != colorDescription.Data.Size ||
+            depthDescription.BytesPerBlock != colorDescription.BytesPerBlock ||
+            depthDescription.Resources != colorDescription.Resources ||
+            depthDescription.Resources.Levels != 1 ||
+            colorDescription.HasStencil || colorDescription.HasMetadata)
+        {
+            return false;
+        }
+
+        var depth = PlanFor(depthDescription);
+        var color = PlanFor(colorDescription);
+        return depth.TransferBytes == depthDescription.BytesPerBlock && !color.Swap;
+    }
+
     private static bool IsRawSingleChannel32(MtlPixelFormat format) =>
         format is MtlPixelFormat.R32Float or MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint;
 
