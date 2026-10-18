@@ -177,8 +177,9 @@ public sealed class SelfLoader : ISelfLoader
             throw new InvalidDataException("Input image is empty.");
         }
 
+        ulong? flexibleMemorySize = null;
         var applicationInfo = readParamJson
-            ? TryLoadParamJson(fs, mountRoot)
+            ? TryLoadParamJson(fs, mountRoot, out flexibleMemorySize)
             : default;
 
         if (clearVirtualMemory)
@@ -190,6 +191,9 @@ public sealed class SelfLoader : ISelfLoader
             _nextTlsModuleId = 1;
             GuestTlsTemplate.Reset();
         }
+
+        if (readParamJson)
+            SharpEmu.Libs.Kernel.KernelMemoryCompatExports.ConfigureMemoryBudget(flexibleMemorySize);
 
         var loadContext = ParseLayout(imageData);
         var elfHeader = ReadUnmanaged<ElfHeader>(imageData, loadContext.ElfOffset);
@@ -325,6 +329,7 @@ public sealed class SelfLoader : ISelfLoader
             imageBase,
             effectiveImportStubs,
             runtimeSymbols);
+        _ = GuestSyscallPatcher.Patch(virtualMemory, programHeaders, imageBase, effectiveImportStubs, _moduleManager);
         var finalizedImportStubs = effectiveImportStubs.Count == 0
             ? EmptyImportStubs
             : effectiveImportStubs;
@@ -342,6 +347,15 @@ public sealed class SelfLoader : ISelfLoader
             out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
 
+        ApplyUnrealBackBufferDefault(virtualMemory, programHeaders, imageBase);
+
+        // Main executable only (clearVirtualMemory). After segments, relocations and import binding; before the red-zone scan so it sees patched code.
+        if (clearVirtualMemory)
+        {
+            GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
+            ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
+        }
+
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
         {
             _ = GuestRedZonePatcher.Patch(
@@ -350,7 +364,10 @@ public sealed class SelfLoader : ISelfLoader
                 programHeaders,
                 imageBase,
                 totalImageSize);
+            ApplySpinLoopNap(virtualMemory, patchableMemory, programHeaders, imageBase, totalImageSize, applicationInfo.Title);
         }
+
+        _ = GuestVaHolePatcher.Patch(virtualMemory, programHeaders, imageBase);
 
         Console.WriteLine($"[LOADER] ELF e_entry: 0x{elfHeader.EntryPoint:X16}");
         Console.WriteLine($"[LOADER] Generation: {(isNextGen ? "Gen5 (PS5)" : "Gen4 (PS4)")}");
@@ -399,8 +416,10 @@ public sealed class SelfLoader : ISelfLoader
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
         IFileSystem? fs,
-        string? mountRoot)
+        string? mountRoot,
+        out ulong? flexibleMemorySize)
     {
+        flexibleMemorySize = null;
         if (fs == null)
         {
             Console.WriteLine("[LOADER] param.json not found (no filesystem provided).");
@@ -428,6 +447,7 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         var applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath);
+        flexibleMemorySize = Ps5ParamJsonReader.TryReadFlexibleMemorySize(fs, foundPath);
         Console.WriteLine($"[LOADER] Loading param.json at {foundPath}");
         Console.WriteLine(
             $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +
@@ -571,6 +591,84 @@ public sealed class SelfLoader : ISelfLoader
                 sourceOffset,
                 fileData,
                 header.Flags);
+            // Named once the runtime registers the module.
+            GuestHostMappings.Register(virtualMemory, virtualAddress, header.MemorySize, header.Flags,
+                SharpEmu.Libs.Kernel.KernelMemoryCompatExports.HostMappingKind.Module);
+        }
+    }
+
+    /// <summary>Sizes an Unreal title's compiled back-buffer default to the display the host
+    /// advertises through sceVideoOut; see <see cref="UnrealBackBufferPatch"/>.</summary>
+    private static void ApplyUnrealBackBufferDefault(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase)
+    {
+        var (width, height) = SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.GuestDisplaySize;
+        try
+        {
+            UnrealBackBufferPatch.Apply(virtualMemory, programHeaders, imageBase, width, height);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Unreal back-buffer patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Rewrites a title's compiled display sizes to the display the host advertises
+    /// through sceVideoOut; see <see cref="TitleDisplayPatches"/>.</summary>
+    private static void ApplyTitleDisplayPatch(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        string? titleId)
+    {
+        var (width, height) = SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.GuestDisplaySize;
+        try
+        {
+            TitleDisplayPatches.Apply(virtualMemory, programHeaders, imageBase, titleId, width, height);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] title display size patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Redirects the main executable's spin-wait <c>pause</c> sites through the generic
+    /// spin-nap trampoline so a thread that polls for longer than the idle threshold sleeps instead
+    /// of burning a core; see <see cref="SpinNapRuntime"/>. Title-agnostic, off with
+    /// <c>SHARPEMU_SPIN_NAP=0</c>.</summary>
+    private static void ApplySpinLoopNap(
+        IVirtualMemory virtualMemory,
+        PhysicalVirtualMemory physicalMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        ulong imageSize,
+        string? title)
+    {
+        if (!SpinNapRuntime.IsEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var probe = SpinNapRuntime.EnsureProbeBytes(SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency);
+            if (probe.Length == 0)
+            {
+                return;
+            }
+
+            var lockedProbe = SpinNapRuntime.LockedEnabled
+                ? SpinNapRuntime.EnsureLockedProbeBytes(SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency)
+                : [];
+            _ = GuestRedZonePatcher.PatchSpinLoops(
+                virtualMemory, physicalMemory, programHeaders, imageBase, imageSize, probe,
+                string.IsNullOrEmpty(title) ? "guest" : title, lockedProbe);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] spin-nap patch failed: {exception.Message}");
         }
     }
 
@@ -1462,15 +1560,34 @@ public sealed class SelfLoader : ISelfLoader
     }
 
     private static IReadOnlyList<ImportedSymbolRelocation> BuildImportedRelocations(
-        IReadOnlyList<RelocationDescriptor> descriptors)
+        List<RelocationDescriptor> descriptors)
     {
         if (descriptors.Count == 0)
         {
             return Array.Empty<ImportedSymbolRelocation>();
         }
 
-        var importedRelocations = new List<ImportedSymbolRelocation>(descriptors.Count);
-        foreach (var descriptor in descriptors)
+        // This private method receives the locally built list; neither scan mutates
+        // it or invokes callbacks. Keep that ownership invariant while using its span.
+        // Relative relocations can dominate it; reserve only records retained
+        // in the imported-symbol table rather than every relocation descriptor.
+        var descriptorSpan = CollectionsMarshal.AsSpan(descriptors);
+        var importedCount = 0;
+        foreach (ref readonly var descriptor in descriptorSpan)
+        {
+            if (descriptor.ImportNid is not null && descriptor.ValueKind == RelocationValueKind.Pointer)
+            {
+                importedCount++;
+            }
+        }
+
+        if (importedCount == 0)
+        {
+            return Array.Empty<ImportedSymbolRelocation>();
+        }
+
+        var importedRelocations = new List<ImportedSymbolRelocation>(importedCount);
+        foreach (ref readonly var descriptor in descriptorSpan)
         {
             if (descriptor.ImportNid is null || descriptor.ValueKind != RelocationValueKind.Pointer)
             {
@@ -1837,6 +1954,8 @@ public sealed class SelfLoader : ISelfLoader
                     fileOffset: 0,
                     mapData,
                     ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute);
+                GuestHostMappings.Register(virtualMemory, candidateBase, mapSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
+                    SharpEmu.Libs.Kernel.KernelMemoryCompatExports.HostMappingKind.Runtime);
                 return candidateBase;
             }
             catch (InvalidOperationException)

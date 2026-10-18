@@ -11,7 +11,7 @@ namespace SharpEmu.Core.Loader;
 
 // Protect the guest red zone from host exception writes on Windows and macOS.
 // Split unaligned vector stores when Rosetta requires smaller memory accesses.
-internal static class GuestRedZonePatcher
+internal static partial class GuestRedZonePatcher
 {
     private const int GuestRedZoneBytes = 128;
     private const int MinimumJumpBytes = 5;
@@ -235,6 +235,10 @@ internal static class GuestRedZonePatcher
         var extractCandidates = 0;
         var branchTargets = new HashSet<ulong>();
         var candidateFunctions = new List<(List<DecodedInstruction> Instructions, bool UsesRedZone, bool CanBorrowFollowingInstructions)>();
+        // Functions that are not patch candidates reuse one decode list: growing a fresh one per
+        // function dominated the loader's garbage, with large functions landing on the large
+        // object heap. A candidate keeps the list it was decoded into.
+        var decodeBuffer = new List<DecodedInstruction>();
 
         foreach (var header in programHeaders)
         {
@@ -276,20 +280,20 @@ internal static class GuestRedZonePatcher
                     continue;
                 }
 
-                var decoded = DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd);
-                if (decoded.Count == 0)
+                DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd, decodeBuffer);
+                if (decodeBuffer.Count == 0)
                 {
                     continue;
                 }
 
                 functionCount++;
-                instructionCount += decoded.Count;
-                CollectBranchTargets(decoded, branchTargets);
+                instructionCount += decodeBuffer.Count;
+                CollectBranchTargets(decodeBuffer, branchTargets);
                 var usesRedZone = protectRedZone &&
-                    (decoded.Any(static entry => UsesRedZone(entry.Instruction)) ||
-                     (decoded.Any(static entry => entry.Instruction.MemoryBase == Register.RBP &&
+                    (decodeBuffer.Any(static entry => UsesRedZone(entry.Instruction)) ||
+                     (decodeBuffer.Any(static entry => entry.Instruction.MemoryBase == Register.RBP &&
                          unchecked((long)entry.Instruction.MemoryDisplacement64) < 0) &&
-                      GuestStackFrameAnalysis.UsesFrameRedZone(decoded.Select(static entry => entry.Instruction).ToArray())));
+                      GuestStackFrameAnalysis.UsesFrameRedZone(decodeBuffer.Select(static entry => entry.Instruction).ToArray())));
                 if (!usesRedZone && !splitVectorStores && !rewriteInstructions)
                 {
                     continue;
@@ -303,11 +307,12 @@ internal static class GuestRedZonePatcher
                     memory,
                     programHeaders,
                     imageBase,
-                    decoded,
+                    decodeBuffer,
                     functionStart,
                     functionEnd,
                     branchTargets);
-                candidateFunctions.Add((decoded, usesRedZone, canBorrowFollowingInstructions));
+                candidateFunctions.Add((decodeBuffer, usesRedZone, canBorrowFollowingInstructions));
+                decodeBuffer = new List<DecodedInstruction>();
             }
         }
 
@@ -398,12 +403,24 @@ internal static class GuestRedZonePatcher
         ulong functionStart,
         ulong functionEnd)
     {
+        var decoded = new List<DecodedInstruction>();
+        DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd, decoded);
+        return decoded;
+    }
+
+    private static void DecodeFunction(
+        byte[] segmentBytes,
+        ulong segmentStart,
+        ulong functionStart,
+        ulong functionEnd,
+        List<DecodedInstruction> decoded)
+    {
+        decoded.Clear();
         var offset = checked((int)(functionStart - segmentStart));
         var length = checked((int)(functionEnd - functionStart));
         var reader = new ArraySliceCodeReader(segmentBytes, offset, length);
         var decoder = Decoder.Create(64, reader, DecoderOptions.None);
         decoder.IP = functionStart;
-        var decoded = new List<DecodedInstruction>();
         while (decoder.IP < functionEnd && reader.CanRead)
         {
             decoder.Decode(out var instruction);
@@ -414,8 +431,6 @@ internal static class GuestRedZonePatcher
 
             decoded.Add(new DecodedInstruction(instruction));
         }
-
-        return decoded;
     }
 
     private static void CollectBranchTargets(IReadOnlyList<DecodedInstruction> instructions, HashSet<ulong> targets)
@@ -439,7 +454,6 @@ internal static class GuestRedZonePatcher
                 }
             }
         }
-
     }
 
     private static bool TryCollectJumpTableTargets(
