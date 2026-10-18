@@ -173,6 +173,117 @@ public sealed class KernelFileSystemSemanticsTests : IDisposable
         Assert.Equal(errno, KernelErrno.Current(_ctx));
     }
 
+    // ---- read buffers ---------------------------------------------------
+
+    // A contiguous guest region that hands its bytes out in place, as the host mapping does.
+    private sealed class InPlaceMemory(ulong baseAddress, int size) : ICpuMemory
+    {
+        private readonly byte[] _storage = new byte[size];
+        public int InPlaceFills;
+
+        private bool Resolve(ulong address, int length, out int offset)
+        {
+            offset = (int)(address - baseAddress);
+            return address >= baseAddress && length >= 0 && offset + (long)length <= _storage.Length;
+        }
+
+        public bool TryRead(ulong virtualAddress, Span<byte> destination)
+        {
+            if (!Resolve(virtualAddress, destination.Length, out var offset))
+                return false;
+            _storage.AsSpan(offset, destination.Length).CopyTo(destination);
+            return true;
+        }
+
+        public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
+        {
+            if (!Resolve(virtualAddress, source.Length, out var offset))
+                return false;
+            source.CopyTo(_storage.AsSpan(offset));
+            return true;
+        }
+
+        public bool TryFillInPlace<TState>(ulong virtualAddress, int length, TState state, GuestSpanFill<TState> fill, out int filled)
+        {
+            filled = 0;
+            if (!Resolve(virtualAddress, length, out var offset))
+                return false;
+            InPlaceFills++;
+            filled = fill(state, _storage.AsSpan(offset, length));
+            return true;
+        }
+    }
+
+    private const int LargeRead = 128 * 1024;
+
+    private static byte[] Pattern(int length)
+    {
+        var bytes = new byte[length];
+        for (var index = 0; index < bytes.Length; index++)
+            bytes[index] = (byte)(index * 7 + (index >> 12));
+        return bytes;
+    }
+
+    private static long AllocatedByReads(CpuContext ctx, int fd, ulong buffer, int reads, Action<int, int>? check = null)
+    {
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var index = 0; index < reads; index++)
+        {
+            ctx[CpuRegister.Rdi] = unchecked((ulong)fd);
+            ctx[CpuRegister.Rsi] = buffer;
+            ctx[CpuRegister.Rdx] = LargeRead;
+            var result = KernelMemoryCompatExports.KernelReadUnderscore(ctx);
+            check?.Invoke(result, (int)ctx[CpuRegister.Rax]);
+        }
+
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
+    // A large read used to allocate its whole length as a staging array (on the LOH past
+    // 85 KB). Through a pooled buffer, a warm read allocates nothing proportional to it.
+    [Fact]
+    public void LargeReadsThroughAStagingBufferDoNotAllocateTheirLength()
+    {
+        var content = Pattern(LargeRead * 12);
+        File.WriteAllBytes(Host("staged.bin"), content);
+        var fd = OpenOk(Guest("staged.bin"), ORdonly);
+        AllocatedByReads(_ctx, fd, Data, 2, (result, read) => Assert.Equal((0, LargeRead), (result, read)));
+
+        var allocated = AllocatedByReads(_ctx, fd, Data, 8, (result, read) => Assert.Equal((0, LargeRead), (result, read)));
+        Assert.True(allocated < LargeRead / 4, $"allocated={allocated}");
+
+        var last = new byte[LargeRead];
+        Assert.True(_memory.TryRead(Data, last));
+        Assert.Equal(content.AsSpan(LargeRead * 9, LargeRead).ToArray(), last);
+    }
+
+    // Guest memory that hands the range out in place takes the read directly: same bytes,
+    // same file offset, no staging buffer at all.
+    [Fact]
+    public void LargeReadsFillGuestMemoryInPlace()
+    {
+        var content = Pattern(LargeRead * 12);
+        File.WriteAllBytes(Host("inplace.bin"), content);
+        var fd = OpenOk(Guest("inplace.bin"), ORdonly);
+        const ulong buffer = 0x10_0000;
+        var memory = new InPlaceMemory(buffer, LargeRead);
+        var ctx = new CpuContext(memory, Generation.Gen5) { FsBase = Tls };
+        AllocatedByReads(ctx, fd, buffer, 2, (result, read) => Assert.Equal((0, LargeRead), (result, read)));
+
+        var allocated = AllocatedByReads(ctx, fd, buffer, 8, (result, read) => Assert.Equal((0, LargeRead), (result, read)));
+        Assert.True(allocated < LargeRead / 4, $"allocated={allocated}");
+        Assert.Equal(10, memory.InPlaceFills);
+
+        var last = new byte[LargeRead];
+        Assert.True(memory.TryRead(buffer, last));
+        Assert.Equal(content.AsSpan(LargeRead * 9, LargeRead).ToArray(), last);
+
+        // The last two chunks, then end of file.
+        AllocatedByReads(ctx, fd, buffer, 1, (result, read) => Assert.Equal((0, LargeRead), (result, read)));
+        AllocatedByReads(ctx, fd, buffer, 1, (result, read) => Assert.Equal((0, LargeRead), (result, read)));
+        AllocatedByReads(ctx, fd, buffer, 1, (result, read) => Assert.Equal((0, 0), (result, read)));
+    }
+
     // ---- fd table -------------------------------------------------------
 
     [Fact]

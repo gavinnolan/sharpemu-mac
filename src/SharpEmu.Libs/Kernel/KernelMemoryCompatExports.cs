@@ -2809,60 +2809,88 @@ public static partial class KernelMemoryCompatExports
 
         long positionBefore;
         long positionAfter;
-        var buffer = GC.AllocateUninitializedArray<byte>(requested);
+        // The file is read straight into the guest's host mapping when it hands the range
+        // out in place; otherwise through a pooled staging buffer. A fresh array per call put
+        // every large read on the LOH. The Bink shim patches the bytes before the guest sees
+        // them, so it always stages.
+        byte[]? buffer = null;
         int read;
-        // The open file description's offset is shared by every thread and
-        // every dup of this fd: position, read and advance are one step.
-        lock (stream)
+        try
         {
-            try
+            // The open file description's offset is shared by every thread and
+            // every dup of this fd: position, read and advance are one step.
+            lock (stream)
             {
-                positionBefore = stream.Position;
-            }
-            catch (IOException)
-            {
-                positionBefore = -1;
+                try
+                {
+                    positionBefore = stream.Position;
+                }
+                catch (IOException)
+                {
+                    positionBefore = -1;
+                }
+
+                if (useBinkCompletionShim ||
+                    !ctx.Memory.TryFillInPlace(bufferAddress, requested, stream,
+                        static (source, destination) => source.Read(destination), out read))
+                {
+                    buffer = ArrayPool<byte>.Shared.Rent(requested);
+                    read = stream.Read(buffer, 0, requested);
+                }
+
+                try
+                {
+                    positionAfter = stream.Position;
+                }
+                catch (IOException)
+                {
+                    positionAfter = -1;
+                }
             }
 
-            read = stream.Read(buffer, 0, requested);
-
-            try
+            if (read > 0 && useBinkCompletionShim)
             {
-                positionAfter = stream.Position;
+                // The patched NumFrames field is what tells the guest "this
+                // movie is fully consumed" - hold that specific read until the
+                // host has actually finished showing it, so guest-side game
+                // logic can't race ahead of what's still on screen.
+                if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
+                {
+                    HostMovieBridge.WaitForHostPlaybackToFinish(OpenFileName(stream));
+                }
             }
-            catch (IOException)
+            SharpEmu.HLE.GuestLoadProgress.NoteFileRead(read);
+            if (read > 0 && buffer is not null && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
             {
-                positionAfter = -1;
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (_logIo)
+            {
+                // Read in place, the bytes are only in guest memory.
+                var preview = buffer ?? new byte[Math.Clamp(read, 0, 64)];
+                if (buffer is null && preview.Length > 0 && !ctx.Memory.TryRead(bufferAddress, preview))
+                {
+                    preview = [];
+                }
+
+                var previewCount = Math.Min(read, preview.Length);
+                LogIoTrace(
+                    "read",
+                    OpenFileName(stream),
+                    $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(preview, previewCount, 64)}' hex={PreviewIoHex(preview, previewCount, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)read);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        finally
+        {
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
-
-        if (read > 0 && useBinkCompletionShim)
-        {
-            // The patched NumFrames field is what tells the guest "this
-            // movie is fully consumed" - hold that specific read until the
-            // host has actually finished showing it, so guest-side game
-            // logic can't race ahead of what's still on screen.
-            if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
-            {
-                HostMovieBridge.WaitForHostPlaybackToFinish(OpenFileName(stream));
-            }
-        }
-        SharpEmu.HLE.GuestLoadProgress.NoteFileRead(read);
-        if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        if (_logIo)
-        {
-            LogIoTrace(
-                "read",
-                OpenFileName(stream),
-                $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
-        }
-
-        ctx[CpuRegister.Rax] = unchecked((ulong)read);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
