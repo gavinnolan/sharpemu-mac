@@ -1537,6 +1537,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             Interlocked.Increment(ref _linearViews);
         }
 
+        image.AllocatedBytes = TextureAllocatedBytes(image);
+
         var imageIdentifier = _slots.Insert(image);
         Interlocked.Increment(ref _imageSetVersion);
         if (!ImageDescription.IsEmptyRange(description.Data))
@@ -1637,6 +1639,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var shape = _transfer.ShapeFor(image.Description);
         var texture = CreateTexture(in shape, image.Description);
         RetireImage(image.PromoteToOwned(texture, in shape));
+        RecountAllocatedLocked(image);
         _releaseCauses[(int)MetalImageReleaseCause.LinearViewPromoted]++;
         Interlocked.Decrement(ref _linearViews);
         Interlocked.Increment(ref _linearViewPromotions);

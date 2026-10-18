@@ -31,11 +31,12 @@ internal sealed partial class MetalImageCache
         if (cause == MetalImageReleaseCause.Budget)
         {
             Interlocked.Add(ref _evictedAccountedBytes, (long)image.AccountedSize);
-            Interlocked.Add(ref _evictedAllocatedBytes, (long)AllocatedBytes(image));
+            Interlocked.Add(ref _evictedAllocatedBytes, (long)image.AllocatedBytes);
         }
     }
 
-    private static ulong AllocatedBytes(MetalCachedImage image) =>
+    // MTLTexture.allocatedSize, asked once per texture: a window view holds no memory of its own.
+    private static ulong TextureAllocatedBytes(MetalCachedImage image) =>
         image.Texture == 0 || image.IsWindowLinearView ? 0 : MetalV2Native.SendValue64(image.Texture, SelAllocatedSize);
 
     private static int CensusKind(MetalCachedImage image)
@@ -77,7 +78,7 @@ internal sealed partial class MetalImageCache
                 var kind = CensusKind(image);
                 var age = CensusAge(now - image.LastAccessTimestamp);
                 count[kind, age]++;
-                allocated[kind, age] += AllocatedBytes(image);
+                allocated[kind, age] += image.AllocatedBytes;
                 accounted += image.AccountedSize;
             });
         }

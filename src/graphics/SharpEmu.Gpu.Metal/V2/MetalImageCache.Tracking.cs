@@ -38,7 +38,23 @@ internal sealed partial class MetalImageCache
         }
 
         image.Registered = true;
-        _totalUsedMemory += image.AccountedSize;
+        image.CountedBytes = image.AllocatedBytes;
+        _totalUsedMemory += image.CountedBytes;
+    }
+
+    // The image's texture was replaced (window view promoted, usage widened): the total follows
+    // the new texture's real size. Caller holds the lock.
+    private void RecountAllocatedLocked(MetalCachedImage image)
+    {
+        image.AllocatedBytes = TextureAllocatedBytes(image);
+        if (!image.Registered)
+        {
+            return;
+        }
+
+        _totalUsedMemory -= Math.Min(image.CountedBytes, _totalUsedMemory);
+        image.CountedBytes = image.AllocatedBytes;
+        _totalUsedMemory += image.CountedBytes;
     }
 
     private void RemoveFromIndex(ResourceSlotIdentifier imageIdentifier)
@@ -54,8 +70,8 @@ internal sealed partial class MetalImageCache
         _pageOwners.Remove(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
         _stencilOwners.Remove(imageIdentifier);
 
-        var accounted = image.AccountedSize;
-        _totalUsedMemory -= Math.Min(accounted, _totalUsedMemory);
+        _totalUsedMemory -= Math.Min(image.CountedBytes, _totalUsedMemory);
+        image.CountedBytes = 0;
         image.Registered = false;
     }
 
