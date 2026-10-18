@@ -469,6 +469,8 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
             _pages = new PageGuard(_space);
             _memory = new MetalGuestMemory(device, _backing, new NoMemory());
             Cache = new MetalImageCache(new Owner(Harness), Harness.Transfer, _memory, _pages, _backing);
+            // Exact textures: lossy compression is not this suite's subject.
+            Cache.LossyTextures = false;
             // No host readings and no retirement unless a test asks: a fixed budget nothing reaches.
             Configure(retireFrames: 0, retireSeconds: 0);
         }
