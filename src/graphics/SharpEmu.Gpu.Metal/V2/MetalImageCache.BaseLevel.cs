@@ -1,0 +1,210 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Globalization;
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Images;
+
+namespace SharpEmu.Gpu.Metal.V2;
+
+// Sampled textures held from their T# BASE_LEVEL.
+//
+// On the PS5 the texture unit never reads a level finer than BASE_LEVEL (the SDK's
+// Texture::setMipLevelRange "redefines the size of the base map to that at baseMipLevel";
+// LAST_LEVEL bounds the other end), and a title's texture streamer uses exactly that: Demon's
+// Souls keeps only some levels of each streamed texture resident, decommits the guest memory
+// of the finer ones, and writes BASE_LEVEL = the resident top level into the T#. A texture
+// allocated with the whole chain spends three quarters of its bytes or more on levels the GPU
+// cannot sample, and its upload reads guest pages the title has released.
+//
+// So a sampled-only image gets a texture of the guest levels from BASE_LEVEL down (to the
+// chain's last level, which keeps a different LAST_LEVEL from changing the texture over
+// levels a quarter the size of the one above them). The image's description stays the full
+// guest chain: identity, the page index and every guest offset are the guest's, and only
+// the texture, the bytes uploaded into it and the page watch are cut to those levels.
+// Shaders are unchanged: they sample through a view whose level 0 is BASE_LEVEL either way
+// (MetalCachedImage.GetOrCreateView).
+//
+// The texture follows the binding:
+//  - a binding that needs a finer level gets a texture with it at once, filled from guest
+//    memory (the streamer only lowers BASE_LEVEL after the level is resident);
+//  - a binding that needs only coarser levels keeps the texture through a view until no
+//    binding in this frame or the one before needed the finer ones - the same working-set
+//    rule the budget evicts by, so two descriptors of one texture with different
+//    BASE_LEVELs do not trade reallocations every frame - and then shrinks it, because
+//    every level dropped gives back about three quarters of what is left and the coarser
+//    levels that are uploaded again are only a third of the level above them; a texture
+//    whose finer levels hold less than ShrinkMinimumBytes is not worth the reallocation;
+//  - anything that writes the image (render target, storage, clear, copy, kernel fill)
+//    gets the whole chain first (PromoteLinearView), so a cut texture is never written
+//    back and write-back and retiling of GPU-written images are as they were.
+//
+// SHARPEMU_METAL_V2_BASE_LEVEL=0 allocates every texture with its whole chain again.
+internal sealed partial class MetalImageCache
+{
+    // Finer levels that hold less than this are kept through a view rather than reallocated.
+    private const ulong ShrinkMinimumBytes = 256 * 1024;
+
+    /// <summary>Whether sampled textures are allocated from their BASE_LEVEL; tests switch it.</summary>
+    internal static bool BaseLevelAllocation { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BASE_LEVEL") != "0";
+
+    private long _baseLevelCreated;
+    private long _baseLevelGrows;
+    private long _baseLevelShrinks;
+    private long _baseLevelPromotions;
+    private (long Created, long Grows, long Shrinks, long Promotions) _baseLevelReported;
+
+    /// <summary>Texture reshapes since the cache was made: created cut, grown, shrunk, given the whole chain.</summary>
+    public (long Created, long Grows, long Shrinks, long Promotions) BaseLevelCounters =>
+        (Volatile.Read(ref _baseLevelCreated), Volatile.Read(ref _baseLevelGrows),
+            Volatile.Read(ref _baseLevelShrinks), Volatile.Read(ref _baseLevelPromotions));
+
+    /// <summary>
+    /// The guest level a sampled texture of this description is allocated from when its
+    /// binding's BASE_LEVEL is <paramref name="baseLevel"/>: the level itself for a plain
+    /// mipped colour texture, zero for anything with a layout the cut does not cover (a
+    /// volume, multisample, depth, stencil, DCC metadata, the byte-swapped BGRA16 path).
+    /// A block-compressed texture starts no later than its last level of whole blocks each
+    /// way, so the base of the Metal texture is block-aligned as a whole-chain one is.
+    /// </summary>
+    internal static uint DesiredFirstLevel(in ImageDescription description, uint baseLevel)
+    {
+        if (!BaseLevelAllocation || baseLevel == 0 || ImageDescription.IsEmptyRange(description.Data) ||
+            description.Resources.Levels <= 1 || description.Resources.Levels > ImageDescription.MaxLevels ||
+            description.IsVolume || description.Samples != 1 || description.IsDepth || description.HasMetadata ||
+            description.HasStencil || description.Bgra16)
+        {
+            return 0;
+        }
+
+        var level = Math.Min(baseLevel, description.Resources.Levels - 1);
+        if (description.IsBlock)
+        {
+            while (level > 0 &&
+                   ((description.Extent.Width >> (int)level) % 4 != 0 || (description.Extent.Height >> (int)level) % 4 != 0))
+            {
+                level--;
+            }
+        }
+
+        return level;
+    }
+
+    // The same for an image the cache holds: only one that has been sampled and nothing else.
+    private static uint DesiredFirstLevel(MetalCachedImage image, uint baseLevel)
+    {
+        var uses = image.Uses;
+        if (image.IsWindowLinearView || image.IsGpuModified ||
+            uses.Storage || uses.RenderTarget || uses.DepthTarget || uses.VideoOut)
+        {
+            return 0;
+        }
+
+        return DesiredFirstLevel(in image.Description, baseLevel);
+    }
+
+    // The guest levels the image's texture holds, in the description's own level numbers.
+    private static SubresourceRange ResidentRange(MetalCachedImage image) =>
+        new(image.FirstLevel, image.Description.Resources.Levels - image.FirstLevel,
+            0, image.Description.TransferLayers);
+
+    // Guest bytes of levels [from, to): what a texture from `to` leaves out next to one from `from`.
+    private static ulong LevelBytesBetween(in ImageDescription description, uint from, uint to)
+    {
+        ulong bytes = 0;
+        for (var level = from; level < to && level < ImageDescription.MaxLevels; level++)
+        {
+            bytes += description.MipLayout[(int)level].Size;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// Fits the texture of a sampled image to a binding's BASE_LEVEL before the binding takes
+    /// its view: a finer level than the texture holds grows it at once; a coarser one shrinks
+    /// it once the finer levels have left the working set. Caller holds the lock.
+    /// </summary>
+    private void FitResidentLevelsLocked(MetalCachedImage image, in ImageViewDescription view)
+    {
+        if (image.Texture == 0 || image.IsWindowLinearView)
+        {
+            return;
+        }
+
+        var desired = DesiredFirstLevel(image, view.BaseLevel);
+        if (desired < image.FirstLevel)
+        {
+            ReshapeLevelsLocked(image, desired);
+            _baseLevelGrows++;
+            image.FirstLevelUseTick = _collectionTick;
+            return;
+        }
+
+        if (desired == image.FirstLevel)
+        {
+            image.FirstLevelUseTick = _collectionTick;
+            return;
+        }
+
+        var stillUsed = image.FirstLevelUseTick >= _previousFrameStartTick ||
+            _collectionTick - Math.Min(_collectionTick, image.FirstLevelUseTick) <= TicksBeforeRemoval;
+        if (stillUsed || LevelBytesBetween(in image.Description, image.FirstLevel, desired) < ShrinkMinimumBytes)
+        {
+            return;
+        }
+
+        ReshapeLevelsLocked(image, desired);
+        _baseLevelShrinks++;
+        image.FirstLevelUseTick = _collectionTick;
+    }
+
+    /// <summary>
+    /// Gives a sampled-only image a new texture holding the guest levels from
+    /// <paramref name="firstLevel"/>, refilled from guest memory on its next use; the old
+    /// texture waits for the submissions that bound it. Caller holds the lock.
+    /// </summary>
+    private void ReshapeLevelsLocked(MetalCachedImage image, uint firstLevel)
+    {
+        var shape = _transfer.ShapeFor(image.Description, firstLevel) with { Usage = image.Shape.Usage };
+        var texture = CreateTexture(in shape, image.Description);
+        var (start, end) = _transfer.LevelBytes(image.Description, firstLevel);
+        RetireImage(image.ReplaceLevels(texture, in shape, firstLevel, start, end));
+        RecountAllocatedLocked(image);
+        if (image.IsWatched)
+        {
+            // The watch follows the bytes the texture now reads.
+            WatchImageLocked(image);
+        }
+    }
+
+    // Census of the cut textures: how many, what they hold, and what the levels they leave
+    // out would have cost. Caller holds the lock.
+    private void CountResidentLevels(MetalCachedImage image, ref long images, ref ulong allocated, ref ulong dropped)
+    {
+        if (image.FirstLevel == 0)
+        {
+            return;
+        }
+
+        images++;
+        allocated += image.AllocatedBytes;
+        dropped += LevelBytesBetween(in image.Description, 0, image.FirstLevel);
+    }
+
+    private string DescribeBaseLevels(long images, ulong allocated, ulong dropped)
+    {
+        const double Mb = 1048576.0;
+        var current = BaseLevelCounters;
+        var last = _baseLevelReported;
+        _baseLevelReported = current;
+        return string.Create(CultureInfo.InvariantCulture,
+            $"base_level_images={images} base_level_allocated_mb={allocated / Mb:F0} " +
+            $"base_level_dropped_mb={dropped / Mb:F0} " +
+            $"base_level_created={current.Created}(+{current.Created - last.Created}) " +
+            $"base_level_grows={current.Grows}(+{current.Grows - last.Grows}) " +
+            $"base_level_shrinks={current.Shrinks}(+{current.Shrinks - last.Shrinks}) " +
+            $"base_level_promotions={current.Promotions}(+{current.Promotions - last.Promotions})");
+    }
+}

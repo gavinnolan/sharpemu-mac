@@ -251,7 +251,9 @@ internal sealed partial class MetalImageCache
         ref readonly var to = ref destination.Description;
         var fromShape = source.Shape;
         var toShape = destination.Shape;
-        if (!IsPlainKernelTarget(in from, in fromShape) || !IsPlainKernelTarget(in to, in toShape) ||
+        // A texture held from its BASE_LEVEL has not got the levels the guest bytes start with.
+        if (source.FirstLevel != 0 || destination.FirstLevel != 0 ||
+            !IsPlainKernelTarget(in from, in fromShape) || !IsPlainKernelTarget(in to, in toShape) ||
             from.PixelFormat != to.PixelFormat || from.GuestFormat != to.GuestFormat || from.Type != to.Type ||
             from.Extent != to.Extent || from.Resources != to.Resources || from.Pitch != to.Pitch ||
             from.BytesPerBlock != to.BytesPerBlock || from.TileMode != to.TileMode || from.Data.Size != to.Data.Size ||

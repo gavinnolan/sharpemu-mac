@@ -188,9 +188,10 @@ internal sealed partial class MetalImageCache
         _retiring.RemoveRange(kept, _retiring.Count - kept);
     }
 
-    private void WatchImage(ResourceSlotIdentifier imageIdentifier)
+    private void WatchImage(ResourceSlotIdentifier imageIdentifier) => WatchImageLocked(_slots[imageIdentifier]);
+
+    private void WatchImageLocked(MetalCachedImage image)
     {
-        var image = _slots[imageIdentifier];
         // A window view reads guest memory in place: a store to it needs no notice.
         if (_watchingStopped || !image.Registered || image.IsWindowLinearView ||
             ImageDescription.IsEmptyRange(image.Description.Data))
@@ -198,8 +199,11 @@ internal sealed partial class MetalImageCache
             return;
         }
 
-        var begin = image.Description.Data.Address;
-        var end = image.Description.Data.End;
+        // The bytes the texture's levels read: the whole image, or for a texture held from
+        // its BASE_LEVEL only the coarser levels', so the guest reusing the finer levels'
+        // pages costs this image nothing.
+        var begin = image.Description.Data.Address + image.ResidentStart;
+        var end = image.Description.Data.Address + image.ResidentEnd;
         if (begin == image.WatchBegin && end == image.WatchEnd)
         {
             return;
@@ -207,18 +211,25 @@ internal sealed partial class MetalImageCache
 
         if (image.IsWatched)
         {
-            UnwatchImage(imageIdentifier);
+            UnwatchImageLocked(image);
         }
 
         image.WatchBegin = begin;
         image.WatchEnd = end;
-        _pages.AddWatch(begin, image.Description.Data.Size, blockReads: false);
+        _pages.AddWatch(begin, end - begin, blockReads: false);
     }
 
     private void UnwatchImage(ResourceSlotIdentifier imageIdentifier)
     {
-        var image = _slots.TryGet(imageIdentifier);
-        if (image is null || !image.IsWatched)
+        if (_slots.TryGet(imageIdentifier) is { } image)
+        {
+            UnwatchImageLocked(image);
+        }
+    }
+
+    private void UnwatchImageLocked(MetalCachedImage image)
+    {
+        if (!image.IsWatched)
         {
             return;
         }
