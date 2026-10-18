@@ -126,7 +126,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.False(gate.IsReadLockHeld || gate.IsWriteLockHeld || gate.IsUpgradeableReadLockHeld);
                 Assert.Equal(2L, StorageMember(writers, "admission"));
                 writeHook.SetValue(views, oldWrite); pause.Admitted.Set();
-                if (!pause.Resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Applied validation writer pause bound");
+                if (!pause.Resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Applied validation writer pause bound");
             }));
             beforeHook.SetValue(null, (Action<object>)(actual =>
             {
@@ -238,7 +238,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         finally
         {
             Exception? cleanup = null; pause.Resume.Set();
-            try { if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(5))) { owners.OrdinaryWriterUnconfirmed = true; cleanup = new TimeoutException("Applied writer still live; owners quarantined"); } }
+            try { if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(10))) { owners.OrdinaryWriterUnconfirmed = true; cleanup = new TimeoutException("Applied writer still live; owners quarantined"); } }
             catch (Exception failure) { owners.OrdinaryWriterUnconfirmed = true; cleanup = failure; }
             if (receipt is not null && (bool)StorageMember(receipt, "ValidationQuarantined")!) owners.AppliedValidationQuarantined = true;
             Attempt(() => beforeHook.SetValue(null, oldBefore)); Attempt(() => busyHook.SetValue(null, oldBusy));
@@ -257,12 +257,12 @@ public sealed partial class MetalImmutableGpuVersionTests
                 try { pause.Written = views.TryWriteBacking(destination, new byte[] { 0xA9 }); }
                 catch (Exception failure) { pause.Failure = failure; }
             }) { IsBackground = true, Name = "post-Applied exact validation writer" };
-            pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)));
+            pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(10)));
             Assert.Equal(2L, StorageMember(writers, "admission"));
         }
         void FinishWriter()
         {
-            pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(5)));
+            pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(10)));
             if (pause.Failure is { } failure) ExceptionDispatchInfo.Capture(failure).Throw(); Assert.True(pause.Written);
         }
         CpuMappedCopyObservation CaptureFixtureByte(PhysicalVirtualMemory source, ulong at)

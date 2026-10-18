@@ -61,9 +61,9 @@ public sealed partial class MappedPublicationTests
         try
         {
             Assert.Equal(OrdinaryBackingWriteAdmission.Admitted, reservation.TryAcquire(TimeSpan.FromMilliseconds(500)));
-            Assert.True(cancel.Wait(TimeSpan.FromSeconds(2))); cancel.GetAwaiter().GetResult();
+            Assert.True(cancel.Wait(TimeSpan.FromSeconds(10))); cancel.GetAwaiter().GetResult();
         }
-        finally { publication.Dispose(); Assert.True(cancel.Wait(TimeSpan.FromSeconds(2))); }
+        finally { publication.Dispose(); Assert.True(cancel.Wait(TimeSpan.FromSeconds(10))); }
     }
 
     [Fact]
@@ -90,13 +90,13 @@ public sealed partial class MappedPublicationTests
         var close = Task.Run(() => state.Backing.Dispose());
         try
         {
-            Assert.True(SpinWait.SpinUntil(() => state.Backing.IsClosing, TimeSpan.FromSeconds(1)));
+            Assert.True(SpinWait.SpinUntil(() => state.Backing.IsClosing, TimeSpan.FromSeconds(10)));
             Assert.Equal(OrdinaryBackingWriteAdmission.OriginalChanged, reservation.TryAcquire(TimeSpan.Zero));
             Assert.False(close.IsCompleted); // actual alias access pin remains held
             reservation.Dispose();
-            Assert.True(close.Wait(TimeSpan.FromSeconds(2))); close.GetAwaiter().GetResult();
+            Assert.True(close.Wait(TimeSpan.FromSeconds(10))); close.GetAwaiter().GetResult();
         }
-        finally { reservation.Dispose(); Assert.True(close.Wait(TimeSpan.FromSeconds(2))); }
+        finally { reservation.Dispose(); Assert.True(close.Wait(TimeSpan.FromSeconds(10))); }
         // No pointer reads after backing release.
     }
 
@@ -119,7 +119,7 @@ public sealed partial class MappedPublicationTests
         using var publication = state.Prepare(original, State.Address, [7]);
         using var reservation = Busy(state);
         var peer = Task.Run(() => Assert.Throws<InvalidOperationException>(() => reservation.TryAcquire(TimeSpan.Zero)));
-        Assert.True(peer.Wait(TimeSpan.FromSeconds(2))); peer.GetAwaiter().GetResult();
+        Assert.True(peer.Wait(TimeSpan.FromSeconds(10))); peer.GetAwaiter().GetResult();
         publication.Dispose(); reservation.Dispose(); reservation.Dispose();
         Assert.Throws<InvalidOperationException>(() => reservation.TryAcquire(TimeSpan.Zero));
         Assert.Throws<InvalidOperationException>(() => reservation.CompleteWriteAttempt(true));

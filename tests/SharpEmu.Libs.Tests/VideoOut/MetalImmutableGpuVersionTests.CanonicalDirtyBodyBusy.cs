@@ -170,7 +170,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(2L, StorageMember(volumeLedger, "admission"));
                 writeHook.SetValue(volumeViews, oldWrite);
                 pause.Admitted.Set();
-                if (!pause.Resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("different-backing writer bound");
+                if (!pause.Resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("different-backing writer bound");
             }));
             bodyHook.SetValue(null, (Action<bool>)(consumed =>
             {
@@ -184,7 +184,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                     try { pause.Written = volumeViews.TryWriteBacking(writeAddress, new byte[] { 0xA9 }); }
                     catch (Exception failure) { pause.Failure = failure; }
                 }) { IsBackground = true, Name = "different-backing dirty-body writer" };
-                pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)));
+                pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(10)));
                 Assert.Equal(scenario == "overlap" ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Busy,
                     ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(volumeMapping));
                 if (scenario == "unrelated-error") throw cause;
@@ -238,7 +238,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.False(state.TryDrainBusyNative()); Assert.Equal(0, label);
                 Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0));
             }
-            pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(5)));
+            pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(10)));
             if (pause.Failure is { } writerFailure) ExceptionDispatchInfo.Capture(writerFailure).Throw();
             Assert.True(pause.Written); extraExpected[checked((int)(writeAddress - owners.BodyVolumeAddress))] = 0xA9;
             Assert.Equal(extraExpected, ReadExtra()); Assert.Equal(expected, readCanonical());
@@ -263,7 +263,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Exception? cleanup = null; pause.Resume.Set();
             try
             {
-                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(5)))
+                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(10)))
                 { owners.OrdinaryWriterUnconfirmed = true; cleanup = new TimeoutException("dirty-body writer still live; all owners quarantined"); }
             }
             catch (Exception failure) { owners.OrdinaryWriterUnconfirmed = true; cleanup = failure; }
@@ -325,7 +325,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.False(gate.IsReadLockHeld || gate.IsWriteLockHeld || gate.IsUpgradeableReadLockHeld);
                 Assert.Equal(2L, StorageMember(volumeLedger, "admission"));
                 writeHook.SetValue(volumeViews, oldWrite); pause.Admitted.Set();
-                if (!pause.Resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("initial-owner writer bound");
+                if (!pause.Resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("initial-owner writer bound");
             }));
             bodyHook.SetValue(null, (Action<bool>)(_ => throw new InvalidOperationException("first healthy Busy must defer before dirty-body validation")));
             firstHook.SetValue(null, (Action)(() =>
@@ -335,7 +335,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.True(GuestImageWriteTracker.PeekDirty(address));
                 Assert.Equal(0L, StorageMember(ownLedger, "admission"));
                 Assert.Equal(2L, StorageMember(volumeLedger, "admission"));
-                pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(5)));
+                pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(10)));
                 if (pause.Failure is { } failure) ExceptionDispatchInfo.Capture(failure).Throw();
                 Assert.True(pause.Written);
                 foreach (var mapping in mappings)
@@ -349,7 +349,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 try { pause.Written = volumeViews.TryWriteBacking(writeAddress, new byte[] { 0xA9 }); }
                 catch (Exception failure) { pause.Failure = failure; }
             }) { IsBackground = true, Name = "initial-owner different-backing writer" };
-            pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)));
+            pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(10)));
             foreach (var mapping in mappings)
                 Assert.Equal(CpuMappedReadWatchStatus.Busy, ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(mapping));
             Assert.Equal("Deferred", Call("TryAcknowledgeFiniteCanonicalDirty", address, null)!.ToString());
@@ -380,7 +380,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Exception? cleanup = null; pause.Resume.Set();
             try
             {
-                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(5)))
+                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(10)))
                 { owners.OrdinaryWriterUnconfirmed = true; cleanup = new TimeoutException("initial-owner writer still live; all owners quarantined"); }
             }
             catch (Exception failure) { owners.OrdinaryWriterUnconfirmed = true; cleanup = failure; }

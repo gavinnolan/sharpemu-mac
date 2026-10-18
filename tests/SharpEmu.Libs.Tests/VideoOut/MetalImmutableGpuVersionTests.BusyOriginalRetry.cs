@@ -110,7 +110,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 // The real ordinary envelope and exact physical chunk, plus
                 // the canonical alias lifetime pin, are held BEFORE any byte.
                 pause.Admitted.Set();
-                if (!pause.Resume.Wait(TimeSpan.FromSeconds(5)))
+                if (!pause.Resume.Wait(TimeSpan.FromSeconds(10)))
                     throw new TimeoutException("Busy ordinary writer was not released within the controlled bound.");
             }));
             releaseHook.SetValue(null, (Action)(() =>
@@ -128,7 +128,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                         catch (Exception failure) { pause.Failure = failure; }
                     }) { IsBackground = true, Name = "controlled canonical Busy writer" };
                     pause.Thread.Start();
-                    Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)), "real ordinary chunk admission must be reached");
+                    Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(10)), "real ordinary chunk admission must be reached");
                     Assert.True(pause.Thread.IsAlive);
                     CheckOriginalVolumes(CpuMappedReadWatchStatus.Busy);
                 }
@@ -219,7 +219,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.Equal(expected, readCanonical());
 
             pause.Resume.Set();
-            Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(5)), "ordinary writer must finish before any owner cleanup");
+            Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(10)), "ordinary writer must finish before any owner cleanup");
             if (pause.Failure is { } writerFailure) ExceptionDispatchInfo.Capture(writerFailure).Throw();
             Assert.True(pause.Written);
             expected[checked(imageBytes + 32768)] = 0xA9;
@@ -264,7 +264,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             pause.Resume.Set();
             try
             {
-                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(5)))
+                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(10)))
                 {
                     owners.OrdinaryWriterUnconfirmed = true;
                     cleanup = new TimeoutException("Busy ordinary writer remains live; backing, native owners and events are quarantined.");

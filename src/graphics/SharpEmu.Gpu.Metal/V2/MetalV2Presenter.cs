@@ -263,6 +263,8 @@ internal static partial class MetalV2Presenter
 
             EnsureDeviceLocked();
             _windowStarted = true;
+            // Before the prewarm, whose libraries it may already hold.
+            MetalBinaryArchive.Start(_device);
             MetalShaderPrewarm.Start(_device);
             if (HostMainThread.IsAvailable)
             {

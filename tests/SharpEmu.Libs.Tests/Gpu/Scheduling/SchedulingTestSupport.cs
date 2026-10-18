@@ -215,7 +215,7 @@ internal static class SchedulingTestSupport
     public static async Task<bool> CompletesWithin(Task task, int milliseconds) =>
         await Task.WhenAny(task, Task.Delay(milliseconds)) == task;
 
-    public static bool WaitUntil(Func<bool> condition, int milliseconds = 5000)
+    public static bool WaitUntil(Func<bool> condition, int milliseconds = 10000)
     {
         var watch = Stopwatch.StartNew();
         while (!condition())

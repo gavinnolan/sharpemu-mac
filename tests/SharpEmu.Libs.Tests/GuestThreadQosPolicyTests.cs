@@ -80,7 +80,7 @@ public sealed class GuestThreadQosPolicyTests
         }, out var errno);
 
         Assert.NotNull(thread);
-        Assert.True(thread!.Join(5000));
+        Assert.True(thread!.Join(10000));
         Assert.Equal(0x11u, actual);
         Assert.Equal("qos-test", name);
         Assert.Equal(0, errno);

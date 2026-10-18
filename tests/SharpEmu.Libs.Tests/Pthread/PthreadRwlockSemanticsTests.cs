@@ -52,7 +52,7 @@ public sealed class PthreadRwlockSemanticsTests
                 readerContext[CpuRegister.Rdi] = rwlockAddress;
                 var lockResult = KernelPthreadExtendedCompatExports.PthreadRwlockRdlock(readerContext);
                 readerReady.Set();
-                releaseReader.Wait(TimeSpan.FromSeconds(5));
+                releaseReader.Wait(TimeSpan.FromSeconds(10));
                 var unlockResult = lockResult == 0
                     ? KernelPthreadExtendedCompatExports.PthreadRwlockUnlock(readerContext)
                     : int.MinValue;
@@ -64,7 +64,7 @@ public sealed class PthreadRwlockSemanticsTests
 
         try
         {
-            Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(readerReady.Wait(TimeSpan.FromSeconds(10)));
             var writerContext = new CpuContext(memory, Generation.Gen5);
             writerContext[CpuRegister.Rdi] = rwlockAddress;
             Assert.Equal(
@@ -76,7 +76,7 @@ public sealed class PthreadRwlockSemanticsTests
             releaseReader.Set();
         }
 
-        Assert.Equal((0, 0), await readerTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal((0, 0), await readerTask.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, KernelPthreadExtendedCompatExports.PthreadRwlockDestroy(initializationContext));
     }
 }

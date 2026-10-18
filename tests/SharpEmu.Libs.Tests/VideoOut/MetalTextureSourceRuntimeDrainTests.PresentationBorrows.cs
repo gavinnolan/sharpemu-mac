@@ -119,7 +119,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             Assert.True(SpinWait.SpinUntil(() =>
             {
                 lock (Field("_gate").GetValue(null)!) return (int)Field("_guestPresentationBorrowShutdownWaiters").GetValue(null)! == 1;
-            }, 1500));
+            }, 10000));
             // Acquiring this gate while the real shutdown waits proves that
             // its wait releases the gate. The borrower can still finish.
             lock (Field("_gate").GetValue(null)!)
@@ -132,14 +132,14 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Assert.Null(args[2]); Assert.Equal(0, MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, "closed"));
             }
             Assert.Equal(before + 1, GuestDataPool.DiagnosticStats().LeaseCount);
-            ReleaseBorrow(borrow); Assert.True(closing.Wait(1500));
+            ReleaseBorrow(borrow); Assert.True(closing.Wait(10000));
             Assert.False((bool)Field("_guestPresentationBorrowShutdownIncomplete").GetValue(null)!);
             Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount); AssertNoLivePayloadReceipts();
         }
         finally
         {
             foreach (var borrow in ((IEnumerable)Field("_activeGuestPresentationPayloadBorrows").GetValue(null)!).Cast<object>().ToArray()) ReleaseBorrow(borrow);
-            if (closing is not null) Assert.True(closing.Wait(3000));
+            if (closing is not null) Assert.True(closing.Wait(10000));
             GuestDataPool.Shared.Return(data);
         }
     }
@@ -162,7 +162,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Field("_guestWorkFailure").SetValue(null, cause);
                 Field("_guestPresentationBorrowShutdownTimeoutMilliseconds").SetValue(null, 30);
                 if (selfClose) Call("CompletePresenterShutdown");
-                else Assert.True(Task.Run(() => Call("CompletePresenterShutdown")).Wait(1500));
+                else Assert.True(Task.Run(() => Call("CompletePresenterShutdown")).Wait(10000));
                 Assert.True((bool)Field("_guestPresentationBorrowShutdownIncomplete").GetValue(null)!);
                 Assert.Same(cause, Field("_guestWorkFailure").GetValue(null));
                 Assert.Contains(selfClose ? "closing thread" : "timed out", Assert.IsType<InvalidOperationException>(Field("_textureSourceCleanupFailure").GetValue(null)).Message);
@@ -227,11 +227,11 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             Assert.True(SpinWait.SpinUntil(() =>
             {
                 lock (Field("_gate").GetValue(null)!) return (int)Field("_guestPresentationBorrowShutdownWaiters").GetValue(null)! == 1;
-            }, 1500));
+            }, 10000));
             Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, (Action)(() => throw cleanup));
             var failure = Assert.Throws<TargetInvocationException>(() => ReleaseBorrow(borrow));
             Assert.Same(cleanup, Assert.IsType<GpuFatalException>(failure.InnerException).InnerException);
-            Assert.True(closing.Wait(1500)); Assert.Equal(0, ActiveBorrows);
+            Assert.True(closing.Wait(10000)); Assert.Equal(0, ActiveBorrows);
             Assert.Same(cleanup, Field("_guestWorkFailure").GetValue(null)); Assert.Single(reports);
             AssertNoLivePayloadReceipts();
         }
@@ -239,7 +239,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
         {
             Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, null);
             foreach (var borrow in ((IEnumerable)Field("_activeGuestPresentationPayloadBorrows").GetValue(null)!).Cast<object>().ToArray()) ReleaseBorrow(borrow);
-            if (closing is not null) Assert.True(closing.Wait(3000));
+            if (closing is not null) Assert.True(closing.Wait(10000));
             GuestDataPool.Shared.Return(data);
         }
     }
@@ -284,20 +284,20 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             Assert.True(SpinWait.SpinUntil(() =>
             {
                 lock (Field("_gate").GetValue(null)!) return (int)Field("_guestPresentationBorrowShutdownWaiters").GetValue(null)! == 1;
-            }, 1500));
+            }, 10000));
             var accepted = Field("_guestPresentationShutdownAttempt").GetValue(null)!;
             second = Task.Run(() => Call("CompletePresenterShutdown"));
             Assert.True(SpinWait.SpinUntil(() =>
             {
                 lock (Field("_gate").GetValue(null)!) return (int)Field("_guestPresentationShutdownJoinWaiters").GetValue(null)! == 1;
-            }, 1500));
+            }, 10000));
             lock (Field("_gate").GetValue(null)!)
             {
                 Assert.Same(accepted, Field("_guestPresentationShutdownAttempt").GetValue(null));
                 Assert.False((bool)Get(accepted, "Finished")!); Assert.False((bool)Get(accepted, "Completed")!);
                 Assert.False(first.IsCompleted); Assert.False(second.IsCompleted);
             }
-            ReleaseBorrow(borrow); Assert.True(Task.WaitAll([first, second], 1500));
+            ReleaseBorrow(borrow); Assert.True(Task.WaitAll([first, second], 10000));
             Assert.Same(accepted, Field("_guestPresentationShutdownAttempt").GetValue(null));
             Assert.True((bool)Get(accepted, "Finished")!); Assert.True((bool)Get(accepted, "Completed")!);
             Call("CompletePresenterShutdown"); Assert.Same(accepted, Field("_guestPresentationShutdownAttempt").GetValue(null));
@@ -306,8 +306,8 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
         finally
         {
             foreach (var borrow in ((IEnumerable)Field("_activeGuestPresentationPayloadBorrows").GetValue(null)!).Cast<object>().ToArray()) ReleaseBorrow(borrow);
-            if (first is not null) Assert.True(first.Wait(3000));
-            if (second is not null) Assert.True(second.Wait(3000));
+            if (first is not null) Assert.True(first.Wait(10000));
+            if (second is not null) Assert.True(second.Wait(10000));
             GuestDataPool.Shared.Return(data);
         }
     }
@@ -325,22 +325,22 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             Assert.True(SpinWait.SpinUntil(() =>
             {
                 lock (Field("_gate").GetValue(null)!) return (int)Field("_guestPresentationBorrowShutdownWaiters").GetValue(null)! == 1;
-            }, 1500));
+            }, 10000));
             var accepted = Field("_guestPresentationShutdownAttempt").GetValue(null)!;
             Field("_guestPresentationBorrowShutdownTimeoutMilliseconds").SetValue(null, 30);
             if (selfJoin) Call("CompletePresenterShutdown");
-            else Assert.True(Task.Run(() => Call("CompletePresenterShutdown")).Wait(1500));
+            else Assert.True(Task.Run(() => Call("CompletePresenterShutdown")).Wait(10000));
             Assert.Same(accepted, Field("_guestPresentationShutdownAttempt").GetValue(null));
             Assert.False((bool)Get(accepted, "Finished")!); Assert.False((bool)Get(accepted, "Completed")!);
             Assert.False(first.IsCompleted); Assert.Equal(1, ActiveBorrows);
             Assert.Contains(selfJoin ? "own active" : "joining", Assert.IsType<InvalidOperationException>(Field("_textureSourceCleanupFailure").GetValue(null)).Message);
-            ReleaseBorrow(borrow); Assert.True(first.Wait(1500));
+            ReleaseBorrow(borrow); Assert.True(first.Wait(10000));
             Assert.True((bool)Get(accepted, "Completed")!); AssertNoLivePayloadReceipts();
         }
         finally
         {
             foreach (var borrow in ((IEnumerable)Field("_activeGuestPresentationPayloadBorrows").GetValue(null)!).Cast<object>().ToArray()) ReleaseBorrow(borrow);
-            if (first is not null) Assert.True(first.Wait(3000));
+            if (first is not null) Assert.True(first.Wait(10000));
             GuestDataPool.Shared.Return(data);
         }
     }

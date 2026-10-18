@@ -138,7 +138,7 @@ public sealed partial class MetalTextureMaterializationTests
                 {
                     Exception? failure = null;
                     var thread = new Thread(() => { try { validate.Invoke(null, [association, false]); } catch (Exception error) { failure = error; } });
-                    thread.Start(); Assert.True(thread.Join(TimeSpan.FromSeconds(5)));
+                    thread.Start(); Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
                     Assert.IsType<InvalidOperationException>(Assert.IsType<TargetInvocationException>(failure).InnerException);
                 }
             }

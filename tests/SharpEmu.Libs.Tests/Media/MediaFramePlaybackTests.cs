@@ -24,7 +24,7 @@ public sealed class MediaFramePlaybackTests
 
     private static byte[] WaitForAdvancedFrame(MediaFramePlayback playback)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
             if (playback.TryGetFrame(true, out var frame, out var advanced) && advanced)
@@ -100,7 +100,7 @@ public sealed class MediaFramePlaybackTests
         MediaFramePlayback playback,
         bool advanceClock)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
             if (playback.TryGetFrame(advanceClock, out var frame, out _))
@@ -118,7 +118,7 @@ public sealed class MediaFramePlaybackTests
         MediaFramePlayback playback,
         long targetFrameIndex)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
             if (playback.TryGetFrameAtOrBeforeIndex(

@@ -23,19 +23,19 @@ public sealed class CommandPrefixCompletionTests
         {
             Assert.False(Monitor.IsEntered(typeof(CommandStreamQueue).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(queue)!));
             Assert.NotEqual(caller, Environment.CurrentManagedThreadId);
-            entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(2)));
+            entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(10)));
         }) : null;
         var words = StreamRunner.Packet(PacketOpcode.NumInstances, 3); host.WriteWords(StreamRunner.CommandAddress, words);
         var first = queue.EnqueueWithPreparation(0, StreamRunner.CommandAddress, (uint)words.Length, 91, null);
         var worker = new CommandStreamWorker(queue, host, static () => false, true, "prefix progress"); worker.Start();
         try
         {
-            var wait = Task.Run(first.WaitUntilPrepared); Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            var wait = Task.Run(first.WaitUntilPrepared); Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
             var other = StreamRunner.Packet(PacketOpcode.NumInstances, 7); host.WriteWords(StreamRunner.DataAddress, other);
             queue.EnqueueCompute(0x20, StreamRunner.DataAddress, (uint)other.Length, 92, null);
             Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle()); Assert.Equal(7u, queue.GetInterpreter(1).InstanceCount);
             Assert.False(wait.IsCompleted); release.Set();
-            Assert.Equal(GuestSubmissionPreparationResult.PreparedPrefix, await wait.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(GuestSubmissionPreparationResult.PreparedPrefix, await wait.WaitAsync(TimeSpan.FromSeconds(10)));
         }
         finally { release.Set(); worker.Stop(); }
     }

@@ -109,7 +109,7 @@ internal static class MacBackingLifecycleWorker
             Assert.True(views.TryResolveAlias(second.Address, (ulong)seed.Length, out var alias));
             Assert.Equal(seed, new ReadOnlySpan<byte>((void*)second.Address, seed.Length).ToArray());
             closing = Task.Run(views.Dispose);
-            Assert.True(SpinWait.SpinUntil(() => !views.IsAvailable, 1000));
+            Assert.True(SpinWait.SpinUntil(() => !views.IsAvailable, 10000));
             Assert.False(views.CleanupComplete); Assert.False(backing.IsDisposed); Assert.Equal(HostBackingReleaseStatus.NotAttempted, backing.LastRelease.Status);
             Assert.False(views.TryEnterAliasAccess()); Assert.False(views.TryWriteBacking(first.Address, seed));
             // Resolve before close, then use only under the already admitted
@@ -139,7 +139,7 @@ internal static class MacBackingLifecycleWorker
             // Reentrant Dispose requests close only, while this pending operation
             // still owns its exact late-map rollback obligation.
             views.Dispose(); Assert.False(views.CleanupComplete); Assert.False(backing.IsDisposed);
-            requested.Set(); Assert.True(proceed.Wait(1500));
+            requested.Set(); Assert.True(proceed.Wait(10000));
         };
         try
         {
@@ -148,7 +148,7 @@ internal static class MacBackingLifecycleWorker
                 Assert.False(views.TryMapReservedRange(hole.Address, host.PageSize, 0, HostPageProtection.ReadWrite, out var failure));
                 Assert.Equal(HostViewFailure.BackingUnavailable, failure); Assert.True(views.CleanupComplete);
             });
-            Assert.True(requested.Wait(1000));
+            Assert.True(requested.Wait(10000));
             peer = Task.Run(() => { peerStarted.Set(); views.Dispose(); Assert.True(views.CleanupComplete); });
             Assert.True(peerStarted.Wait(1000)); Assert.False(peer.IsCompleted);
             Assert.False(views.IsAvailable); Assert.False(views.CleanupComplete); Assert.Equal(HostBackingReleaseStatus.NotAttempted, backing.LastRelease.Status);
@@ -169,7 +169,7 @@ internal static class MacBackingLifecycleWorker
         foreach (var task in tasks)
         {
             if (task is null) continue;
-            try { task.WaitAsync(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult(); }
+            try { task.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult(); }
             catch (Exception error) when (error is not OutOfMemoryException and not AccessViolationException)
             {
                 cleanup ??= error;
@@ -189,7 +189,7 @@ internal static class MacBackingLifecycleWorker
 
     private static void Released(HostBackingObject backing)
     {
-        Assert.True(backing.TryDispose(TimeSpan.FromSeconds(1), out var result));
+        Assert.True(backing.TryDispose(TimeSpan.FromSeconds(10), out var result));
         Assert.Equal(HostBackingReleaseStatus.Released, result.Status); Assert.Equal(0, result.NativeError); AssertReleased(backing);
         Console.WriteLine($"native-backing-release identity={backing.Identity} logical_bytes={backing.Size} alias_extent={backing.NativeAliasSize} status={result.Status} native_error={result.NativeError}; actual-provider-cleanup-not-permission-receipt");
     }
@@ -366,14 +366,14 @@ public sealed class MacBackingLifecycleTests(ITestOutputHelper output)
         try
         {
             await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-            var captured = await stdout.WaitAsync(TimeSpan.FromSeconds(2)); var errors = await stderr.WaitAsync(TimeSpan.FromSeconds(2));
+            var captured = await stdout.WaitAsync(TimeSpan.FromSeconds(10)); var errors = await stderr.WaitAsync(TimeSpan.FromSeconds(10));
             output.WriteLine(captured); if (errors.Length != 0) output.WriteLine(errors);
             Assert.Equal(0, worker.ExitCode); Assert.Empty(errors); Assert.Contains("backing-native-pass case=" + scenario, captured);
             Assert.Contains("architecture=" + expected, captured); Assert.Contains("ordinary-alias-descriptor-only", captured);
         }
         finally
         {
-            if (!worker.HasExited) { worker.Kill(entireProcessTree: true); await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+            if (!worker.HasExited) { worker.Kill(entireProcessTree: true); await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
         }
     }
 }

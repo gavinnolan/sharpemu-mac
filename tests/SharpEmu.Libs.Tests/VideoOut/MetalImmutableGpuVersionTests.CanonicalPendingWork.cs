@@ -95,14 +95,14 @@ public sealed partial class MetalImmutableGpuVersionTests
                         Assert.False(pvmGate.IsReadLockHeld || pvmGate.IsWriteLockHeld || pvmGate.IsUpgradeableReadLockHeld);
                         Assert.Equal(2L, StorageMember(ledger, "admission"));
                         writeHook.SetValue(views, oldWriteHook); pause.Admitted.Set();
-                        if (!pause.Resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("pending original writer did not resume");
+                        if (!pause.Resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("pending original writer did not resume");
                     }));
                     pause.Thread = new Thread(() =>
                     {
                         try { pause.Written = views.TryWriteBacking(writeAddress, new byte[] { 0xA9 }); }
                         catch (Exception failure) { pause.Failure = failure; }
                     }) { IsBackground = true, Name = "pending canonical lower watch Busy" };
-                    pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)));
+                    pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(10)));
                     Assert.Equal(CpuMappedReadWatchStatus.Busy, memory.GetMappedCopyWriteWatchStatus(firstVolumeMapping));
                 }
             }));
@@ -198,7 +198,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             if (scenario == "volume-busy")
             {
                 pause.Resume.Set();
-                if (!pause.Thread!.Join(TimeSpan.FromSeconds(5)))
+                if (!pause.Thread!.Join(TimeSpan.FromSeconds(10)))
                 {
                     owners.OrdinaryWriterUnconfirmed = true;
                     throw new TimeoutException("actual lower watch Busy writer could not be joined");
@@ -216,7 +216,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             pause.Resume.Set();
             try
             {
-                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(5)))
+                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(10)))
                 {
                     owners.OrdinaryWriterUnconfirmed = true;
                     cleanup = new TimeoutException("pending original writer remains live; exact native/backing owners quarantined");

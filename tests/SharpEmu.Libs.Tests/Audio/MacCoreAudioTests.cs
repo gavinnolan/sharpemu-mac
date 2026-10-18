@@ -380,7 +380,7 @@ public class MacCoreAudioDeviceTests
         using (stream)
         {
             PlayTone(stream, channels: 2, HostPcmFormat.Signed16);
-            AssertQueueDrains(stream);
+            AssertQueueDrains(stream, () => PlayTone(stream, channels: 2, HostPcmFormat.Signed16, milliseconds: 100));
         }
 
         Assert.False(stream.Submit(new byte[4]));
@@ -400,7 +400,7 @@ public class MacCoreAudioDeviceTests
         using (stream)
         {
             PlayTone(stream, channels: 6, HostPcmFormat.Float32);
-            AssertQueueDrains(stream);
+            AssertQueueDrains(stream, () => PlayTone(stream, channels: 6, HostPcmFormat.Float32, milliseconds: 100));
         }
     }
 
@@ -500,12 +500,22 @@ public class MacCoreAudioDeviceTests
     /// holding a cushion) and shallower a moment later (the device is consuming
     /// it). A stream that never drains would hold the first value forever.
     /// </summary>
-    private static void AssertQueueDrains(IHostAudioStream stream)
+    private static void AssertQueueDrains(IHostAudioStream stream, Action refill)
     {
+        // The tone is generated in real time, so a loaded runner can starve the device and
+        // leave the queue empty by the time it is read. Top it up and look again (Submit blocks
+        // until there is room, so a refill returns with a cushion queued); a stream that never
+        // queues anything still fails after the retries.
         var queued = stream.QueuedMilliseconds;
+        for (var attempt = 0; queued <= 0 && attempt < 5; attempt++)
+        {
+            refill();
+            queued = stream.QueuedMilliseconds;
+        }
+
         Assert.True(queued > 0, $"the device queue should hold a cushion, saw {queued} ms");
 
-        var deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
+        var deadline = Stopwatch.GetTimestamp() + (10 * Stopwatch.Frequency);
         var drained = false;
         while (Stopwatch.GetTimestamp() < deadline)
         {

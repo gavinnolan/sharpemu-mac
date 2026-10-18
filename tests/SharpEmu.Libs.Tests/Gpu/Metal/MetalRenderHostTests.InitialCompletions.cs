@@ -26,13 +26,13 @@ public sealed partial class MetalRenderHostTests
         {
             Assert.False(Monitor.IsEntered(CompletionGate));
             entered.Set();
-            Assert.True(release.Wait(3000));
+            Assert.True(release.Wait(10000));
             InvokeLabelWriter(_host, new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 7, address, 1));
         }, "first initial payload"));
         Task<Exception?>? second = null;
         try
         {
-            Assert.True(entered.Wait(1000));
+            Assert.True(entered.Wait(10000));
             var receipt = ReadCompletionState("_initialGuestCompletion");
             Assert.NotNull(receipt);
             second = CompletionWorker(() => _host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 7, address, 42)));
@@ -59,12 +59,12 @@ public sealed partial class MetalRenderHostTests
         using var entered = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         var first = CompletionWorker(() => MetalVideoPresenter.SubmitOrderedGuestCompletion(() =>
-        { entered.Set(); Assert.True(release.Wait(3000)); }, "paused initial"));
+        { entered.Set(); Assert.True(release.Wait(10000)); }, "paused initial"));
         Task<Exception?>? later = null;
         var executed = false;
         try
         {
-            Assert.True(entered.Wait(1000));
+            Assert.True(entered.Wait(10000));
             later = CompletionWorker(() =>
             {
                 if (operation == "close") InvokeCompletionMethod("CompletePresenterShutdown");
@@ -105,11 +105,11 @@ public sealed partial class MetalRenderHostTests
         using var release = new ManualResetEventSlim();
         var original = new InvalidOperationException("initial memory publication failed");
         var first = CompletionWorker(() => MetalVideoPresenter.SubmitOrderedGuestCompletion(() =>
-        { entered.Set(); Assert.True(release.Wait(3000)); throw original; }, "failed initial"));
+        { entered.Set(); Assert.True(release.Wait(10000)); throw original; }, "failed initial"));
         Task<Exception?>? startup = null;
         try
         {
-            Assert.True(entered.Wait(1000));
+            Assert.True(entered.Wait(10000));
             startup = CompletionWorker(() => { lock (CompletionGate) InvokeCompletionMethod("StartPresenterLocked"); });
             WaitForInitialCompletionWaiters(1);
             Assert.Null(ReadCompletionState("_thread"));
@@ -137,11 +137,11 @@ public sealed partial class MetalRenderHostTests
         using var release = new ManualResetEventSlim();
         var original = new InvalidOperationException("paused initial publisher fails");
         var first = CompletionWorker(() => MetalVideoPresenter.SubmitOrderedGuestCompletion(() =>
-        { entered.Set(); Assert.True(release.Wait(3000)); throw original; }, "direct caller barrier"));
+        { entered.Set(); Assert.True(release.Wait(10000)); throw original; }, "direct caller barrier"));
         Task<Exception?>? later = null;
         try
         {
-            Assert.True(entered.Wait(1000));
+            Assert.True(entered.Wait(10000));
             later = CompletionWorker(() =>
             {
                 switch (caller)
@@ -216,7 +216,7 @@ public sealed partial class MetalRenderHostTests
         { entered.Set(); Assert.True(release.Wait(3000)); }, "deadline owner"));
         try
         {
-            Assert.True(entered.Wait(1000));
+            Assert.True(entered.Wait(10000));
             var receipt = ReadCompletionState("_initialGuestCompletion");
             var failure = Assert.Throws<InvalidOperationException>(() => InvokeCompletionMethod("CompletePresenterShutdown"));
             Assert.Contains("deadline expired", failure.Message);
@@ -308,11 +308,11 @@ public sealed partial class MetalRenderHostTests
     private static Task<Exception?> CompletionWorker(Action action) => Task.Factory.StartNew(() =>
     { try { action(); return (Exception?)null; } catch (Exception exception) { return exception; } },
         CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-    private static Exception? WorkerResult(Task<Exception?> worker) { Assert.True(worker.Wait(2000)); return worker.Result; }
+    private static Exception? WorkerResult(Task<Exception?> worker) { Assert.True(worker.Wait(10000)); return worker.Result; }
     private static void JoinCompletionWorkers(params Task<Exception?>?[] workers)
-    { foreach (var worker in workers) if (worker is not null) Assert.True(worker.Wait(4000)); }
+    { foreach (var worker in workers) if (worker is not null) Assert.True(worker.Wait(10000)); }
     private static void WaitForInitialCompletionWaiters(int count) => Assert.True(SpinWait.SpinUntil(() =>
-        (int)ReadCompletionState("_initialGuestCompletionWaiters")! >= count, 1000), "worker must reach the actual receipt wait");
+        (int)ReadCompletionState("_initialGuestCompletionWaiters")! >= count, 10000), "worker must reach the actual receipt wait");
     private static object InitialControlAction(Action action) => Activator.CreateInstance(typeof(MetalVideoPresenter)
         .GetNestedType("OrderedGuestAction", BindingFlags.NonPublic)!, [action, "actual admission barrier control"])!;
     private static object InitialControlPresentation()

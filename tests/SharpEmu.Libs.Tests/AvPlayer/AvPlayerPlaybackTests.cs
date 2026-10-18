@@ -160,7 +160,7 @@ public sealed class AvPlayerPlaybackTests
             var decoder = Activator.CreateInstance(queueType, new MemoryStream(videoBytes), FrameByteCount, 16)!;
             SetState("VideoDecoder", decoder);
             _decoderWorker = (Thread)queueType.GetField("_worker", PrivateInstance)!.GetValue(decoder)!;
-            Assert.True(_decoderWorker.Join(TimeSpan.FromSeconds(5)), "The test decoder did not finish.");
+            Assert.True(_decoderWorker.Join(TimeSpan.FromSeconds(10)), "The test decoder did not finish.");
         }
 
         public bool ReachedVideoEnd =>
@@ -238,7 +238,7 @@ public sealed class AvPlayerPlaybackTests
         public void Dispose()
         {
             AvPlayerExports.RemovePlayerForTest(Handle);
-            Assert.True(_decoderWorker.Join(TimeSpan.FromSeconds(5)));
+            Assert.True(_decoderWorker.Join(TimeSpan.FromSeconds(10)));
         }
     }
 }

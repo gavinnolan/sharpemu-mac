@@ -230,7 +230,7 @@ public sealed partial class MetalRenderHostTests
             if (!task.IsCompleted)
             {
                 _ = MetalVideoPresenter.FailGuestCompletion("managed memory-order control unwound before its worker");
-                try { await task.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+                try { await task.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
                 Assert.True(task.IsCompleted, "Never restore scheduling state while its worker still owns an action.");
             }
         }

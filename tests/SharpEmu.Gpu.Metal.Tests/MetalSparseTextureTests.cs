@@ -163,6 +163,29 @@ public sealed unsafe class MetalSparseTextureTests(ITestOutputHelper output)
         }
     }
 
+    // The tile size is a 24-byte MTLSize, which an x86_64 process (the osx-x64 build under
+    // Rosetta) gets only through objc_msgSend_stret: through objc_msgSend the device was
+    // messaged with the result buffer for its receiver, crashing the host the first time a
+    // texture qualified (the Demon's Souls GPU-worker crashes). A tile is 16 KiB of texels.
+    [Theory]
+    [InlineData(252u, 4u)] // Depth32Float
+    [InlineData(70u, 4u)] // RGBA8Unorm
+    [InlineData(115u, 8u)] // RGBA16Float
+    public void TheSparseTileSizeIsReadWithTheStructReturnOfTheProcessArchitecture(uint pixelFormat, uint texelBytes)
+    {
+        if (!RequireDevice()) return;
+        var selector = MetalNative.Selector("sparseTileSizeWithTextureType:pixelFormat:sampleCount:");
+        var tileBytes = MetalV2Native.SendValue(Device.Value, MetalNative.Selector("sparseTileSizeInBytes"));
+        for (var call = 0; call < 64; call++)
+        {
+            var tile = MetalV2Native.SendSparseTileSize(Device.Value, selector, (nuint)Mtl.TextureType2DArray, pixelFormat, 1);
+            Assert.Equal((nuint)1, tile.Depth);
+            Assert.Equal(tileBytes, tile.Width * tile.Height * texelBytes);
+        }
+
+        output.WriteLine($"{RuntimeInformation.ProcessArchitecture}: format {pixelFormat} tiles of {tileBytes} bytes");
+    }
+
     private readonly record struct ArrayShape(uint Width, uint Height, uint Layers)
     {
         public ulong LayerBytes => LayerSize(Width, Height);

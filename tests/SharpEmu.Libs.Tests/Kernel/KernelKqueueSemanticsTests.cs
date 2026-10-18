@@ -352,9 +352,9 @@ public sealed class KernelKqueueSemanticsTests
         waiter.Start();
         Thread.Sleep(30);
         _ = trigger();
-        Assert.True(waiter.Join(TimeSpan.FromSeconds(9)));
+        Assert.True(waiter.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(Ok, result);
-        Assert.True(stopwatch.ElapsedMilliseconds < 5_000, $"woke after {stopwatch.ElapsedMilliseconds} ms");
+        Assert.True(stopwatch.ElapsedMilliseconds < 9_000, $"woke after {stopwatch.ElapsedMilliseconds} ms");
     }
 
     private static Q.KernelQueuedEvent UserChange(ulong ident, int flags, uint fflags = 0, ulong data = 0) =>

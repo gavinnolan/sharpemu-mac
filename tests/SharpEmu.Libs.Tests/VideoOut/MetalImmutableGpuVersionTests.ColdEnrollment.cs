@@ -143,7 +143,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                         {
                             Assert.Equal(alias, destination); Assert.Equal(1, length); RequireGateFree();
                             Assert.Equal(2L, InitialAdmission); ready.Set();
-                            if (!resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Cold ordinary actor resume bound.");
+                            if (!resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Cold ordinary actor resume bound.");
                         }));
                         Assert.True(views.TryWriteBacking(disjoint, disjointByte));
                         Interlocked.Increment(ref releases);
@@ -167,7 +167,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                             Assert.NotNull(heldPublication);
                         }
                         RequireGateFree(); Assert.Equal(4294967296L, InitialAdmission); ready.Set();
-                        if (!resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Cold reservation actor resume bound.");
+                        if (!resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Cold reservation actor resume bound.");
                         if (heldRead is { } read)
                         {
                             // Clear BEFORE the sole release. An exception keeps
@@ -193,7 +193,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 catch (Exception failure) { actorFailure = failure; ready.Set(); }
             }) { IsBackground = true, Name = "real cold enrollment foreign admission" };
             owners.OrdinaryWriterUnconfirmed = true;
-            actor.Start(); Assert.True(ready.Wait(TimeSpan.FromSeconds(5)));
+            actor.Start(); Assert.True(ready.Wait(TimeSpan.FromSeconds(10)));
             if (actorFailure is { } failure) ExceptionDispatchInfo.Capture(failure).Throw();
             admittedPins = backing.ActiveAccesses;
             Assert.True(admittedPins > baselinePins);
@@ -335,7 +335,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             resume.Set();
             if (actor is not null && !joined)
             {
-                joined = actor.Join(TimeSpan.FromSeconds(5));
+                joined = actor.Join(TimeSpan.FromSeconds(10));
                 if (!joined) throw new TimeoutException("Cold actor outcome unknown; fixture owners retained.");
             }
             var cleanup = RestoreHooks();

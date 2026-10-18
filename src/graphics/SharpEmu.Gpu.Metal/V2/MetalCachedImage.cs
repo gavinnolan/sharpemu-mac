@@ -353,6 +353,8 @@ internal sealed class MetalCachedImage : IDisposable
 
         Texture = texture;
         Shape = shape;
+        // A replacement texture is an ordinary one; the sparse grow path sets its record after.
+        Sparse = null;
         SetResidentLevels(firstLevel, start, end);
         MarkCpuDirty(MetalImageDirtyCause.Invalidated);
         NoteContentChanged();
@@ -380,6 +382,7 @@ internal sealed class MetalCachedImage : IDisposable
 
         Texture = texture;
         Shape = shape;
+        Sparse = null;
         NoteContentChanged();
         return retired;
     }
@@ -882,6 +885,7 @@ internal sealed class MetalCachedImage : IDisposable
 
         Texture = texture;
         Shape = shape;
+        Sparse = null;
         NoteContentChanged();
     }
 

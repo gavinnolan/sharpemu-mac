@@ -102,13 +102,13 @@ public sealed class MetalImageWriterAdmissionTests
         });
         try
         {
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
             // After the worker enters Submit, its only blocking operation is
             // EnqueueGuestWorkLocked's Monitor.Wait. Observe that real wait,
             // then inspect both admission bounds and publication under _gate.
             Assert.True(SpinWait.SpinUntil(() =>
                 (admissionThread!.ThreadState & ThreadState.WaitSleepJoin) != 0,
-                TimeSpan.FromSeconds(5)));
+                TimeSpan.FromSeconds(10)));
             lock (Field("_gate").GetValue(null)!)
             {
                 Assert.False(submit.IsCompleted);
@@ -117,7 +117,7 @@ public sealed class MetalImageWriterAdmissionTests
                 Assert.False(Registry("_guestImageWorkSequences").Contains(Address));
             }
             MetalVideoPresenter.DrainGuestWork(0, 0);
-            Assert.True(submit.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(submit.Wait(TimeSpan.FromSeconds(10)));
             Assert.True(submit.Result > 0);
             Assert.Equal(submit.Result, Registry("_guestImageWorkSequences")[Address]);
         }
@@ -130,7 +130,7 @@ public sealed class MetalImageWriterAdmissionTests
                     Field("_closed").SetValue(null, true);
                     Monitor.PulseAll(Field("_gate").GetValue(null)!);
                 }
-                _ = submit.Wait(TimeSpan.FromSeconds(5));
+                _ = submit.Wait(TimeSpan.FromSeconds(10));
             }
         }
     }

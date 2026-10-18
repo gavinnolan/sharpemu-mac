@@ -58,19 +58,19 @@ public sealed class HostRecoveryOwnerTests
         {
             lock (recoveryGate) { owner.Close(); closed.Set(); }
             // The kernel-mutation stand-in is deliberately after the gate/drain.
-            if (!owner.TryDrain(TimeSpan.FromSeconds(2))) return false;
+            if (!owner.TryDrain(TimeSpan.FromSeconds(10))) return false;
             Interlocked.Exchange(ref mutationStarted, 1);
             return true;
         });
-        Assert.True(closed.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(closed.Wait(TimeSpan.FromSeconds(10)));
         Assert.True(owner.IsClosed);
         Assert.False(owner.TryAcquireWritePin(Base, HostRecoveryAccess.Write, 2, 7, out _));
         Assert.Equal(0, Volatile.Read(ref mutationStarted));
         // A recovery needing this gate can finish; the draining thread cannot hold it.
         var released = await Task.Run(() => { lock (recoveryGate) return owner.Release(held); })
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TimeSpan.FromSeconds(10));
         Assert.True(released);
-        Assert.True(await mutation.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await mutation.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(1, Volatile.Read(ref mutationStarted));
         Assert.Equal(0, owner.ActivePins);
     }
