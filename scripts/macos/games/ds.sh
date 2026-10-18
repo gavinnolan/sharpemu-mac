@@ -27,7 +27,9 @@
 # Defaults, each overridable by an ENV=VALUE argument: SHARPEMU_DISPLAY_RESOLUTION=1080p and
 # SHARPEMU_TITLE_DISPLAY_PATCH=mode (the guest display and the internal scene are both
 # 1920x1080: metrics.md lists the resolution evidence from the log), SHARPEMU_LOG_SAVEDATA=1
-# and SHARPEMU_LOG_VIDEOOUT_FPS=1.
+# and SHARPEMU_LOG_VIDEOOUT_FPS=1. Memory evidence is on too: SHARPEMU_MEMSTAT=1 (memstat.log, every
+# SHARPEMU_MEMSTAT_EVERY=15 s, de-duplicated by VM object, through `sudo -n`), SHARPEMU_LOG_MEMORY=1 ([MEM] lines in
+# game.log) and, always, system-mem.log; ds-metrics.py puts them in metrics.md.
 # SHARPEMU_DS_DRY_RUN=1 prints the validated key plan and exits. SHARPEMU_SHOT_EVERY=<s> changes the 10 s interval screenshots; every plan marker also takes one.
 #
 # Plans are anchored on log lines, not wall-clock, where the game gives one (see input-plan.py):
@@ -170,6 +172,7 @@ run() {
   # The defaults come first so an ENV=VALUE argument (exported later, in order) wins.
   "$REPO_ROOT/scripts/macos/run-game.sh" ds "$1" "$SECONDS_LIMIT" "$PLAN" \
     SHARPEMU_SAVEDATA_DIR="$SAVES" SHARPEMU_LOG_VIDEOOUT_FPS=1 SHARPEMU_LOG_SAVEDATA=1 \
+    SHARPEMU_MEMSTAT=1 SHARPEMU_LOG_MEMORY=1 \
     SHARPEMU_DISPLAY_RESOLUTION=1080p SHARPEMU_TITLE_DISPLAY_PATCH=mode "${@:2}"
 }
 summarise() {

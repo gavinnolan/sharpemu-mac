@@ -5,7 +5,7 @@
 
 Inputs (all optional except run.env): run.env (launch_epoch), frame-times.txt (one line per guest
 flip, SHARPEMU_FRAME_TIMES), markers.tsv (epoch<TAB>name per plan marker), footprint.log
-("seconds footprint_mb rss_mb"), game.tlog (game.log with "[+seconds]" prefixes), result.txt and
+("seconds footprint_mb rss_mb"), memstat.log and system-mem.log (memstat.py), game.tlog (game.log with "[+seconds]" prefixes), result.txt and
 the screenshots.
 
 Definitions (all times are seconds since launch_epoch, the wall clock when run-game.sh started
@@ -31,6 +31,15 @@ the game):
                             intervals above 50 ms.
   peaks                     physical footprint and RSS (footprint.log, 1 s samples) and Metal
                             allocation (gpu_alloc_mb on the [METAL-PRESENT] lines, 2 s samples).
+  memory                    from memstat.log (JSON per sample, each VM object counted once): unique MB is
+                            resident + compressed/swapped bytes of the objects, which the kernel's
+                            physical footprint overstates when the guest's shared backing object is mapped
+                            many times. Reported per segment (peak) and overall: peak unique MB, steady
+                            state (median of the last third of the in-world time, in-world = from the
+                            `hud` marker to the end of the run), peak phys_footprint (same samples), the
+                            guest shm object's resident and compressed MB, and from system-mem.log the
+                            swap used delta and the swapouts / compressions summed over the window.
+                            The in-world window needs the `hud` marker; whole-run values are always given.
   crash                     non-zero exit, death by signal, a [FATAL]/[CRASH] log line, or the
                             harness killing the run (memory limit). A run still alive at its time
                             limit is not a crash.
@@ -48,6 +57,16 @@ import sys
 HANG_SECONDS = 30.0
 FATAL = re.compile(r"\]\[FATAL\]|\[CRASH\]|Unhandled exception|Fatal error")
 PRESENT = re.compile(r"\[METAL-PRESENT\].*?gpu_alloc_mb=(\d+) gpu_images=(\d+) gpu_image_cache_mb=(\d+)")
+
+
+def load_memstat_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("memstat_glue", Path(__file__).with_name("memstat.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 TLOG = re.compile(r"^\[\+\s*([0-9.]+)\] (.*)$")
 
 
@@ -288,12 +307,16 @@ def summarise(run, gameplay_regex):
             gameplay_note = "no `hud` marker was written; the first interval screenshot showing the HUD is used (resolution = the screenshot interval)"
     if gameplay is None:
         gameplay_note = "no in-world HUD was seen on screen (no `hud` marker): the run did not reach gameplay"
+    memstat_glue = load_memstat_module()
+    memstat = memstat_glue.rebase(memstat_glue.read_memstat(run / "memstat.log"), launch)
+    sysmem = memstat_glue.rebase(memstat_glue.read_sysmem(run / "system-mem.log"), launch)
     shots, shots_by_segment = screenshots(run, segments)
     segment_rows = []
     for name, start, end in segments:
         row = {"name": name, "start_s": round(start, 2), "end_s": round(end, 2)}
         row.update(frame_stats(flips, start, end))
         row["peaks"] = peaks(footprint, present, start, end)
+        row["memory"] = memstat_glue.summarise_window(memstat, sysmem, start, end)
         row["screenshots"] = ([f"shot-mark-{name}.png"] if (run / f"shot-mark-{name}.png").exists() else []) + shots_by_segment.get(name, [])
         segment_rows.append(row)
     first_flip = flips[0] if flips else None
@@ -309,12 +332,24 @@ def summarise(run, gameplay_regex):
         "overall_after_first_frame": overall,
         "segments": segment_rows,
         "peaks": peaks(footprint, present, 0.0, run_end + 1),
+        "memory": memory_summary(memstat_glue, memstat, sysmem, gameplay, run_end),
         "crash": {"crashed": bool(crash), "reasons": crash},
         "hangs": {"threshold_s": HANG_SECONDS, "events": find_hangs(flips, segments, run_end, alive_until)},
         "resolution": resolution_evidence(tlog),
         "screenshots": shots,
         "markers": [{"at_s": round(t, 2), "name": n} for t, n in markers],
     }
+
+
+def memory_summary(glue, memstat, sysmem, gameplay, run_end):
+    whole = glue.summarise_window(memstat, sysmem, 0.0, run_end + 1)
+    whole["steady_state_unique_mb"] = glue.steady_state(memstat, 0.0, run_end + 1)
+    in_world = None
+    if gameplay is not None:
+        in_world = glue.summarise_window(memstat, sysmem, gameplay, run_end + 1)
+        in_world["steady_state_unique_mb"] = glue.steady_state(memstat, gameplay, run_end + 1)
+        in_world["window_s"] = [round(gameplay, 2), round(run_end, 2)]
+    return {"whole_run": whole, "in_world": in_world}
 
 
 def fmt(value, unit=""):
@@ -341,21 +376,43 @@ def markdown(m):
               f"| crash | {'YES: ' + '; '.join(m['crash']['reasons']) if m['crash']['crashed'] else 'no'} |",
               f"| hangs (>= {m['hangs']['threshold_s']:.0f} s without a flip) | "
               + (", ".join(f"{h['from_s']}-{h['to_s']} s ({h['seconds']} s)" for h in m['hangs']['events']) or "none") + " |", ""]
+    lines += memory_markdown(m["memory"])
     r = m["resolution"]
     lines += ["## Resolution", f"- display patch: {r['display_patch'] or 'n/a'}", f"- video out: {r['video_out'] or 'n/a'}",
               f"- first published flip: {r['first_flip'] or 'n/a'}", f"- render passes (top): {r['render_passes']}", ""]
-    lines += ["## Segments", "", "| segment | start | end | flips | FPS avg | FPS p1 | p99 ms | hitches >50 ms | footprint MB | GPU MB | screenshots |",
-              "|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines += ["## Segments", "", "| segment | start | end | flips | FPS avg | FPS p1 | p99 ms | hitches >50 ms | footprint MB | unique MB | GPU MB | screenshots |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in m["segments"]:
         ft = s["frame_time_ms"] or {}
         lines.append(
             f"| {s['name']} | {s['start_s']} | {s['end_s']} | {s['flips']} | {fmt(s['fps_avg'])} | {fmt(s['fps_p1'])} | "
             f"{fmt(ft.get('p99'))} | {fmt(s['hitches_over_50ms'])} | {fmt(s['peaks']['footprint_mb'])} | "
-            f"{fmt(s['peaks']['gpu_alloc_mb'])} | {len(s['screenshots'])} |")
+            f"{fmt(s['memory']['unique_mb_peak'])} | {fmt(s['peaks']['gpu_alloc_mb'])} | {len(s['screenshots'])} |")
     lines += ["", "## Screenshots", ""]
     for shot in m["screenshots"]:
         lines.append(f"- {shot['file']} ({shot['at']})")
     return "\n".join(lines) + "\n"
+
+
+def memory_markdown(memory):
+    whole, world = memory["whole_run"], memory["in_world"]
+    if not whole["samples"]:
+        return ["## Memory", "- no memstat.log samples (memstat needs `sudo -n`; SHARPEMU_MEMSTAT=1)", ""]
+    lines = ["## Memory (each VM object counted once; MB)", "", "| metric | whole run | in world |", "|---|---|---|"]
+
+    def row(label, key):
+        lines.append(f"| {label} | {fmt(whole.get(key))} | {fmt(world.get(key)) if world else 'n/a'} |")
+    row("samples", "samples")
+    row("peak unique (resident + compressed)", "unique_mb_peak")
+    row("steady-state unique (median of last third)", "steady_state_unique_mb")
+    row("peak unique resident", "unique_resident_mb_peak")
+    row("peak phys_footprint (kernel)", "phys_footprint_mb_peak")
+    row("guest shm resident (last sample)", "shm_resident_mb_last")
+    row("guest shm compressed/swapped (last sample)", "shm_swapped_mb_last")
+    row("swap used delta", "swap_used_mb_delta")
+    row("swapouts (pages)", "swapouts")
+    row("compressions (pages)", "compressions")
+    return lines + [""]
 
 
 def main():
