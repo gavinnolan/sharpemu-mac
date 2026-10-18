@@ -88,6 +88,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                    Or '%(Filename)' == 'SharpEmu.ShaderCompiler.Vulkan'
                    Or '%(Filename)' == 'SharpEmu.Gpu.Vulkan'
                    Or '%(Filename)' == 'SharpEmu.Adapters.Sdl'
+                   Or $([System.String]::Copy('%(Filename)').StartsWith('Avalonia.Win32'))
+                   Or $([System.String]::Copy('%(Filename)').StartsWith('Avalonia.X11'))
+                   Or $([System.String]::Copy('%(Filename)').StartsWith('Avalonia.FreeDesktop'))
                    Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('moltenvk'))
                    Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().StartsWith('libvulkan'))" />
       <_SharpEmuMacForbiddenClosure Include="@(ResolvedFileToPublish->'%(Filename)%(Extension)')"

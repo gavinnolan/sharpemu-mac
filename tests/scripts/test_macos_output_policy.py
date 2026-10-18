@@ -62,7 +62,8 @@ class MacOutputPolicyTests(unittest.TestCase):
             project = root / "closure.proj"
             for filename, accepted in (("Silk.NET.Vulkan.dll", False), ("SharpEmu.Gpu.Vulkan.dll", False),
                                        ("SharpEmu.Adapters.Sdl.dll", False), ("SharpEmu.GUI.dll", True),
-                                       ("Avalonia.Base.dll", True), ("libSkiaSharp.dylib", True)):
+                                       ("Avalonia.Base.dll", True), ("libSkiaSharp.dylib", True),
+                                       ("Avalonia.Win32.dll", False), ("Avalonia.X11.dll", False)):
                 with self.subTest(filename=filename):
                     project.write_text('<Project><ItemGroup><ResolvedFileToPublish Include="' + filename +
                                        '" /></ItemGroup><Import Project="' + html.escape(str(targets), quote=True) + '" /></Project>')

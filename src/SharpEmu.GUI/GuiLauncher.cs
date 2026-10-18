@@ -28,7 +28,15 @@ public static class GuiLauncher
 
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<App>()
+#if SHARPEMU_GUI_MACOS
+            // Avalonia.Desktop's UsePlatformDetect would pull in the Win32
+            // and X11 backends; macOS only needs the native one.
+            .UseAvaloniaNative()
+            .UseSkia()
+            .UseHarfBuzz()
+#else
             .UsePlatformDetect()
+#endif
             .WithInterFont()
             .LogToTrace();
 
