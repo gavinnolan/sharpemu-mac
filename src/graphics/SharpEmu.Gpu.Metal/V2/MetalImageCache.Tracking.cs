@@ -424,6 +424,7 @@ internal sealed partial class MetalImageCache
         }
 
         StagedRanges?.OnUnmap(address, size);
+        _guestMemory.OnGuestUnmap(address, size);
         using var held = _lock.Hold();
         var end = address + size;
         var stale = new List<ulong>();

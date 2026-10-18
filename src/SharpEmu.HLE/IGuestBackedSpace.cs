@@ -48,6 +48,17 @@ public interface IGuestBackedSpace
     bool TryResolveBackingAliasSpan(ulong address, ulong size, out ulong alias) =>
         TryResolveBackingAlias(address, size, out alias);
 
+    // The host address the guest range itself is mapped at, when every byte of it is a
+    // backed view and the views lie side by side in host memory, whatever backing offsets
+    // they map. A range of pages mapped one by one from scattered backing offsets has no
+    // single alias address, but it is still one host range here: the Metal backend binds a
+    // read of such a range as a no-copy buffer over this mapping rather than a copy.
+    bool TryResolveBackedHostView(ulong address, ulong size, out ulong host)
+    {
+        host = 0;
+        return false;
+    }
+
     // The whole backing seen as one contiguous host range: its base pointer and byte
     // size, or zero when the space has no alias. The Metal backend maps this range as
     // no-copy MTLBuffer windows, so every address TryResolveBackingAlias returns falls

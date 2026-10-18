@@ -1934,17 +1934,12 @@ internal sealed partial class MetalRenderHost :
         // A buffer binding sees guest memory, so any image that owns these bytes
         // publishes them first; a written binding also invalidates those images.
         FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding);
-        MetalGuestRange range = default;
-        if (!isWritten && MetalStagedRangeCache.Eligible(size) && _stagedRanges is not null &&
-            !_guestMemory.TryResolveInPlace(address, size, out _))
-        {
-            range = BindStagedRange(address, size, written: false);
-        }
-
-        if (!range.IsValid)
-        {
-            range = _guestMemory.Resolve(address, size);
-        }
+        // A read takes the storage path: its window, a guest view, or a staged copy that
+        // holds the GPU's writes still in flight in this command buffer - whole, however
+        // large, up to the largest window.
+        var range = isWritten
+            ? _guestMemory.Resolve(address, size, whole: true)
+            : ResolveStorageBuffer(address, size, written: false);
 
         if (!range.IsValid)
         {
@@ -2193,7 +2188,7 @@ internal sealed partial class MetalRenderHost :
             // or the write reached watched DCC metadata. Of the owner ones, those that found
             // an image over their bytes and those that found none.
             $"cpu_write_locked={lockedCpuWrites.Owner}/{lockedCpuWrites.Metadata} " +
-            $"cpu_write_owner_found={lockedCpuWrites.OwnerFound}/{lockedCpuWrites.OwnerNone}{StagedRangeCounters()}" +
+            $"cpu_write_owner_found={lockedCpuWrites.OwnerFound}/{lockedCpuWrites.OwnerNone}{StagedRangeCounters()}{GuestViewCounters()}" +
             TakeKernelFillCounters());
         // On a tile-based GPU the attachments are the bandwidth: a pass loads every
         // one it does not clear and stores every one it keeps, so this says what the
