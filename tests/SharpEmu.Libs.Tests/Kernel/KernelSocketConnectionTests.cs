@@ -130,7 +130,9 @@ public sealed class KernelSocketConnectionTests
         var errors = process.StandardError.ReadToEndAsync();
         try
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            // The child is a whole `dotnet test` start-up; on a loaded CI runner that alone can
+            // take tens of seconds. A deadlock in the connect path never finishes at all.
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(120));
         }
         catch (TimeoutException)
         {
