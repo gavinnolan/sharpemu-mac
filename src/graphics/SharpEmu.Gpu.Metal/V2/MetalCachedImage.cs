@@ -36,6 +36,8 @@ internal enum MetalImageReleaseCause : byte
     // A texture that read the guest window in place became an owned texture because the
     // image was written, stored to, copied into, or needed a view the window texture cannot give.
     LinearViewPromoted,
+    // Not used for the retirement age (frames and seconds), whatever the budget.
+    Retired,
 }
 
 // Why a GPU-written image had to be published into guest memory.
@@ -309,8 +311,19 @@ internal sealed class MetalCachedImage : IDisposable
 
     public bool IsWatched => WatchBegin != 0 && WatchEnd != 0;
 
-    // The byte footprint the cache accounts for; a view-only image has none.
+    // The guest bytes the image covers; a view-only image has none. Telemetry only: the
+    // budget counts AllocatedBytes, which is what the device really holds.
     public ulong AccountedSize => Texture == 0 ? 0 : (Description.Data.Size + 1023) & ~1023UL;
+
+    /// <summary>
+    /// MTLTexture.allocatedSize of the texture the image owns, asked once when the texture is
+    /// made (padding, mip tails, D32S8 and substituted formats included); zero for a window
+    /// view, which holds no memory of its own.
+    /// </summary>
+    public ulong AllocatedBytes;
+
+    /// <summary>What the cache added to its total for this image when it registered it, taken back on removal.</summary>
+    public ulong CountedBytes;
 
     // Why the next upload will happen; purely diagnostic.
     public MetalImageDirtyCause DirtyCause { get; private set; } = MetalImageDirtyCause.Created;

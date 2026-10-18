@@ -38,7 +38,23 @@ internal sealed partial class MetalImageCache
         }
 
         image.Registered = true;
-        _totalUsedMemory += image.AccountedSize;
+        image.CountedBytes = image.AllocatedBytes;
+        _totalUsedMemory += image.CountedBytes;
+    }
+
+    // The image's texture was replaced (window view promoted, usage widened): the total follows
+    // the new texture's real size. Caller holds the lock.
+    private void RecountAllocatedLocked(MetalCachedImage image)
+    {
+        image.AllocatedBytes = TextureAllocatedBytes(image);
+        if (!image.Registered)
+        {
+            return;
+        }
+
+        _totalUsedMemory -= Math.Min(image.CountedBytes, _totalUsedMemory);
+        image.CountedBytes = image.AllocatedBytes;
+        _totalUsedMemory += image.CountedBytes;
     }
 
     private void RemoveFromIndex(ResourceSlotIdentifier imageIdentifier)
@@ -54,8 +70,8 @@ internal sealed partial class MetalImageCache
         _pageOwners.Remove(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
         _stencilOwners.Remove(imageIdentifier);
 
-        var accounted = image.AccountedSize;
-        _totalUsedMemory -= Math.Min(accounted, _totalUsedMemory);
+        _totalUsedMemory -= Math.Min(image.CountedBytes, _totalUsedMemory);
+        image.CountedBytes = 0;
         image.Registered = false;
     }
 
@@ -82,6 +98,9 @@ internal sealed partial class MetalImageCache
         if (image.IsGpuModified)
         {
             WriteBackToGuest(image, MetalWritebackCause.Release);
+            // The retile reads the texture in the command buffer being recorded: the texture
+            // outlives that submission whatever bound it last.
+            image.NoteUse(_owner.CurrentSerial);
         }
 
         if (image.Description.HasMetadata)
@@ -89,9 +108,43 @@ internal sealed partial class MetalImageCache
             _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
         }
 
+        ForgetImageBookkeepingLocked(imageIdentifier, image);
+        NoteDroppedLocked(image, cause);
         RemoveFromIndex(imageIdentifier);
         _slots.Erase(imageIdentifier);
         RetireImage(image);
+    }
+
+    // What the cache keeps about an image outside its slot: claims on its DCC slices, clears
+    // deferred for it, and a pending linear publication. Keyed by the slot identifier, they
+    // would otherwise outlive it until the metadata happened to be rewritten.
+    private void ForgetImageBookkeepingLocked(ResourceSlotIdentifier imageIdentifier, MetalCachedImage image)
+    {
+        _unpublishedLinearWrites.Remove(image);
+        if (_materializedDccSlices.Count != 0)
+        {
+            _materializedDccSlices.RemoveWhere(entry => entry.Image == imageIdentifier);
+        }
+
+        if (_deferredDccSlices.Count != 0)
+        {
+            List<(ResourceSlotIdentifier, ulong)>? stale = null;
+            foreach (var key in _deferredDccSlices.Keys)
+            {
+                if (key.Image == imageIdentifier)
+                {
+                    (stale ??= []).Add(key);
+                }
+            }
+
+            if (stale is not null)
+            {
+                foreach (var key in stale)
+                {
+                    _deferredDccSlices.Remove(key);
+                }
+            }
+        }
     }
 
     // A command buffer names a texture through an argument buffer, which holds a
@@ -427,22 +480,31 @@ internal sealed partial class MetalImageCache
         using var held = _lock.Hold();
         _previousFrameStartTick = _frameStartTick;
         _frameStartTick = _collectionTick;
+        _idleClock.MarkFrame(_collectionTick);
     }
 
-    /// <summary>Advances the collection tick and evicts stale images over the budget.</summary>
+    /// <summary>
+    /// Advances the collection tick, re-reads the budget when it is due, retires images past
+    /// the retirement age and evicts stale images over the budget.
+    /// </summary>
     public void Collect()
     {
         using var held = _lock.Hold();
         _collectionTick++;
         DrainRetiredImages();
-        CollectIfOverBudget();
+        var now = _clock();
+        _idleClock.Sample(now, _collectionTick);
+        MaybeEvaluateBudgetLocked(now);
+        HousekeepLocked(now);
+        CollectIfOverBudget(now);
     }
 
-    // Eviction under memory pressure: the least recently used clean images go first,
-    // and a GPU-modified image is written back before its texture is dropped. Images
-    // used by the current or the previous frame are the working set and stay: when
-    // that alone is over the budget the cache runs over rather than thrashing.
-    private void CollectIfOverBudget()
+    private void CollectIfOverBudget() => CollectIfOverBudget(_clock());
+
+    // Eviction under memory pressure: the least recently used images outside the working set
+    // go first, and a GPU-modified image is written back before its texture is dropped. When
+    // the working set alone is over the budget the cache runs over rather than thrashing.
+    private void CollectIfOverBudget(long now)
     {
         if (_totalUsedMemory <= _memoryBudgetBytes)
         {
@@ -452,9 +514,7 @@ internal sealed partial class MetalImageCache
         var candidates = new List<(ulong Tick, ResourceSlotIdentifier Image)>();
         _slots.ForEach((imageIdentifier, image) =>
         {
-            if (image.Registered
-                && image.LastAccessTick < _previousFrameStartTick
-                && _collectionTick - Math.Min(_collectionTick, image.LastAccessTick) > TicksBeforeRemoval)
+            if (IsBudgetEvictableLocked(image, now))
             {
                 candidates.Add((image.LastAccessTick, imageIdentifier));
             }

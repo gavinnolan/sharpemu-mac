@@ -114,7 +114,6 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // Evicted images whose Metal objects a recorded submission still names.
     private readonly List<(ulong Serial, MetalCachedImage Image)> _retiring = new();
     private ulong _totalUsedMemory;
-    private ulong _memoryBudgetBytes;
     private ulong _collectionTick;
     // Collection ticks at which the current and the previous presented frame began:
     // an image used in either is part of the working set and is never evicted for
@@ -149,7 +148,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         MetalBlockCubeDump.Peek ??= guestMemory.TryPeek;
         _pages = pages;
         _backing = backing;
-        _memoryBudgetBytes = ResolveMemoryBudget();
+        ConfigureMemoryPolicy(
+            MetalImageBudgetSettings.FromEnvironment(MetalHostMemory.Physical),
+            MetalImageRetirementSettings.FromEnvironment(),
+            MetalHostMemory.Sample,
+            System.Diagnostics.Stopwatch.GetTimestamp,
+            static () => MetalHostMemory.PressureEvents);
     }
 
     public ulong TotalUsedMemory => _totalUsedMemory;
@@ -165,21 +169,6 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public (long Images, long Uploads, long Writebacks, long Evictions) Counters =>
         (Volatile.Read(ref _createdImages), Volatile.Read(ref _uploads),
             Volatile.Read(ref _writebacks), Volatile.Read(ref _evictions));
-
-    private static ulong ResolveMemoryBudget()
-    {
-        var configured = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IMAGE_BUDGET_MB");
-        if (ulong.TryParse(configured, out var megabytes) && megabytes >= 256)
-        {
-            return megabytes * MiB;
-        }
-
-        // A quarter of physical memory, between 3 GB and 8 GB: a 4K title's working set
-        // (Demon's Souls: ~3.3 GB at character creation) must fit, and unified memory
-        // also holds the guest's own copy of every image.
-        var physical = (ulong)Math.Max(0L, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
-        return Math.Clamp(physical / 4, 3072 * MiB, 8192 * MiB);
-    }
 
     private static bool IsValidRange(ulong address, ulong size) =>
         ImageDescription.IsValidRange(new GuestSpan(address, size));
@@ -1537,6 +1526,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             Interlocked.Increment(ref _linearViews);
         }
 
+        image.AllocatedBytes = TextureAllocatedBytes(image);
+        NoteRecreatedLocked(in admitted);
+
         var imageIdentifier = _slots.Insert(image);
         Interlocked.Increment(ref _imageSetVersion);
         if (!ImageDescription.IsEmptyRange(description.Data))
@@ -1637,6 +1629,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var shape = _transfer.ShapeFor(image.Description);
         var texture = CreateTexture(in shape, image.Description);
         RetireImage(image.PromoteToOwned(texture, in shape));
+        RecountAllocatedLocked(image);
         _releaseCauses[(int)MetalImageReleaseCause.LinearViewPromoted]++;
         Interlocked.Decrement(ref _linearViews);
         Interlocked.Increment(ref _linearViewPromotions);
@@ -2359,10 +2352,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private readonly long[] _uploadCauses = new long[5];
     private readonly long[] _writebackCauses = new long[7];
-    private readonly long[] _releaseCauses = new long[9];
+    private readonly long[] _releaseCauses = new long[10];
 
     private static readonly string[] _releaseCauseNames =
-        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped", "linear_promoted"];
+        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped", "linear_promoted", "retired"];
 
     /// <summary>The release reasons since the last read, as "name=count" pairs.</summary>
     public void AppendReleaseCauses(System.Text.StringBuilder target)

@@ -17,6 +17,8 @@ internal sealed partial class MetalImageCache
     private long _releasedAccountedBytes;
     private long _releasedImages;
     private (long Evictions, long EvictedAccounted, long EvictedAllocated, long Released, long ReleasedBytes) _censusReported;
+    private (long Images, long Bytes) _censusRetired;
+    private long _censusRefaults;
 
     // Notes an image about to be dropped. Only runs with SHARPEMU_LOG_MEMORY=1.
     private void NoteReleasedForTelemetry(MetalCachedImage image, MetalImageReleaseCause cause)
@@ -31,11 +33,12 @@ internal sealed partial class MetalImageCache
         if (cause == MetalImageReleaseCause.Budget)
         {
             Interlocked.Add(ref _evictedAccountedBytes, (long)image.AccountedSize);
-            Interlocked.Add(ref _evictedAllocatedBytes, (long)AllocatedBytes(image));
+            Interlocked.Add(ref _evictedAllocatedBytes, (long)image.AllocatedBytes);
         }
     }
 
-    private static ulong AllocatedBytes(MetalCachedImage image) =>
+    // MTLTexture.allocatedSize, asked once per texture: a window view holds no memory of its own.
+    private static ulong TextureAllocatedBytes(MetalCachedImage image) =>
         image.Texture == 0 || image.IsWindowLinearView ? 0 : MetalV2Native.SendValue64(image.Texture, SelAllocatedSize);
 
     private static int CensusKind(MetalCachedImage image)
@@ -69,15 +72,21 @@ internal sealed partial class MetalImageCache
         var accounted = 0UL;
         var now = Stopwatch.GetTimestamp();
         int images;
+        MetalHostMemorySample host;
+        ulong counted;
+        long evaluations;
         using (var held = _lock.Hold())
         {
             images = _slots.Count;
+            host = _hostSample;
+            counted = _totalUsedMemory;
+            evaluations = _budgetEvaluations;
             _slots.ForEach((_, image) =>
             {
                 var kind = CensusKind(image);
                 var age = CensusAge(now - image.LastAccessTimestamp);
                 count[kind, age]++;
-                allocated[kind, age] += AllocatedBytes(image);
+                allocated[kind, age] += image.AllocatedBytes;
                 accounted += image.AccountedSize;
             });
         }
@@ -125,9 +134,23 @@ internal sealed partial class MetalImageCache
             Volatile.Read(ref _releasedAccountedBytes));
         var last = _censusReported;
         _censusReported = current;
+        var retired = (Images: Volatile.Read(ref _retiredImages), Bytes: Volatile.Read(ref _retiredBytes));
+        var lastRetired = _censusRetired;
+        _censusRetired = retired;
+        var refaults = Volatile.Read(ref _refaults);
+        var lastRefaults = _censusRefaults;
+        _censusRefaults = refaults;
+        var policy = _budgetSettings.FixedBudget is null ? "host" : "fixed";
         return string.Create(culture,
             $"images={images} allocated_mb={totalAllocated / Mb:F0} accounted_mb={accounted / Mb:F0} " +
-            $"budget_mb={_memoryBudgetBytes / Mb:F0} (count/allocated_mb) by_kind:{byKind} by_idle:{byAge} cells:{cells} " +
+            $"counted_mb={counted / Mb:F0} budget_mb={MemoryBudgetBytes / Mb:F0} budget_policy={policy} " +
+            $"budget_evaluations={evaluations} pressure={PressureName(host.Pressure)} " +
+            $"pressure_events={MetalHostMemory.PressureEvents} host_available_mb={host.AvailableBytes / Mb:F0} " +
+            $"process_footprint_mb={host.ProcessFootprintBytes / Mb:F0} " +
+            $"retired={retired.Images}(+{retired.Images - lastRetired.Images}) " +
+            $"retired_mb={retired.Bytes / Mb:F0}(+{(retired.Bytes - lastRetired.Bytes) / Mb:F0}) " +
+            $"refaults={refaults}(+{refaults - lastRefaults}) " +
+            $"(count/allocated_mb) by_kind:{byKind} by_idle:{byAge} cells:{cells} " +
             $"evictions={current.Item1}(+{current.Item1 - last.Evictions}) " +
             $"evicted_accounted_mb={current.Item2 / Mb:F0}(+{(current.Item2 - last.EvictedAccounted) / Mb:F0}) " +
             $"evicted_allocated_mb={current.Item3 / Mb:F0}(+{(current.Item3 - last.EvictedAllocated) / Mb:F0}) " +

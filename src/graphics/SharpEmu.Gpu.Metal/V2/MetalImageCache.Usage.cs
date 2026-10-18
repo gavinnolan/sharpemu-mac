@@ -100,6 +100,7 @@ internal sealed partial class MetalImageCache
         var context = _owner.BeginTransfer(MetalTransferCause.ImageCopy, image.Texture, texture);
         _transfer.EncodeWholeTextureCopy(context, image.Texture, texture);
         RetireImage(image.ReplaceWithCopy(texture, in shape, _owner.CurrentSerial));
+        RecountAllocatedLocked(image);
         _usagePromotions++;
     }
 }
