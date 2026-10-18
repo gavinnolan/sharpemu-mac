@@ -2156,7 +2156,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
             .Append(" data_replans=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Replans)
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
-            .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
+            .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count);
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
         WriteCopyReadTraces();
         var causes = _imageCache.TakeTransferCauses();

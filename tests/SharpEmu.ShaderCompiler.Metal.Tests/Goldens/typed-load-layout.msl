@@ -262,18 +262,19 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
     if (low != 0u)
     {
         Gen5AddressRange range = ranges[low - 1u];
-        // Bit 63 of page_count marks a range in a window this submission did not name
-        // resident, bits 56..62 that window. The access still goes through - the window's
-        // pages are mapped for the life of the buffer - and the window is reported in the
-        // feedback words so the host names it from then on.
-        ulong page_count = range.page_count & 0x00FFFFFFFFFFFFFFul;
+        // The low 32 bits of page_count are the page count. Bit 63 marks a range in a guest
+        // memory window this submission did not name resident, bits 32..62 its granule.
+        // The access still goes through - the window's pages are mapped for the life of
+        // the buffer - and the granule is reported in the feedback words (word 0 counts such
+        // lookups, then one bit per granule) so the host names it from then on.
+        ulong page_count = range.page_count & 0xFFFFFFFFul;
         if (page - range.first_page < page_count)
         {
             if ((range.page_count >> 63u) != 0ul)
             {
-                uint window = (uint)(range.page_count >> 56u) & 0x7Fu;
-                atomic_fetch_or_explicit((device atomic_uint*)(faults + (window >> 5u)), 1u << (window & 31u), memory_order_relaxed);
-                atomic_fetch_add_explicit((device atomic_uint*)(faults + 4u), 1u, memory_order_relaxed);
+                uint granule = (uint)(range.page_count >> 32u) & 0x7FFFFFFFu;
+                atomic_fetch_or_explicit((device atomic_uint*)(faults + 1u + (granule >> 5u)), 1u << (granule & 31u), memory_order_relaxed);
+                atomic_fetch_add_explicit((device atomic_uint*)faults, 1u, memory_order_relaxed);
             }
             valid = true;
             cache.first_page = range.first_page;

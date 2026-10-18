@@ -8,77 +8,121 @@ using SharpEmu.Libs.Gpu.Scheduling;
 namespace SharpEmu.Gpu.Metal.V2;
 
 /// <summary>
-/// Guest memory as the GPU sees it. The guest's direct-memory backing is one
-/// contiguous host alias, so a handful of <c>newBufferWithBytesNoCopy</c> windows
-/// cover all of it: every vertex, index, constant, storage and indirect binding is
-/// then a (window, offset) pair and no guest byte is ever copied.
+/// Guest memory as the GPU sees it. The guest's direct-memory backing is one contiguous
+/// host alias, and <c>newBufferWithBytesNoCopy</c> windows over slices of it make every
+/// vertex, index, constant, storage and indirect binding a (window, offset) pair: no guest
+/// byte is copied for a range that is one contiguous run of the backing.
 ///
-/// Adjacent windows overlap by at least <see cref="SeamOverlapBytes"/>, so a binding up
-/// to that size never straddles a window edge. A range that is not backed, or a larger
-/// one that straddles two windows, falls back to a per-command-buffer upload ring. The windows and the live ring buffers sit in an
-/// <c>MTLResidencySet</c> attached to the queue, so no encoder needs
-/// <c>useResource:</c> for them.
+/// <para>
+/// What a window costs is not its creation but its naming. A command buffer that names a
+/// no-copy buffer (useResource, or a direct binding) makes the driver wire and fault in
+/// every page of it for the life of the command buffer: measured on an M4, naming a 4 GiB
+/// window over untouched memory for a kernel that wrote one word wired 4.3 GB and left all
+/// 4.3 GB resident (zero pages the compressor then has to keep and hand back on the next
+/// wire); the first wire costs ~25 ms/GiB, a resident one ~0.3 ms per submission however
+/// many buffers carry it. With 1 GiB windows Demon's Souls named 8-9.5 GiB per command
+/// buffer in-world for ~1.5-2.3 GiB of ranges it actually referenced, and paged constantly
+/// on a 24 GB machine. A real PS5's GPU touches only the pages it accesses in unified GDDR6,
+/// so the bytes wired here should track the bytes referenced.
+/// </para>
+///
+/// <para>
+/// The backing is therefore cut into windows of about a granule (<see cref="DefaultGranuleBytes"/>)
+/// that do not overlap (<see cref="MetalWindowPartition"/>, which says why they must not):
+/// <list type="bullet">
+/// <item>a range inside one window binds it. Naming it wires about one granule;</item>
+/// <item>a range that crosses a cut moves the cut out of it, so it lies in one window again;
+/// no range is staged for straddling an edge in the steady state, and the windows beside the
+/// cut grow or shrink by the range. When a window the command buffer being recorded already
+/// used would have to change, the range is staged (read) or refused (write, which its caller
+/// splits or writes another way) for this command buffer, and the cut moves as the next one
+/// begins;</item>
+/// <item>a range that is not backed, not contiguous in the backing, or larger than the
+/// largest window (<see cref="DefaultMaxWindowBytes"/>) is staged through the per-submission
+/// upload ring, or binds a window-sized prefix in place when it is too large to stage, as
+/// before.</item>
+/// </list>
+/// </para>
+///
+/// <para>
+/// A window's buffer is created the first time something uses it and kept while the cut
+/// stays; a buffer whose window a move or a re-cut replaced is released once the GPU has
+/// completed the submission that replaced it. Windows unused for <see cref="IdleWindowSerials"/>
+/// submissions are cut back to one per granule. A submission names exactly the windows its
+/// own resolves touched (see <see cref="TouchedWindows"/>), plus, for an encoder that runs a
+/// device-address program, the windows holding the title's reach set
+/// (MetalRenderHost.DeviceAddressReach.cs).
+/// </para>
 /// </summary>
-internal sealed class MetalGuestMemory : IDisposable
+internal sealed class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 {
-    // About eighteen 1 GiB windows, overlapping by the seam, cover the 16 GiB of direct
-    // memory and the flexible tail. maxBufferLength caps a single window at about
-    // 13.6 GB on this hardware.
-    //
-    // Every encoder names the windows it touches with useResource, and the driver holds
-    // the named bytes resident (wired) while the command buffer runs - the whole window,
-    // pages the guest never touched included. A window touched for one binding therefore
-    // pins everything under it: with 4 GiB windows Demon's Souls named 3-4 of five per
-    // submission (its device-address programs reach every mapped span), which wired
-    // 14-18 GB of a 24 GB machine and pushed everything else into swap (0.3 fps
-    // in-game). 1 GiB windows pin only the stretches in use and ran that title's
-    // gameplay 8x faster; a binding larger than a window minus the seam straddles and
-    // binds the window prefix in place. Its mapped spans split into more device-address
-    // runs over the smaller windows, which the table (16384 entries) holds.
-    // SHARPEMU_METAL_V2_WINDOW_MB (512..4096) overrides the size.
-    internal const ulong PreferredWindowBytes = 1UL * 1024 * 1024 * 1024;
-    private const int MaxWindows = 64;
+    // The granule is the size windows start at and are cut back to, and the unit the
+    // device-address reach is learned in. Smaller wastes less around each referenced range
+    // but makes more windows to name per encoder, more device-address table entries (a run
+    // is split at every window and granule edge) and more reach feedback bits. Demon's Souls
+    // in-world references ~1.5-2.3 GiB per 10 s through bindings of up to ~180 MiB, spread
+    // over ~11 GiB of mapped spans: at 32 MiB a referenced range wires on average ~16 MiB of
+    // neighbours (half a window each side), ~580 windows cover its 18 GiB backing, the
+    // table grows by ~360 entries over the 1 GiB layout (11.2 GiB / 32 MiB, against the
+    // 16384 it holds) and the reach feedback is 19 words. 64 MiB halves those counts and
+    // doubles the waste per range; 16 MiB doubles them for ~8 MiB less per range.
+    // SHARPEMU_METAL_V2_GRANULE_MB (a power of two, 1..1024) overrides it.
+    internal const ulong DefaultGranuleBytes = 32UL * 1024 * 1024;
 
-    private static ulong ResolvePreferredWindowBytes() =>
-        ResolvePreferredWindowBytes(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WINDOW_MB"));
+    // The largest a window grows to hold a range. A binding past it (Demon's Souls binds
+    // whole heaps of 1.5-4 GB as raw storage) binds this much of its prefix in place, which
+    // is what the 1 GiB windows gave it. SHARPEMU_METAL_V2_WINDOW_MB (512..4096), which used
+    // to pick the window size, picks this cap now.
+    internal const ulong DefaultMaxWindowBytes = 1UL * 1024 * 1024 * 1024;
 
-    internal static ulong ResolvePreferredWindowBytes(string? configured)
+    // Windows nothing used for this many submissions (completed) are cut back to one per
+    // granule. Demon's Souls commits ~80 command buffers a second, so a cut moved for a
+    // range stays where it is across ~10 s of the range not being used.
+    internal const ulong IdleWindowSerials = 1024;
+
+    private static ulong ResolveGranuleBytes() =>
+        ResolveGranuleBytes(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRANULE_MB"));
+
+    internal static ulong ResolveGranuleBytes(string? configured)
+    {
+        if (ulong.TryParse(configured, out var megabytes) && megabytes >= 1 && megabytes <= 1024 &&
+            System.Numerics.BitOperations.IsPow2(megabytes))
+        {
+            return megabytes * 1024 * 1024;
+        }
+
+        return DefaultGranuleBytes;
+    }
+
+    private static ulong ResolveMaxWindowBytes() =>
+        ResolveMaxWindowBytes(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WINDOW_MB"));
+
+    internal static ulong ResolveMaxWindowBytes(string? configured)
     {
         if (ulong.TryParse(configured, out var megabytes) && megabytes >= 512 && megabytes <= 4096)
         {
             return megabytes * 1024 * 1024;
         }
-        return PreferredWindowBytes;
-    }
-    private const ulong MaxUploadBytes = 64UL * 1024 * 1024;
 
-    /// <summary>
-    /// How far adjacent windows overlap when the device cannot hold the half overlap.
-    /// A range staged into the ring is copied on the CPU at record time, so it misses
-    /// GPU writes still in flight to those bytes, and a shader's stores into it land in
-    /// the ring instead of guest memory. With this overlap every range up to its size
-    /// lies wholly inside the window its first byte selects and binds the guest bytes
-    /// directly, ordered like any other window access. It matches the ring's own cap,
-    /// so no range the ring could stage whole still needs it for straddling an edge,
-    /// and it costs one overlap of resident bytes per window edge.
-    /// </summary>
-    internal const ulong SeamOverlapBytes = MaxUploadBytes;
+        return DefaultMaxWindowBytes;
+    }
+
+    private const ulong MaxUploadBytes = 64UL * 1024 * 1024;
     private const ulong RingBufferBytes = 32UL * 1024 * 1024;
     private const ulong RingAlignment = 256;
     public const ulong GdsBytes = ManagedCommandStreamHost.GdsBytes;
 
-    // Hazard tracking on a 4 GiB window makes Metal order and fence every command
-    // buffer that touches it, which measured at tens of milliseconds per submission
-    // because every submission touches a window. Untracked is the design's choice:
-    // the guest's own barriers end the encoder, and encoders on one queue run in
-    // order. SHARPEMU_METAL_V2_TRACKED=1 restores automatic tracking for comparison.
+    // Hazard tracking on a window makes Metal order and fence every command buffer that
+    // touches it, which measured at tens of milliseconds per submission because every
+    // submission touches a window. Untracked is the design's choice: the guest's own
+    // barriers end the encoder, and encoders on one queue run in order.
+    // SHARPEMU_METAL_V2_TRACKED=1 restores automatic tracking for comparison.
     // An MTLResidencySet would keep the windows mapped for the queue without any
-    // per-encoder call, which is what the design asked for — but a set holding the
-    // whole 16 GiB backing measured about seventy milliseconds of scheduling
-    // latency on every submission, with the GPU itself idle: Dreaming Sarah ran at
-    // five frames a second with it and at a hundred and twenty without. Naming the
-    // windows per encoder costs five useResource calls instead.
-    // SHARPEMU_METAL_V2_RESIDENCY_SET=1 restores the set for comparison.
+    // per-encoder call — but a set holding the whole 16 GiB backing measured about seventy
+    // milliseconds of scheduling latency on every submission, with the GPU itself idle:
+    // Dreaming Sarah ran at five frames a second with it and at a hundred and twenty
+    // without. SHARPEMU_METAL_V2_RESIDENCY_SET=1 restores the set for comparison (every
+    // window joins it as it is created).
     private static readonly bool UseResidencySet = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_RESIDENCY_SET"), "1", StringComparison.Ordinal);
 
@@ -96,33 +140,10 @@ internal sealed class MetalGuestMemory : IDisposable
     private static readonly nint SelGpuAddress = MetalNative.Selector("gpuAddress");
     private static readonly nint SelContents = MetalNative.Selector("contents");
     private static readonly nint SelMaxBufferLength = MetalNative.Selector("maxBufferLength");
-    private static readonly nint SelRecommendedWorkingSet =
-        MetalNative.Selector("recommendedMaxWorkingSetSize");
     private static readonly nint SelSetLabel = MetalNative.Selector("setLabel:");
     private static readonly nint SelRelease = MetalNative.Selector("release");
     private static readonly nint SelAddAllocation = MetalNative.Selector("addAllocation:");
     private static readonly nint SelCommit = MetalNative.Selector("commit");
-
-    // One no-copy MTLBuffer over a slice of the backing alias.
-    private readonly struct Window
-    {
-        public Window(nint buffer, ulong aliasBase, ulong size, ulong gpuAddress)
-        {
-            Buffer = buffer;
-            AliasBase = aliasBase;
-            Size = size;
-            GpuAddress = gpuAddress;
-        }
-
-        public nint Buffer { get; }
-
-        // Host pointer of the window's first byte.
-        public ulong AliasBase { get; }
-
-        public ulong Size { get; }
-
-        public ulong GpuAddress { get; }
-    }
 
     // A ring buffer of host-written bytes: valid until the submission that used it completes.
     private sealed class RingBuffer
@@ -138,12 +159,30 @@ internal sealed class MetalGuestMemory : IDisposable
     private readonly nint _device;
     private readonly IGuestBackedSpace _backing;
     private readonly ICpuMemory _memory;
-    private readonly Window[] _windows;
-    private readonly ulong _windowStride;
-    private readonly ulong _windowOverlap;
-    private readonly int _windowCount;
     private readonly ulong _aliasBase;
     private readonly ulong _aliasSize;
+    private readonly int _granuleBits;
+    private readonly ulong _granuleBytes;
+    private readonly int _granuleCount;
+    private readonly ulong _maxWindowBytes;
+
+    // The cut of the backing into windows, and everything that reads or moves it, under
+    // _windowLock. Buffers of windows a move replaced wait in _retired for the submission
+    // that replaced them to complete; ranges a move had to wait for wait in _pendingPlacements
+    // for the next submission.
+    private readonly MetalWindowPartition _partition;
+    private readonly object _windowLock = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<nint, byte> _windowBuffers = new();
+    private readonly List<(MetalWindowPartition.Window Window, ulong Serial)> _retired = new();
+    private readonly List<MetalWindowPartition.Window> _retiredScratch = new();
+    private readonly List<(ulong Start, ulong End)> _pendingPlacements = new();
+    private readonly HashSet<(ulong Start, ulong End)> _pendingSet = new();
+    private long _windowsCreated;
+    private long _windowsReleased;
+    private long _windowBytesMapped;
+    private long _windowMoves;
+    private long _windowConflicts;
+    private ulong _normalizeSerial;
 
     // The largest range the ring stages whole; a bigger one binds a prefix instead.
     private readonly ulong _maxUploadBytes;
@@ -161,18 +200,17 @@ internal sealed class MetalGuestMemory : IDisposable
     private bool _disposed;
 
     public MetalGuestMemory(nint device, IGuestBackedSpace backing, ICpuMemory memory)
-        : this(device, backing, memory, ResolvePreferredWindowBytes(), SeamOverlapBytes, budgetOverride: 0)
+        : this(device, backing, memory, ResolveGranuleBytes(), ResolveMaxWindowBytes())
     {
     }
 
-    /// <summary>A layout with explicit window, overlap and budget sizes, for tests on a small backing.</summary>
+    /// <summary>A layout with explicit granule and window cap, for tests on a small backing.</summary>
     internal MetalGuestMemory(
         nint device,
         IGuestBackedSpace backing,
         ICpuMemory memory,
-        ulong preferredWindowBytes,
-        ulong seamBytes,
-        ulong budgetOverride,
+        ulong granuleBytes,
+        ulong maxWindowBytes,
         ulong maxUploadBytes = MaxUploadBytes)
     {
         _device = device;
@@ -185,70 +223,27 @@ internal sealed class MetalGuestMemory : IDisposable
             throw GpuFatal.Fatal("Metal v2 needs the guest backing alias; the address space reports none.");
         }
 
+        // Granules start at multiples of the granule from the alias base; a granule of at
+        // least a 16 KB host page keeps every window page-aligned with its host pointer.
+        if (!System.Numerics.BitOperations.IsPow2(granuleBytes) || granuleBytes < PairLockPageBytes)
+        {
+            throw GpuFatal.Fatal($"The guest window granule must be a power of two of at least 16 KB: 0x{granuleBytes:X}.");
+        }
+
         _aliasBase = aliasBase;
         _aliasSize = aliasSize;
+        _granuleBits = System.Numerics.BitOperations.TrailingZeroCount(granuleBytes);
+        _granuleBytes = granuleBytes;
+        _granuleCount = checked((int)((aliasSize + granuleBytes - 1) >> _granuleBits));
         var maxBufferLength = (ulong)MetalV2Native.SendValue(device, SelMaxBufferLength);
-        var windowBytes = Math.Min(preferredWindowBytes, maxBufferLength == 0 ? preferredWindowBytes : maxBufferLength);
-        var budget = budgetOverride != 0 ? budgetOverride : WindowBudget(device);
-        var (windowStride, windowCount, mappedBytes) = ChooseWindowLayout(aliasSize, windowBytes, budget, seamBytes);
-        if (mappedBytes > budget)
-        {
-            MetalV2Diagnostics.WarnOnce(
-                "window-budget",
-                "The guest backing does not fit what the device can hold resident; submissions may fail with " +
-                $"Insufficient Memory: mapped=0x{mappedBytes:X} budget=0x{budget:X}.");
-        }
-
-        if (windowCount > MaxWindows)
-        {
-            throw GpuFatal.Fatal(
-                $"The guest backing needs more Metal windows than v2 maps: windows={windowCount} max={MaxWindows} " +
-                $"size=0x{aliasSize:X} windowBytes=0x{windowBytes:X}.");
-        }
+        var cap = maxBufferLength == 0 ? maxWindowBytes : Math.Min(maxWindowBytes, maxBufferLength);
+        // Whole granules, and never less than one.
+        _maxWindowBytes = Math.Max(granuleBytes, cap & ~(granuleBytes - 1));
+        _partition = new MetalWindowPartition(aliasSize, granuleBytes, _maxWindowBytes, PairLockPageBytes);
+        _touchedWindows = new MetalWindowSet(_partition.IdLimit + 64);
+        _pinnedWindows = new MetalWindowSet(_partition.IdLimit + 64);
 
         _residencySet = UseResidencySet ? CreateResidencySet(device) : 0;
-        _windows = new Window[windowCount];
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        for (var index = 0; index < windowCount; index++)
-        {
-            var offset = (ulong)index * windowStride;
-            var size = Math.Min(windowBytes, aliasSize - offset);
-            var pointer = aliasBase + offset;
-            var buffer = MetalV2Native.SendNewBufferNoCopy(
-                device,
-                SelNewBufferNoCopy,
-                (nint)pointer,
-                (nuint)size,
-                Mtl.ResourceStorageModeShared | HazardTrackingMode,
-                0);
-            if (buffer == 0)
-            {
-                throw GpuFatal.Fatal(
-                    $"A guest memory window could not be mapped: window={index} pointer=0x{pointer:X16} size=0x{size:X}.");
-            }
-
-            SetLabel(buffer, $"guest.window[{index}]");
-            _windows[index] = new Window(buffer, pointer, size, MetalNative.SendGpuAddress(buffer, SelGpuAddress));
-            // A guest qword's pair lock is picked by bits 3..13 of its GPU address
-            // (pair_atomic_prelude.msl), which names the same lock through every window only
-            // while each window keeps the host mapping's offset within a 16 KB page.
-            if (((_windows[index].GpuAddress - pointer) & (PairLockPageBytes - 1)) != 0)
-            {
-                MetalV2Diagnostics.WarnOnce(
-                    "pair-lock-window-alignment",
-                    "A guest memory window's GPU address is not 16 KB congruent with its host pointer, so a qword " +
-                    "reached through two overlapping windows takes two different pair locks: " +
-                    $"window={index} pointer=0x{pointer:X16} gpu=0x{_windows[index].GpuAddress:X16}.");
-            }
-            if (_residencySet != 0)
-            {
-                AddResident(buffer);
-            }
-        }
-
-        _windowCount = windowCount;
-        _windowStride = windowStride;
-        _windowOverlap = windowCount > 1 ? windowBytes - windowStride : 0;
         _gdsBuffer = CreateSharedBuffer(GdsBytes, "guest.gds", out _, out _);
         _nullBuffer = CreateSharedBuffer(256, "guest.null", out _nullContents, out _);
         // Both are reached through an address in an argument buffer, so the encoder
@@ -261,92 +256,10 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         CommitResidency();
-        var seconds = (System.Diagnostics.Stopwatch.GetTimestamp() - started) /
-            (double)System.Diagnostics.Stopwatch.Frequency;
-        var mapSeconds = seconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
         Console.Error.WriteLine(
-            $"[METAL-V2][INFO] guest memory mapped windows={windowCount} window_bytes=0x{windowBytes:X} " +
-            $"stride=0x{windowStride:X} overlap=0x{_windowOverlap:X} mapped_mb={mappedBytes / (1024 * 1024)} " +
-            $"budget_mb={budget / (1024 * 1024)} " +
-            $"alias=0x{aliasBase:X16}+0x{aliasSize:X} map_seconds={mapSeconds} residency_set={(_residencySet != 0 ? 1 : 0)}");
-    }
-
-    /// <summary>
-    /// Picks the window stride for a backing alias.
-    ///
-    /// Windows may overlap by half: window k starts at k * stride, so any range of up to
-    /// one stride lies wholly inside the window its first byte selects, and a range
-    /// crossing a window edge never falls back to a copy.
-    ///
-    /// That doubles how many window bytes every encoder names with <c>useResource</c>,
-    /// and a command buffer whose named resources exceed what the device can hold
-    /// resident fails outright — "Insufficient Memory"
-    /// (<c>kIOGPUCommandBufferCallbackErrorOutOfMemory</c>) — with no draw ever reaching
-    /// the framebuffer. On a 24 GB M4 a 16.4 GiB backing in half-overlapping 4 GiB
-    /// windows asks for 30.4 GiB and every single submission failed. The overlap is
-    /// therefore taken only while the mapped total fits the device's working set.
-    ///
-    /// Short of that, the windows overlap by the seam alone, which adds one seam of
-    /// resident bytes per window edge and still keeps every range up to the seam inside
-    /// one window. Only when even that does not fit do the windows tile the alias exactly,
-    /// and a straddling range takes the ring (reads) or splits into runs (which the
-    /// device-address table already does).
-    /// </summary>
-    internal static (ulong Stride, int Count, ulong MappedBytes) ChooseWindowLayout(
-        ulong aliasSize,
-        ulong windowBytes,
-        ulong budget,
-        ulong seamBytes = SeamOverlapBytes)
-    {
-        var overlapped = windowBytes / 2;
-        if (overlapped != 0 && MappedBytes(aliasSize, windowBytes, overlapped) <= budget)
-        {
-            return (overlapped, WindowCount(aliasSize, windowBytes, overlapped),
-                MappedBytes(aliasSize, windowBytes, overlapped));
-        }
-
-        if (seamBytes != 0 && seamBytes < overlapped)
-        {
-            var seamed = windowBytes - seamBytes;
-            if (MappedBytes(aliasSize, windowBytes, seamed) <= budget)
-            {
-                return (seamed, WindowCount(aliasSize, windowBytes, seamed),
-                    MappedBytes(aliasSize, windowBytes, seamed));
-            }
-        }
-
-        return (windowBytes, WindowCount(aliasSize, windowBytes, windowBytes),
-            MappedBytes(aliasSize, windowBytes, windowBytes));
-    }
-
-    // How many windows of windowBytes at this stride cover the alias.
-    private static int WindowCount(ulong aliasSize, ulong windowBytes, ulong windowStride) =>
-        aliasSize <= windowBytes
-            ? 1
-            : (int)((aliasSize - windowBytes + windowStride - 1) / windowStride) + 1;
-
-    // The bytes every encoder names with useResource, which is what the device has to
-    // hold resident: overlapping windows map the same guest bytes more than once.
-    private static ulong MappedBytes(ulong aliasSize, ulong windowBytes, ulong windowStride)
-    {
-        var total = 0UL;
-        var count = WindowCount(aliasSize, windowBytes, windowStride);
-        for (var index = 0; index < count; index++)
-        {
-            var offset = (ulong)index * windowStride;
-            total += Math.Min(windowBytes, aliasSize - offset);
-        }
-
-        return total;
-    }
-
-    // What the device says it can keep resident. A command buffer that names more than
-    // this is refused by the driver rather than throttled, so the window layout is
-    // chosen against it instead of against the alias size.
-    private static ulong WindowBudget(nint device)
-    {
-        var recommended = MetalV2Native.SendValue64(device, SelRecommendedWorkingSet);
-        return recommended != 0 ? recommended : 4UL * 1024 * 1024 * 1024;
+            $"[METAL-V2][INFO] guest memory windows: granule=0x{granuleBytes:X} granules={_granuleCount} " +
+            $"max_window=0x{_maxWindowBytes:X} alias=0x{aliasBase:X16}+0x{aliasSize:X} " +
+            $"residency_set={(_residencySet != 0 ? 1 : 0)} (windows are created on first use)");
     }
 
     /// <summary>
@@ -375,6 +288,59 @@ internal sealed class MetalGuestMemory : IDisposable
     // Shared memory the upload rings hold now, for the periodic counters line.
     public ulong RingBytes => (ulong)Volatile.Read(ref _ringBytes);
 
+    /// <summary>The granule size: the unit a binding wires.</summary>
+    public ulong GranuleBytes => _granuleBytes;
+
+    /// <summary>How many granules cover the backing: the units the reach set is learned in.</summary>
+    public int GranuleCount => _granuleCount;
+
+    /// <summary>The largest window one binding may name.</summary>
+    public ulong MaxWindowBytes => _maxWindowBytes;
+
+    /// <summary>The backing alias size, which the granules cover.</summary>
+    public ulong AliasBytes => _aliasSize;
+
+    /// <summary>Window buffers alive now, created and released since startup, and the bytes the alive ones map.</summary>
+    public (int Alive, long Created, long Released, ulong MappedBytes) WindowCounts
+    {
+        get
+        {
+            lock (_windowLock)
+            {
+                return ((int)(_windowsCreated - _windowsReleased), _windowsCreated, _windowsReleased,
+                    (ulong)_windowBytesMapped);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cuts moved for a range that crossed one, ranges that had to be staged or refused for
+    /// one submission because the move would have changed a window it already used, and the
+    /// windows the backing is cut into now.
+    /// </summary>
+    public (long Moves, long Conflicts, int Windows) WindowLayoutCounts
+    {
+        get
+        {
+            lock (_windowLock)
+            {
+                return (_windowMoves, _windowConflicts, _partition.Windows.Count);
+            }
+        }
+    }
+
+    /// <summary>Changes whenever a cut moves: what a table of window addresses is valid for.</summary>
+    public long PartitionVersion
+    {
+        get
+        {
+            lock (_windowLock)
+            {
+                return _partition.Version;
+            }
+        }
+    }
+
     /// <summary>
     /// Shared memory the rings handed to the submission being recorded hold. A ring
     /// returns to the pool only when the submission that last used it completes, so a
@@ -383,78 +349,169 @@ internal sealed class MetalGuestMemory : IDisposable
     /// </summary>
     public ulong RecordingBytes { get; private set; }
 
-    /// <summary>The serial a resource allocated now is retired at.</summary>
+    /// <summary>
+    /// The serial a resource allocated now is retired at. A new command buffer has used no
+    /// window yet, so this is where cuts that had to wait move, and where idle windows are
+    /// cut back to granules.
+    /// </summary>
     public void BeginSubmission(ulong submissionSerial, ulong completedSerial)
     {
         _submissionSerial = submissionSerial;
-        _completedSerial = completedSerial;
+        _completedSerial = Math.Max(_completedSerial, completedSerial);
         RecordingBytes = 0;
-        // Residency is per submission: naming every window on every encoder asks the
-        // kernel to make the whole 16 GiB backing writable-resident for a draw that
-        // touches one window, which measured as tens of milliseconds between -commit
-        // and the driver scheduling the submission.
-        _touchedWindows = 0;
+        // Residency is per submission: a window is named by the submissions that resolve a
+        // range through it, never by every submission after.
+        _touchedWindows.Clear();
         _residentDirty = true;
+        lock (_windowLock)
+        {
+            _pinnedWindows.Clear();
+            foreach (var (start, end) in _pendingPlacements)
+            {
+                if (_partition.Place(start, end, _pinnedWindows, _retiredScratch, out _) == MetalWindowPartition.Placement.Moved)
+                {
+                    _windowMoves++;
+                }
+            }
+
+            _pendingPlacements.Clear();
+            _pendingSet.Clear();
+            if (_completedSerial >= IdleWindowSerials && _submissionSerial - _normalizeSerial >= IdleWindowSerials / 8)
+            {
+                _normalizeSerial = _submissionSerial;
+                _partition.Normalize(_completedSerial - IdleWindowSerials, _pinnedWindows, _retiredScratch);
+            }
+
+            RetireReplaced();
+        }
     }
 
-    private ulong _touchedWindows;
+    private readonly MetalWindowSet _touchedWindows;
+
+    // The windows this submission reached in any way - its resolves, and the windows a
+    // device-address encoder names - whose cuts may not move before it ends.
+    private readonly MetalWindowSet _pinnedWindows;
     private bool _residentDirty = true;
 
-    /// <summary>The buffer of one window, for an encoder that names it itself.</summary>
-    public nint WindowBuffer(int index) => _windows[index].Buffer;
-
-    /// <summary>The windows resolved since this submission began, one bit each.</summary>
-    public ulong TouchedWindows => _touchedWindows;
-
-    /// <summary>Notes that this submission reaches into these windows.</summary>
-    public void MarkWindowsTouched(ulong windows)
+    /// <summary>The buffer of one window, created if it has none; zero when no window has the id.</summary>
+    public nint WindowBuffer(int id)
     {
-        if ((windows & ~_touchedWindows) == 0)
+        lock (_windowLock)
         {
-            return;
+            return _partition.ById(id) is { } window ? EnsureBuffer(window) : 0;
         }
-
-        _touchedWindows |= windows;
-        _residentDirty = true;
     }
 
-    /// <summary>Forgets which windows this submission has reached, for a re-scan.</summary>
-    public void ClearTouchedWindows()
+    /// <summary>The windows resolved since this submission began, one bit per window id.</summary>
+    public MetalWindowSet TouchedWindows => _touchedWindows;
+
+    /// <summary>
+    /// Notes that this submission names these windows for a device-address program: their
+    /// cuts stay until it ends, and they count as used.
+    /// </summary>
+    public void PinWindows(MetalWindowSet windows)
     {
-        _touchedWindows = 0;
-        _residentDirty = true;
+        lock (_windowLock)
+        {
+            _pinnedWindows.UnionWith(windows);
+            foreach (var id in windows)
+            {
+                if (_partition.ById(id) is { } window)
+                {
+                    window.LastUsedSerial = _submissionSerial;
+                }
+            }
+        }
     }
 
-    /// <summary>The summed size of the windows whose bits are set.</summary>
-    public ulong WindowBytes(ulong windows)
+    /// <summary>
+    /// Adds the granules the windows of <paramref name="windowIds"/> overlap to
+    /// <paramref name="granules"/>.
+    /// </summary>
+    public void AddCoveredGranules(MetalWindowSet windowIds, MetalWindowSet granules)
+    {
+        lock (_windowLock)
+        {
+            foreach (var id in windowIds)
+            {
+                if (_partition.ById(id) is { } window)
+                {
+                    for (var granule = window.Start >> _granuleBits; granule <= (window.End - 1) >> _granuleBits; granule++)
+                    {
+                        granules.Add((int)granule);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The bytes the windows of a set map: what naming them wires. Windows do not overlap,
+    /// so nothing is counted twice.
+    /// </summary>
+    public ulong WindowSetBytes(MetalWindowSet windowIds)
     {
         var bytes = 0UL;
-        for (; windows != 0; windows &= windows - 1)
+        ForEachWindow(windowIds, (_, size) => bytes += size);
+        return bytes;
+    }
+
+    /// <summary>The backing offset each window of a set starts at, and its size.</summary>
+    public void ForEachWindow(MetalWindowSet windowIds, Action<ulong, ulong> visit)
+    {
+        lock (_windowLock)
         {
-            var index = System.Numerics.BitOperations.TrailingZeroCount(windows);
-            if (index < _windowCount)
+            foreach (var id in windowIds)
             {
-                bytes += _windows[index].Size;
+                if (_partition.ById(id) is { } window)
+                {
+                    visit(window.Start, window.Size);
+                }
+            }
+        }
+    }
+
+    /// <summary>The bytes of the backing the granules of the set cover.</summary>
+    public ulong GranuleSetBytes(MetalWindowSet granules)
+    {
+        var bytes = 0UL;
+        foreach (var granule in granules)
+        {
+            if (granule < _granuleCount)
+            {
+                bytes += GranuleBacking(granule).Size;
             }
         }
 
         return bytes;
     }
 
-    /// <summary>Every window, for a submission that cannot name the ones it needs.</summary>
-    public ulong AllWindows => _windowCount >= 64 ? ulong.MaxValue : (1UL << _windowCount) - 1;
+    /// <summary>The backing a granule covers: an offset into the alias and its length.</summary>
+    public (ulong Offset, ulong Size) GranuleBacking(int granule)
+    {
+        var offset = (ulong)granule << _granuleBits;
+        return (offset, Math.Min(_granuleBytes, _aliasSize - offset));
+    }
+
+    /// <summary>The granule a backing offset lies in.</summary>
+    public int GranuleOfBacking(ulong offset) =>
+        (int)Math.Min(offset >> _granuleBits, (ulong)(_granuleCount - 1));
 
     public void NoteCompleted(ulong completedSerial)
     {
         _completedSerial = Math.Max(_completedSerial, completedSerial);
         TrimIdleRings();
+        lock (_windowLock)
+        {
+            ReleaseRetired();
+        }
     }
 
-    // A ring is created when a range straddles a window or is not backed, which a
-    // title can do in bursts: a 4 GiB span of unbacked descriptors once cost tens of
-    // rings. Nothing freed them again, so the pool was the process's high-water mark
-    // for the rest of the run. Rings beyond the few that keep a steady submission fed
-    // are released once the GPU has been done with them for this many serials.
+    // A ring is created when a range is not one backed run, which a title can do in
+    // bursts: a 4 GiB span of unbacked descriptors once cost tens of rings. Nothing freed
+    // them again, so the pool was the process's high-water mark for the rest of the run.
+    // Rings beyond the few that keep a steady submission fed are released once the GPU
+    // has been done with them for this many serials.
     private const int KeptRings = 4;
     private const ulong IdleRingSerials = 64;
 
@@ -484,6 +541,53 @@ internal sealed class MetalGuestMemory : IDisposable
 
     private long _ringsReleased;
 
+    // Caller holds _windowLock. Windows a move or a re-cut replaced keep their buffers until
+    // the submission being recorded completes: earlier submissions still in flight may bind
+    // them, and this one's device-address table may hold their addresses.
+    private void RetireReplaced()
+    {
+        foreach (var window in _retiredScratch)
+        {
+            if (window.Buffer != 0)
+            {
+                _retired.Add((window, _submissionSerial));
+            }
+        }
+
+        _retiredScratch.Clear();
+    }
+
+    // Caller holds _windowLock.
+    private void ReleaseRetired()
+    {
+        for (var index = _retired.Count - 1; index >= 0; index--)
+        {
+            var (window, serial) = _retired[index];
+            if (serial > _completedSerial)
+            {
+                continue;
+            }
+
+            ReleaseBuffer(window);
+            _retired.RemoveAt(index);
+        }
+    }
+
+    // Caller holds _windowLock.
+    private void ReleaseBuffer(MetalWindowPartition.Window window)
+    {
+        _windowBuffers.TryRemove(window.Buffer, out _);
+        if (_residencySet != 0)
+        {
+            RemoveResident(window.Buffer);
+        }
+
+        MetalNative.SendVoid(window.Buffer, SelRelease);
+        window.Buffer = 0;
+        _windowsReleased++;
+        _windowBytesMapped -= (long)window.Size;
+    }
+
     /// <summary>How many idle upload rings have been handed back since startup.</summary>
     public long RingsReleased => Volatile.Read(ref _ringsReleased);
 
@@ -491,8 +595,8 @@ internal sealed class MetalGuestMemory : IDisposable
     public int RingCount => _rings.Count;
 
     /// <summary>
-    /// The GPU view of a guest byte range. A backed range inside one window needs no
-    /// copy; anything else is staged into the upload ring, so the bytes the GPU reads
+    /// The GPU view of a guest byte range. A range that is one backed run binds its window
+    /// in place; anything else is staged into the upload ring, so the bytes the GPU reads
     /// are the bytes the CPU can see right now.
     /// </summary>
     public MetalGuestRange Resolve(ulong gpuVa, ulong size)
@@ -527,43 +631,23 @@ internal sealed class MetalGuestMemory : IDisposable
         return true;
     }
 
-    /// <summary>The window whose buffer a GPU address lies in, or -1.</summary>
-    public int WindowIndexOfGpuAddress(ulong gpuAddress)
-    {
-        for (var index = 0; index < _windowCount; index++)
-        {
-            if (gpuAddress - _windows[index].GpuAddress < _windows[index].Size)
-            {
-                return index;
-            }
-        }
-
-        return -1;
-    }
-
-    /// <summary>
-    /// The backing a window owns: from its first byte to the next window's, so the seam it
-    /// shares with the next one belongs to that one and every backing byte to one window.
-    /// </summary>
-    public (ulong Offset, ulong Size) WindowOwnedBacking(int index) =>
-        ((ulong)index * _windowStride, index == _windowCount - 1 ? _windows[index].Size : _windowStride);
-
-    /// <summary>The window that owns a backing offset (<see cref="WindowOwnedBacking"/>).</summary>
-    public int WindowOwningBacking(ulong offset) =>
-        (int)Math.Min(offset / _windowStride, (ulong)(_windowCount - 1));
-
     /// <summary>True when the range is a window's own bytes - guest memory - rather than a ring copy.</summary>
     public bool IsInPlace(in MetalGuestRange range)
     {
-        foreach (var window in _windows)
+        if (!range.IsValid || range.Buffer == 0)
         {
-            if (window.Buffer == range.Buffer)
+            return false;
+        }
+
+        foreach (var ring in _rings)
+        {
+            if (ring.Buffer == range.Buffer)
             {
-                return range.IsValid;
+                return false;
             }
         }
 
-        return false;
+        return _windowBuffers.ContainsKey(range.Buffer);
     }
 
     /// <summary>A ring copy of the guest bytes the CPU sees now.</summary>
@@ -591,15 +675,14 @@ internal sealed class MetalGuestMemory : IDisposable
     }
 
     /// <summary>
-    /// The longest prefix of a range that one window covers, or an invalid range when
-    /// not even the first byte is in one. Whether a range resolves is monotone in its
-    /// length - a window covers a prefix of whatever it covers - so the longest one is
-    /// a binary search, which is how an image too scattered to map in one piece is cut
-    /// into the pieces that do map.
+    /// The longest prefix of a range that one window can cover, or an invalid range when
+    /// not even the first byte is backed: the longest prefix that is one contiguous run of
+    /// the backing, up to the largest window from its first granule. That is how an image
+    /// too scattered to map in one piece is cut into the pieces that do map.
     /// </summary>
     public MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size)
     {
-        var prefix = ResolveWritablePrefix(gpuVa, size, warn: true);
+        var prefix = ResolveWindowPrefix(gpuVa, size, minimum: 1);
         if (prefix.IsValid)
         {
             MetalGpuReferenceCensus.Mark(gpuVa, prefix.Size);
@@ -608,42 +691,185 @@ internal sealed class MetalGuestMemory : IDisposable
         return prefix;
     }
 
-    private MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size, bool warn)
+    // A prefix shorter than the minimum is not bound at all, so a caller that would stage
+    // it instead does not name a window for nothing.
+    private MetalGuestRange ResolveWindowPrefix(ulong gpuVa, ulong size, ulong minimum)
     {
-        if (size == 0)
+        if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
         {
             return default;
         }
 
-        if (TryResolveWindow(gpuVa, size, out var whole, warn))
+        if (TryResolveWindow(gpuVa, size, out var whole, warn: false))
         {
             return whole;
         }
 
-        var low = 0UL;
-        var high = size;
-        var found = default(MetalGuestRange);
-        while (high - low > 1)
+        if (!_backing.TryResolveBackingAliasSpan(gpuVa, 1, out var alias) || !InAlias(alias, 1))
         {
-            var probe = low + ((high - low) / 2);
-            if (TryResolveWindow(gpuVa, probe, out var resolved, warn))
+            return default;
+        }
+
+        var offset = alias - _aliasBase;
+        if (minimum > 1)
+        {
+            // A prefix that has to be large (one too large to stage) may move cuts to fit,
+            // up to the largest window.
+            var reach = Math.Min(size, Math.Min(_maxWindowBytes, _aliasSize - offset));
+            var capped = ContiguousBackedPrefix(gpuVa, reach, alignment: 1);
+            if (capped >= minimum && capped < size && TryResolveWindow(gpuVa, capped, out var large, warn: false))
             {
-                found = resolved;
-                low = probe;
-            }
-            else
-            {
-                high = probe;
+                return large;
             }
         }
 
-        return found;
+        // Otherwise what the window holding the first byte holds, as the backing is cut now.
+        ulong windowEnd;
+        lock (_windowLock)
+        {
+            windowEnd = _partition.At(offset).End;
+        }
+
+        var length = ContiguousBackedPrefix(gpuVa, Math.Min(size, windowEnd - offset), alignment: 1);
+        return length != 0 && length >= minimum && TryResolveWindow(gpuVa, length, out var prefix, warn: false)
+            ? prefix
+            : default;
     }
 
     /// <summary>
+    /// The longest prefix of a range, in multiples of <paramref name="alignment"/>, that is
+    /// one contiguous run of the backing. Whether a range resolves is monotone in its length,
+    /// so it is a binary search; nothing is bound.
+    /// </summary>
+    private ulong ContiguousBackedPrefix(ulong gpuVa, ulong size, ulong alignment)
+    {
+        if (_backing.TryResolveBackingAliasSpan(gpuVa, size, out _))
+        {
+            return size;
+        }
+
+        var good = 0UL;
+        var bad = size;
+        while (bad - good > alignment)
+        {
+            var middle = (good + ((bad - good) / 2)) & ~(alignment - 1);
+            if (middle <= good)
+            {
+                break;
+            }
+
+            if (_backing.TryResolveBackingAliasSpan(gpuVa, middle, out _))
+            {
+                good = middle;
+            }
+            else
+            {
+                bad = middle;
+            }
+        }
+
+        return good;
+    }
+
+    /// <summary>
+    /// For the device-address table: the longest run from <paramref name="gpuVa"/>, in whole
+    /// pages and at most <paramref name="size"/>, that is contiguous in the backing and stays
+    /// inside the granule its first byte lies in, with the backing offset of its first byte.
+    /// The table cuts it further at window edges (<see cref="WindowAt"/>). Nothing is marked
+    /// touched: the table is not a binding, and what a device-address encoder names is
+    /// decided by the reach set.
+    /// </summary>
+    public bool TryResolveGranuleRun(
+        ulong gpuVa, ulong size, ulong page, out ulong backingOffset, out ulong length, out int granule)
+    {
+        backingOffset = 0;
+        length = 0;
+        granule = -1;
+        if (size < page || !_backing.TryResolveBackingAliasSpan(gpuVa, page, out var alias) || !InAlias(alias, page))
+        {
+            return false;
+        }
+
+        backingOffset = alias - _aliasBase;
+        granule = (int)(backingOffset >> _granuleBits);
+        var (granuleOffset, granuleSize) = GranuleBacking(granule);
+        var clipped = Math.Min(size, granuleOffset + granuleSize - backingOffset) & ~(page - 1);
+        length = clipped == 0 ? 0 : ContiguousBackedPrefix(gpuVa, clipped, page);
+        return length != 0;
+    }
+
+    /// <summary>
+    /// The window holding a backing offset as the backing is cut now: its id, the offset it
+    /// ends at, and the GPU address of the offset in it. Its buffer is created if it has none.
+    /// </summary>
+    public (int Id, ulong End, ulong GpuAddress) WindowAt(ulong backingOffset)
+    {
+        lock (_windowLock)
+        {
+            var window = _partition.At(backingOffset);
+            EnsureBuffer(window);
+            return (window.Id, window.End, window.GpuAddress + (backingOffset - window.Start));
+        }
+    }
+
+    // Caller holds _windowLock.
+    private nint EnsureBuffer(MetalWindowPartition.Window window)
+    {
+        if (window.Buffer != 0)
+        {
+            return window.Buffer;
+        }
+
+        var pointer = _aliasBase + window.Start;
+        var buffer = MetalV2Native.SendNewBufferNoCopy(
+            _device,
+            SelNewBufferNoCopy,
+            (nint)pointer,
+            (nuint)window.Size,
+            Mtl.ResourceStorageModeShared | HazardTrackingMode,
+            0);
+        if (buffer == 0)
+        {
+            throw GpuFatal.Fatal(
+                $"A guest memory window could not be mapped: window={window.Id} backing=0x{window.Start:X}+0x{window.Size:X} " +
+                $"pointer=0x{pointer:X16}.");
+        }
+
+        SetLabel(buffer, $"guest.window[0x{window.Start:X}+0x{window.Size:X}]");
+        window.GpuAddress = MetalNative.SendGpuAddress(buffer, SelGpuAddress);
+        // A guest qword's pair lock is picked by bits 3..13 of its GPU address
+        // (pair_atomic_prelude.msl). Windows do not overlap, but a qword lives in different
+        // windows over time as cuts move, so each must keep the host mapping's offset within
+        // a 16 KB page for the lock to stay the same.
+        if (((window.GpuAddress - pointer) & (PairLockPageBytes - 1)) != 0)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "pair-lock-window-alignment",
+                "A guest memory window's GPU address is not 16 KB congruent with its host pointer, so a qword " +
+                "takes a different pair lock once a cut moves it into another window: " +
+                $"window={window.Id} pointer=0x{pointer:X16} gpu=0x{window.GpuAddress:X16}.");
+        }
+
+        _windowBuffers[buffer] = 0;
+        window.Buffer = buffer;
+        _windowsCreated++;
+        _windowBytesMapped += (long)window.Size;
+        if (_residencySet != 0)
+        {
+            AddResident(buffer);
+            CommitResidency();
+        }
+
+        return buffer;
+    }
+
+    private bool InAlias(ulong alias, ulong size) =>
+        alias >= _aliasBase && alias - _aliasBase < _aliasSize && size <= _aliasSize - (alias - _aliasBase);
+
+    /// <summary>
     /// Why a range has no window, for diagnostics. A caller that has to fall back wants to
-    /// say whether the guest bytes are not one backed span at all or merely straddle the
-    /// boundary between two windows, because the two have different answers.
+    /// say whether the guest bytes are not one backed span at all or merely exceed the
+    /// largest window, because the two have different answers.
     /// </summary>
     public string DescribeResolve(ulong gpuVa, ulong size)
     {
@@ -668,27 +894,25 @@ internal sealed class MetalGuestMemory : IDisposable
             return $"not one backed span (contiguous prefix about 0x{contiguous:X} of 0x{size:X})";
         }
 
-        if (alias < _aliasBase || alias - _aliasBase >= _aliasSize)
+        if (!InAlias(alias, size))
         {
-            return $"backed at alias 0x{alias:X16}, outside the mapped windows " +
+            return $"backed at alias 0x{alias:X16}, outside the mapped alias " +
                 $"0x{_aliasBase:X16}+0x{_aliasSize:X}";
         }
 
-        var index = (int)Math.Min((alias - _aliasBase) / _windowStride, (ulong)(_windowCount - 1));
-        ref readonly var window = ref _windows[index];
-        var offset = alias - window.AliasBase;
-        if (alias < window.AliasBase || offset >= window.Size)
+        var offset = alias - _aliasBase;
+        if (size > _maxWindowBytes)
         {
-            return $"alias 0x{alias:X16} is outside window {index} (0x{window.AliasBase:X16}+0x{window.Size:X})";
+            return $"backed at offset 0x{offset:X}, larger than the largest window 0x{_maxWindowBytes:X}";
         }
 
-        if (size > window.Size - offset)
+        lock (_windowLock)
         {
-            return $"straddles the end of window {index}: offset 0x{offset:X} + size 0x{size:X} " +
-                $"exceeds 0x{window.Size:X} by 0x{size - (window.Size - offset):X}";
+            var window = _partition.At(offset);
+            return offset + size <= window.End
+                ? "resolvable"
+                : $"resolvable once the window edge at 0x{window.End:X} moves out of it";
         }
-
-        return "resolvable";
     }
 
     // Why a range had to be staged into the ring instead of binding its window: the
@@ -722,8 +946,7 @@ internal sealed class MetalGuestMemory : IDisposable
         // A range that crosses the edge between two mappings of one allocation is
         // still contiguous in the backing, so it still has one window address; the
         // single-mapping test alone sent those to the staging ring.
-        if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out var alias) ||
-            alias < _aliasBase || alias - _aliasBase >= _aliasSize)
+        if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out var alias) || !InAlias(alias, size))
         {
             if (warn)
             {
@@ -733,72 +956,70 @@ internal sealed class MetalGuestMemory : IDisposable
             return false;
         }
 
-        var index = (int)Math.Min((alias - _aliasBase) / _windowStride, (ulong)(_windowCount - 1));
-        ref readonly var window = ref _windows[index];
-        var offset = alias - window.AliasBase;
-        if (alias < window.AliasBase || offset >= window.Size || size > window.Size - offset)
+        var offset = alias - _aliasBase;
+        MetalWindowPartition.Window window;
+        lock (_windowLock)
         {
-            if (!warn)
+            switch (_partition.Place(offset, offset + size, _pinnedWindows, _retiredScratch, out window))
             {
-                return false;
+                case MetalWindowPartition.Placement.Moved:
+                    _windowMoves++;
+                    RetireReplaced();
+                    break;
+                case MetalWindowPartition.Placement.Pinned:
+                    // The cut has to move but this submission already used a window it would
+                    // change: give it no window now, move the cut as the next one begins.
+                    _windowConflicts++;
+                    if (_pendingSet.Add((offset, offset + size)))
+                    {
+                        _pendingPlacements.Add((offset, offset + size));
+                    }
+
+                    MetalV2Diagnostics.InfoOnce(
+                        "window-move-deferred",
+                        "A guest range crosses a window edge whose windows this command buffer already used; it has " +
+                        "no window until the next command buffer moves the edge (a byte may have one GPU address " +
+                        $"per command buffer): address=0x{gpuVa:X16} size=0x{size:X}.");
+                    return false;
+                case MetalWindowPartition.Placement.TooLarge:
+                    if (warn)
+                    {
+                        MetalV2Diagnostics.WarnOnce(
+                            $"window-span:{size:X}",
+                            $"A backed guest range is larger than the largest window can grow to hold it: " +
+                            $"address=0x{gpuVa:X16} size=0x{size:X} alias=0x{alias:X16} " +
+                            $"max_window=0x{_maxWindowBytes:X}.");
+                    }
+
+                    return false;
             }
 
-            MetalV2Diagnostics.WarnOnce(
-                $"window-straddle:{size:X}",
-                $"A backed guest range straddles the window edge, so no single window covers it: " +
-                $"address=0x{gpuVa:X16} size=0x{size:X} alias=0x{alias:X16} window={index} " +
-                $"window_offset=0x{offset:X} window_size=0x{window.Size:X} " +
-                $"overlap=0x{_windowOverlap:X}.");
-            return false;
+            EnsureBuffer(window);
+            window.LastUsedSerial = _submissionSerial;
+            _pinnedWindows.Add(window.Id);
         }
 
-        var bit = 1UL << index;
-        if ((_touchedWindows & bit) == 0)
+        if (_touchedWindows.Add(window.Id))
         {
-            _touchedWindows |= bit;
             _residentDirty = true;
         }
 
-        resolved = new MetalGuestRange(window.Buffer, offset, size, window.GpuAddress + offset);
+        var windowOffset = offset - window.Start;
+        resolved = new MetalGuestRange(window.Buffer, windowOffset, size, window.GpuAddress + windowOffset);
         // Mappings are page-granular on both sides, so a page-aligned guest address has to
         // resolve to a page-aligned window offset. When it does not, some view record's
         // guest address and backing offset disagree below the page, and every range it
         // resolves lands that far from where the guest put it.
-        if ((gpuVa & 0xFFF) != (offset & 0xFFF))
+        if ((gpuVa & 0xFFF) != (windowOffset & 0xFFF))
         {
             MetalV2Diagnostics.WarnOnce(
                 "unaligned-window-offset",
                 $"A guest address resolved to a window offset that disagrees with it below the page: " +
-                $"address=0x{gpuVa:X16} offset=0x{offset:X} window={index} delta=0x{(gpuVa ^ offset) & 0xFFF:X}.");
+                $"address=0x{gpuVa:X16} offset=0x{windowOffset:X} window={window.Id} delta=0x{(gpuVa ^ windowOffset) & 0xFFF:X}.");
         }
 
-        Trap?.NoteBinding($"resolve[{index}]", gpuVa, size, (ulong)window.Buffer, offset, resolved.GpuAddress);
+        Trap?.NoteBinding($"resolve[{window.Id}]", gpuVa, size, (ulong)window.Buffer, windowOffset, resolved.GpuAddress);
         return true;
-    }
-
-    /// <summary>
-    /// The prefix of a contiguous backed range that the window holding its first byte
-    /// covers, for a range that straddles the window's end. False when the range is not
-    /// one backed span, which the binary search in <see cref="ResolveWritablePrefix"/> handles.
-    /// </summary>
-    private bool TryResolveWindowPrefix(ulong gpuVa, ulong size, out MetalGuestRange resolved)
-    {
-        resolved = default;
-        if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out var alias) ||
-            alias < _aliasBase || alias - _aliasBase >= _aliasSize)
-        {
-            return false;
-        }
-
-        var index = (int)Math.Min((alias - _aliasBase) / _windowStride, (ulong)(_windowCount - 1));
-        ref readonly var window = ref _windows[index];
-        if (alias < window.AliasBase || alias - window.AliasBase >= window.Size)
-        {
-            return false;
-        }
-
-        var covered = Math.Min(size, window.Size - (alias - window.AliasBase));
-        return TryResolveWindow(gpuVa, covered, out resolved, warn: false);
     }
 
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
@@ -807,17 +1028,13 @@ internal sealed class MetalGuestMemory : IDisposable
         if (size > _maxUploadBytes)
         {
             // A range this large that no window covers is not data a draw reads whole;
-            // bind its prefix rather than staging gigabytes per submission. When one
-            // window holds at least a ring's worth of its start, that prefix binds in
-            // place: it stays live with the GPU writes still in flight and a shader's
-            // stores through it reach guest memory, neither of which a staged copy of
-            // the first bytes can do. Demon's Souls binds its whole heap (1.5-4 GB) this
-            // way, and with windows smaller than the heap every such binding came here.
-            if (!TryResolveWindowPrefix(gpuVa, size, out var prefix))
-            {
-                prefix = ResolveWritablePrefix(gpuVa, size, warn: false);
-            }
-
+            // bind its prefix rather than staging gigabytes per submission. When its
+            // contiguous start holds at least a ring's worth, up to the largest window,
+            // that prefix binds in place: it stays live with the GPU writes still in
+            // flight and a shader's stores through it reach guest memory, neither of
+            // which a staged copy of the first bytes can do. Demon's Souls binds whole
+            // heaps (1.5-4 GB) this way.
+            var prefix = ResolveWindowPrefix(gpuVa, size, minimum: _maxUploadBytes);
             if (prefix.IsValid && prefix.Size >= _maxUploadBytes)
             {
                 MetalGpuReferenceCensus.Mark(gpuVa, prefix.Size);
@@ -830,7 +1047,7 @@ internal sealed class MetalGuestMemory : IDisposable
                 return prefix;
             }
 
-            // It may well be backed and merely cross a window edge, so the warning says which.
+            // It may well be backed and merely exceed the largest window, so the warning says which.
             MetalV2Diagnostics.WarnOnce(
                 "oversized-upload",
                 $"A guest range no single window covers is too large to stage; binding its first " +
@@ -1237,7 +1454,8 @@ internal sealed class MetalGuestMemory : IDisposable
     /// <summary>
     /// The window and ring buffers an encoder has to be told about when there is no
     /// residency set: an argument buffer holds their addresses, not references, so
-    /// Metal cannot see the dependency on its own.
+    /// Metal cannot see the dependency on its own. The windows are the ones this
+    /// submission resolved a range through, and only those: naming a window wires it.
     /// </summary>
     public ReadOnlySpan<nint> ResidentBuffers
     {
@@ -1252,11 +1470,14 @@ internal sealed class MetalGuestMemory : IDisposable
             {
                 _residentDirty = false;
                 _submissionResidentCount = 0;
-                for (var index = 0; index < _windowCount; index++)
+                lock (_windowLock)
                 {
-                    if ((_touchedWindows & (1UL << index)) != 0)
+                    foreach (var id in _touchedWindows)
                     {
-                        Append(ref _submissionResidentBuffers, ref _submissionResidentCount, _windows[index].Buffer);
+                        if (_partition.ById(id) is { Buffer: not 0 } window)
+                        {
+                            Append(ref _submissionResidentBuffers, ref _submissionResidentCount, window.Buffer);
+                        }
                     }
                 }
 
@@ -1323,9 +1544,28 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         _rings.Clear();
-        for (var index = 0; index < _windowCount; index++)
+        lock (_windowLock)
         {
-            MetalNative.SendVoid(_windows[index].Buffer, SelRelease);
+            foreach (var window in _partition.Windows)
+            {
+                if (window.Buffer != 0)
+                {
+                    MetalNative.SendVoid(window.Buffer, SelRelease);
+                    window.Buffer = 0;
+                }
+            }
+
+            foreach (var (window, _) in _retired)
+            {
+                if (window.Buffer != 0)
+                {
+                    MetalNative.SendVoid(window.Buffer, SelRelease);
+                    window.Buffer = 0;
+                }
+            }
+
+            _retired.Clear();
+            _windowBuffers.Clear();
         }
 
         if (_gdsBuffer != 0)

@@ -19,6 +19,14 @@ public static partial class Gen5MslTranslator
     public const uint AddressRangeSearchSteps = 15;
     public const uint MaxAddressRangeCount = 16384;
 
+    /// <summary>The device-address helpers every program with a page table carries, for device tests.</summary>
+    internal static string DeviceAddressPrelude()
+    {
+        var source = new StringBuilder();
+        CompilationContext.EmitResourcePreludeForTests(source);
+        return source.ToString();
+    }
+
     public static bool TryCompileProgram(
         ShaderCompileRequest request,
         out Gen5MslShader shader,
@@ -287,6 +295,8 @@ public static partial class Gen5MslTranslator
                 dimension,
                 binding.Resources);
         }
+
+        internal static void EmitResourcePreludeForTests(StringBuilder source) => EmitResourcePrelude(source);
 
         private static void EmitResourcePrelude(StringBuilder source) =>
             source.Append(MslTemplates.Render(
