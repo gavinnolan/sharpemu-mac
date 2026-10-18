@@ -109,6 +109,7 @@ internal sealed partial class MetalImageCache
         }
 
         ForgetImageBookkeepingLocked(imageIdentifier, image);
+        NoteDroppedLocked(image, cause);
         RemoveFromIndex(imageIdentifier);
         _slots.Erase(imageIdentifier);
         RetireImage(image);
@@ -479,22 +480,31 @@ internal sealed partial class MetalImageCache
         using var held = _lock.Hold();
         _previousFrameStartTick = _frameStartTick;
         _frameStartTick = _collectionTick;
+        _idleClock.MarkFrame(_collectionTick);
     }
 
-    /// <summary>Advances the collection tick and evicts stale images over the budget.</summary>
+    /// <summary>
+    /// Advances the collection tick, re-reads the budget when it is due, retires images past
+    /// the retirement age and evicts stale images over the budget.
+    /// </summary>
     public void Collect()
     {
         using var held = _lock.Hold();
         _collectionTick++;
         DrainRetiredImages();
-        CollectIfOverBudget();
+        var now = _clock();
+        _idleClock.Sample(now, _collectionTick);
+        MaybeEvaluateBudgetLocked(now);
+        HousekeepLocked(now);
+        CollectIfOverBudget(now);
     }
 
-    // Eviction under memory pressure: the least recently used clean images go first,
-    // and a GPU-modified image is written back before its texture is dropped. Images
-    // used by the current or the previous frame are the working set and stay: when
-    // that alone is over the budget the cache runs over rather than thrashing.
-    private void CollectIfOverBudget()
+    private void CollectIfOverBudget() => CollectIfOverBudget(_clock());
+
+    // Eviction under memory pressure: the least recently used images outside the working set
+    // go first, and a GPU-modified image is written back before its texture is dropped. When
+    // the working set alone is over the budget the cache runs over rather than thrashing.
+    private void CollectIfOverBudget(long now)
     {
         if (_totalUsedMemory <= _memoryBudgetBytes)
         {
@@ -504,9 +514,7 @@ internal sealed partial class MetalImageCache
         var candidates = new List<(ulong Tick, ResourceSlotIdentifier Image)>();
         _slots.ForEach((imageIdentifier, image) =>
         {
-            if (image.Registered
-                && image.LastAccessTick < _previousFrameStartTick
-                && _collectionTick - Math.Min(_collectionTick, image.LastAccessTick) > TicksBeforeRemoval)
+            if (IsBudgetEvictableLocked(image, now))
             {
                 candidates.Add((image.LastAccessTick, imageIdentifier));
             }

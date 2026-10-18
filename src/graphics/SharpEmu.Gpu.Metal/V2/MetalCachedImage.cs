@@ -36,6 +36,8 @@ internal enum MetalImageReleaseCause : byte
     // A texture that read the guest window in place became an owned texture because the
     // image was written, stored to, copied into, or needed a view the window texture cannot give.
     LinearViewPromoted,
+    // Not used for the retirement age (frames and seconds), whatever the budget.
+    Retired,
 }
 
 // Why a GPU-written image had to be published into guest memory.
