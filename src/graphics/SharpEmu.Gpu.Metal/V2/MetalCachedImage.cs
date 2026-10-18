@@ -93,6 +93,7 @@ internal sealed class MetalCachedImage : IDisposable
         Description = description;
         Shape = shape;
         Texture = texture;
+        ResidentEnd = description.Data.Size;
         // A newly created image starts with the guest's bytes as its contents, so the
         // first use uploads unless the GPU takes ownership first.
         _cpuDirty = !ImageDescription.IsEmptyRange(description.Data);
@@ -158,6 +159,39 @@ internal sealed class MetalCachedImage : IDisposable
     public MetalTextureShape Shape { get; private set; }
 
     public nint Texture { get; private set; }
+
+    /// <summary>
+    /// The guest mip level the texture's level 0 holds. Zero for the whole chain; above zero
+    /// for a sampled texture held from its T# BASE_LEVEL (MetalImageCache.BaseLevel.cs), whose
+    /// finer levels the GPU cannot address and the host does not allocate. The description
+    /// stays the guest's full chain either way: identity, guest offsets and the page index
+    /// are the guest's, only the texture and what is uploaded into it are cut.
+    /// </summary>
+    public uint FirstLevel { get; private set; }
+
+    /// <summary>
+    /// The guest bytes, as offsets into the image, that the levels the texture holds read:
+    /// the whole image for the whole chain, the coarser levels' run for a texture from a
+    /// later level. Uploads and the page watch cover this run and nothing else.
+    /// </summary>
+    public ulong ResidentStart { get; private set; }
+
+    public ulong ResidentEnd { get; private set; }
+
+    /// <summary>
+    /// The collection tick of the newest texture binding that needed the texture's first
+    /// level, so a texture is cut down to a coarser BASE_LEVEL only once nothing in the
+    /// working set still samples the finer one.
+    /// </summary>
+    public ulong FirstLevelUseTick;
+
+    /// <summary>Records which guest levels a newly made texture holds and the bytes they read.</summary>
+    public void SetResidentLevels(uint firstLevel, ulong start, ulong end)
+    {
+        FirstLevel = firstLevel;
+        ResidentStart = start;
+        ResidentEnd = end;
+    }
 
     public MetalImageUses Uses;
 
@@ -255,6 +289,37 @@ internal sealed class MetalCachedImage : IDisposable
         Texture = texture;
         Shape = shape;
         _windowLinearView = false;
+        MarkCpuDirty(MetalImageDirtyCause.Invalidated);
+        NoteContentChanged();
+        return retired;
+    }
+
+    /// <summary>
+    /// Gives the image a texture holding the guest levels from <paramref name="firstLevel"/>,
+    /// in place of one holding a different set. The old texture and its views move to the
+    /// returned image, which the cache retires once the GPU is done with it. The new texture
+    /// holds nothing yet, so the image is CPU-dirty over its whole range; only a sampled-only
+    /// image is ever cut, so guest memory holds everything the old texture did.
+    /// </summary>
+    public MetalCachedImage ReplaceLevels(nint texture, in MetalTextureShape shape, uint firstLevel, ulong start, ulong end)
+    {
+        if (_gpuModified || _windowLinearView)
+        {
+            throw GpuFatal.Fatal(
+                $"Only a sampled-only owned texture changes its levels: gpuModified={_gpuModified} " +
+                $"windowView={_windowLinearView} address=0x{Description.Data.Address:X16}.");
+        }
+
+        var retired = new MetalCachedImage(in Description, Shape, Texture) { LastUseSerial = LastUseSerial };
+        lock (_viewGate)
+        {
+            retired._views.AddRange(_views);
+            _views.Clear();
+        }
+
+        Texture = texture;
+        Shape = shape;
+        SetResidentLevels(firstLevel, start, end);
         MarkCpuDirty(MetalImageDirtyCause.Invalidated);
         NoteContentChanged();
         return retired;
@@ -426,6 +491,16 @@ internal sealed class MetalCachedImage : IDisposable
     /// </param>
     public void MarkGpuModified(bool depthPlaneChanged = true)
     {
+        // Every write path gives a texture held from a later level the whole chain first
+        // (MetalImageCache.PromoteLinearView): a writeback of a cut texture would retile its
+        // levels into the wrong guest offsets.
+        if (FirstLevel != 0)
+        {
+            throw GpuFatal.Fatal(
+                $"A texture held from guest level {FirstLevel} was written without the whole chain: " +
+                $"address=0x{Description.Data.Address:X16}.");
+        }
+
         if (depthPlaneChanged)
         {
             NoteContentChanged();
@@ -642,7 +717,29 @@ internal sealed class MetalCachedImage : IDisposable
             return Texture;
         }
 
-        var wholeImage = requested.BaseLevel == 0 && requested.LevelCount >= Shape.MipLevels &&
+        // LOD remapping for a texture held from a later level. A request names guest levels:
+        // its BaseLevel is the T# BASE_LEVEL, which on the PS5 is a view base, not a clamp -
+        // the texture unit treats level BASE_LEVEL as the base map, so implicit LOD, an
+        // explicit LOD (sample_l, image_load_mip), resinfo's width/height for a LOD and its
+        // level count (LAST_LEVEL - BASE_LEVEL + 1) are all relative to it, and so is the
+        // sampler's MIN_LOD. The translated shader therefore never sees an absolute level:
+        // it samples a view whose level 0 is BASE_LEVEL, and Metal's own level(), bias(),
+        // min_lod_clamp, get_width(lod) and get_num_mip_levels() are relative to the view
+        // exactly the same way. A texture whose level 0 is guest level FirstLevel only moves
+        // where that view starts, to BASE_LEVEL - FirstLevel; the shader, the sampler and
+        // every explicit-LOD fetch stay as they are. The cache never hands out a view below
+        // FirstLevel (FitResidentLevelsLocked grows the texture first), so the clamp below
+        // only keeps a broken caller from making Metal raise.
+        var textureLevel = requested.BaseLevel >= FirstLevel ? requested.BaseLevel - FirstLevel : 0;
+        if (requested.BaseLevel < FirstLevel)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                $"view-below-first-level:{Description.Data.Address:X}",
+                $"A view names a guest level the texture does not hold; it starts at the texture's first level " +
+                $"instead: level={requested.BaseLevel} firstLevel={FirstLevel} address=0x{Description.Data.Address:X16}.");
+        }
+
+        var wholeImage = textureLevel == 0 && requested.LevelCount >= Shape.MipLevels &&
             requested.BaseLayer == 0 && requested.LayerCount >= Shape.ArrayLength;
         if (wholeImage && identitySwizzle && viewFormat == Shape.PixelFormat && viewType == Shape.TextureType)
         {
@@ -679,7 +776,8 @@ internal sealed class MetalCachedImage : IDisposable
             return Texture;
         }
 
-        var levelCount = Math.Min(requested.LevelCount, Shape.MipLevels - Math.Min(requested.BaseLevel, Shape.MipLevels - 1));
+        textureLevel = Math.Min(textureLevel, Shape.MipLevels - 1);
+        var levelCount = Math.Min(requested.LevelCount, Shape.MipLevels - textureLevel);
         var baseLayer = Math.Min(requested.BaseLayer, Shape.ArrayLength - 1);
         var layerCount = Math.Min(requested.LayerCount, Shape.ArrayLength - baseLayer);
         if (viewType == Mtl.TextureType3D)
@@ -689,7 +787,7 @@ internal sealed class MetalCachedImage : IDisposable
             layerCount = 1;
         }
 
-        var levelRange = new NsRange { Location = requested.BaseLevel, Length = Math.Max(levelCount, 1) };
+        var levelRange = new NsRange { Location = textureLevel, Length = Math.Max(levelCount, 1) };
         var sliceRange = new NsRange { Location = baseLayer, Length = Math.Max(layerCount, 1) };
         var view = identitySwizzle
             ? MetalV2Native.SendNewTextureView(

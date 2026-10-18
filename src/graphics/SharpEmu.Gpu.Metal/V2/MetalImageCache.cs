@@ -278,7 +278,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         if (!result.IsValid)
         {
-            result = InsertImage(request.Description, sampledOnly: request.Role == ImageRole.Texture, request.Role);
+            var sampledOnly = request.Role == ImageRole.Texture;
+            result = InsertImage(
+                request.Description, sampledOnly, request.Role,
+                sampledOnly ? DesiredFirstLevel(in request.Description, request.View.BaseLevel) : 0);
         }
 
         var image = _slots[result];
@@ -714,6 +717,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 PromoteLinearView(image);
             }
 
+            // Every sampled binding comes through here, the ones that reuse an earlier
+            // lookup too, so this is where the texture follows the binding's BASE_LEVEL.
+            if (request.Role == ImageRole.Texture)
+            {
+                FitResidentLevelsLocked(image, in request.View);
+            }
+            else
+            {
+                PromoteLinearView(image);
+            }
+
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
@@ -1035,11 +1049,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     /// <summary>
     /// A blit or resolve is about to write into this image's texture: a window view would
-    /// write the guest bytes with no record of it, so it gets an owned texture first.
+    /// write the guest bytes with no record of it, so it gets an owned texture first, and a
+    /// texture held from its BASE_LEVEL gets the whole chain the write names levels of.
     /// </summary>
     public void PrepareImageWrite(MetalCachedImage image)
     {
-        if (!image.IsWindowLinearView)
+        if (!image.IsWindowLinearView && image.FirstLevel == 0)
         {
             return;
         }
@@ -1184,6 +1199,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     {
         if (!DeviceAliasPublishEnabled || image.Texture == 0 || other.Texture == 0 ||
             image.IsWindowLinearView || other.IsWindowLinearView ||
+            image.FirstLevel != 0 || other.FirstLevel != 0 ||
             image.Texture == other.Texture || other.IsCpuDirty ||
             image.Description.Data.Address != other.Description.Data.Address ||
             image.Description.Data.Size != other.Description.Data.Size)
@@ -1508,22 +1524,36 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return imageIdentifier;
     }
 
+    // firstLevel above zero makes a sampled texture of the guest levels from there down
+    // (MetalImageCache.BaseLevel.cs).
     private ResourceSlotIdentifier InsertImage(
-        in ImageDescription description, bool sampledOnly = false, ImageRole role = ImageRole.Texture)
+        in ImageDescription description, bool sampledOnly = false, ImageRole role = ImageRole.Texture,
+        uint firstLevel = 0)
     {
         var admitted = Admit(in description);
-        var shape = CreationShape(in admitted, role);
+        var shape = firstLevel != 0 ? _transfer.ShapeFor(in admitted, firstLevel) : CreationShape(in admitted, role);
         nint viewTexture = 0;
-        var windowView = sampledOnly && TryCreateLinearView(in admitted, ref shape, out viewTexture);
+        var windowView = sampledOnly && firstLevel == 0 && TryCreateLinearView(in admitted, ref shape, out viewTexture);
         var texture = windowView ? viewTexture : CreateTexture(in shape, in admitted);
         // Stamped before the collection below runs: an image that has never been used
         // reads as the oldest one in the cache, so an over-budget collection evicted the
         // image it was making room for and the caller read a freed slot.
-        var image = new MetalCachedImage(in admitted, in shape, texture) { LastAccessTick = _collectionTick };
+        var image = new MetalCachedImage(in admitted, in shape, texture)
+        {
+            LastAccessTick = _collectionTick,
+            FirstLevelUseTick = _collectionTick,
+        };
         if (windowView)
         {
             image.MarkWindowLinearView();
             Interlocked.Increment(ref _linearViews);
+        }
+
+        if (firstLevel != 0)
+        {
+            var (start, end) = _transfer.LevelBytes(in admitted, firstLevel);
+            image.SetResidentLevels(firstLevel, start, end);
+            _baseLevelCreated++;
         }
 
         image.AllocatedBytes = TextureAllocatedBytes(image);
@@ -1618,9 +1648,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>
     /// Gives a window view an owned texture, to be filled from guest memory like any other
     /// image. The old texture waits for the submissions that bound it. Caller holds the lock.
+    ///
+    /// Every path that writes an image or binds it as anything but a sampled texture comes
+    /// here first, so a texture held from its BASE_LEVEL gets the whole chain here too: a
+    /// write may name any level, and a GPU-written image is retiled back whole.
     /// </summary>
     private void PromoteLinearView(MetalCachedImage image)
     {
+        if (image.FirstLevel != 0)
+        {
+            ReshapeLevelsLocked(image, 0);
+            _baseLevelPromotions++;
+            return;
+        }
+
         if (!image.IsWindowLinearView)
         {
             return;
@@ -1728,6 +1769,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         ref readonly var description = ref image.Description;
+        // A texture held from its BASE_LEVEL reads only the coarser levels' bytes; guest
+        // memory changing anywhere else changes nothing it holds. (An empty interval is a
+        // new image, dirty over all of it.)
+        var residentStart = image.ResidentStart;
+        var residentEnd = image.ResidentEnd;
+        if (image.FirstLevel != 0 && image.DirtyEnd > image.DirtyStart &&
+            (image.DirtyEnd <= residentStart || image.DirtyStart >= residentEnd))
+        {
+            image.RefreshComplete();
+            return;
+        }
+
         if (TryRefreshDirtyRun(image))
         {
             return;
@@ -1748,17 +1801,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-        var whole = description.Data.Size <= MaxTransferPieceBytes
-            ? _guestMemory.Resolve(description.Data.Address, description.Data.Size)
+        var residentSize = residentEnd - residentStart;
+        var whole = residentSize <= MaxTransferPieceBytes
+            ? _guestMemory.Resolve(description.Data.Address + residentStart, residentSize)
             : default;
-        if (whole.IsValid && whole.Size >= description.Data.Size)
+        if (whole.IsValid && whole.Size >= residentSize)
         {
             var stencil = description.HasStencil
                 ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
                 : default;
-            var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
             _transfer.EncodeGuestToTexture(
-                context, in description, range, whole, stencil, image.Texture, 0, description.Data.Size);
+                context, in description, ResidentRange(image), whole, stencil, image.Texture,
+                residentStart, residentSize, image.FirstLevel);
         }
         else if (!UploadInPieces(context, image))
         {
@@ -1783,18 +1837,28 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private bool TryRefreshDirtyRun(MetalCachedImage image)
     {
         ref readonly var description = ref image.Description;
+        // Only what the texture's levels read counts: the whole image, or for a texture
+        // held from its BASE_LEVEL the coarser levels' run.
+        var residentStart = image.ResidentStart;
+        var residentEnd = image.ResidentEnd;
+        var dirtyStart = Math.Max(image.DirtyStart, residentStart);
+        var dirtyEnd = Math.Min(image.DirtyEnd, residentEnd);
         if (!SubRangeTransfersEnabled || description.HasStencil ||
-            image.DirtyEnd <= image.DirtyStart ||
-            image.DirtyEnd - image.DirtyStart > description.Data.Size / 2)
+            dirtyEnd <= dirtyStart ||
+            dirtyEnd - dirtyStart > (residentEnd - residentStart) / 2)
         {
             return false;
         }
 
-        if (!TryCoveringRun(in description, image.DirtyStart, image.DirtyEnd, out var start, out var end))
+        if (!TryCoveringRun(in description, dirtyStart, dirtyEnd, out var start, out var end))
         {
             return false;
         }
 
+        // The run's ends widen outward to cuts of the whole chain; the resident run's own
+        // ends are where its levels' transfers start and stop, so cutting there loses none.
+        start = Math.Max(start, residentStart);
+        end = Math.Min(end, residentEnd);
         var source = _guestMemory.Resolve(description.Data.Address + start, end - start);
         if (!source.IsValid || source.Size < end - start)
         {
@@ -1802,14 +1866,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeGuestToTexture(
-            context, in description, range, source, default, image.Texture, start, end - start);
+            context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
+            image.FirstLevel);
         _uploadCauses[(int)image.DirtyCause]++;
         _partialUploads++;
-        _partialUploadBytesSaved += (long)(description.Data.Size - (end - start));
+        _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
         context.ProfileEncoded(ProfileLabel("upload-run", in description));
-        image.RefreshComplete(start, end);
+        if (image.FirstLevel != 0)
+        {
+            // What is still dirty lies outside the levels the texture holds.
+            image.RefreshComplete();
+        }
+        else
+        {
+            image.RefreshComplete(start, end);
+        }
+
         Interlocked.Increment(ref _uploads);
         return true;
     }
@@ -1884,19 +1957,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (!TrySplitLayers(in description, out var layers, out var layerBytes))
         {
             // One window, never the ring: a range this large is past what the ring
-            // stages, and staging it would carry only its prefix.
-            var source = _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size);
+            // stages, and staging it would carry only its prefix. A texture held from its
+            // BASE_LEVEL maps the coarser levels' run alone (a split image has one level,
+            // so the layer pieces below never have a first level to keep).
+            var residentStart = image.ResidentStart;
+            var residentSize = image.ResidentEnd - residentStart;
+            var source = _guestMemory.ResolveWritable(description.Data.Address + residentStart, residentSize);
             if (!source.IsValid)
             {
-                return UploadInRuns(context, image, 0, description.Data.Size);
+                return UploadInRuns(context, image, residentStart, image.ResidentEnd);
             }
 
             var stencil = description.HasStencil
                 ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
                 : default;
-            var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
             _transfer.EncodeGuestToTexture(
-                context, in description, range, source, stencil, image.Texture, 0, description.Data.Size);
+                context, in description, ResidentRange(image), source, stencil, image.Texture,
+                residentStart, residentSize, image.FirstLevel);
             return true;
         }
 
@@ -2149,7 +2226,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var uncovered = PlanUploadRuns(
             _transfer, in description, from, to, MaxTransferPieceBytes,
             (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs);
-        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+        var range = ResidentRange(image);
         // The stencil plane is named by layers, as in WriteBackInRuns.
         var layers = description.TransferLayers;
         var layerBytes = layers != 0 ? description.Data.Size / layers : 0;
@@ -2174,7 +2251,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 : default;
             _transfer.EncodeGuestToTexture(
                 context, in description, range, source with { Size = run.Size }, stencil, image.Texture,
-                run.Offset, run.Size);
+                run.Offset, run.Size, image.FirstLevel);
             moved += run.Size;
             staged += run.Staged ? run.Size : 0;
         }

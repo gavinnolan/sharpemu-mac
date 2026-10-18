@@ -278,7 +278,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         left.Samples == 1 && right.Samples == 1 &&
         !left.IsVolume && !right.IsVolume;
 
-    public MetalTextureShape ShapeFor(in ImageDescription description)
+    public MetalTextureShape ShapeFor(in ImageDescription description, uint firstLevel = 0)
     {
         if (!MetalGuestFormats.TryDecodeHostFormat(description.PixelFormat, out var format))
         {
@@ -287,16 +287,73 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 $"guestFormat={(uint)description.GuestFormat} bytesPerBlock={description.BytesPerBlock}.");
         }
 
+        if (firstLevel != 0 &&
+            (firstLevel >= description.Resources.Levels || description.IsVolume || description.Samples != 1))
+        {
+            throw GpuFatal.Fatal(
+                $"A texture cannot start at this guest level: firstLevel={firstLevel} " +
+                $"levels={description.Resources.Levels} volume={description.IsVolume} samples={description.Samples}.");
+        }
+
+        // Metal sizes level i of a texture as max(1, width >> i), as the guest does, so a
+        // texture from firstLevel has exactly the extents of the chain's levels from there.
         return new MetalTextureShape(
             (ulong)format,
             (ulong)TextureTypeOf(description),
-            description.Extent.Width,
-            description.Extent.Height,
+            Math.Max(description.Extent.Width >> (int)firstLevel, 1),
+            Math.Max(description.Extent.Height >> (int)firstLevel, 1),
             description.IsVolume ? description.Extent.Depth : 1,
-            description.Resources.Levels,
+            description.Resources.Levels - firstLevel,
             description.IsVolume ? 1 : description.Resources.Layers,
             description.Samples,
             (ulong)UsageOf(description, format));
+    }
+
+    public (ulong Start, ulong End) LevelBytes(in ImageDescription description, uint firstLevel)
+    {
+        if (firstLevel == 0 || ImageDescription.IsEmptyRange(description.Data))
+        {
+            return (0, description.Data.Size);
+        }
+
+        // From the plan an upload selects from, so the run holds every byte the selected
+        // tiles or copies read. The guest chain keeps its full-chain offsets whatever the
+        // texture holds: the T# base address is mip 0's chain, and a coarser level sits
+        // where the full layout puts it.
+        var plan = PlanFor(description);
+        var start = ulong.MaxValue;
+        var end = 0UL;
+        if (plan.Tiled)
+        {
+            foreach (var transfer in plan.Tiles)
+            {
+                if (transfer.Level >= firstLevel)
+                {
+                    start = Math.Min(start, transfer.TiledOffset);
+                    end = Math.Max(end, transfer.TiledOffset + transfer.TiledSize);
+                }
+            }
+        }
+        else if (!plan.DepthStencil)
+        {
+            foreach (var copy in plan.Copies)
+            {
+                if (copy.Level >= firstLevel)
+                {
+                    start = Math.Min(start, copy.BufferOffset);
+                    end = Math.Max(end, CopyEnd(plan, copy));
+                }
+            }
+        }
+
+        if (start == ulong.MaxValue || start >= description.Data.Size)
+        {
+            return (0, description.Data.Size);
+        }
+
+        // A subresource's tiled extent may run past the bytes the description claims; the
+        // piece that reaches the image's end owns whatever is there (see Select).
+        return (start, Math.Min(end, description.Data.Size));
     }
 
     private static MtlTextureType TextureTypeOf(in ImageDescription description)
@@ -357,15 +414,19 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
     public void EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
-        ulong guestBase, ulong pieceSize)
+        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0)
     {
-        EncodeGuestToTextureCore(context, description, range, source, stencilSource, texture, guestBase, pieceSize);
-        MetalBlockCubeDump.Capture(context, _tiler, description, source, texture, guestBase, pieceSize);
+        EncodeGuestToTextureCore(
+            context, description, range, source, stencilSource, texture, guestBase, pieceSize, textureFirstLevel);
+        if (textureFirstLevel == 0)
+        {
+            MetalBlockCubeDump.Capture(context, _tiler, description, source, texture, guestBase, pieceSize);
+        }
     }
 
     private void EncodeGuestToTextureCore(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
-        ulong guestBase, ulong pieceSize)
+        ulong guestBase, ulong pieceSize, uint textureFirstLevel)
     {
         // Per-sample tiled layouts are not decoded on either backend; the Vulkan cache
         // leaves a multisampled image untouched too.
@@ -377,11 +438,18 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var plan = PlanFor(description);
         if (plan.DepthStencil)
         {
+            if (textureFirstLevel != 0)
+            {
+                throw GpuFatal.Fatal(
+                    $"A depth image has no texture from a later level: firstLevel={textureFirstLevel} " +
+                    $"address=0x{description.Data.Address:X16}.");
+            }
+
             EncodeDepthUpload(context, description, plan, range, source, stencilSource, texture, guestBase, pieceSize);
             return;
         }
 
-        Select(plan, description, range, guestBase, pieceSize);
+        Select(plan, description, range, guestBase, pieceSize, textureFirstLevel);
         if (_copies.Count == 0)
         {
             return;
@@ -801,11 +869,23 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     // become relative to the piece that was mapped, and the linear offsets to the start of
     // the piece's own staging, so the staging a transfer asks for is the piece's size and
     // never the whole image's.
+    //
+    // textureFirstLevel moves every selected level down by that much, onto a texture that
+    // holds only the guest levels from there on (ShapeFor). The guest offsets stay the full
+    // chain's: the guest lays the chain out from mip 0 whatever the texture keeps of it.
     private void Select(
-        TransferPlan plan, in ImageDescription description, SubresourceRange range, ulong guestBase, ulong pieceSize)
+        TransferPlan plan, in ImageDescription description, SubresourceRange range, ulong guestBase, ulong pieceSize,
+        uint textureFirstLevel = 0)
     {
         _copies.Clear();
         _tiles.Clear();
+        if (textureFirstLevel != 0 && (range.LevelCount == 0 || range.BaseLevel < textureFirstLevel))
+        {
+            throw GpuFatal.Fatal(
+                $"A transfer names guest levels the texture does not hold: levels={range.BaseLevel}+{range.LevelCount} " +
+                $"firstLevel={textureFirstLevel} address=0x{description.Data.Address:X16}.");
+        }
+
         // The guest bytes this transfer may touch, as offsets into the image. A caller
         // that could only map part of the image hands over that part, and a subresource
         // that straddles the end of it is cut down to the block rows inside rather than
@@ -831,6 +911,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
                 var rebased = clipped;
                 rebased.BufferOffset = Rebase(clipped.BufferOffset, guestBase, "a subresource copy");
+                rebased.Level -= textureFirstLevel;
                 _copies.Add(rebased);
             }
 
@@ -855,6 +936,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             {
                 var rebased = band;
                 rebased.TiledOffset = Rebase(band.TiledOffset, guestBase, "a tile transfer");
+                rebased.Level -= textureFirstLevel;
                 _tiles.Add(rebased);
                 linearBase = Math.Min(linearBase, band.LinearOffset);
             }
@@ -875,6 +957,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
             var rebased = clipped;
             rebased.BufferOffset = Rebase(clipped.BufferOffset, linearBase, "a tiled subresource copy");
+            rebased.Level -= textureFirstLevel;
             _copies.Add(rebased);
         }
 

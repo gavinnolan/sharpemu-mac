@@ -22,7 +22,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// before its texture goes. The policy arithmetic runs anywhere; cache behaviour runs on the
 /// device behind the exclusive device gate.
 /// </summary>
-public sealed unsafe class MetalImageBudgetTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper output)
 {
     private const ulong MiB = 1024 * 1024;
     private const ulong GiB = 1024 * MiB;
@@ -320,7 +320,8 @@ public sealed unsafe class MetalImageBudgetTests(ITestOutputHelper output)
 
     private sealed class Backing : IGuestBackedSpace, IDisposable
     {
-        public const ulong Size = 1024 * 1024;
+        // Room for the mipped textures the BASE_LEVEL tests make next to the small ones.
+        public const ulong Size = 4 * 1024 * 1024;
         private readonly void* _block = NativeMemory.AlignedAlloc((nuint)Size, 16384);
 
         public Backing() => NativeMemory.Clear(_block, (nuint)Size);

@@ -84,7 +84,14 @@ internal interface IMetalImageTransfer
 {
     // The Metal texture shape the cache must allocate for a description (format,
     // type, extent, mips, layers, usage). The transfer and the cache agree on it.
-    MetalTextureShape ShapeFor(in ImageDescription description);
+    // A firstLevel above zero shapes a texture that holds only guest levels
+    // [firstLevel, levels): its level 0 is the guest's level firstLevel.
+    MetalTextureShape ShapeFor(in ImageDescription description, uint firstLevel = 0);
+
+    // The guest bytes, as offsets into description.Data, that the transfer reads for the
+    // levels from firstLevel down: the smallest run every transfer of those levels lies in,
+    // from the same plan an upload uses. (0, Data.Size) for firstLevel zero.
+    (ulong Start, ulong End) LevelBytes(in ImageDescription description, uint firstLevel);
 
     // Detiles/copies every subresource in range from guest memory into the texture.
     //
@@ -94,9 +101,13 @@ internal interface IMetalImageTransfer
     // transfer; a caller that cannot map a very large image whole splits it into pieces so
     // that each one lands in a guest-memory window and the staging stays piece-sized.
     // Stencil, when present, is passed separately and is cut the same way.
+    //
+    // textureFirstLevel is the guest level the texture's level 0 holds (see ShapeFor):
+    // range still names guest levels, which must all be at or past it, and each lands
+    // in texture level (guest level - textureFirstLevel).
     void EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
-        ulong guestBase, ulong pieceSize);
+        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0);
 
     // Retiles/copies every subresource in range from the texture back into guest memory,
     // with the same piece contract as the upload.
