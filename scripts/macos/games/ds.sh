@@ -5,10 +5,12 @@
 # Demon's Souls (PPSA01342): boot straight into gameplay (or to the title menu) with the
 # fewest seconds of input, on a private copy of a known save, through run-game.sh.
 #
-#   scripts/macos/games/ds.sh <tag> [seconds] [ingame|title|boot] [ENV=VALUE ...]
+#   scripts/macos/games/ds.sh <tag> [seconds] [ingame|walk|title|boot] [ENV=VALUE ...]
 #
 #   ingame  (default) skip the intro movie, press past the title, CONTINUE the saved
 #           character and "Continue Offline", then stop pressing so gameplay stays still
+#   walk    as ingame, then hold forward at +260 s to walk into the Outpost Passage tunnel,
+#           where the reference video's t00548 frame is (to compare the same camera)
 #   title   skip the intro movie and stop at the title menu
 #   boot    no input (load-time measurements)
 #
@@ -27,7 +29,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-[[ $# -ge 1 ]] || { sed -n '5,18p' "$0" >&2; exit 2; }
+[[ $# -ge 1 ]] || { sed -n '5,20p' "$0" >&2; exit 2; }
 TAG="$1"
 SECONDS_LIMIT="${2:-300}"
 MODE="${3:-ingame}"
@@ -45,15 +47,16 @@ trap 'rm -rf "$SAVES"' EXIT
 # Seconds after the intro movie starts: Cross held through the movie,
 # then single presses for "press any button", CONTINUE and "Continue Offline".
 case "$MODE" in
-  ingame)
+  ingame|walk)
     PLAN="0:enter:2,10:enter:2,20:enter:2,30:enter:2,40:enter:2,48:enter:2"
     # Cross keeps coming every 8 s for a while: the menus' timing moves with machine load,
     # and in gameplay Cross only interacts, which the starting spot has nothing to.
-    PLAN+="$(printf ',%d:enter' $(seq 58 8 202))" ;;
+    PLAN+="$(printf ',%d:enter' $(seq 58 8 202))"
+    [[ "$MODE" == walk ]] && PLAN+=",260:w:3" ;;
   title)
     PLAN="0:enter:2,10:enter:2,20:enter:2,30:enter:2,40:enter:2,48:enter:2,58:enter" ;;
   boot) PLAN="-" ;;
-  *) echo "unknown mode $MODE (ingame|title|boot)" >&2; exit 2 ;;
+  *) echo "unknown mode $MODE (ingame|walk|title|boot)" >&2; exit 2 ;;
 esac
 
 USER_ROOT="$HOME/Library/Application Support/SharpEmu"
