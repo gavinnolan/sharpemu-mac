@@ -131,6 +131,13 @@ internal sealed unsafe class SceneRig : IDisposable
     /// <summary>Runs <paramref name="words"/> on the graphics queue (0) or a compute queue (0x20 to 0x57).</summary>
     public void Submit(uint[] words, int queue = 0)
     {
+        Enqueue(words, queue);
+        Drain();
+    }
+
+    /// <summary>Hands <paramref name="words"/> to the command stream without running it.</summary>
+    public void Enqueue(uint[] words, int queue = 0)
+    {
         var address = Memory.Upload<uint>(words, 256);
         if (queue == 0)
         {
@@ -140,9 +147,10 @@ internal sealed unsafe class SceneRig : IDisposable
         {
             Host.CommandStream.EnqueueCompute((uint)queue, address, (uint)words.Length, _submissionId++, null);
         }
-
-        Drain();
     }
+
+    /// <summary>The relay the rig's host posts GPU-queue work through, for driving the worker's own pass.</summary>
+    internal MetalGpuWorkerRelay Relay => _relay;
 
     /// <summary>Runs the worker loop until no submission is runnable, then waits for the GPU.</summary>
     public void Drain()

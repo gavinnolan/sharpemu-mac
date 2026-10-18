@@ -63,6 +63,8 @@ internal sealed class MetalScheduleNudge : IDisposable
             SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         foreach (var buffer in _buffers.GetConsumingEnumerable())
         {
+            // The wait autoreleases driver temporaries on a thread that has no pool.
+            using var pool = MetalAutoreleasePool.Enter();
             MetalNative.SendVoid(buffer, SelWaitUntilScheduled);
             MetalNative.SendVoid(buffer, SelRelease);
         }

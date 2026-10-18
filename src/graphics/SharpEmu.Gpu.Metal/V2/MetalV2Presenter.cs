@@ -381,6 +381,34 @@ internal static partial class MetalV2Presenter
     private static bool TryEnqueueControlBarrier(Action work, Action cancel) =>
         _host is { } host && host.CommandStream.TryEnqueueControlBarrier(work, cancel);
 
+    /// <summary>
+    /// One pass of the worker: the relay's commands, a budget of command-stream slices and
+    /// the counters. The pass runs in an autorelease pool of its own, because this thread
+    /// has none: what Metal autoreleases while recording (command buffers, encoders,
+    /// descriptors and strings from class factories) is freed when the pass ends. Whatever
+    /// has to outlive the pass is retained by its owner. The park is outside the pool, so
+    /// the pool never waits out the idle interval.
+    /// </summary>
+    /// <returns>True when nothing is runnable and the worker should park.</returns>
+    internal static bool RunWorkerStep(MetalRenderHost host, MetalGpuWorkerRelay relay)
+    {
+        using var pool = MetalAutoreleasePool.Enter();
+        host.RunPendingCommands();
+        host.RunCommandStreamSlices(64);
+        host.ReportCounters();
+        if (host.CommandStream.HasUnblockedPending || relay.HasPendingCommands)
+        {
+            return false;
+        }
+
+        // A buffer a coalesced Stream flush left open goes out before the park:
+        // nothing else would commit it until the guest submits again.
+        host.CommitCoalescedFlush();
+        host.PollGpuCompletions();
+        host.KeepQueueWarmIfIdle();
+        return true;
+    }
+
     private static void RunWorker()
     {
         var host = _host!;
@@ -394,16 +422,8 @@ internal static partial class MetalV2Presenter
         {
             while (!Volatile.Read(ref _closeRequested) && !HostSessionControl.IsShutdownRequested)
             {
-                host.RunPendingCommands();
-                host.RunCommandStreamSlices(64);
-                host.ReportCounters();
-                if (!host.CommandStream.HasUnblockedPending && !_relay.HasPendingCommands)
+                if (RunWorkerStep(host, _relay))
                 {
-                    // A buffer a coalesced Stream flush left open goes out before the park:
-                    // nothing else would commit it until the guest submits again.
-                    host.CommitCoalescedFlush();
-                    host.PollGpuCompletions();
-                    host.KeepQueueWarmIfIdle();
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                     var dsIdle = DsTrace.Gpu && DsTrace.Armed;
                     var dsIdleCpu = dsIdle ? DsTrace.SelfCpuNs() : 0UL;
@@ -450,6 +470,7 @@ internal static partial class MetalV2Presenter
     // page guard is released, and only this thread may touch the image cache.
     private static void Shutdown(MetalRenderHost host)
     {
+        using var pool = MetalAutoreleasePool.Enter();
         try
         {
             host.CommandStream.StopAccepting();
@@ -720,22 +741,27 @@ internal static partial class MetalV2Presenter
         {
             var wakeAt = long.MaxValue;
             var waitingForGpu = false;
-            lock (_frameGate)
+            // This thread has no pool: what the promotion and the event read autorelease is
+            // freed at the end of each pass, not held for the life of the thread.
+            using (MetalAutoreleasePool.Enter())
             {
-                while (TryPromotePendingLocked())
+                lock (_frameGate)
                 {
-                }
-
-                if (_pendingFrames.TryPeek(out var frame))
-                {
-                    if (host.Completions.SignaledValue < frame.Serial)
+                    while (TryPromotePendingLocked())
                     {
-                        waitingForGpu = true;
                     }
-                    else
+
+                    if (_pendingFrames.TryPeek(out var frame))
                     {
-                        wakeAt = VideoOutBackendServices.NextFlipPresentTimestamp(
-                            frame.RequestId, System.Diagnostics.Stopwatch.GetTimestamp());
+                        if (host.Completions.SignaledValue < frame.Serial)
+                        {
+                            waitingForGpu = true;
+                        }
+                        else
+                        {
+                            wakeAt = VideoOutBackendServices.NextFlipPresentTimestamp(
+                                frame.RequestId, System.Diagnostics.Stopwatch.GetTimestamp());
+                        }
                     }
                 }
             }

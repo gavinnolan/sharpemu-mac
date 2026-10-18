@@ -118,7 +118,8 @@ internal sealed partial class MetalRenderHost
             var text = Marshal.PtrToStringUTF8(MetalNative.Send(name, MetalNative.Selector("UTF8String")));
             if (string.Equals(text, "timestamp", StringComparison.Ordinal))
             {
-                _ppCounterSet = set;
+                // Element of an autoreleased array: kept for the life of the host.
+                _ppCounterSet = MetalNative.Send(set, SelRetain);
                 break;
             }
         }
