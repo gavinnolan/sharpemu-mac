@@ -11,6 +11,7 @@ using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -552,6 +553,62 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         WaitForCompletions(host);
         Assert.False(host.CommitPendingOperandWrite(WindowedLabel, sizeof(ulong)));
         Assert.Equal(0x99UL, rig.Backing.Read64(WindowedLabel));
+    }
+
+    /// <summary>
+    /// GET_LOD_STATS on the GPU: the report is packed from the counter bank where the
+    /// packet sits, lands with the work before it rather than at parse, and a reset leaves
+    /// the bank empty for the next window while a report without one keeps counting.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AGetLodStatsReportIsPackedOnTheGpuWhereThePacketSits(bool reset)
+    {
+        if (!RequireDevice()) return;
+        var previous = ResourceMaterializer.RecordMipStatistics;
+        ResourceMaterializer.RecordMipStatistics = true;
+        try
+        {
+            using var rig = new Rig(Device.Value);
+            var host = rig.Host;
+            const ulong report = GuestBase + 0x4000;
+            const int entries = (int)MipStatistics.CounterWords;
+            var bank = host.LodStatisticsBank;
+            bank[3] = 2;
+            bank[entries + 3] = 5;
+            bank[2 * entries + 3] = 7;
+            bank[9] = 0;
+            bank[2 * entries + 9] = 0x2000000;
+            Assert.True(rig.Backing.TryWrite(report + MipStatistics.ReportBytes, BitConverter.GetBytes(0xAAAAAAAAu)));
+
+            Assert.True(((ICommandStreamHost)host).TryRecordLodStatistics(report, 0x1040, reset));
+            Assert.Equal(0u, rig.Backing.Read32(report));
+
+            host.FlushCommandBuffer();
+            WaitForGpu(host, host.LastWorkSerial);
+            WaitForCompletions(host);
+            Assert.Equal(MipStatistics.FirstCounterOffset, rig.Backing.Read32(report));
+            Assert.Equal(5u | (3u << 24), rig.Backing.Read32(report + 64 + 3 * 8));
+            Assert.Equal(7u | (2u << 24), rig.Backing.Read32(report + 64 + 3 * 8 + 4));
+            Assert.Equal(9u << 24, rig.Backing.Read32(report + 64 + 9 * 8));
+            Assert.Equal(0xFFFFFFu, rig.Backing.Read32(report + 64 + 9 * 8 + 4));
+            Assert.Equal(4u << 24, rig.Backing.Read32(report + 64 + 4 * 8));
+            Assert.Equal(15u << 24, rig.Backing.Read32(report + 64 + 4 * 8 + 4));
+            Assert.Equal(0xAAAAAAAAu, rig.Backing.Read32(report + MipStatistics.ReportBytes));
+
+            bank = host.LodStatisticsBank;
+            Assert.Equal(reset ? uint.MaxValue : 2u, bank[3]);
+            Assert.Equal(reset ? 0u : 5u, bank[entries + 3]);
+            Assert.Equal(reset ? 0u : 7u, bank[2 * entries + 3]);
+            Assert.Equal(2u, bank[3 * entries]);
+            Assert.Equal(1u, bank[3 * entries + 1]);
+            Assert.Equal(1L, host.LodStatisticsReports);
+        }
+        finally
+        {
+            ResourceMaterializer.RecordMipStatistics = previous;
+        }
     }
 
     private static void WaitForGpu(MetalRenderHost host, ulong serial)

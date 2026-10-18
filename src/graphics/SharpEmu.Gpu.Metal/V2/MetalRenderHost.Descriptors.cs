@@ -327,6 +327,11 @@ internal sealed partial class MetalRenderHost
             shaderData[layout.ShaderBaseDword + 1] = (uint)(stage.ShaderBase >> 32);
         }
 
+        if (layout.MipStatisticsCount != 0)
+        {
+            MipStatistics.WriteImageFields(shaderData, layout, info, snapshot.Images);
+        }
+
         stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
         return prepared;
     }
@@ -1001,6 +1006,8 @@ internal sealed partial class MetalRenderHost
                 return UploadDwords(stage.StageResources.Resources.FlattenedResourceTable);
             case DescriptorBindingKind.ShaderData:
                 return UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
+            case DescriptorBindingKind.MipStatistics:
+                return LodStatisticsAddress();
             default:
                 throw Fatal($"The argument layout has a pointer field of an unknown kind: kind={kind}.");
         }

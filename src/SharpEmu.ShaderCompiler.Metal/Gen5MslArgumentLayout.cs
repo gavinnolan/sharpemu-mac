@@ -52,6 +52,7 @@ public sealed class Gen5MslArgumentLayout
     public const string StepReportName = "step_report";
     public const string PairLocksName = "pair_locks";
     public const string BindlessImagesName = "bindless_images";
+    public const string MipStatisticsName = "mip_stats";
 
     /// <summary>The bytes of one bindless table entry: gpuResourceID, variant, reserved.</summary>
     public const int BindlessEntryBytes = 16;
@@ -118,6 +119,11 @@ public sealed class Gen5MslArgumentLayout
                 case DescriptorBindingKind.ShaderData:
                     Add(binding.Kind, MslArgumentFieldKind.Pointer, "shader_data", 1, ResourceBytes);
                     Add(binding.Kind, MslArgumentFieldKind.Word, "shader_data_words", 1, WordBytes);
+                    break;
+                case DescriptorBindingKind.MipStatistics:
+                    // The GET_LOD_STATS counter bank (MipStatistics.CounterBufferBytes): the
+                    // finest level, clamped and unclamped sample counts of each counter id.
+                    Add(binding.Kind, MslArgumentFieldKind.Pointer, MipStatisticsName, 1, ResourceBytes);
                     break;
                 default:
                     Add(binding.Kind, MslArgumentFieldKind.Textures, ImageClassName(binding.Kind), count, ResourceBytes);

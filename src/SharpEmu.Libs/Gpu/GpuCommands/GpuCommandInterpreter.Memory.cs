@@ -546,7 +546,12 @@ public sealed partial class GpuCommandInterpreter
         var slotsBound = SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.Enabled
             ? MipStatistics.Shared.BoundSlotCount
             : 0;
-        if (destination != 0 && bufferSize != 0 && _host.TryRecordLodStatistics(destination, bufferSize))
+        // Control bit 18 asks for a reset and bit 19 enables the counters again
+        // (sceAgcDcbGetLodStats). Either one starts a new measurement window: a title that
+        // hands its counter ids to other textures every report (Demon's Souls passes
+        // enable without reset) reads the min of unrelated textures otherwise.
+        var resetCounters = (payload[3] & ((1u << 18) | (1u << 19))) != 0;
+        if (destination != 0 && bufferSize != 0 && _host.TryRecordLodStatistics(destination, bufferSize, resetCounters))
         {
             SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NotePacket(bufferSize, destination, hostRecorded: true, slotsBound);
             return 4;
@@ -558,6 +563,7 @@ public sealed partial class GpuCommandInterpreter
         {
             var report = new byte[bufferSize];
             MipStatistics.Shared.WriteReport(report);
+            SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NoteReport(report);
             WriteBytes(destination, report);
         }
 
