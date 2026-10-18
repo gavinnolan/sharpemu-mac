@@ -23,6 +23,7 @@
 #   SHARPEMU_MIN_MACOS            LSMinimumSystemVersion (default 15.0)
 #   SHARPEMU_CODESIGN_IDENTITY    signing identity; unset means ad-hoc ("-")
 #   SHARPEMU_MAC_FORBID_SDL       "1" (default) fails the build on SDL3; "0" to bisect
+#   SHARPEMU_MAC_GET_TASK_ALLOW   "1" adds get-task-allow (measurement builds: memstat needs task_for_pid)
 #   SHARPEMU_MAC_KEEP_UNIVERSAL   pass "1" to keep arm64 slices in fat dylibs
 #   SHARPEMU_MAC_R2R              "true" (default) publishes ReadyToRun; "false" to bisect
 #   SHARPEMU_MAC_DMG              pass "1" to also produce a .dmg
@@ -217,6 +218,11 @@ fi
 # build/platforms/macos/SharpEmu.entitlements.in.
 entitlements="${output_dir}/SharpEmu.entitlements"
 plutil -convert xml1 -o "${entitlements}" "${platform_dir}/SharpEmu.entitlements.in"
+# Measurement builds only: the hardened runtime denies task_for_pid even to root, which the
+# de-duplicated memory sampler (scripts/macos/memstat.c) needs. Never set for releases.
+if [ "${SHARPEMU_MAC_GET_TASK_ALLOW:-0}" = "1" ]; then
+    /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "${entitlements}"
+fi
 
 codesign "${sign_flags[@]}" --entitlements "${entitlements}" "${app_dir}"
 
