@@ -301,8 +301,8 @@ while :; do
   fi
   if (( ${#gcdump_at[@]} > 0 )) && (( now >= gcdump_at[0] )); then
     gcdump="$OUT/gcdump-$(printf %04d "$now")"
-    ( "$HOME/.dotnet/tools/dotnet-gcdump" collect -p "$GPID" -o "$gcdump.gcdump" > "$gcdump.log" 2>&1
-      "$HOME/.dotnet/tools/dotnet-gcdump" report "$gcdump.gcdump" > "$gcdump.txt" 2>> "$gcdump.log" ) &
+    ( DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}" "$HOME/.dotnet/tools/dotnet-gcdump" collect -p "$GPID" -o "$gcdump.gcdump" > "$gcdump.log" 2>&1
+      DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}" "$HOME/.dotnet/tools/dotnet-gcdump" report "$gcdump.gcdump" > "$gcdump.txt" 2>> "$gcdump.log" ) &
     EVIDENCE_PIDS+=($!)
     gcdump_at=("${gcdump_at[@]:1}")
   fi
