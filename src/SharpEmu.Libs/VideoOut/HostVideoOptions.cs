@@ -33,8 +33,8 @@ public enum HostHdrMode
 /// </summary>
 public enum GuestDisplayResolution
 {
-    /// <summary>1920x1080. The default: a 4K report costs up to four times the pixel work
-    /// for a panel the host is almost certainly not driving.</summary>
+    /// <summary>1920x1080. A 4K report costs up to four times the pixel work for a panel the
+    /// host is almost certainly not driving.</summary>
     Hd,
 
     /// <summary>2560x1440.</summary>
@@ -43,8 +43,8 @@ public enum GuestDisplayResolution
     /// <summary>3840x2160.</summary>
     Uhd,
 
-    /// <summary>1280x720: for titles whose compiled render sizes follow the display (see
-    /// TitleDisplayPatches), a way to cut their pixel work below 1080p.</summary>
+    /// <summary>1280x720. The default: for titles whose compiled render sizes follow the
+    /// display (see TitleDisplayPatches) it cuts their pixel work below 1080p.</summary>
     Hd720,
 }
 
@@ -85,7 +85,7 @@ public sealed record HostVideoOptions
 
     /// <summary>What the guest is told the display is. See
     /// <see cref="GuestDisplayResolution"/> for why this is not the window size.</summary>
-    public GuestDisplayResolution DisplayResolution { get; init; } = GuestDisplayResolution.Hd;
+    public GuestDisplayResolution DisplayResolution { get; init; } = GuestDisplayResolution.Hd720;
 
     public bool OverlayEnabled { get; init; } = true;
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
@@ -126,7 +126,7 @@ public sealed record HostVideoOptions
         HdrMode = Enum.IsDefined(HdrMode) ? HdrMode : HostHdrMode.Auto,
         DisplayResolution = Enum.IsDefined(DisplayResolution)
             ? DisplayResolution
-            : GuestDisplayResolution.Hd,
+            : GuestDisplayResolution.Hd720,
         OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.TopRight,
         OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.TitleBar,
     };

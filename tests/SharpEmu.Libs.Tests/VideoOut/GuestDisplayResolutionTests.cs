@@ -15,12 +15,12 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class GuestDisplayResolutionTests
 {
     [Fact]
-    public void TheDefaultDisplayIs1080p()
+    public void TheDefaultDisplayIs720p()
     {
         var options = HostVideoOptions.Default;
 
-        Assert.Equal(GuestDisplayResolution.Hd, options.DisplayResolution);
-        Assert.Equal((1920u, 1080u), options.GuestDisplaySize);
+        Assert.Equal(GuestDisplayResolution.Hd720, options.DisplayResolution);
+        Assert.Equal((1280u, 720u), options.GuestDisplaySize);
         Assert.Equal(1, options.GuestResolutionClass);
     }
 
@@ -56,7 +56,7 @@ public sealed class GuestDisplayResolutionTests
     {
         var options = new HostVideoOptions { DisplayResolution = (GuestDisplayResolution)42 }.Normalize();
 
-        Assert.Equal(GuestDisplayResolution.Hd, options.DisplayResolution);
+        Assert.Equal(GuestDisplayResolution.Hd720, options.DisplayResolution);
     }
 
     /// <summary>The window and the reported display are independent: a 4K window does not tell
