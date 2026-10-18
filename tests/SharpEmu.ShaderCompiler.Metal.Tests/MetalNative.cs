@@ -101,8 +101,29 @@ internal static partial class MetalNative
     // MTLResourceUsageRead | MTLResourceUsageWrite for buffers reached through an argument buffer.
     private const nuint ReadWriteUsage = 3;
 
+    // Hosted CI macOS runners only expose "Apple Paravirtual device", which lacks parts of the
+    // Metal API these conformance tests drive (its render encoder has no setMeshBuffer, and
+    // calling it kills the test host). It counts as no device unless the device gate demands
+    // one, in which case it is used and any gap fails loudly.
     private static readonly Lazy<nint> Device = new(() =>
-        OperatingSystem.IsMacOS() ? MTLCreateSystemDefaultDevice() : 0);
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return 0;
+        }
+
+        var device = MTLCreateSystemDefaultDevice();
+        if (device != 0 && Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            var name = Marshal.PtrToStringUTF8(Send(Send(device, Selector("name")), Selector("UTF8String")));
+            if (name is not null && name.Contains("Paravirtual", StringComparison.OrdinalIgnoreCase))
+            {
+                return 0;
+            }
+        }
+
+        return device;
+    });
 
     public static bool IsAvailable => Device.Value != 0;
 
