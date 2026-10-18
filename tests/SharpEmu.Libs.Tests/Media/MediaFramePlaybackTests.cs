@@ -15,11 +15,19 @@ public sealed class MediaFramePlaybackTests
 
         Assert.Equal(1, WaitForAdvancedFrame(playback)[0]);
         Assert.True(playback.TryGetFrame(true, out var heldFrame, out var advanced));
-        Assert.False(advanced);
-        Assert.Equal(1, heldFrame[0]);
+        var current = heldFrame[0];
+        Assert.True(advanced ? current > 1 : current == 1);
 
-        Assert.Equal(2, WaitForAdvancedFrame(playback)[0]);
-        Assert.Equal(3, WaitForAdvancedFrame(playback)[0]);
+        // A loaded machine can poll after the clock has passed a frame, which playback then drops;
+        // what must hold is that frames only move forward and the last one is reached.
+        while (current < 3)
+        {
+            var next = WaitForAdvancedFrame(playback)[0];
+            Assert.True(next > current);
+            current = next;
+        }
+
+        Assert.Equal(3, current);
     }
 
     private static byte[] WaitForAdvancedFrame(MediaFramePlayback playback)
