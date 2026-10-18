@@ -113,6 +113,43 @@ public sealed unsafe class MetalShaderSourceReleaseTests(ITestOutputHelper outpu
         Assert.NotEqual(first.Pipeline, second.Pipeline);
     }
 
+    // A module the shader cache bound released is built again from the kept request alone:
+    // AcquireShader checks the translation against the hash of the text it dropped, so a
+    // rebuild that succeeds compiled the same MSL.
+    [Fact]
+    public void AModuleReleasedByTheShaderCacheBoundIsBuiltAgainFromItsRequest()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Host.ShaderCacheLimits = MetalShaderCacheLimits.Unbounded;
+        var request = Gen5ComputeFixtures.CreateComputeRequest(Gen5ComputeFixtures.ExecStore);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var original, out var error), error);
+        var expected = XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(original.Source));
+        var metal = new MetalCompiledGuestShader(original, request);
+        var program = new ShaderProgram(1, rig.Host.CreateShaderModule(metal, ShaderStage.Compute, 0x5EED, 1));
+        var description = new ComputePipelineDescription
+        {
+            Input = new ComputeInputInfo { ThreadsX = 32, ThreadsY = 1, ThreadsZ = 1 },
+            Program = program,
+            Stage = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x5EED },
+        };
+        rig.Host.CreateComputePipeline(description);
+
+        var (_, modules) = rig.Host.TrimShaderCache(
+            rig.Host.CompletedSerial,
+            System.Diagnostics.Stopwatch.GetTimestamp() + 3600 * System.Diagnostics.Stopwatch.Frequency,
+            new MetalShaderCacheLimits(0, 1, 0, 1, 0));
+        Assert.Equal(1, modules);
+        Assert.Equal(0, rig.Host.ShaderCacheCounters.ResidentModules);
+
+        rig.Host.CreateComputePipeline(description);
+
+        Assert.Equal(1, rig.Host.ShaderCacheCounters.ModuleRebuilds);
+        Assert.Equal(1, rig.Host.ShaderCacheCounters.ResidentModules);
+        Assert.True(metal.SourceReleased);
+        Assert.Equal(expected, metal.PayloadHash);
+    }
+
     private static PipelineHandle Pipeline(MetalRenderHost host, MetalCompiledGuestShader shader, ulong id)
     {
         var program = new ShaderProgram(id, host.CreateShaderModule(shader, ShaderStage.Compute, 0x5EED + id, id));
