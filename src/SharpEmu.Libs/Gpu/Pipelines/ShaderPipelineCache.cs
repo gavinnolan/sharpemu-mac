@@ -31,10 +31,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // The last user data array of each graphics stage, kept under _resolveGate.
     private uint[]? _vertexUserData;
     private uint[]? _pixelUserData;
+    private uint[]? _computeUserData;
     private readonly List<Gen5PixelOutputBinding> _boundOutputs = new(ContextRegisters.ColorTargetCount);
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly object _gate = new();
+    // The options of each stage's lookup, refilled under _gate (StageCompileOptions.Detached).
+    private readonly StageCompileOptions _vertexOptions = StageCompileOptions.CreateReusable();
+    private readonly StageCompileOptions _pixelOptions = StageCompileOptions.CreateReusable();
+    private readonly StageCompileOptions _computeOptions = StageCompileOptions.CreateReusable();
     // The pipeline maps: a lookup takes this lock or _gate, an addition both; a cached draw so does
     // not wait for the program preparation a resolving thread holds _gate for.
     private readonly object _pipelineGate = new();
@@ -150,15 +155,31 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
         var registered = _registry.Require(codeAddress, label);
-        foreach (var (address, sizeBytes) in registered.CodeRanges)
+        Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
+        ranges = ranges[..registered.CopyCodeRanges(ranges)];
+        foreach (var (address, sizeBytes) in ranges)
         {
             _host.SynchronizeShaderCode(address, sizeBytes);
         }
 
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, registered.CodeRanges, label);
+        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, ranges, label);
         var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, ref userDataMemo);
-        return new ShaderSource(registered, hash, userData, userDataBase, stage);
+
+        // A source is immutable, so a draw that resolves to the same one as the last draw of its
+        // stage shares it instead of allocating another.
+        ref var last = ref _lastSources[(int)stage];
+        if (last is not null && ReferenceEquals(last.Registered, registered) && last.Hash == hash &&
+            ReferenceEquals(last.UserData, userData) && last.UserDataBase == userDataBase && last.Stage == stage &&
+            last.ExcludedUserDataRegisters == 0)
+        {
+            return last;
+        }
+
+        return last = new ShaderSource(registered, hash, userData, userDataBase, stage);
     }
+
+    // The last source of each stage, kept under _resolveGate like the user data memos.
+    private readonly ShaderSource?[] _lastSources = new ShaderSource?[Enum.GetValues<ShaderStage>().Length];
 
     // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
     // the program, decode and materialization caches it updates are used under this lock only.
@@ -296,33 +317,32 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var pushDataCursor = 0u;
             if (pixelSource is not null)
             {
+                // Each stage refills its own reusable options; a miss keeps a copy.
+                var pixelOptions = _pixelOptions;
+                pixelOptions.PixelInfo = pixelInfo;
+                pixelOptions.PixelOutputs = pixelOutputs;
+                pixelOptions.PixelInputEnable = shaderInterface.PixelInputEnable;
+                pixelOptions.PixelInputAddress = shaderInterface.PixelInputAddress;
+                pixelOptions.PerVertexInputsFromPrimitive = perVertexParameters != 0;
+                pixelOptions.ManualInterpolation = manualInterpolation is not null;
                 if (!TryPrepareProgram(
                     pixelSource,
-                    new StageCompileOptions
-                    {
-                        PixelInfo = pixelInfo,
-                        PixelOutputs = pixelOutputs,
-                        PixelInputEnable = shaderInterface.PixelInputEnable,
-                        PixelInputAddress = shaderInterface.PixelInputAddress,
-                        PerVertexInputsFromPrimitive = perVertexParameters != 0,
-                        ManualInterpolation = manualInterpolation is not null,
-                    },
+                    pixelOptions,
                     ref pushDataCursor,
                     out pixelProgramHandle,
                     out pixelStage))
                     return new GraphicsPrograms { Available = false };
             }
 
+            var vertexOptions = _vertexOptions;
+            vertexOptions.VertexInfo = vertexInfo;
+            vertexOptions.RequiredVertexOutputCount = (int)attributeCount;
+            vertexOptions.PrimitiveShader = primitiveShader;
+            vertexOptions.MeshPerVertexParameterMask = perVertexParameters;
+            vertexOptions.VertexInterpolants = manualInterpolation?.Interpolants.Select(interpolant => interpolant.Encoded).ToArray() ?? [];
             if (!TryPrepareProgram(
                 vertexCompileSource,
-                new StageCompileOptions
-                {
-                    VertexInfo = vertexInfo,
-                    RequiredVertexOutputCount = (int)attributeCount,
-                    PrimitiveShader = primitiveShader,
-                    MeshPerVertexParameterMask = perVertexParameters,
-                    VertexInterpolants = manualInterpolation?.Interpolants.Select(interpolant => interpolant.Encoded).ToArray() ?? [],
-                },
+                vertexOptions,
                 ref pushDataCursor,
                 out vertexProgram,
                 out vertexStage))
@@ -579,8 +599,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionZ)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-        uint[]? noMemo = null;
-        var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0, ref noMemo);
+        var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0, ref _computeUserData);
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var systemRegisters = DecodeComputeSystemRegisters(compute);
         var program = _programs.Decode(source);
@@ -600,9 +619,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             using var lockedScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrepareLocked);
             var pushDataCursor = 0u;
+            var computeOptions = _computeOptions;
+            computeOptions.ComputeInfo = input;
+            computeOptions.ComputeSystemRegisters = systemRegisters;
             if (!TryPrepareProgram(
                 source,
-                new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
+                computeOptions,
                 ref pushDataCursor,
                 out handle,
                 out stage))

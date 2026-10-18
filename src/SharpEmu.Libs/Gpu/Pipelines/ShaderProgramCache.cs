@@ -40,29 +40,48 @@ public sealed record ShaderSource(RegisteredShader Registered, ulong Hash, uint[
 // The stage-specific compile inputs one lookup carries beside its static key.
 public sealed class StageCompileOptions
 {
-    public VertexInputInfo? VertexInfo { get; init; }
-    public int RequiredVertexOutputCount { get; init; }
+    public VertexInputInfo? VertexInfo { get; set; }
+    public int RequiredVertexOutputCount { get; set; }
 
     // Set when the draw selected the NGG primitive-shader stage and the backend can run it
     // as a workgroup; the emitter then compiles the merged ES/GS stage instead of a plain
     // vertex shader.
-    public Gen5NggStageInfo? PrimitiveShader { get; init; }
+    public Gen5NggStageInfo? PrimitiveShader { get; set; }
 
     // The params the paired pixel program reads per vertex from the primitive shader's mesh
     // primitives (ShaderCompileRequest.MeshPerVertexParameterMask), and the pixel side of it.
-    public uint MeshPerVertexParameterMask { get; init; }
-    public bool PerVertexInputsFromPrimitive { get; init; }
+    public uint MeshPerVertexParameterMask { get; set; }
+    public bool PerVertexInputsFromPrimitive { get; set; }
 
     // The host interpolants that replace the paired pixel program's hand interpolations of
     // its per-vertex inputs (ShaderCompileRequest.VertexInterpolants), and the pixel side of it.
-    public IReadOnlyList<uint> VertexInterpolants { get; init; } = [];
-    public bool ManualInterpolation { get; init; }
-    public PixelInputInfo? PixelInfo { get; init; }
-    public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
-    public uint PixelInputEnable { get; init; }
-    public uint PixelInputAddress { get; init; }
-    public ComputeInputInfo? ComputeInfo { get; init; }
-    public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
+    public IReadOnlyList<uint> VertexInterpolants { get; set; } = [];
+    public bool ManualInterpolation { get; set; }
+    public PixelInputInfo? PixelInfo { get; set; }
+    public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; set; } = [];
+    public uint PixelInputEnable { get; set; }
+    public uint PixelInputAddress { get; set; }
+    public ComputeInputInfo? ComputeInfo { get; set; }
+    public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; set; }
+
+    // A resolver refills one reusable instance for every lookup of a stage instead of
+    // allocating one per draw; whatever keeps options past the lookup (a new entry, a
+    // compile, the corpus) takes Detached(), which copies a reusable instance.
+    internal bool Reusable { get; private set; }
+
+    internal static StageCompileOptions CreateReusable() => new() { Reusable = true };
+
+    internal StageCompileOptions Detached()
+    {
+        if (!Reusable)
+        {
+            return this;
+        }
+
+        var copy = (StageCompileOptions)MemberwiseClone();
+        copy.Reusable = false;
+        return copy;
+    }
 }
 
 // The key of a program entry: what the emitter reads besides the resource specialization.
@@ -209,6 +228,7 @@ internal sealed class ShaderProgramCache
     }
 
     private readonly Func<ulong, bool>? _dataWritePending;
+    private ResourceRuntimeInputs? _inputs;
 
     public int ProgramCount => _programs.Count;
 
@@ -344,23 +364,25 @@ internal sealed class ShaderProgramCache
             RenderTrace.Write($"ProgramCache lookup stage={source.Label} hash=0x{source.Hash:X16} cached={entry is not null} permutations={entry?.Permutations.Count ?? 0}");
         }
 
-        var inputs = new ResourceRuntimeInputs
+        // One inputs object refilled per lookup: the materialization reads it during the call
+        // and keeps nothing of it (a miss copies what its entry needs).
+        var inputs = _inputs ??= new ResourceRuntimeInputs
         {
-            UserData = source.UserData,
-            ShaderBase = source.Address,
             ReadMemory = _readGuestWord,
             ReadCleanMemory = _readCleanGuestWord,
             ReadResidentMemory = _prefetchResidentGuestBytes,
             DataWritePending = _dataWritePending,
-            ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
-                ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
-                    Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
-                    computeState.LocalDataShareDwords, computeState.ThreadIdCount)
-                : null,
         };
+        inputs.UserData = source.UserData;
+        inputs.ShaderBase = source.Address;
+        inputs.ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
+            ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
+                Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
+                computeState.LocalDataShareDwords, computeState.ThreadIdCount)
+            : null;
         if (entry is null)
         {
-            entry = CreateEntry(source, options);
+            entry = CreateEntry(source, options.Detached());
             key = BuildProgramKey(source);
             _programs.Add(key, entry);
             ShaderCacheCounters.CountProgram();
@@ -376,7 +398,7 @@ internal sealed class ShaderProgramCache
                 ProgramSourceEntry? replanned = null;
                 try
                 {
-                    replanned = CreateEntry(source, options);
+                    replanned = CreateEntry(source, options.Detached());
                 }
                 catch (ShaderProgramRejectedException)
                 {
@@ -459,7 +481,7 @@ internal sealed class ShaderProgramCache
             }
         }
 
-        var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached);
+        var permutation = CompilePermutation(source, options.Detached(), entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached);
         entry.Permutations.Add(permutation);
         ShaderCacheCounters.CountPermutation();
         stage = CreateStageResources(permutation.Program, snapshot, source, options);

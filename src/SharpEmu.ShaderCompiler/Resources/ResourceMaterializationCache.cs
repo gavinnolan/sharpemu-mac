@@ -1463,9 +1463,16 @@ public sealed partial class ResourceMaterializationCache
             same = words[index] == userData[index];
         if (same)
             return cached;
-        var current = new uint[userData.Count];
-        for (var index = 0; index < current.Length; index++)
-            current[index] = userData[index];
+        // A draw's user data array is never written once made (ShaderSource.UserData), so the
+        // snapshot shares it rather than copying it for every draw, as ResourceSnapshot.WithUserData does.
+        var current = userData as uint[];
+        if (current is null)
+        {
+            current = new uint[userData.Count];
+            for (var index = 0; index < current.Length; index++)
+                current[index] = userData[index];
+        }
+
         return new ResourceSnapshot
         {
             Buffers = cached.Buffers,
