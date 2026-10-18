@@ -92,14 +92,17 @@ case "$MODE" in
     PLAN+=";$BINK~300|0:mark:intro-cinematic"
     PLAN+=";$BINK~300|0:mark:bluepoint-logo"
     # Title menu: CONTINUE, LOAD GAME, NEW GAME, (gap) SETTINGS; the cursor starts on CONTINUE.
-    # Idle 5 s, step down two items and back up (single presses do not repeat, no wrap), then CONTINUE.
+    # Cross dismisses "PRESS ANY BUTTON"; then Up three times (no wrap, so any number of extra Ups
+    # stays on CONTINUE, and a press dropped during the menu's fade-in changes nothing), then CONTINUE.
+    # The earlier down,down,up,up probe landed on NEW GAME in p0-baseline (20261018-093723): the
+    # first D-pad press only dismissed the prompt and a later one was dropped.
     # Calibrated on cal4-full: the in-game Settings screen has the tabs GAME, CONTROLLER, DISPLAY,
     # AUDIO, CAMERA, LANGUAGE, NETWORK, and DISPLAY > Visual Mode already reads "Performance" (the 60
     # FPS mode) with the golden save, so a run needs no change to be in Performance mode.
     # SHARPEMU_DS_SETTINGS_TOUR=1 adds a walk through the Settings screen (a screenshot per tab and
     # per DISPLAY row). It is off by default because where the title cursor lands after Settings is
     # NOT calibrated: both tour runs came back to NEW GAME and ended in character creation.
-    PLAN+=";@after=11~11|0:mark:title,5:down,6.5:down,8:up,9.5:up,11:mark:title-top"
+    PLAN+=";@after=11~11|0:mark:title,4:enter,7:up,8.5:up,10:up,11:mark:title-top"
     if [[ "${SHARPEMU_DS_SETTINGS_TOUR:-0}" == 1 ]]; then
       PLAN+=",12:down,13.5:down,15:down,17:mark:settings-select,17.5:enter,22:mark:settings-0"
       for step in 1 2 3 4 5 6; do
