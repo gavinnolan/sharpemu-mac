@@ -148,7 +148,7 @@ public sealed partial class RenderExecutor
         _host.EndRendering();
         if (program.UsesDeviceAddresses)
         {
-            _host.BeforeDeviceAddressPreparation();
+            _host.BeforeDeviceAddressPreparation([input.Stage]);
         }
 
         using (_host.BeginPreparation())

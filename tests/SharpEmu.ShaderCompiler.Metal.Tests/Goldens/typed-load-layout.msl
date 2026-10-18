@@ -263,17 +263,41 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
     {
         Gen5AddressRange range = ranges[low - 1u];
         // The low 32 bits of page_count are the page count. Bit 63 marks a range in a guest
-        // memory window this submission did not name resident, bits 32..62 its granule.
+        // memory window this submission did not name resident, bits 32..61 its granule.
         // The access still goes through - the window's pages are mapped for the life of
         // the buffer - and the granule is reported in the feedback words (word 0 counts such
-        // lookups, then one bit per granule) so the host names it from then on.
+        // lookups, then from word 8 one bit per granule) so the host names it from then on.
         ulong page_count = range.page_count & 0xFFFFFFFFul;
         if (page - range.first_page < page_count)
         {
-            if ((range.page_count >> 63u) != 0ul)
+            ulong flags = range.page_count >> 62u;
+            if (flags == 1ul)
             {
-                uint granule = (uint)(range.page_count >> 32u) & 0x7FFFFFFFu;
-                atomic_fetch_or_explicit((device atomic_uint*)(faults + 1u + (granule >> 5u)), 1u << (granule & 31u), memory_order_relaxed);
+                // Bit 62: the range's backing chunks are single-copy released (their GPU alias
+                // pages are a hole), bits 32..61 its first backing page. The hit is counted in
+                // word 1 and its backing page set in the bitmap words 2 and 3 locate, so the
+                // host gives the chunk back and keeps it. Word 4 set is the shadow mode, where
+                // nothing was emptied and the access goes through; otherwise it reads zero and
+                // a store is dropped. Never cached: every access to the range is seen.
+                uint backing_page = ((uint)(range.page_count >> 32u) & 0x3FFFFFFFu) + (uint)(page - range.first_page);
+                uint bitmap_word = backing_page >> 5u;
+                if (bitmap_word < faults[3])
+                {
+                    atomic_fetch_or_explicit((device atomic_uint*)(faults + faults[2] + bitmap_word), 1u << (backing_page & 31u), memory_order_relaxed);
+                }
+                atomic_fetch_add_explicit((device atomic_uint*)(faults + 1u), 1u, memory_order_relaxed);
+                if (faults[4] == 0u)
+                {
+                    return nullptr;
+                }
+                valid = true;
+                ulong trap_offset = ((page - range.first_page) << 14u) + (masked & 0x3FFFul);
+                return (device uint*)((device uchar*)range.base + trap_offset);
+            }
+            if (flags != 0ul)
+            {
+                uint granule = (uint)(range.page_count >> 32u) & 0x3FFFFFFFu;
+                atomic_fetch_or_explicit((device atomic_uint*)(faults + 8u + (granule >> 5u)), 1u << (granule & 31u), memory_order_relaxed);
                 atomic_fetch_add_explicit((device atomic_uint*)faults, 1u, memory_order_relaxed);
             }
             valid = true;

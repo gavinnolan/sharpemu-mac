@@ -25,6 +25,12 @@ public enum GuestSingleCopyAccess : byte
 
     /// <summary>The texture that holds the bytes is going away.</summary>
     Teardown,
+
+    /// <summary>
+    /// A device-address program may read the bytes through the page table: a range the host
+    /// evaluated for it covers the chunk, or the shader's trap saw it read the chunk.
+    /// </summary>
+    DeviceAddress,
 }
 
 /// <summary>
@@ -82,6 +88,7 @@ public sealed class GuestSingleCopy
 {
     private readonly SharedBackingViews _views;
     private readonly byte[] _released;
+    private readonly byte[] _pinned;
     private IGuestSingleCopyHandler? _handler;
     private int _releasedChunks;
 
@@ -95,6 +102,7 @@ public sealed class GuestSingleCopy
         ChunkBytes = chunkBytes;
         Size = size;
         _released = new byte[(size + chunkBytes - 1) / chunkBytes];
+        _pinned = new byte[_released.Length];
     }
 
     public ulong ChunkBytes { get; }
@@ -137,18 +145,39 @@ public sealed class GuestSingleCopy
     /// </summary>
     public bool TryMarkReleased(int chunk, ulong address) => _views.TryMarkSingleCopyReleased(this, chunk, address);
 
-    // Under the views lock.
+    // Under the views lock. A pinned chunk is refused; the mark and the pin are each written
+    // before the other is read, both behind a full fence, so of a mark and a pin racing at
+    // least one sees the other (Pin's caller restores a chunk it finds released).
     internal bool MarkReleasedLocked(int chunk)
     {
-        if ((uint)chunk >= (uint)_released.Length || _released[chunk] != 0)
+        if ((uint)chunk >= (uint)_released.Length || _released[chunk] != 0 || Volatile.Read(ref _pinned[chunk]) != 0)
         {
             return false;
         }
 
         Volatile.Write(ref _released[chunk], 1);
         Interlocked.Increment(ref _releasedChunks);
+        if (Volatile.Read(ref _pinned[chunk]) != 0)
+        {
+            Volatile.Write(ref _released[chunk], 0);
+            Interlocked.Decrement(ref _releasedChunks);
+            return false;
+        }
+
         return true;
     }
+
+    /// <summary>Whether a chunk is pinned: it is never marked released again.</summary>
+    public bool IsPinned(int chunk) => (uint)chunk < (uint)_pinned.Length && Volatile.Read(ref _pinned[chunk]) != 0;
+
+    /// <summary>
+    /// Pins a chunk for good (a device-address program may read it): it is never marked
+    /// released from now on. True when it was not pinned before. The caller then gives back a
+    /// chunk it finds released (<see cref="IsReleased"/>), which a mark racing the pin may
+    /// have left.
+    /// </summary>
+    public bool Pin(int chunk) =>
+        (uint)chunk < (uint)_pinned.Length && Interlocked.CompareExchange(ref _pinned[chunk], 1, 0) == 0;
 
     /// <summary>Clears a chunk's released mark; true when it was set. The handler's lock only.</summary>
     public bool ClearReleased(int chunk)

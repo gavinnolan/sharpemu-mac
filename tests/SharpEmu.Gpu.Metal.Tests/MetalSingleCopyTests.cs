@@ -26,7 +26,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// (no real protection), so faults are driven through the handler the fault path calls.
 /// </summary>
 [System.Runtime.Versioning.SupportedOSPlatform("macos")]
-public sealed unsafe class MetalSingleCopyTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalSingleCopyTests(ITestOutputHelper output)
 {
     private const ulong Chunk = 64 * 1024;
     private const ulong Mib = 1024 * 1024;
@@ -102,14 +102,16 @@ public sealed unsafe class MetalSingleCopyTests(ITestOutputHelper output)
         private readonly ulong _holeSize = BackingSize + Chunk;
         private readonly PageGuard _pages;
         private readonly bool _savedSentinel = MetalSingleCopy.SentinelMode;
+        private readonly bool _savedShadow = MetalSingleCopy.ShadowMode;
         private readonly bool _savedLinearViews = MetalLinearWindowView.Enabled;
         private long _now = 1;
         private ulong _serial;
         private ulong _completed;
 
-        public Rig(nint device, bool sentinel = false)
+        public Rig(nint device, bool sentinel = false, bool shadow = false)
         {
             MetalSingleCopy.SentinelMode = sentinel;
+            MetalSingleCopy.ShadowMode = shadow;
             // A linear texture would be a window view, which reads guest memory in place and
             // so is never single-copy; the linear cases here are owned textures.
             MetalLinearWindowView.Enabled = false;
@@ -242,6 +244,7 @@ public sealed unsafe class MetalSingleCopyTests(ITestOutputHelper output)
             }
 
             MetalSingleCopy.SentinelMode = _savedSentinel;
+            MetalSingleCopy.ShadowMode = _savedShadow;
             MetalLinearWindowView.Enabled = _savedLinearViews;
         }
     }
