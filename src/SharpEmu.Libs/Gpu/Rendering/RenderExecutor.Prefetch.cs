@@ -10,7 +10,8 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 
 // What a draw's program resolution reads besides the stage and context registers: the export
 // mapping of every bound color slot, whether the pixel stage runs, whether a depth target is
-// bound and whether that target has a depth aspect. All follow from the register banks alone.
+// bound and whether that target has a depth aspect, and whether the draw is indexed. All
+// follow from the register banks and the draw packet alone.
 public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 {
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]
@@ -27,6 +28,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 
     // VGT_PRIMITIVE_TYPE is a triangle list (see IShaderPipelineProvider.GetGraphicsPrograms).
     public bool TriangleList;
+    public bool Indexed;
 
     public static GraphicsProgramInputs Create()
     {
@@ -37,7 +39,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 
     public readonly bool Equals(GraphicsProgramInputs other) =>
         PixelActive == other.PixelActive && DepthBound == other.DepthBound && DepthAspectBound == other.DepthAspectBound &&
-        StencilAspectBound == other.StencilAspectBound && TriangleList == other.TriangleList &&
+        StencilAspectBound == other.StencilAspectBound && TriangleList == other.TriangleList && Indexed == other.Indexed &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -55,6 +57,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
         hash.Add(DepthAspectBound);
         hash.Add(StencilAspectBound);
         hash.Add(TriangleList);
+        hash.Add(Indexed);
         return hash.ToHashCode();
     }
 }
@@ -86,7 +89,7 @@ public sealed partial class RenderExecutor
 
     // The inputs ResolveShaderPrograms derives from the targets TryResolveDrawTargets binds, from the
     // registers alone: the target requests and the pixel and depth activity, without the images.
-    public static GraphicsProgramInputs ProgramInputsOf(RegisterBanks banks, IImageFormatSupport formats, Func<string, Exception> fatal)
+    public static GraphicsProgramInputs ProgramInputsOf(RegisterBanks banks, IImageFormatSupport formats, Func<string, Exception> fatal, bool indexed = false)
     {
         var inputs = GraphicsProgramInputs.Create();
         var context = banks.Context;
@@ -113,6 +116,7 @@ public sealed partial class RenderExecutor
             (ViewFormatRules.DepthAspects(stencilTarget.Target.Format) & GpuImageAspect.StencilBit) != 0;
         inputs.PixelActive = HasActivePixelShader(banks);
         inputs.TriangleList = AssemblesTriangleList(banks);
+        inputs.Indexed = indexed;
         return inputs;
     }
 
@@ -120,6 +124,21 @@ public sealed partial class RenderExecutor
     public GraphicsPrograms ResolveGraphicsPrograms(RegisterBanks banks, in GraphicsProgramInputs inputs)
     {
         var context = banks.Context;
+        if (UsesMeshExecution(banks))
+        {
+            var userConfig = banks.UserConfig;
+            if (inputs.Indexed && userConfig.PrimitiveType is
+                (uint)GuestPrimitiveType.TriangleList or (uint)GuestPrimitiveType.TriangleStrip)
+            {
+                userConfig = userConfig.Copy();
+                userConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;
+            }
+
+            return _pipelines.GetMeshGraphicsPrograms(
+                banks.Shader.Vertex, banks.Shader.Pixel, context.ShaderInterface, context,
+                userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
+        }
+
         return _pipelines.GetGraphicsPrograms(
             banks.Shader.Vertex,
             banks.Shader.Pixel,

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.DsTrace;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
 
@@ -195,9 +197,24 @@ public sealed partial class GpuCommandInterpreter
 
     public bool ConstantEngineComplete { get; set; }
 
-    // One count for every command processor: a query's begin and end dumps may run on different
-    // queues, and the end must still read later than the begin or the pair counts no samples.
-    private static long _syntheticOcclusionCounter;
+    // One bank for every command processor of a queue set: a query's begin and end dumps may run
+    // on different queues, and the end must still read later than the begin or the pair counts no
+    // samples. CommandStreamQueue shares one bank across its interpreters; a lone one owns its own.
+    private readonly ulong[] _syntheticOcclusionCounters = new ulong[4];
+
+    internal ulong[] SyntheticOcclusionCounterBank
+    {
+        init => _syntheticOcclusionCounters = value.Length == 4
+            ? value
+            : throw new ArgumentException("The occlusion counter bank holds four counters.", nameof(value));
+    }
+
+    private ulong _occlusionCounterStart;
+    private int _selectedOcclusionCounter;
+    private uint _occlusionDumpStrideBytes = 16;
+    private uint _occlusionDumpInstanceMask = 0xFFFF;
+
+    public ulong SyntheticOcclusionCounter => _syntheticOcclusionCounters[_selectedOcclusionCounter];
 
     public ulong AtomicReturnMeData { get; private set; }
 
@@ -465,6 +482,7 @@ public sealed partial class GpuCommandInterpreter
             if (PacketHeader.IsPredicated(header) && PredicateSkip)
             {
                 Trace(PacketTraceOutcome.Predicated, in cursor, offset, header, length, length, cursorIndex);
+                TraceSkippedPackets("predicated", packetAddress, length, PacketHeader.Opcode(header));
                 cursor.Offset += length;
                 execution.MadeProgress = true;
                 continue;
@@ -734,18 +752,82 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
-    internal void WriteDword(ulong address, uint value, string kind = "WRITE32")
+    private static long _skippedPacketTraceCount;
+
+    // Skipped packets are silent otherwise; a skipped producer leaves its consumer with stale memory.
+    internal void TraceSkippedPackets(string kind, ulong packetAddress, uint dwords, uint detail)
+    {
+        if (IndexedDrawTrace.Enabled)
+            SkippedIndexedDrawScanner.Scan(_host.Memory.TryRead, packetAddress, dwords, IndexTypeAndSize, IndexBaseAddress,
+                (count, type, address, packet) => IndexedDrawTrace.Write(
+                    IndexedDrawTrace.Capture(count, type, address, _host.Memory.TryRead),
+                    $"{kind}-candidate", SubmitId, packet), IndexedDrawTrace.ScanIssue);
+        if (!ImageClearTrace.Enabled) return;
+        _host.TraceGuestWrite($"command-skip-{kind}", packetAddress, (ulong)dwords * sizeof(uint));
+        if (Interlocked.Increment(ref _skippedPacketTraceCount) > 256) return;
+        var target = string.Empty;
+        Span<byte> body = stackalloc byte[3 * sizeof(uint)];
+        if (detail == PacketOpcode.IndirectBuffer && dwords == 4 && _host.TryReadGuest(packetAddress + sizeof(uint), body))
+        {
+            var words = MemoryMarshal.Cast<byte, uint>(body);
+            var targetAddress = words[0] | ((ulong)(words[1] & 0xFFFFu) << 32);
+            var targetDwords = words[2] & 0xFFFFFu;
+            target = $" target=0x{targetAddress:X16} targetDwords={targetDwords} chain={(words[2] >> 20) & 1u}";
+            TraceSkippedTargetPackets(targetAddress, targetDwords);
+        }
+        Console.Error.WriteLine($"[GPU][TRACE] CommandSkip kind={kind} packet=0x{packetAddress:X16} dwords={dwords} detail=0x{detail:X8}{target}");
+    }
+
+    private static readonly HashSet<ulong> _decodedSkipTargets = new();
+
+    // Lists each packet of a skipped buffer once, so the skipped work can be identified.
+    private void TraceSkippedTargetPackets(ulong address, uint dwords)
+    {
+        lock (_decodedSkipTargets)
+        {
+            if (_decodedSkipTargets.Count >= 16 || !_decodedSkipTargets.Add(address)) return;
+        }
+        var buffer = new byte[Math.Min(dwords, 4096u) * sizeof(uint)];
+        if (buffer.Length == 0 || !_host.TryReadGuest(address, buffer)) return;
+        var words = MemoryMarshal.Cast<byte, uint>(buffer);
+        var packets = new List<string>();
+        for (var offset = 0; offset < words.Length;)
+        {
+            var header = words[offset];
+            if ((header >> 30) != 3)
+            {
+                packets.Add($"raw:0x{header:X8}");
+                offset++;
+                continue;
+            }
+            var length = (int)PacketHeader.Length(header);
+            var marker = string.Empty;
+            if (PacketHeader.Opcode(header) == PacketOpcode.Nop && PacketHeader.CustomCode(header) == PacketCustomCode.PushMarker &&
+                offset + length <= words.Length)
+            {
+                var text = MemoryMarshal.AsBytes(words.Slice(offset + 1, length - 1));
+                var end = text.IndexOf((byte)0);
+                marker = $"\"{System.Text.Encoding.ASCII.GetString(end < 0 ? text : text[..end])}\"";
+            }
+            packets.Add($"0x{PacketHeader.Opcode(header):X2}/{length}{(PacketHeader.IsPredicated(header) ? "p" : "")}" +
+                (PacketHeader.Opcode(header) == PacketOpcode.Nop ? $"[r=0x{PacketHeader.CustomCode(header):X2}]" : "") + marker);
+            offset += Math.Max(length, 1);
+        }
+        Console.Error.WriteLine($"[GPU][TRACE] CommandSkipTarget target=0x{address:X16} dwords={dwords} packets={string.Join(',', packets)}");
+    }
+
+    internal void WriteDword(ulong address, uint value, string kind = "WRITE32", [CallerMemberName] string caller = "")
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
-        WriteBytes(address, bytes, kind);
+        WriteBytes(address, bytes, kind, caller);
     }
 
-    internal void WriteQword(ulong address, ulong value, string kind = "WRITE64")
+    internal void WriteQword(ulong address, ulong value, string kind = "WRITE64", [CallerMemberName] string caller = "")
     {
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
-        WriteBytes(address, bytes, kind);
+        WriteBytes(address, bytes, kind, caller);
     }
 
     /// <summary>
@@ -762,8 +844,15 @@ public sealed partial class GpuCommandInterpreter
 
     internal delegate bool PendingLabelReader(ulong address, bool is64Bit, out ulong value);
 
-    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES")
+    // The caller name labels the packet handler in the image-clear trace.
+    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES", [CallerMemberName] string caller = "")
     {
+        if (_host.TryDeferOrderedWrite(QueueId, address, source))
+        {
+            _lastWriteLength = 0;
+            return;
+        }
+
         if (!_host.TryWriteGuest(address, source, kind))
         {
             throw _host.Fatal($"The command stream cannot write guest memory: address=0x{address:X16} size={source.Length}.");
@@ -789,6 +878,7 @@ public sealed partial class GpuCommandInterpreter
             _lastWriteLength = source.Length;
             _lastWritePacket = _packetSerial;
         }
+        if (ImageClearTrace.Enabled) _host.TraceGuestWrite($"command-write-{caller}", address, (ulong)source.Length);
     }
 
     private static ulong Address(uint low, uint high) => low | ((ulong)high << 32);

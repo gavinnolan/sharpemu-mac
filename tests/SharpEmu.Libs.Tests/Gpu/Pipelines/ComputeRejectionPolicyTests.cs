@@ -18,6 +18,23 @@ public sealed class ComputeRejectionPolicyTests
     private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UnlinkableShaderCallsCompileTheCallerAlone(bool strict)
+    {
+        using var fatal = new FatalScope();
+        var guest = new PipelineTestGuest();
+        guest.Compiler.LinkedShaderCallsSupported = false;
+        guest.RegisterProgram(CodeAddress, HeaderAddress, [0xBE8E2100, 0xBF810000]);
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, []);
+        var cursor = 0u;
+        Assert.True(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(32),
+            strict, ref cursor, out _, out _, out var rejection), rejection);
+        var request = Assert.Single(guest.Compiler.Requests);
+        Assert.Contains(request.Program.Instructions, static instruction => instruction.Opcode == "SSwappcB64");
+    }
+
+    [Theory]
     [InlineData(null, false)]
     [InlineData("0", false)]
     [InlineData("1", false)]

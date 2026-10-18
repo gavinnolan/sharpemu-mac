@@ -78,6 +78,8 @@ public sealed class CommandStreamQueue
     private readonly object _gate = new();
     private readonly LinkedList<CommandSubmission>[] _queues = new LinkedList<CommandSubmission>[QueueCount];
     private readonly GpuCommandInterpreter?[] _interpreters = new GpuCommandInterpreter?[QueueCount];
+    // Shared by every queue's interpreter: one slice runs at a time, so they never race.
+    private readonly ulong[] _syntheticOcclusionCounters = new ulong[4];
     private readonly Queue<ControlBarrier> _controlBarriers = new();
     private int _nextQueue;
     private int _submissionCount;
@@ -202,6 +204,7 @@ public sealed class CommandStreamQueue
                 GuestMemoryWritten = NotifyGuestMemoryWritten,
                 PendingLabelRecorded = NotePendingLabel,
                 PendingLabelLookup = TryGetPendingLabel,
+                SyntheticOcclusionCounterBank = _syntheticOcclusionCounters,
             };
             _interpreters[queueId] = created;
             return created;
@@ -807,6 +810,34 @@ public sealed class CommandStreamQueue
     }
 
     /// <summary>
+    /// Wakes every blocked head after a host finished publishing deferred writes. A slice
+    /// running at the time sees the wake generation change and stays runnable at its park.
+    /// </summary>
+    public void NotifyPublicationCompleted()
+    {
+        lock (_gate)
+        {
+            _wakeGeneration++;
+            var retried = false;
+            foreach (var queue in _queues)
+            {
+                if (queue.First is { Value.Blocked: true } head)
+                {
+                    head.Value.Blocked = false;
+                    retried = true;
+                }
+            }
+
+            if (retried)
+            {
+                BlockedRetries++;
+            }
+
+            Monitor.PulseAll(_gate);
+        }
+    }
+
+    /// <summary>
     /// Wakes every blocked head. This is the fallback: it is what a timer does when
     /// nothing told us which wait could have changed, and what a guest CPU write we
     /// cannot observe is eventually caught by.
@@ -1168,7 +1199,7 @@ public sealed class CommandStreamQueue
             }
             else
             {
-                if (submission.Kind == CommandSubmissionKind.FrameBoundary)
+                if (submission!.Kind == CommandSubmissionKind.FrameBoundary)
                 {
                     _pendingBoundaries--;
                     _doneCount++;

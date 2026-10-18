@@ -140,7 +140,8 @@ public sealed partial class RenderExecutor
             depthBiasPerFace ? back.Item1 : 0f,
             depthBiasPerFace ? back.Item2 : 0f,
             pointLine.Item1,
-            pointLine.Item2);
+            pointLine.Item2,
+            context.DepthCountControl);
     }
 
     // The screen, window, generic, viewport and clip rectangles intersected and clamped to the extent.

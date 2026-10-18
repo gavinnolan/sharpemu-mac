@@ -217,6 +217,55 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         harness.AssertNoValidationMessages();
     }
 
+    [Theory]
+    [InlineData(GuestPixelFormat.Bc1UNorm, GpuFormat.BC1RgbaUnormBlock, GpuFormat.R32G32Uint, 8u)]
+    [InlineData(GuestPixelFormat.Bc7UNorm, GpuFormat.BC7UnormBlock, GpuFormat.R32G32B32A32Uint, 16u)]
+    public void GetOrCreateView_CompressedImageSupportsIntegerStorageView(
+        GuestPixelFormat guestFormat, GpuFormat imageFormat, GpuFormat storageFormat, uint blockBytes)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var description = Color2D(64, 64, levels: 2) with
+        {
+            GuestFormat = guestFormat,
+            PixelFormat = imageFormat,
+            BytesPerBlock = blockBytes,
+        };
+        var image = harness.CreateImage(description);
+        if ((image.Backing.Flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) == 0)
+        {
+            Assert.True(OperatingSystem.IsMacOS());
+            Assert.Equal((ImageUsageFlags)0, image.Backing.Usage & ImageUsageFlags.StorageBit);
+            image.GetOrCreateView(ImageViewDescription.Default with { Format = imageFormat });
+            harness.AssertNoValidationMessages();
+            return;
+        }
+        var storageFeatures = _vulkan.DeviceInfo.GetFormatProperties(storageFormat.ToVk()).OptimalTilingFeatures;
+        var supportsStorage = (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0 &&
+            _vulkan.DeviceInfo.TryGetImageFormatProperties(imageFormat, GpuImageType.Type2D, GpuImageTiling.Optimal,
+                (GpuImageUsage)image.Backing.Usage | GpuImageUsage.StorageBit, (GpuImageCreateFlags)image.Backing.Flags, out var properties) &&
+            (properties.SampleCounts & GpuSampleCount.Count1Bit) != 0;
+        Assert.Equal(supportsStorage, (image.Backing.Usage & ImageUsageFlags.StorageBit) != 0);
+        var sampled = image.GetOrCreateView(ImageViewDescription.Default with { Format = imageFormat });
+        Assert.NotEqual(0UL, sampled.Handle);
+        var storageRequest = ImageViewDescription.Default with
+        {
+            Format = storageFormat,
+            Usage = GpuImageUsage.StorageBit,
+        };
+        if (!supportsStorage)
+        {
+            using var fatal = new FatalScope();
+            Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(storageRequest));
+            harness.AssertNoValidationMessages();
+            return;
+        }
+        var storage = image.GetOrCreateView(storageRequest);
+        Assert.NotEqual(0UL, storage.Handle);
+        Assert.NotEqual(sampled, storage);
+        harness.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void GetOrCreateView_NormalizesAndCachesViews()
     {

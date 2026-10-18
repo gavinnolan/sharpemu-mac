@@ -26,6 +26,12 @@ public sealed partial class GpuCommandInterpreter
         }
 
         // A compare-swap loop applies once per try and suspends while the compare fails.
+        if (_host.MustHoldForCrossQueueOrder(QueueId))
+        {
+            Suspend();
+            return 8;
+        }
+
         var operation = CommandMemoryOperation.Atomic(atomic);
         _host.ExecuteCommandMemoryOperation(operation);
         var priorValue = operation.PriorValue;
@@ -80,6 +86,12 @@ public sealed partial class GpuCommandInterpreter
 
         if (semaphore.IsSignal)
         {
+            if (_host.MustHoldForCrossQueueOrder(QueueId))
+            {
+                Suspend();
+                return 3;
+            }
+
             _host.ExecuteCommandMemoryOperation(CommandMemoryOperation.Semaphore(semaphore));
             GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
 
@@ -87,6 +99,12 @@ public sealed partial class GpuCommandInterpreter
         }
 
         // A wait takes one token, or suspends until a signal adds one.
+        if (_host.MustHoldForCrossQueueOrder(QueueId))
+        {
+            Suspend();
+            return 3;
+        }
+
         var consume = CommandMemoryOperation.Semaphore(semaphore);
         _host.ExecuteCommandMemoryOperation(consume);
         var priorValue = consume.PriorValue;

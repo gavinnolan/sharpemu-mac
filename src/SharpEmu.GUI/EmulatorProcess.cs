@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
+using SharpEmu.HLE.Host.Windows;
 
 namespace SharpEmu.GUI;
 
@@ -28,9 +29,6 @@ internal sealed class EmulatorProcess : IDisposable
     private const int JobObjectExtendedLimitInformationClass = 9;
     private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
-    private const ulong ControlFlowGuardAlwaysOff = 0x00000002UL << 40;
-    private const ulong CetUserShadowStacksAlwaysOff = 0x00000002UL << 28;
-    private const ulong UserCetSetContextIpValidationAlwaysOff = 0x00000002UL << 32;
     // macOS: read by the emulator's OwnerProcessWatch, which then leads a process group of
     // its own and exits with this process.
     private const string OwnerPidEnvironment = "SHARPEMU_OWNER_PID";
@@ -242,10 +240,10 @@ internal sealed class EmulatorProcess : IDisposable
             }
 
             mitigationPolicies = Marshal.AllocHGlobal(sizeof(ulong) * 2);
-            Marshal.WriteInt64(mitigationPolicies, unchecked((long)ControlFlowGuardAlwaysOff));
+            Marshal.WriteInt64(mitigationPolicies, unchecked((long)GuestProcessMitigationPolicy.Primary));
             Marshal.WriteInt64(
                 nint.Add(mitigationPolicies, sizeof(long)),
-                unchecked((long)(CetUserShadowStacksAlwaysOff | UserCetSetContextIpValidationAlwaysOff)));
+                unchecked((long)GuestProcessMitigationPolicy.Secondary));
             if (!UpdateProcThreadAttribute(
                     attributeList,
                     0,
@@ -281,7 +279,7 @@ internal sealed class EmulatorProcess : IDisposable
                             0,
                             0,
                             true,
-                            ExtendedStartupInfoPresent | CreateNoWindow,
+                            ExtendedStartupInfoPresent | CreateNoWindow | WindowsGuestAddressReservation.CreateSuspended,
                             0,
                             string.IsNullOrWhiteSpace(workingDirectory)
                                 ? Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory
@@ -300,6 +298,7 @@ internal sealed class EmulatorProcess : IDisposable
 
             processHandle = processInfo.Process;
             threadHandle = processInfo.Thread;
+            WindowsGuestAddressReservation.PrepareAndResume(processHandle, threadHandle);
             CloseHandle(stdoutWrite);
             stdoutWrite = 0;
             CloseHandle(stderrWrite);

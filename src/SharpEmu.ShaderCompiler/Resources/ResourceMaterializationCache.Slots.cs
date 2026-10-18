@@ -387,7 +387,8 @@ public sealed partial class ResourceMaterializationCache
     // The entry evaluated again for this draw, or false with nothing stored. The new entry records
     // each slot's word where this draw read it, which is every word the materialization depends on.
     private bool TryRefreshSlots(Entry entry, ShaderResourcePlan plan, SlotPlan slots, ResourceRuntimeInputs inputs,
-        ResidentGuestBytesReader residentReader, AddressRebase rebase, out Entry refreshed, out bool descriptorChanged)
+        ResidentGuestBytesReader residentReader, AddressRebase rebase, in RejectionSample rejection, out Entry refreshed,
+        out bool descriptorChanged)
     {
         refreshed = null!;
         descriptorChanged = false;
@@ -433,6 +434,14 @@ public sealed partial class ResourceMaterializationCache
             if (zero)
             {
                 address = ZeroSlot;
+            }
+            else if (slots.Evaluated[slot] && model.Ranges[slot] is var sampledRange &&
+                rejection.RefutesWord(address, sampledRange < 0 || entry.RangeClean[sampledRange], model.Values[slot]))
+            {
+                // Validation already read this descriptor word changed: no read can refresh it.
+                RefuseSlots(SlotRefusal.Descriptor);
+                descriptorChanged = true;
+                return false;
             }
             else if (!TryReadSlot(entry, model, slot, address, residentReader, single, out word))
             {

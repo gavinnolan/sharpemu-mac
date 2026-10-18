@@ -34,6 +34,22 @@ public static partial class Gen5MslTranslator
         Gen5MslCodegenOptions? options = null)
     {
         shader = default!;
+        // The guest mesh stage (Vulkan's task/mesh path) has no MSL emission; the Metal mesh path
+        // compiles NGG primitive shaders as Vertex requests with PrimitiveShader set instead.
+        if (request.Stage == ShaderStage.Mesh)
+        {
+            error = "Metal does not support mesh shaders.";
+            return false;
+        }
+        // A program the shader-call linker rewrote carries call dispatch the MSL emitter cannot
+        // express. An unlinked S_SWAPPC_B64 keeps today's behaviour (TryEmitScalar64 skips it),
+        // and an explicit branch target alone (ShaderLinkedBranchControl) compiles.
+        if (request.Program.Instructions.Any(instruction =>
+            instruction.Control is ShaderCallMatchControl or ShaderCallEntryControl or ShaderCallFaultControl))
+        {
+            error = "Metal does not support linked shader calls.";
+            return false;
+        }
         try
         {
             BindingLayoutValidator.Validate(
@@ -1716,8 +1732,15 @@ public static partial class Gen5MslTranslator
                 Line("}");
             }
 
-            var isShared = $"{aperture} == {FormatUInt(Gen5InlineConstants.SharedApertureHigh >> Gen5InlineConstants.ApertureShift)}";
-            var isPrivate = $"{aperture} == {FormatUInt(Gen5InlineConstants.PrivateApertureHigh >> Gen5InlineConstants.ApertureShift)}";
+            // Like the SPIR-V translator: a lane is in an aperture when its high dword carries the
+            // guest literal tag (top nibble) or the virtual segment src_shared/private_base reads as.
+            var high = Temp("uint", $"(uint)({address} >> 32)");
+            var isShared =
+                $"({aperture} == {FormatUInt(Gen5InlineConstants.SharedApertureHigh >> Gen5InlineConstants.ApertureShift)} || " +
+                $"{high} == {FormatUInt((uint)(Gen5InlineConstants.SharedApertureBase >> 32))})";
+            var isPrivate =
+                $"({aperture} == {FormatUInt(Gen5InlineConstants.PrivateApertureHigh >> Gen5InlineConstants.ApertureShift)} || " +
+                $"{high} == {FormatUInt((uint)(Gen5InlineConstants.PrivateApertureBase >> 32))})";
             if (canShare && canPrivate)
             {
                 Branch(isShared, Shared, () => Branch(isPrivate, Private, Global));

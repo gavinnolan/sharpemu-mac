@@ -38,5 +38,10 @@ public static class VulkanGpuBackend
         RenderPhaseProfile.RegisterReportProvider(GpuSyncProfile.TakeReport);
         RenderPhaseProfile.RegisterReportProvider(GuestImageCache.TakeLookupReport);
         RenderPhaseProfile.RegisterReportProvider(GuestImageCache.TakeDccReport);
+        RenderPhaseProfile.RegisterReportProvider(static () =>
+        {
+            SharpEmu.ShaderCompiler.Vulkan.ShaderTranslationProfile.Report();
+            return string.Empty;
+        });
     }
 }

@@ -75,7 +75,8 @@ public readonly record struct DynamicDrawState(
     // The bias of points and lines, which take the front offset under POLY_OFFSET_PARA_ENABLE
     // whatever the triangle faces take.
     float DepthBiasPointLineConstantFactor = 0f,
-    float DepthBiasPointLineSlopeFactor = 0f);
+    float DepthBiasPointLineSlopeFactor = 0f,
+    uint DepthCountControl = 0);
 
 // The host-side descriptors of one shader stage, prepared before the draw or dispatch records.
 public interface IPreparedBindings
@@ -91,7 +92,20 @@ public interface IResourcePreparation : IDisposable
 // Everything the executor needs from the renderer, the caches and the pipeline objects.
 public interface IRenderHost
 {
+    int BeginImageSnapshot(IPreparedBindings? pixelBindings) => 0;
+
+    int BeginComputeImageSnapshot(IPreparedBindings bindings) => 0;
+
+    void EndComputeImageSnapshot(int sequence, IPreparedBindings bindings) { }
+
+    void EndImageSnapshot(int sequence, ReadOnlySpan<ColorTargetState> targets) { }
+
+    // Records a draw's color-target base for the image-clear trace; see docs/image-clear-tracing.md.
+    void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) { }
+
     RenderHostLimits Limits { get; }
+
+    bool SupportsNativeRectangles => false;
 
     IImageFormatSupport FormatSupport { get; }
 
@@ -125,8 +139,19 @@ public interface IRenderHost
 
     BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten);
 
+    void TraceVertexBuffer(ulong shaderHash, VertexAttributeResource attribute, VertexInputBuffer input,
+        BufferBinding binding, ulong requestedBytes, ulong acquiredBytes) { }
+
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
+
+    ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices) =>
+        throw new NotSupportedException("The renderer does not support indexed mesh inputs.");
+
+    bool SupportsIndirectMeshDraw => false;
+
+    IIndirectMeshDraw PrepareIndirectMeshDraw(in IndirectMeshDrawRequest request) =>
+        throw new NotSupportedException("The renderer does not support indirect mesh inputs.");
 
     void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input);
 
@@ -229,6 +254,11 @@ public interface IRenderHost
     // its patch draw on the GPU in PrepareIndirectDraw.
     bool TakesIndirectAutoRectangleListArguments(VertexInputInfo vertexInput, ulong argumentsAddress, ulong argumentsSize) =>
         TakesIndirectRectangleListArguments;
+
+    void InsertDrawTraceMarker(string label) { }
+
+    void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
+        throw new NotSupportedException("The render host does not support mesh shaders.");
 
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
 

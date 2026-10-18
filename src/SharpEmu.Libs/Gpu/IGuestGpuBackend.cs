@@ -23,6 +23,8 @@ public interface IGuestGpuBackend
     /// the window title. macOS builds link only Metal.</summary>
     string BackendName { get; }
 
+    bool LinkedShaderCallsSupported => false;
+
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 
