@@ -72,6 +72,8 @@ export SHARPEMU_DATA_ROOT="$DATA_ROOT"
 
 export SHARPEMU_GAME_ENTRY_RUN=1
 export SHARPEMU_INPUT_START_AFTER_LOG="${SHARPEMU_INPUT_START_AFTER_LOG:-Scheduled guest thread 'Bink IO'}"
+# run-game.sh reads the memory limit itself, before the ENV=VALUE arguments reach the game.
+for arg in "$@"; do [[ "$arg" == SHARPEMU_MEM_LIMIT_MB=* ]] && export "$arg"; done
 export SHARPEMU_MEM_LIMIT_MB="${SHARPEMU_MEM_LIMIT_MB:-18000}"
 run() {
   rm -rf "$SAVES/PPSA01342" && cp -R "$GOLDEN/PPSA01342" "$SAVES/"
