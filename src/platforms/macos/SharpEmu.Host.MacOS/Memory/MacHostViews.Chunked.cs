@@ -7,7 +7,7 @@ using SharpEmu.HLE.Host;
 namespace SharpEmu.Host.MacOS;
 
 /// <summary>
-/// SHARPEMU_GUEST_BACKING=chunked: the guest backing as an array of 64 KiB purgeable named
+/// The default guest backing (SHARPEMU_GUEST_BACKING=shm selects the old one): the guest backing as an array of 64 KiB purgeable named
 /// memory entries instead of one POSIX shm object.
 ///
 /// <para>
@@ -64,10 +64,9 @@ internal sealed unsafe partial class MacHostViews
     [ThreadStatic]
     internal static bool? ChunkedBackingForTests;
 
-    // The default stays the shm object until the chunked backing is measured in a game:
-    // flipping it is this one comparison.
-    private static bool UseChunkedBacking => ChunkedBackingForTests ?? string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_GUEST_BACKING"), "chunked", StringComparison.OrdinalIgnoreCase);
+    // On unless SHARPEMU_GUEST_BACKING=shm asks for the single POSIX shm object.
+    private static bool UseChunkedBacking => ChunkedBackingForTests ?? !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_GUEST_BACKING"), "shm", StringComparison.OrdinalIgnoreCase);
 
     // Called under HostViewRegions.Gate after the ledger preflight, like the shm path.
     private bool TryCreateChunkedBackingLocked(ulong size, out HostBackingObject? backing, out HostViewFailure failure)

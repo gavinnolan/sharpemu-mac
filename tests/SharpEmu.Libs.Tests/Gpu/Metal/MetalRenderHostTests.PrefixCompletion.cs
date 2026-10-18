@@ -38,12 +38,17 @@ public sealed partial class MetalRenderHostTests
             // Created after End in the first row; it must still precede the barrier.
             Assert.True(MetalVideoPresenter.SubmitOrderedGuestAction(() => effects.Add("later writeback"), "later renderer followup") > 0);
         }, "captured producer");
-        var future = Task.Run(() =>
+        // A thread of its own: a Task.Run awaited with GetResult can be inlined onto this
+        // thread, whose prefix capture (queue 107) would then refuse queue 108.
+        long future = 0;
+        var submitter = new Thread(() =>
         {
             using var laterQueue = MetalVideoPresenter.EnterGuestQueue("dcb.graphics", 108);
-            return MetalVideoPresenter.SubmitOrderedGuestAction(() =>
+            future = MetalVideoPresenter.SubmitOrderedGuestAction(() =>
             { futureEntered.Set(); Assert.True(releaseFuture.Wait(TimeSpan.FromSeconds(2))); }, "unrelated future work");
-        }).GetAwaiter().GetResult();
+        });
+        submitter.Start();
+        Assert.True(submitter.Join(TimeSpan.FromSeconds(10)));
         Assert.True(future > prefix);
         var drain = Task.Run(() => { for (var i = 0; i < 8; i++) MetalVideoPresenter.DrainGuestWork(0, 0); });
         try
@@ -107,11 +112,16 @@ public sealed partial class MetalRenderHostTests
         MetalVideoPresenter.BeginGuestSubmissionPrefixCapture(0, 101);
         var prefixRan = false;
         var prefix = MetalVideoPresenter.SubmitOrderedGuestAction(() => prefixRan = true, "captured prefix");
-        var future = Task.Run(() =>
+        // A thread of its own: a Task.Run awaited with GetResult can be inlined onto this
+        // thread, whose prefix capture (queue 101) would then refuse queue 102.
+        long future = 0;
+        var submitter = new Thread(() =>
         {
             using var laterQueue = MetalVideoPresenter.EnterGuestQueue("dcb.graphics", 102);
-            return MetalVideoPresenter.SubmitOrderedGuestAction(() => { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(2))); }, "future work");
-        }).GetAwaiter().GetResult();
+            future = MetalVideoPresenter.SubmitOrderedGuestAction(() => { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(2))); }, "future work");
+        });
+        submitter.Start();
+        Assert.True(submitter.Join(TimeSpan.FromSeconds(10)));
         Assert.True(future > prefix);
         var completion = Assert.IsAssignableFrom<IGuestSubmissionPrefixCompletion>(MetalVideoPresenter.EndGuestSubmissionPrefixCapture(true));
         var wait = Task.Run(completion.WaitUntilCompleted);
