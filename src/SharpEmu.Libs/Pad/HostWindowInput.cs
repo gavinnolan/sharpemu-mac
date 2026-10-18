@@ -91,15 +91,6 @@ public static class HostWindowInput
         }
     }
 
-    internal static byte ToStickByte(short value)
-    {
-        var normalized = value + 32768;
-        return (byte)Math.Clamp((normalized * 255 + 32767) / 65535, 0, 255);
-    }
-
-    internal static byte ToTriggerByte(short value) =>
-        (byte)Math.Clamp(value * 255 / 32767, 0, 255);
-
     private sealed class WindowInputSource : IHostWindowInputSource
     {
         public bool HasKeyboardFocus

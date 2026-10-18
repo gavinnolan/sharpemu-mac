@@ -2,18 +2,40 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace SharpEmu.Libs.Ampr;
 
-public static class AmprExports
+/// <summary>DSTRACE APR inner timings, passed from CompleteCommandBuffer to the APR submit export (same thread).</summary>
+internal static class DsAprAcc
+{
+    [ThreadStatic] public static long PreadTicks;
+    [ThreadStatic] public static long WaitTicks;
+    [ThreadStatic] public static long WaitIters;
+    [ThreadStatic] public static long Bytes;
+    [ThreadStatic] public static long Cmds;
+
+    public static void Reset()
+    {
+        PreadTicks = 0;
+        WaitTicks = 0;
+        WaitIters = 0;
+        Bytes = 0;
+        Cmds = 0;
+    }
+}
+
+public static partial class AmprExports
 {
     private const int CommandBufferHeaderSize = 0x18;
     private const ulong CommandBufferTypeOffset = 0x00;
@@ -106,10 +128,13 @@ public static class AmprExports
     {
         private readonly SafeFileHandle? _handle;
         private readonly ZArchiveFileStream? _archived;
+        private long _nextSequentialOffset = -1;
 
         public CachedHostFile(string path)
         {
-            if (!File.Exists(path) && App0Archive.OpenRead(path) is { } archived)
+            // Only an archive-mounted app0 has files that are not on disk; without one, skip the
+            // existence probe so an open costs no extra metadata read.
+            if (App0Archive.IsMounted && !File.Exists(path) && App0Archive.OpenRead(path) is { } archived)
             {
                 _archived = archived;
                 Length = archived.Length;
@@ -122,13 +147,56 @@ public static class AmprExports
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete,
                 FileOptions.RandomAccess);
-            Length = RandomAccess.GetLength(_handle);
+            // Resolving this path already measured the file. Asking the host
+            // again is a second cold metadata read of the same inode on the
+            // external game volume, and an asset storm pays it per open.
+            Length = KernelMemoryCompatExports.TryGetReadOnlyImageLength(path, out var known)
+                ? known
+                : RandomAccess.GetLength(_handle);
         }
 
         public long Length { get; }
 
         public int Read(Span<byte> buffer, long offset) =>
             _archived?.ReadAt(buffer, offset) ?? RandomAccess.Read(_handle!, buffer, offset);
+
+        /// <summary>
+        /// Asks the kernel to start pulling in the bytes after a read that
+        /// continues where the previous one stopped.
+        /// </summary>
+        /// <remarks>
+        /// Unreal titles drain a .pak in 64 KiB positional reads - Octopath
+        /// Traveler II issues 12,236 of them for 784 MiB - and each one is a
+        /// separate syscall that waits for the device. That reaches ~21 MB/s on
+        /// the external game volume against ~41 MB/s of raw sequential
+        /// throughput, because nothing tells the kernel the next 64 KiB is
+        /// wanted until the guest asks for it. F_RDADVISE queues that read
+        /// asynchronously with no copy to userspace, so the following call can
+        /// be served from the buffer cache.
+        ///
+        /// Only a continuing offset is advised: hinting ahead of a genuinely
+        /// random read would evict pages a different stream still wants, and
+        /// the handle cache is shared by all of a title's AMPR reads. A file
+        /// read out of an archive has no host handle to advise.
+        /// </remarks>
+        public void AdviseSequentialReadAhead(long offset, int length)
+        {
+            if (_handle is null || !HostReadAhead.Enabled || length <= 0)
+            {
+                return;
+            }
+
+            var completed = offset + length;
+            var continuesPreviousRead = offset == Volatile.Read(ref _nextSequentialOffset);
+            Volatile.Write(ref _nextSequentialOffset, completed);
+            if (!continuesPreviousRead || completed >= Length)
+            {
+                return;
+            }
+
+            var window = (int)Math.Min(HostReadAhead.WindowBytes, Length - completed);
+            HostReadAhead.Advise(_handle, completed, window);
+        }
 
         public void Dispose()
         {
@@ -144,10 +212,42 @@ public static class AmprExports
     }
 
     // Keep a bounded LRU of open host files. An unbounded cache exhausts the
-    // process FD limit (~10k on macOS) during large asset storms, after
-    // which every new open throws IOException and surfaces as NOT_FOUND — the
-    // guest then reports InvalidFileFourCC on empty buffers.
-    private const int MaxCachedHostFiles = 1536;
+    // process FD limit during large asset storms, after which every new open
+    // throws IOException and surfaces as NOT_FOUND — the guest then reports
+    // InvalidFileFourCC on empty buffers.
+    //
+    // The cap is sized against the real limit rather than a guess: macOS allows
+    // 92160 descriptors per process (kern.maxfilesperproc) and this process is
+    // launched with a soft RLIMIT_NOFILE of 1048576, so 1536 was leaving most
+    // of a title's working set to be reopened. Demon's Souls touches ~10k
+    // distinct assets per boot and was reopening ~9k of them, each one a cold
+    // open on the external volume. An eighth of the soft limit keeps a wide
+    // margin for the guest's own descriptors, the GPU and the audio stack.
+    private static readonly int MaxCachedHostFiles = ResolveHostFileCacheLimit();
+
+    private const int MinimumHostFileCacheLimit = 512;
+    private const int MaximumHostFileCacheLimit = 16384;
+
+    private static int ResolveHostFileCacheLimit()
+    {
+        var configured = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_FILE_CACHE");
+        if (int.TryParse(configured, out var requested) &&
+            requested is >= MinimumHostFileCacheLimit and <= MaximumHostFileCacheLimit)
+        {
+            return requested;
+        }
+
+        var descriptors = HostDescriptorLimit.SoftLimit;
+        if (descriptors <= 0)
+        {
+            return MinimumHostFileCacheLimit * 3;
+        }
+
+        return (int)Math.Clamp(
+            descriptors / 8,
+            MinimumHostFileCacheLimit,
+            MaximumHostFileCacheLimit);
+    }
     private static readonly object _hostFileCacheGate = new();
     private static readonly Dictionary<string, LinkedListNode<CachedHostFileEntry>> _hostFileByPath =
         new(HostFsPath.Comparer);
@@ -172,6 +272,8 @@ public static class AmprExports
         header.Clear();
         if (!ctx.Memory.TryWrite(commandBuffer, header))
         {
+            AprFailureDiagnostics.Failed("constructor-header-write", commandBuffer, commandBuffer,
+                CommandBufferHeaderSize, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
@@ -881,7 +983,36 @@ public static class AmprExports
     {
         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_OK;
         errorOffset = 0;
+        var captureResult = CaptureCommandBuffer(ctx, commandBuffer, out var captured);
+        if (captureResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return captureResult;
+        }
 
+        ExecuteCapturedCommandBuffer(ctx, captured!, out executionResult, out errorOffset);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// The commands of a command buffer at submission, in record order. The
+    /// guest may reset or rewrite a submitted buffer while the submission
+    /// runs, so execution only uses this snapshot.
+    /// </summary>
+    private sealed class CapturedCommandBuffer
+    {
+        public required ulong CommandBuffer { get; init; }
+        public required ulong Buffer { get; init; }
+        public required ulong WriteOffset { get; init; }
+        public required ReadFileCommand[] ReadCommands { get; init; }
+        public required KernelEventCommand[] KernelEventCommands { get; init; }
+        public required WriteAddressCommand[] WriteAddressCommands { get; init; }
+        public required WaitAddressCommand[] WaitAddressCommands { get; init; }
+        public required (ulong Offset, int Kind, int Index)[] Order { get; init; }
+    }
+
+    private static int CaptureCommandBuffer(CpuContext ctx, ulong commandBuffer, out CapturedCommandBuffer? captured)
+    {
+        captured = null;
         if (commandBuffer == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -926,25 +1057,66 @@ public static class AmprExports
         }
         commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
 
-        foreach (var commandEntry in commands)
+        captured = new CapturedCommandBuffer
+        {
+            CommandBuffer = commandBuffer,
+            Buffer = buffer,
+            WriteOffset = writeOffset,
+            ReadCommands = readCommands,
+            KernelEventCommands = kernelEventCommands,
+            WriteAddressCommands = writeAddressCommands,
+            WaitAddressCommands = waitAddressCommands,
+            Order = [.. commands],
+        };
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// Runs the captured commands in record order. Each command publishes
+    /// before the next starts (read data, kernel event, address write), and
+    /// the first failing command stops the buffer and reports its offset.
+    /// </summary>
+    private static void ExecuteCapturedCommandBuffer(
+        CpuContext ctx,
+        CapturedCommandBuffer captured,
+        out int executionResult,
+        out uint errorOffset)
+    {
+        executionResult = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        errorOffset = 0;
+        var commandBuffer = captured.CommandBuffer;
+        var dsApr = DsTrace.Io && DsTrace.Armed;
+        if (dsApr)
+        {
+            DsAprAcc.Cmds = captured.Order.Length;
+        }
+
+        foreach (var commandEntry in captured.Order)
         {
             switch (commandEntry.Kind)
             {
                 case 0:
                     {
-                        var readCommand = readCommands[commandEntry.Index];
+                        var readCommand = captured.ReadCommands[commandEntry.Index];
+                        var dsT0 = dsApr ? Stopwatch.GetTimestamp() : 0;
                         var readResult = CompleteReadFileRecord(ctx, commandBuffer, readCommand);
+                        if (dsApr)
+                        {
+                            DsAprAcc.PreadTicks += Stopwatch.GetTimestamp() - dsT0;
+                            DsAprAcc.Bytes += unchecked((long)readCommand.Size);
+                        }
+
                         if (readResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
                         {
                             executionResult = readResult;
                             errorOffset = checked((uint)commandEntry.Offset);
-                            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                            return;
                         }
                         break;
                     }
 
                 case 1:
-                    var eventCommand = kernelEventCommands[commandEntry.Index];
+                    var eventCommand = captured.KernelEventCommands[commandEntry.Index];
                     if (!KernelEventQueueCompatExports.TriggerAmprEvent(
                             eventCommand.Equeue,
                             unchecked((uint)eventCommand.Id),
@@ -952,35 +1124,42 @@ public static class AmprExports
                     {
                         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return;
                     }
                     break;
 
                 case 2:
-                    var writeCommand = writeAddressCommands[commandEntry.Index];
+                    var writeCommand = captured.WriteAddressCommands[commandEntry.Index];
                     if (!ctx.TryWriteUInt64(writeCommand.Address, writeCommand.Value))
                     {
                         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return;
                     }
+
+                    GuestAddressWatch.NotifyWrite(writeCommand.Address, sizeof(ulong));
                     break;
 
                 case 3:
-                    var waitCommand = waitAddressCommands[commandEntry.Index];
+                    var waitCommand = captured.WaitAddressCommands[commandEntry.Index];
+                    var dsW0 = dsApr ? Stopwatch.GetTimestamp() : 0;
                     var waitResult = WaitForAddress(ctx, waitCommand);
+                    if (dsApr)
+                    {
+                        DsAprAcc.WaitTicks += Stopwatch.GetTimestamp() - dsW0;
+                    }
+
                     if (waitResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
                     {
                         executionResult = waitResult;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return;
                     }
                     break;
             }
         }
 
-        TraceAmpr(ctx, "complete", commandBuffer, buffer, writeOffset);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        TraceAmpr(ctx, "complete", commandBuffer, captured.Buffer, captured.WriteOffset);
     }
 
     private static int _unknownReadFileIdWarnings;
@@ -1009,6 +1188,7 @@ public static class AmprExports
                         $"[LOADER][WARN] ampr.read_unknown_file_id id=0x{fileId:X8} size=0x{size:X} offset=0x{fileOffset:X}");
                 }
 
+                SharpEmu.HLE.GuestLoadProgress.NoteAmprRead(0, unknownId: true);
                 TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, hostPath, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
@@ -1025,6 +1205,7 @@ public static class AmprExports
         }
 
         var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
+        SharpEmu.HLE.GuestLoadProgress.NoteAmprRead((long)bytesRead);
         TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
@@ -1044,8 +1225,8 @@ public static class AmprExports
     {
         if (size > uint.MaxValue || writeOffset > uint.MaxValue ||
             !WriteVisibleCommandBufferPointers(ctx, commandBuffer, buffer, size) ||
-            !ctx.TryWriteUInt32(commandBuffer + CommandBufferOffsetOffset, (uint)writeOffset) ||
-            !ctx.TryWriteUInt32(commandBuffer + CommandBufferNumOffset, 0))
+            !WriteCommandBufferHeaderUInt32(ctx, commandBuffer, CommandBufferOffsetOffset, (uint)writeOffset, "header-offset-write") ||
+            !WriteCommandBufferHeaderUInt32(ctx, commandBuffer, CommandBufferNumOffset, 0, "header-count-write"))
         {
             return false;
         }
@@ -1062,8 +1243,28 @@ public static class AmprExports
             return false;
         }
 
-        return ctx.TryWriteUInt32(commandBuffer + CommandBufferSizeOffset, (uint)size) &&
-               ctx.TryWriteUInt64(commandBuffer + CommandBufferDataOffset, buffer);
+        return WriteCommandBufferHeaderUInt32(ctx, commandBuffer, CommandBufferSizeOffset, (uint)size, "header-size-write") &&
+               WriteCommandBufferHeaderUInt64(ctx, commandBuffer, CommandBufferDataOffset, buffer, "header-data-write");
+    }
+
+    private static bool WriteCommandBufferHeaderUInt32(CpuContext ctx, ulong commandBuffer,
+        ulong offset, uint value, string stage)
+    {
+        var address = commandBuffer + offset;
+        if (ctx.TryWriteUInt32(address, value)) return true;
+        AprFailureDiagnostics.Failed(stage, commandBuffer, address, sizeof(uint),
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return false;
+    }
+
+    private static bool WriteCommandBufferHeaderUInt64(CpuContext ctx, ulong commandBuffer,
+        ulong offset, ulong value, string stage)
+    {
+        var address = commandBuffer + offset;
+        if (ctx.TryWriteUInt64(address, value)) return true;
+        AprFailureDiagnostics.Failed(stage, commandBuffer, address, sizeof(ulong),
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return false;
     }
 
     private static void UpdateCommandBufferState(
@@ -1133,10 +1334,10 @@ public static class AmprExports
             return true;
         }
 
-        if (ctx.TryReadUInt64(commandBuffer + CommandBufferDataOffset, out buffer) &&
-            TryReadUInt32(ctx, commandBuffer + CommandBufferSizeOffset, out var size32) &&
-            TryReadUInt32(ctx, commandBuffer + CommandBufferOffsetOffset, out var offset32) &&
-            TryReadUInt32(ctx, commandBuffer + CommandBufferNumOffset, out var count32))
+        if (TryReadHeader64(commandBuffer + CommandBufferDataOffset, out buffer) &&
+            TryReadHeader32(commandBuffer + CommandBufferSizeOffset, out var size32) &&
+            TryReadHeader32(commandBuffer + CommandBufferOffsetOffset, out var offset32) &&
+            TryReadHeader32(commandBuffer + CommandBufferNumOffset, out var count32))
         {
             size = size32;
             state = _commandBuffers.GetOrAdd(commandBuffer, static _ => new CommandBufferState());
@@ -1163,6 +1364,21 @@ public static class AmprExports
         size = 0;
         state = null;
         return false;
+
+        bool TryReadHeader64(ulong address, out ulong value)
+        {
+            var read = ctx.TryReadUInt64(address, out value);
+            if (!read) AprFailureDiagnostics.Failed("header-read", commandBuffer, address, sizeof(ulong),
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return read;
+        }
+        bool TryReadHeader32(ulong address, out uint value)
+        {
+            var read = TryReadUInt32(ctx, address, out value);
+            if (!read) AprFailureDiagnostics.Failed("header-read", commandBuffer, address, sizeof(uint),
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return read;
+        }
     }
 
     private static bool HasQueuedCommands(CommandBufferState state)
@@ -1228,6 +1444,25 @@ public static class AmprExports
         ulong size,
         out ulong bytesRead)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = TryReadFileToGuestMemoryCore(ctx, hostPath, fileOffset, destination, size, out bytesRead);
+        FileIoProfile.End(
+            FileIoProfile.Op.AmprHostRead,
+            profile,
+            bytes: unchecked((long)bytesRead),
+            path: hostPath,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int TryReadFileToGuestMemoryCore(
+        CpuContext ctx,
+        string hostPath,
+        ulong fileOffset,
+        ulong destination,
+        ulong size,
+        out ulong bytesRead)
+    {
         bytesRead = 0;
         if (size == 0)
         {
@@ -1242,7 +1477,8 @@ public static class AmprExports
         // 4 MiB chunks cut syscall/Rosetta round-trips on DeS' large sequential
         // APR reads without blowing the ArrayPool for small probes.
         const int ChunkSize = 4 * 1024 * 1024;
-        var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
+        // Rented only for a chunk that cannot be read in place.
+        byte[]? buffer = null;
 
         try
         {
@@ -1269,7 +1505,30 @@ public static class AmprExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
-                var request = (int)Math.Min((ulong)buffer.Length, size - bytesRead);
+                var request = (int)Math.Min((ulong)ChunkSize, size - bytesRead);
+                var chunkDestination = destination + bytesRead;
+
+                // A backed destination with a single host view takes the pread
+                // directly, with the write tracking TryWrite would have issued;
+                // anything else stages through the bounce buffer as before.
+                if (ctx.Memory.TryFillInPlace(
+                        chunkDestination,
+                        request,
+                        (File: cachedFile, Offset: unchecked((long)absoluteOffset)),
+                        static (state, span) => state.File.Read(span, state.Offset),
+                        out var filled))
+                {
+                    if (filled <= 0)
+                    {
+                        break;
+                    }
+
+                    cachedFile.AdviseSequentialReadAhead(unchecked((long)absoluteOffset), filled);
+                    bytesRead += (ulong)filled;
+                    continue;
+                }
+
+                buffer ??= ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
                 var read = cachedFile.Read(
                     buffer.AsSpan(0, request),
                     unchecked((long)absoluteOffset));
@@ -1279,7 +1538,9 @@ public static class AmprExports
                     break;
                 }
 
-                if (!ctx.Memory.TryWrite(destination + bytesRead, buffer.AsSpan(0, read)))
+                cachedFile.AdviseSequentialReadAhead(unchecked((long)absoluteOffset), read);
+
+                if (!ctx.Memory.TryWrite(chunkDestination, buffer.AsSpan(0, read)))
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
@@ -1297,7 +1558,10 @@ public static class AmprExports
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1305,17 +1569,31 @@ public static class AmprExports
 
     private static bool TryGetCachedHostFile(string hostPath, out CachedHostFile file, out int result)
     {
+        var profile = FileIoProfile.Begin();
+        var opened = TryGetCachedHostFileCore(hostPath, out file, out result);
+        FileIoProfile.End(FileIoProfile.Op.AmprHostOpen, profile, failed: !opened);
+        return opened;
+    }
+
+    private static bool TryGetCachedHostFileCore(string hostPath, out CachedHostFile file, out int result)
+    {
         file = null!;
         result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
 
-        string cachePath;
-        try
+        // Registry paths come out of GetFullPath (ResolveGuestPath, or a
+        // normalized app0 root joined with an indexed relative path), so a
+        // rooted one is already the cache key; only a relative one is resolved.
+        string cachePath = hostPath;
+        if (!Path.IsPathFullyQualified(hostPath))
         {
-            cachePath = Path.GetFullPath(hostPath);
-        }
-        catch
-        {
-            cachePath = hostPath;
+            try
+            {
+                cachePath = Path.GetFullPath(hostPath);
+            }
+            catch
+            {
+                cachePath = hostPath;
+            }
         }
 
         lock (_hostFileCacheGate)
@@ -1709,11 +1987,24 @@ public static class AmprExports
         return true;
     }
 
+    /// <summary>
+    /// A wait-on-address command. It runs on the APR worker, never on the
+    /// submitting guest thread: after a short spin it parks on the address
+    /// watch, which AMPR address writes signal, and re-reads the value at
+    /// least every millisecond for stores the emulator does not observe
+    /// (plain guest stores, GPU label writes).
+    /// </summary>
     private static int WaitForAddress(CpuContext ctx, WaitAddressCommand command)
     {
         var spinWait = new SpinWait();
         while (true)
         {
+            var observed = GuestAddressWatch.Version;
+            if (DsTrace.Io)
+            {
+                DsAprAcc.WaitIters += 1;
+            }
+
             if (command.Flush != 0)
             {
                 Thread.MemoryBarrier();
@@ -1729,7 +2020,13 @@ public static class AmprExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
-            spinWait.SpinOnce();
+            if (!spinWait.NextSpinWillYield)
+            {
+                spinWait.SpinOnce(sleep1Threshold: -1);
+                continue;
+            }
+
+            GuestAddressWatch.WaitForWrite(observed, GuestAddressWatch.RecheckInterval);
         }
     }
 
@@ -1816,53 +2113,6 @@ public static class AmprExports
                state.CommandCount <= uint.MaxValue &&
                ctx.TryWriteUInt32(commandBuffer + CommandBufferOffsetOffset, (uint)state.WriteOffset) &&
                ctx.TryWriteUInt32(commandBuffer + CommandBufferNumOffset, (uint)state.CommandCount);
-    }
-
-    private static bool CompleteKernelEventQueueRecord(CpuContext ctx, ulong recordAddress)
-    {
-        Span<byte> record = stackalloc byte[(int)KernelEventQueueRecordSize];
-        if (!ctx.Memory.TryRead(recordAddress, record))
-        {
-            return false;
-        }
-
-        var filter = unchecked((short)BinaryPrimitives.ReadUInt32LittleEndian(record[0x04..]));
-        var equeue = BinaryPrimitives.ReadUInt64LittleEndian(record[0x08..]);
-        var ident = BinaryPrimitives.ReadUInt64LittleEndian(record[0x10..]);
-        var userData = BinaryPrimitives.ReadUInt64LittleEndian(record[0x18..]);
-        var data = BinaryPrimitives.ReadUInt64LittleEndian(record[0x20..]);
-        var extra = BinaryPrimitives.ReadUInt64LittleEndian(record[0x28..]);
-
-        var queuedEvent = new KernelEventQueueCompatExports.KernelQueuedEvent(
-            ident,
-            filter,
-            0x20,
-            unchecked((uint)extra),
-            data,
-            userData);
-
-        _ = KernelEventQueueCompatExports.EnqueueEvent(equeue, queuedEvent);
-        TraceAmpr(ctx, "complete_equeue", equeue, ident, data);
-        return true;
-    }
-
-    private static bool CompleteWriteAddressRecord(CpuContext ctx, ulong recordAddress)
-    {
-        Span<byte> record = stackalloc byte[(int)WriteAddressRecordSize];
-        if (!ctx.Memory.TryRead(recordAddress, record))
-        {
-            return false;
-        }
-
-        var address = BinaryPrimitives.ReadUInt64LittleEndian(record[0x08..]);
-        var value = BinaryPrimitives.ReadUInt64LittleEndian(record[0x10..]);
-        if (!ctx.TryWriteUInt64(address, value))
-        {
-            return false;
-        }
-
-        TraceAmpr(ctx, "complete_write_address", address, value, 0);
-        return true;
     }
 
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)

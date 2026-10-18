@@ -106,7 +106,7 @@ public sealed class LocalizationTests : IDisposable
     [Fact]
     public void EmbeddedLanguagesProvideDiscordButtonLabels()
     {
-        var assembly = typeof(Localization).Assembly;
+        var assembly = typeof(LauncherLocalization).Assembly;
         var resourceNames = assembly.GetManifestResourceNames()
             .Where(name =>
                 name.StartsWith("Languages.", StringComparison.Ordinal) &&
@@ -151,7 +151,7 @@ public sealed class LocalizationTests : IDisposable
     [Fact]
     public void EmbeddedLanguages_ContainEveryEnglishOptionsKey()
     {
-        var assembly = typeof(Localization).Assembly;
+        var assembly = typeof(LauncherLocalization).Assembly;
         var resourceNames = assembly.GetManifestResourceNames()
             .Where(name =>
                 name.StartsWith("Languages.", StringComparison.Ordinal) &&
@@ -189,7 +189,7 @@ public sealed class LocalizationTests : IDisposable
     [Fact]
     public void EmbeddedLanguages_ContainEveryPatchKeyAndPreserveFormatArguments()
     {
-        var assembly = typeof(Localization).Assembly;
+        var assembly = typeof(SharpEmu.Application.LauncherLocalization).Assembly;
         var english = ReadEmbeddedLanguage(assembly, "Languages.en.json");
         var patchKeys = english.Keys.Where(key => key == "Library.Context.Patches" ||
             key.StartsWith("Library.Patches.", StringComparison.Ordinal)).ToArray();

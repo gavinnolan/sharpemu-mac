@@ -41,4 +41,16 @@ public static class MouseExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // No mouse is connected, so there is no absolute position to reset; the call is accepted.
+    [SysAbiExport(
+        Nid = "c59jEdE4wzY",
+        ExportName = "sceMouseResetAbsolutePosition",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceMouse")]
+    public static int MouseResetAbsolutePosition(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

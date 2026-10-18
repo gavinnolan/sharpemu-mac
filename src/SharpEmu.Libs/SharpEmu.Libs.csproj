@@ -7,10 +7,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <ProjectReference Include="..\SharpEmu.LibAtrac9\SharpEmu.LibAtrac9.csproj" />
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+    <ProjectReference Include="..\SharpEmu.Fonts.Abstractions\SharpEmu.Fonts.Abstractions.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
-    <ProjectReference Include="..\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
-    <ProjectReference Include="..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
+    <!-- The backend emitters moved out with their backends: the MSL emitter is
+         referenced only by SharpEmu.Gpu.Metal and the SPIR-V emitter only by
+         SharpEmu.Gpu.Vulkan. The shared engine keeps the guest-facing
+         SharpEmu.ShaderCompiler above and nothing else. -->
     <!-- SysAbi export generator + analyzers (compile-time registry, NID validation). -->
     <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"
                       OutputItemType="Analyzer"
@@ -28,15 +31,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <InternalsVisibleTo Include="SharpEmu.Core" />
   </ItemGroup>
 
+  <!-- Extracted backends and platform packages use explicit public contracts.
+       The existing Core exception above is limited to loader diagnostics. -->
+
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="NLayer" />
-    <PackageReference Include="ppy.SDL3-CS" />
-    <PackageReference Include="Silk.NET.Vulkan" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
-    <PackageReference Include="SkiaSharp" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 

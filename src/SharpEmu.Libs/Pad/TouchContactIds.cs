@@ -7,7 +7,7 @@ namespace SharpEmu.Libs.Pad;
 // and keeps it while the finger stays down. Games tell strokes apart by that id: with a
 // fixed id per finger slot, lifting the finger and touching elsewhere reads as one
 // contact jumping across the pad (Ghost of Yōtei's name drawing never saw a new stroke).
-internal sealed class TouchContactIds
+public sealed class TouchContactIds
 {
     private const byte FirstId = 1;
     private const byte LastId = 127;

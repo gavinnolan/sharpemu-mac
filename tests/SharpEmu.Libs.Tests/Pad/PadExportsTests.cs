@@ -15,6 +15,7 @@ public sealed class PadExportsTests
     private const int AlreadyOpened = unchecked((int)0x80920004);
     private const int NotInitialized = unchecked((int)0x80920005);
     private const int NoHandle = unchecked((int)0x80920008);
+    private const int InvalidArgument = unchecked((int)0x80920001);
 
     private readonly FakeCpuMemory _memory = new(Base, 0x1000);
     private readonly CpuContext _ctx;
@@ -197,8 +198,8 @@ public sealed class PadExportsTests
     }
 
     [NativeX64Theory]
-    [InlineData(0ul, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT)]
-    [InlineData(Base + 0x1000, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)]
+    [InlineData(0ul, InvalidArgument)]
+    [InlineData(Base + 0x1000, InvalidArgument)]
     public void GetExtControllerInformation_RejectsInvalidOutput(ulong address, int expected)
     {
         _ctx[CpuRegister.Rdi] = 1;
@@ -368,8 +369,8 @@ public sealed class PadExportsTests
     }
 
     [NativeX64Theory]
-    [InlineData(0ul, unchecked((int)0x80920001))]
-    [InlineData(Base + 0x1000, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)]
+    [InlineData(0ul, InvalidArgument)]
+    [InlineData(Base + 0x1000, InvalidArgument)]
     public void IsRemoteController_RejectsInvalidOutput(ulong address, int expected)
     {
         _ctx[CpuRegister.Rdi] = 1;
@@ -455,6 +456,155 @@ public sealed class PadExportsTests
         _ctx[CpuRegister.Rcx] = 0;
         Assert.Equal(unchecked((int)0x80920002), PadExports.PadOpen(_ctx));
         Assert.Equal(unchecked((int)0x80920002), PadExports.PadGetHandle(_ctx));
+    }
+
+    [NativeX64Fact]
+    public void GetExtControllerInformation_FillsTheBaseInformationAndZeroesTheExtensionTail()
+    {
+        const ulong informationAddress = Base + 0x100;
+        Assert.True(_memory.TryWrite(informationAddress, Enumerable.Repeat((byte)0xEE, 0x30).ToArray()));
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = informationAddress;
+
+        Assert.Equal(0, PadExports.PadGetExtControllerInformation(_ctx));
+
+        var information = new byte[0x30];
+        Assert.True(_memory.TryRead(informationAddress, information));
+        Assert.Equal(44.86f, BitConverter.ToSingle(information, 0));
+        Assert.Equal(1920, BitConverter.ToUInt16(information, 4));
+        Assert.Equal(943, BitConverter.ToUInt16(information, 6));
+        Assert.Equal(1, information[0x0C]);
+        Assert.All(information[0x1C..0x2C], value => Assert.Equal(0, value));
+        Assert.All(information[0x2C..], value => Assert.Equal(0xEE, value));
+    }
+
+    [NativeX64Fact]
+    public void NullOutputsReturnPadInvalidArgument()
+    {
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 1;
+        Assert.Equal(InvalidArgument, PadExports.PadGetControllerInformation(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadDeviceClassGetExtendedInformation(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadReadState(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadRead(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadReadExt(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadGetTriggerEffectState(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadSetTriggerEffect(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadSetVibration(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadSetLightBar(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadIsRemoteController(_ctx));
+
+        _ctx[CpuRegister.Rsi] = Base + 0x100;
+        _ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(InvalidArgument, PadExports.PadRead(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadReadExt(_ctx));
+        _ctx[CpuRegister.Rdx] = 65;
+        Assert.Equal(InvalidArgument, PadExports.PadReadExt(_ctx));
+    }
+
+    [NativeX64Theory]
+    [InlineData(0x04, 0u, 0u)]
+    [InlineData(0x01, 7u, 0u)]
+    [InlineData(0x02, 0u, 7u)]
+    public void SetTriggerEffect_RejectsUnknownMasksAndModes(byte mask, uint leftMode, uint rightMode)
+    {
+        const ulong address = Base + 0x100;
+        var parameter = new byte[120];
+        parameter[0] = mask;
+        BitConverter.GetBytes(leftMode).CopyTo(parameter, 8);
+        BitConverter.GetBytes(rightMode).CopyTo(parameter, 64);
+        Assert.True(_memory.TryWrite(address, parameter));
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = address;
+
+        Assert.Equal(InvalidArgument, PadExports.PadSetTriggerEffect(_ctx));
+    }
+
+    [NativeX64Fact]
+    public void SetVibrationMode_RequiresInit()
+    {
+        var context = new CpuContext(new FakeCpuMemory(Base, 0x1000), Generation.Gen5);
+        context[CpuRegister.Rdi] = 1;
+        context[CpuRegister.Rsi] = 1;
+        Assert.Equal(NotInitialized, PadExports.PadSetVibrationMode(context));
+    }
+
+    [NativeX64Theory]
+    [InlineData(0, InvalidArgument)]
+    [InlineData(1, 0)]
+    [InlineData(2, 0)]
+    [InlineData(3, 0)]
+    [InlineData(4, InvalidArgument)]
+    [InlineData(5, 0)]
+    public void SetVibrationMode_ValidatesTheMode(int mode, int expected)
+    {
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = unchecked((ulong)mode);
+        Assert.Equal(expected, PadExports.PadSetVibrationMode(_ctx));
+    }
+
+    [NativeX64Theory]
+    [InlineData(1, 0)]
+    [InlineData(0, InvalidHandle)]
+    [InlineData(2, InvalidHandle)]
+    [InlineData(-1, InvalidHandle)]
+    public void HandleOnlySetters_ValidateHandle(int handle, int expected)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(expected, PadExports.PadSetAngularVelocityBiasCorrectionState(_ctx));
+        Assert.Equal(expected, PadExports.PadSetLightBarBaseBrightness(_ctx));
+    }
+
+    [NativeX64Fact]
+    public void ProcessWideSwitches_AreAccepted()
+    {
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rax] = ulong.MaxValue;
+        Assert.Equal(0, PadExports.PadSetParticularMode(_ctx));
+        Assert.Equal(0, PadExports.PadSetProcessPrivilege(_ctx));
+        Assert.Equal(0UL, _ctx[CpuRegister.Rax]);
+    }
+
+    // A controller reports at a fixed rate, so reads taken between two reports
+    // return the same sample and the same timestamp. Titles use that: Quake polls
+    // scePadReadState about two hundred thousand times a second and treats a
+    // changed timestamp as a new sample, so a timestamp taken from the clock on
+    // every call splits one button press across tens of thousands of "samples"
+    // and the press is gone before the frame that would act on it.
+    [NativeX64Fact]
+    public void ReadState_RepeatsOneSamplesTimestampUntilTheSampleChanges()
+    {
+        const int handle = 1;
+
+        // Two back-to-back reads land in one 1 ms sampling interval. A thread descheduled between
+        // them on a loaded runner crosses the interval, so look for a pair that did not; a pad
+        // that reports a fresh timestamp on every read never produces one.
+        ulong first = 0, second = 1;
+        for (var attempt = 0; attempt < 100 && first != second; attempt++)
+        {
+            first = ReadStateTimestamp(handle);
+            second = ReadStateTimestamp(handle);
+        }
+
+        Assert.Equal(first, second);
+
+        // Past the sampling interval the pad has reported again and the timestamp
+        // has to move, or no title could ever see a second press.
+        Thread.Sleep(5);
+        Assert.True(ReadStateTimestamp(handle) > first);
+    }
+
+    private ulong ReadStateTimestamp(int handle)
+    {
+        const ulong address = Base + 0x300;
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = address;
+        Assert.Equal(0, PadExports.PadReadState(_ctx));
+        var data = new byte[8];
+        Assert.True(_memory.TryRead(address + 0x50, data));
+        return BitConverter.ToUInt64(data);
     }
 
     private int Open(int portType, bool extended = false)

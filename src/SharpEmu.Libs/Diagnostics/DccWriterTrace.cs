@@ -3,11 +3,11 @@
 
 using System.Diagnostics;
 using System.Globalization;
-using SharpEmu.Libs.Gpu.Buffers;
 
 namespace SharpEmu.Libs.Diagnostics;
 
-internal static class DccWriterTrace
+/// <summary>Shared guest-resource diagnostics for backend reads and writes.</summary>
+public static class DccWriterTrace
 {
     private const int MaxReports = 256;
     private const int MaxFrames = 12;
@@ -24,7 +24,7 @@ internal static class DccWriterTrace
     public static readonly bool Enabled = DccEnabled || TargetAddresses.Length != 0;
 
     [ThreadStatic]
-    public static ulong CurrentProgram;
+    internal static ulong CurrentProgram;
 
     private static readonly HashSet<(ulong Address, ulong Size, ulong Program)> _reported = new();
     private static readonly HashSet<(ulong Hash, string Reason)> _refusals = new();
@@ -81,10 +81,12 @@ internal static class DccWriterTrace
         return ulong.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
     }
 
-    public static void Record(IGuestImageCache images, ulong address, ulong size)
+    // Takes an overlaps-DCC-metadata predicate rather than the image cache that answers it:
+    // the cache belongs to the graphics backend, while this trace is shared.
+    public static void Record(Func<ulong, ulong, bool> overlapsDccMetadata, ulong address, ulong size)
     {
         var targeted = TargetAddresses.Any(target => target >= address && target - address < size);
-        if (_reported.Count >= MaxReports || (!targeted && !(DccEnabled && images.OverlapsDccMetadata(address, size))) ||
+        if (_reported.Count >= MaxReports || (!targeted && !(DccEnabled && overlapsDccMetadata(address, size))) ||
             !_reported.Add((address, size, CurrentProgram)))
         {
             return;

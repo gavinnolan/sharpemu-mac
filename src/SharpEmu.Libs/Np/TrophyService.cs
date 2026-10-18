@@ -83,6 +83,91 @@ internal static class TrophyService
     private static Trophy[]? _trophies;
     private static Dictionary<string, List<StatRule>> _rules = [];
     private static string? _unlockPath;
+    private static string? _packagePath;
+    private static string _gameTitle = string.Empty;
+    private static Dictionary<int, string> _groupNames = [];
+
+    /// <summary>Title name from the package's titleMetadata, empty when absent.</summary>
+    internal static string GameTitle
+    {
+        get
+        {
+            lock (Gate)
+            {
+                EnsureLoaded();
+                return _gameTitle;
+            }
+        }
+    }
+
+    /// <summary>Group name by group id, for the groups named in groupMetadata.</summary>
+    internal static IReadOnlyDictionary<int, string> GroupNames
+    {
+        get
+        {
+            lock (Gate)
+            {
+                EnsureLoaded();
+                return _groupNames;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns the PNG of one trophy: the in-memory copy when present, otherwise the
+    /// trop%04d.png entry of the package on disk.
+    /// </summary>
+    internal static bool TryReadTrophyIcon(int trophyId, out byte[] png)
+    {
+        png = [];
+        string? packagePath;
+        lock (Gate)
+        {
+            EnsureLoaded();
+            var trophy = _trophies!.FirstOrDefault(t => t.Id == trophyId);
+            if (trophy?.IconPng is { Length: > 0 } cached)
+            {
+                png = cached;
+                return true;
+            }
+
+            packagePath = trophy is null ? null : _packagePath;
+        }
+
+        try
+        {
+            if (packagePath is null || !File.Exists(packagePath))
+            {
+                return false;
+            }
+
+            using var stream = File.OpenRead(packagePath);
+            if (new TrophyPackage(stream).Read($"trop{trophyId:D4}.png") is not { Length: > 0 } icon)
+            {
+                return false;
+            }
+
+            png = icon;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    internal static void SetPackageForTests(Trophy[] trophies, string gameTitle, Dictionary<int, string> groupNames)
+    {
+        lock (Gate)
+        {
+            _trophies = trophies;
+            _gameTitle = gameTitle;
+            _groupNames = groupNames;
+            _rules = [];
+            _unlockPath = null;
+            _packagePath = null;
+        }
+    }
 
     internal static Trophy[] Trophies
     {
@@ -103,6 +188,9 @@ internal static class TrophyService
             _trophies = null;
             _rules = [];
             _unlockPath = null;
+            _packagePath = null;
+            _gameTitle = string.Empty;
+            _groupNames = [];
         }
     }
 
@@ -224,9 +312,18 @@ internal static class TrophyService
         try
         {
             var trophyPath = KernelMemoryCompatExports.ResolveGuestPath("/app0/sce_sys/trophy2/trophy00.ucp");
-            _trophies = File.Exists(trophyPath)
-                ? ReadTrophies(File.ReadAllBytes(trophyPath), language: TrophyLanguage.FromSystemLanguage(SystemServiceExports.SystemLanguage))
-                : [];
+            if (File.Exists(trophyPath))
+            {
+                var package = File.ReadAllBytes(trophyPath);
+                _trophies = ReadTrophies(package, language: TrophyLanguage.FromSystemLanguage(SystemServiceExports.SystemLanguage));
+                _packagePath = trophyPath;
+                (_gameTitle, _groupNames) = ReadPackageNames(package);
+            }
+            else
+            {
+                _trophies = [];
+            }
+
             var udsPath = KernelMemoryCompatExports.ResolveGuestPath("/app0/sce_sys/uds/uds00.ucp");
             _rules = File.Exists(udsPath) ? ReadRules(File.ReadAllBytes(udsPath)) : [];
             _unlockPath = UnlockFilePath(KernelMemoryCompatExports.ApplicationTitleId);
@@ -442,6 +539,49 @@ internal static class TrophyService
         }
 
         return [.. result.Values];
+    }
+
+    private static (string Title, Dictionary<int, string> Groups) ReadPackageNames(byte[] package)
+    {
+        var groups = new Dictionary<int, string>();
+        var title = string.Empty;
+        try
+        {
+            using var stream = new MemoryStream(package, writable: false);
+            var files = new TrophyPackage(stream);
+            using var conf = files.Json("tropconf.json");
+            var language = conf is not null && conf.RootElement.TryGetProperty("defaultLanguage", out var lang)
+                ? lang.GetString() ?? "en-US"
+                : "en-US";
+            using var meta = files.Json("tropmeta_en-US.json") ?? files.Json($"tropmeta_{language}.json");
+            if (meta is not null && meta.RootElement.TryGetProperty("metadata", out var metadata))
+            {
+                if (metadata.TryGetProperty("titleMetadata", out var titleMeta) &&
+                    titleMeta.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+                {
+                    title = name.GetString() ?? string.Empty;
+                }
+
+                if (metadata.TryGetProperty("groupMetadata", out var groupMeta) &&
+                    groupMeta.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var group in groupMeta.EnumerateArray())
+                    {
+                        if (TryReadNumber(group, "id", out var id) &&
+                            group.TryGetProperty("name", out var groupName) &&
+                            groupName.ValueKind == JsonValueKind.String)
+                        {
+                            groups[(int)id] = groupName.GetString() ?? string.Empty;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or ArgumentException or InvalidOperationException)
+        {
+        }
+
+        return (title, groups);
     }
 
     private static Dictionary<int, (string Name, string Detail)> ReadTexts(

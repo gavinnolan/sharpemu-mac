@@ -421,6 +421,27 @@ internal static class NpUniversalDataSystemState
         }
     }
 
+    /// <summary>
+    /// Estimated size of an event, measured with the same accounting GetMemoryStat uses: the
+    /// name with its terminator plus every property in the event's tree.
+    /// </summary>
+    internal static bool TryEstimateEventSize(ulong eventHandle, out ulong size)
+    {
+        lock (Gate)
+        {
+            size = 0;
+            if (!_initialized || !Events.TryGetValue(eventHandle, out var udsEvent))
+            {
+                return false;
+            }
+
+            size = checked(
+                (ulong)Encoding.UTF8.GetByteCount(udsEvent.Name) + 1 +
+                MeasureNode(udsEvent.Root, new HashSet<UdsNode>(ReferenceEqualityComparer.Instance)));
+            return true;
+        }
+    }
+
     internal static bool DestroyEvent(ulong eventHandle)
     {
         lock (Gate)

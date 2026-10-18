@@ -20,6 +20,7 @@ public static class UserServiceExports
     private const int PrimaryUserId = 0x10000000;
     private const int InvalidUserId = -1;
     private const string PrimaryUserName = "SharpEmu";
+    private const int RegisteredUserSlots = 16;
     private static int _loginEventDelivered;
 
     [SysAbiExport(
@@ -294,6 +295,101 @@ public static class UserServiceExports
         LibraryName = "libSceUserService")]
     public static int UserServiceGetAccessibilityZoomFollowFocus(CpuContext ctx) =>
         WriteUserSettingInt32(ctx, 0, "get_accessibility_zoom_follow_focus");
+
+    // Initialization is not tracked (the other exports work before it, titles rely on that);
+    // a repeated initialize is therefore accepted as a no-op. The login event state is only
+    // reset by Terminate, so Initialize2 after Initialize does not replay the login.
+    [SysAbiExport(
+        Nid = "az-0R6eviZ0",
+        ExportName = "sceUserServiceInitialize2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceInitialize2(CpuContext ctx) =>
+        SetReturnWithTrace(ctx, 0, "initialize2");
+
+    [SysAbiExport(
+        Nid = "eNb53LQJmIM",
+        ExportName = "sceUserServiceGetForegroundUser",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetForegroundUser(CpuContext ctx)
+    {
+        var userIdAddress = ctx[CpuRegister.Rdi];
+        if (userIdAddress == 0)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+        }
+
+        return TryWriteInt32(ctx, userIdAddress, PrimaryUserId)
+            ? SetReturnWithTrace(ctx, 0, $"get_foreground_user user={PrimaryUserId} out=0x{userIdAddress:X16}")
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    // SceUserServiceRegisteredUserIdList: 16 int32 slots, used slots first, the rest -1.
+    [SysAbiExport(
+        Nid = "5EiQCnL2G1Y",
+        ExportName = "sceUserServiceGetRegisteredUserIdList",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetRegisteredUserIdList(CpuContext ctx)
+    {
+        var listAddress = ctx[CpuRegister.Rdi];
+        if (listAddress == 0)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+        }
+
+        Span<byte> userIds = stackalloc byte[sizeof(int) * RegisteredUserSlots];
+        BinaryPrimitives.WriteInt32LittleEndian(userIds, PrimaryUserId);
+        for (var slot = 1; slot < RegisteredUserSlots; slot++)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(userIds[(slot * sizeof(int))..], InvalidUserId);
+        }
+
+        return ctx.Memory.TryWrite(listAddress, userIds)
+            ? SetReturnWithTrace(ctx, 0, $"get_registered_user_id_list out=0x{listAddress:X16}")
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    // The emulator has no PSN account, so the id is 0 ("no account"). anyps5 answers a bad
+    // user id with INVALID_ARGUMENT; the 0x80960009 not-logged-in code the other per-user
+    // getters here use is kept for consistency.
+    [SysAbiExport(
+        Nid = "6dfDreosXGY",
+        ExportName = "sceUserServiceGetNpAccountId",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetNpAccountId(CpuContext ctx)
+    {
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var accountIdAddress = ctx[CpuRegister.Rsi];
+        if (accountIdAddress == 0)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+        }
+
+        if (userId != PrimaryUserId)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidParameter);
+        }
+
+        Span<byte> accountId = stackalloc byte[sizeof(ulong)];
+        accountId.Clear();
+        return ctx.Memory.TryWrite(accountIdAddress, accountId)
+            ? SetReturnWithTrace(ctx, 0, $"get_np_account_id user={userId} account=0 out=0x{accountIdAddress:X16}")
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    // SceUserServiceUserColor: 0 = blue, the first user's color.
+    [SysAbiExport(
+        Nid = "lUoqwTQu4Go",
+        ExportName = "sceUserServiceGetUserColor",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetUserColor(CpuContext ctx) =>
+        WriteUserSettingInt32(ctx, 0, "get_user_color");
+
+    internal static void ResetForTests() => Interlocked.Exchange(ref _loginEventDelivered, 0);
 
     private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
     {

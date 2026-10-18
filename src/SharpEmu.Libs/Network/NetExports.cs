@@ -12,7 +12,7 @@ using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Network;
 
-public static class NetExports
+public static partial class NetExports
 {
     private const int NetErrorNoEntry = unchecked((int)0x80410102);
     private const int NetErrorBadFileDescriptor = unchecked((int)0x80410109);
@@ -84,6 +84,13 @@ public static class NetExports
             _epolls.Clear();
             Monitor.PulseAll(EpollGate);
         }
+    }
+
+    internal static bool TryGetHostSocket(int socketId, out Socket? socket)
+    {
+        var found = _sockets.TryGetValue(socketId, out var value);
+        socket = value;
+        return found;
     }
 
     internal static bool TryGetReadEventState(

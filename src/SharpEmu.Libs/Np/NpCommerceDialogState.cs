@@ -28,6 +28,7 @@ internal static class NpCommerceDialogState
     internal const int ErrorNotFinished = unchecked((int)0x80B80005);
     internal const int ErrorBusy = unchecked((int)0x80B80008);
     internal const int ErrorParameterInvalid = unchecked((int)0x80B8000A);
+    internal const int ErrorNotRunning = unchecked((int)0x80B8000B);
     internal const int ErrorArgumentNull = unchecked((int)0x80B8000D);
     internal const int ResultUserCanceled = 1;
 
@@ -88,6 +89,31 @@ internal static class NpCommerceDialogState
 
             _request = request;
             _status = NpCommerceDialogStatus.Running;
+            return ErrorOk;
+        }
+    }
+
+    /// <summary>
+    /// Closes the dialog. Only a running dialog can be closed; it finishes as cancelled
+    /// by the user, so GetResult then reports USER_CANCELED. Without a prior Initialize the
+    /// call is NOT_INITIALIZED, and an initialized dialog that is not running (never opened,
+    /// or already finished) is NOT_RUNNING.
+    /// </summary>
+    internal static int Close()
+    {
+        lock (Gate)
+        {
+            if (_status == NpCommerceDialogStatus.None)
+            {
+                return ErrorNotInitialized;
+            }
+
+            if (_status != NpCommerceDialogStatus.Running)
+            {
+                return ErrorNotRunning;
+            }
+
+            _status = NpCommerceDialogStatus.Finished;
             return ErrorOk;
         }
     }

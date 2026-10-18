@@ -12,7 +12,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Np;
 
 // The counts come from TrophyService, which reads the title's trophy package once.
-[Collection(KernelMemoryCompatStateCollection.Name)]
+[Collection("NpUniversalDataSystem")]
 public sealed class NpTrophy2GetGameInfoTests : IDisposable
 {
     // SceNpTrophy2GameDetails is six uint32 counters and a 128 byte title;
@@ -28,17 +28,22 @@ public sealed class NpTrophy2GetGameInfoTests : IDisposable
 
     private readonly FakeCpuMemory _memory = new(MemoryBase, MemorySize);
     private readonly CpuContext _context;
+    private readonly int _trophyContext;
 
     public NpTrophy2GetGameInfoTests()
     {
         TrophyService.ResetForTests();
+        NpTrophy2Exports.ResetForTests();
         _context = new CpuContext(_memory, Generation.Gen5);
+        _context[CpuRegister.Rdi] = MemoryBase + 0x10;
+        Assert.Equal(0, NpTrophy2Exports.NpTrophy2CreateContext(_context));
+        Assert.True(_context.TryReadInt32(MemoryBase + 0x10, out _trophyContext));
         var stale = new byte[MemorySize];
         Array.Fill(stale, Stale);
         Assert.True(_memory.TryWrite(MemoryBase, stale));
     }
 
-    public void Dispose() => TrophyService.ResetForTests();
+    public void Dispose() { TrophyService.ResetForTests(); NpTrophy2Exports.ResetForTests(); }
 
     [Fact]
     public void ReportsAnEmptyTrophySetWhenTheTitleShipsNone()
@@ -95,11 +100,11 @@ public sealed class NpTrophy2GetGameInfoTests : IDisposable
     // sceNpTrophy2GetGameInfo(context, handle, details, data)
     private int GetGameInfo(ulong details, ulong data)
     {
-        _context[CpuRegister.Rdi] = 1;
+        _context[CpuRegister.Rdi] = (ulong)_trophyContext;
         _context[CpuRegister.Rsi] = 1;
         _context[CpuRegister.Rdx] = details;
         _context[CpuRegister.Rcx] = data;
-        return GameServiceStubs.NpTrophy2GetGameInfo(_context);
+        return NpTrophy2Exports.NpTrophy2GetGameInfo(_context);
     }
 
     private void AssertZeroedBetweenIntactGuards(ulong address, int size)

@@ -53,6 +53,76 @@ public static class NpCommerceExports
     public static int NpCommerceDialogUpdateStatus(CpuContext ctx) =>
         SetResult(ctx, NpCommerceDialogState.UpdateStatus());
 
+    /// <summary>
+    /// Reads the dialog status like sceNpCommerceDialogUpdateStatus: the sibling common
+    /// dialogs here (msg, save data, web browser) poll their state machine from GetStatus too,
+    /// and a title that waits on GetStatus alone must not hang on a dialog nobody can answer.
+    /// A running dialog therefore finishes (cancelled) on the first read.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "CCbC+lqqvF0",
+        ExportName = "sceNpCommerceDialogGetStatus",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpCommerce")]
+    public static int NpCommerceDialogGetStatus(CpuContext ctx) =>
+        SetResult(ctx, NpCommerceDialogState.UpdateStatus());
+
+    [SysAbiExport(
+        Nid = "NU3ckGHMFXo",
+        ExportName = "sceNpCommerceDialogClose",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpCommerce")]
+    public static int NpCommerceDialogClose(CpuContext ctx) =>
+        SetResult(ctx, NpCommerceDialogState.Close());
+
+    // PS Store icon overlay. There is no overlay to draw; the visibility and placement
+    // the title asked for are kept so they can be observed. No reference or SDK note
+    // documents an error for these calls, so they always succeed.
+    internal static bool PsStoreIconVisible { get; private set; }
+    internal static int PsStoreIconPosition { get; private set; }
+    internal static int PsStoreIconLayout { get; private set; }
+
+    internal static void ResetIconForTests()
+    {
+        PsStoreIconVisible = false;
+        PsStoreIconPosition = 0;
+        PsStoreIconLayout = 0;
+    }
+
+    [SysAbiExport(
+        Nid = "DHmwsa6S8Tc",
+        ExportName = "sceNpCommerceShowPsStoreIcon",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpCommerce")]
+    public static int NpCommerceShowPsStoreIcon(CpuContext ctx)
+    {
+        PsStoreIconPosition = unchecked((int)ctx[CpuRegister.Rdi]);
+        PsStoreIconVisible = true;
+        return SetResult(ctx, NpCommerceDialogState.ErrorOk);
+    }
+
+    [SysAbiExport(
+        Nid = "dsqCVsNM0Zg",
+        ExportName = "sceNpCommerceHidePsStoreIcon",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpCommerce")]
+    public static int NpCommerceHidePsStoreIcon(CpuContext ctx)
+    {
+        PsStoreIconVisible = false;
+        return SetResult(ctx, NpCommerceDialogState.ErrorOk);
+    }
+
+    [SysAbiExport(
+        Nid = "uKTDW8hk-ts",
+        ExportName = "sceNpCommerceSetPsStoreIconLayout",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpCommerce")]
+    public static int NpCommerceSetPsStoreIconLayout(CpuContext ctx)
+    {
+        PsStoreIconLayout = unchecked((int)ctx[CpuRegister.Rdi]);
+        return SetResult(ctx, NpCommerceDialogState.ErrorOk);
+    }
+
     [SysAbiExport(
         Nid = "r42bWcQbtZY",
         ExportName = "sceNpCommerceDialogGetResult",

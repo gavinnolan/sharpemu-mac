@@ -765,6 +765,592 @@ public static class RtcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // ---- RFC 3339 / RFC 2822 formatting and parsing -------------------------------------
+    //
+    // Formatting follows kyty and anyps5, which agree on the RFC 3339 layout (centisecond
+    // fraction, "Z" for a zero offset). RFC 2822 has a body only in anyps5. Parse failures use
+    // SCE_RTC_ERROR_BAD_PARSE (anyps5); kyty answers INVALID_VALUE, which is not an SDK parse code.
+
+    private const int RtcErrorInvalidPointer = unchecked((int)0x80B50002);
+    private const int RtcErrorInvalidValue = unchecked((int)0x80B50003);
+    private const int RtcErrorBadParse = unchecked((int)0x80B50007);
+    private const int MaxTimeZoneMinutes = 1439;
+    private const int MaxParseLength = 128;
+    private const ulong MaxTick = 3_652_059UL * MicrosecondsPerDay - 1;
+
+    private static readonly string[] WeekdayAbbreviations = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    private static readonly string[] WeekdayNames =
+        { "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY" };
+    private static readonly string[] MonthAbbreviations =
+        { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    private static readonly string[] MonthNames =
+    {
+        "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+        "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER",
+    };
+
+    // Zone names accepted by sceRtcParseDateTime, as minutes east of UTC.
+    private static readonly (string Name, int Minutes)[] ZoneNames =
+    {
+        ("UT", 0), ("GMT", 0), ("WET", 0), ("BST", 60), ("WAT", -60), ("AST", -240), ("ADT", -180),
+        ("EST", -300), ("EDT", -240), ("CST", -360), ("CDT", -300), ("MST", -420), ("MDT", -360),
+        ("PST", -480), ("PDT", -420), ("CET", 60), ("MET", 60), ("MEST", 120), ("CEST", 120),
+        ("EET", 120), ("JST", 540), ("KST", 540), ("AEST", 600), ("NZST", 720), ("NZDT", 780),
+    };
+
+    private static readonly (string Name, int Minutes)[] ZoneNamesLongestFirst =
+        ZoneNames.OrderByDescending(z => z.Name.Length).ToArray();
+
+    [SysAbiExport(
+        Nid = "WJ3rqFwymew",
+        ExportName = "sceRtcFormatRFC3339",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceRtc")]
+    public static int RtcFormatRfc3339(CpuContext ctx) =>
+        FormatRfc(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], unchecked((int)ctx[CpuRegister.Rdx]), rfc2822: false);
+
+    [SysAbiExport(
+        Nid = "DwuHIlLGW8I",
+        ExportName = "sceRtcFormatRFC3339LocalTime",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceRtc")]
+    public static int RtcFormatRfc3339LocalTime(CpuContext ctx) =>
+        FormatRfcLocal(ctx, rfc2822: false);
+
+    [SysAbiExport(
+        Nid = "eiuobaF-hK4",
+        ExportName = "sceRtcFormatRFC2822",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceRtc")]
+    public static int RtcFormatRfc2822(CpuContext ctx) =>
+        FormatRfc(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], unchecked((int)ctx[CpuRegister.Rdx]), rfc2822: true);
+
+    [SysAbiExport(
+        Nid = "AxHBk3eat04",
+        ExportName = "sceRtcFormatRFC2822LocalTime",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceRtc")]
+    public static int RtcFormatRfc2822LocalTime(CpuContext ctx) =>
+        FormatRfcLocal(ctx, rfc2822: true);
+
+    [SysAbiExport(
+        Nid = "99bMGglFW3I",
+        ExportName = "sceRtcParseRFC3339",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceRtc")]
+    public static int RtcParseRfc3339(CpuContext ctx) =>
+        ParseDateTimeText(ctx, anyFormat: false);
+
+    [SysAbiExport(
+        Nid = "NxEI1KByvCI",
+        ExportName = "sceRtcParseDateTime",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceRtc")]
+    public static int RtcParseDateTime(CpuContext ctx) =>
+        ParseDateTimeText(ctx, anyFormat: true);
+
+    private static int FormatRfcLocal(CpuContext ctx, bool rfc2822)
+    {
+        var outputAddress = ctx[CpuRegister.Rdi];
+        var tickAddress = ctx[CpuRegister.Rsi];
+        if (outputAddress == 0 || tickAddress == 0)
+        {
+            return RtcErrorInvalidPointer;
+        }
+
+        if (!ctx.TryReadUInt64(tickAddress, out var tick))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (!TryConvertTickToDateTime(tick, out var utc))
+        {
+            return RtcErrorInvalidValue;
+        }
+
+        var offsetMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(utc).TotalMinutes;
+        return FormatRfc(ctx, outputAddress, tickAddress, offsetMinutes, rfc2822);
+    }
+
+    private static int FormatRfc(CpuContext ctx, ulong outputAddress, ulong tickAddress, int timeZoneMinutes, bool rfc2822)
+    {
+        if (outputAddress == 0 || tickAddress == 0)
+        {
+            return RtcErrorInvalidPointer;
+        }
+
+        if (timeZoneMinutes < -MaxTimeZoneMinutes || timeZoneMinutes > MaxTimeZoneMinutes)
+        {
+            return RtcErrorInvalidValue;
+        }
+
+        if (!ctx.TryReadUInt64(tickAddress, out var tick))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        // The shifted tick has to stay inside the representable range, which also rejects an
+        // input beyond the maximum tick.
+        var shifted = (long)tick + (long)timeZoneMinutes * (long)MicrosecondsPerMinute;
+        if (tick > MaxTick || shifted < 0 || (ulong)shifted > MaxTick)
+        {
+            return RtcErrorInvalidValue;
+        }
+
+        var local = new DateTime(shifted * DateTimeTicksPerMicrosecond, DateTimeKind.Unspecified);
+        var absoluteOffset = Math.Abs(timeZoneMinutes);
+        var sign = timeZoneMinutes < 0 ? '-' : '+';
+        string text;
+        if (rfc2822)
+        {
+            var weekday = WeekdayAbbreviations[(int)local.DayOfWeek];
+            var month = MonthAbbreviations[local.Month - 1];
+            text = string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{weekday}, {local.Day:D2} {month} {local.Year:D4} {local.Hour:D2}:{local.Minute:D2}:{local.Second:D2} " +
+                $"{sign}{absoluteOffset / 60:D2}{absoluteOffset % 60:D2}");
+        }
+        else
+        {
+            var centiseconds = (int)(local.Ticks % TimeSpan.TicksPerSecond / (TimeSpan.TicksPerSecond / 100));
+            var zone = timeZoneMinutes == 0
+                ? "Z"
+                : string.Create(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    $"{sign}{absoluteOffset / 60:D2}:{absoluteOffset % 60:D2}");
+            text = string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{local.Year:D4}-{local.Month:D2}-{local.Day:D2}T{local.Hour:D2}:{local.Minute:D2}:{local.Second:D2}.{centiseconds:D2}{zone}");
+        }
+
+        Span<byte> output = stackalloc byte[text.Length + 1];
+        System.Text.Encoding.ASCII.GetBytes(text, output);
+        output[text.Length] = 0;
+        return ctx.Memory.TryWrite(outputAddress, output)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+    }
+
+    private static int ParseDateTimeText(CpuContext ctx, bool anyFormat)
+    {
+        var tickAddress = ctx[CpuRegister.Rdi];
+        var textAddress = ctx[CpuRegister.Rsi];
+        if (tickAddress == 0 || textAddress == 0)
+        {
+            return RtcErrorInvalidPointer;
+        }
+
+        if (!TryReadAsciiString(ctx, textAddress, out var text))
+        {
+            return RtcErrorBadParse;
+        }
+
+        var result = anyFormat
+            ? ParseAnyDateTime(text, out var tick)
+            : ParseRfc3339Text(text, out tick);
+        if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return result;
+        }
+
+        return ctx.TryWriteUInt64(tickAddress, tick)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+    }
+
+    private static bool TryReadAsciiString(CpuContext ctx, ulong address, out string text)
+    {
+        Span<byte> one = stackalloc byte[1];
+        Span<char> chars = stackalloc char[MaxParseLength];
+        for (var index = 0; index < MaxParseLength; index++)
+        {
+            if (!ctx.Memory.TryRead(address + (ulong)index, one))
+            {
+                break;
+            }
+
+            if (one[0] == 0)
+            {
+                text = new string(chars[..index]);
+                return true;
+            }
+
+            chars[index] = (char)one[0];
+        }
+
+        text = string.Empty;
+        return false;
+    }
+
+    // Combines parsed local fields and a zone offset (minutes east of UTC) into a UTC tick.
+    private static int FinishParse(
+        int year, int month, int day, int hour, int minute, int second, uint microsecond,
+        int offsetMinutes, out ulong utcTick)
+    {
+        utcTick = 0;
+        // A leap second (60) is accepted and rolls into the next minute.
+        var leap = second == 60;
+        var fields = new RtcDateTime(
+            (ushort)Math.Clamp(year, 0, ushort.MaxValue),
+            (ushort)Math.Clamp(month, 0, ushort.MaxValue),
+            (ushort)Math.Clamp(day, 0, ushort.MaxValue),
+            (ushort)Math.Clamp(hour, 0, ushort.MaxValue),
+            (ushort)Math.Clamp(minute, 0, ushort.MaxValue),
+            (ushort)(leap ? 59 : Math.Clamp(second, 0, ushort.MaxValue)),
+            microsecond);
+        var validation = ValidateRtcDateTime(fields);
+        if (validation != 0)
+        {
+            return validation;
+        }
+
+        if (!TryConvertRtcDateTimeToTick(fields, out var local))
+        {
+            return RtcErrorInvalidValue;
+        }
+
+        var utc = (long)local + (leap ? (long)MicrosecondsPerSecond : 0) - (long)offsetMinutes * (long)MicrosecondsPerMinute;
+        if (utc < 0 || (ulong)utc > MaxTick)
+        {
+            return RtcErrorInvalidValue;
+        }
+
+        utcTick = (ulong)utc;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private sealed class TextCursor
+    {
+        private readonly string _text;
+
+        public TextCursor(string text) => _text = text;
+
+        public int Position { get; private set; }
+
+        public char Current => Position < _text.Length ? _text[Position] : '\0';
+
+        public bool AtEnd => Position >= _text.Length;
+
+        public void Advance() => Position++;
+
+        public void SkipBlanks()
+        {
+            while (Current == ' ' || Current == '\t')
+            {
+                Position++;
+            }
+        }
+
+        public bool Expect(char value)
+        {
+            if (Current != value)
+            {
+                return false;
+            }
+
+            Position++;
+            return true;
+        }
+
+        // Reads exactly <count> digits.
+        public bool TryReadFixed(int count, out int value)
+        {
+            value = 0;
+            for (var i = 0; i < count; i++)
+            {
+                if (Current < '0' || Current > '9')
+                {
+                    return false;
+                }
+
+                value = value * 10 + (Current - '0');
+                Position++;
+            }
+
+            return true;
+        }
+
+        // Reads between 1 and <max> digits and reports how many were read.
+        public int ReadUpTo(int max, out int value)
+        {
+            value = 0;
+            var count = 0;
+            while (count < max && Current >= '0' && Current <= '9')
+            {
+                value = value * 10 + (Current - '0');
+                Position++;
+                count++;
+            }
+
+            return count;
+        }
+
+        // Case-insensitive match of a full name, or failing that of its first three letters.
+        public bool TryReadName(string[] upperNames, out int index)
+        {
+            for (index = 0; index < upperNames.Length; index++)
+            {
+                if (TryMatch(upperNames[index], upperNames[index].Length) || TryMatch(upperNames[index], 3))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public bool TryMatch(string upperWord, int length)
+        {
+            if (Position + length > _text.Length)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < length; i++)
+            {
+                if (char.ToUpperInvariant(_text[Position + i]) != upperWord[i])
+                {
+                    return false;
+                }
+            }
+
+            Position += length;
+            return true;
+        }
+    }
+
+    private static int ParseRfc3339Text(string text, out ulong utcTick)
+    {
+        utcTick = 0;
+        var cursor = new TextCursor(text);
+        if (!cursor.TryReadFixed(4, out var year) || !cursor.Expect('-')
+            || !cursor.TryReadFixed(2, out var month) || !cursor.Expect('-')
+            || !cursor.TryReadFixed(2, out var day))
+        {
+            return RtcErrorBadParse;
+        }
+
+        if (cursor.Current != 'T' && cursor.Current != 't')
+        {
+            return RtcErrorBadParse;
+        }
+
+        cursor.Advance();
+        if (!cursor.TryReadFixed(2, out var hour) || !cursor.Expect(':')
+            || !cursor.TryReadFixed(2, out var minute) || !cursor.Expect(':')
+            || !cursor.TryReadFixed(2, out var second))
+        {
+            return RtcErrorBadParse;
+        }
+
+        uint microsecond = 0;
+        if (cursor.Current == '.')
+        {
+            cursor.Advance();
+            var scale = 100_000u;
+            while (cursor.Current >= '0' && cursor.Current <= '9')
+            {
+                // Digits beyond microsecond precision are dropped.
+                microsecond += (uint)(cursor.Current - '0') * scale;
+                scale /= 10;
+                cursor.Advance();
+            }
+        }
+
+        var offsetMinutes = 0;
+        if (cursor.Current == '+' || cursor.Current == '-')
+        {
+            var sign = cursor.Current == '-' ? -1 : 1;
+            cursor.Advance();
+            if (!cursor.TryReadFixed(2, out var offsetHours) || !cursor.Expect(':')
+                || !cursor.TryReadFixed(2, out var offsetMinute))
+            {
+                return RtcErrorBadParse;
+            }
+
+            offsetMinutes = sign * (offsetHours * 60 + offsetMinute);
+        }
+        else if (cursor.Current != 'Z' && cursor.Current != 'z')
+        {
+            // The zone designator is mandatory (anyps5); kyty accepts a missing one as UTC.
+            return RtcErrorBadParse;
+        }
+
+        return FinishParse(year, month, day, hour, minute, second, microsecond, offsetMinutes, out utcTick);
+    }
+
+    private static int ParseAnyDateTime(string text, out ulong utcTick)
+    {
+        utcTick = 0;
+        var cursor = new TextCursor(text);
+        cursor.SkipBlanks();
+        if (cursor.Current >= '0' && cursor.Current <= '9')
+        {
+            return ParseRfc3339Text(text[cursor.Position..], out utcTick);
+        }
+
+        if (!cursor.TryReadName(WeekdayNames, out _))
+        {
+            return RtcErrorBadParse;
+        }
+
+        if (cursor.Current == ',')
+        {
+            cursor.Advance();
+        }
+
+        cursor.SkipBlanks();
+        var isRfc2822 = cursor.Current >= '0' && cursor.Current <= '9';
+        int year, month, day, hour, minute, second = 0;
+        var offsetMinutes = 0;
+        if (isRfc2822)
+        {
+            // "DD Mon YYYY HH:MM[:SS] [zone]" (a two-digit year is windowed at 50).
+            if (cursor.ReadUpTo(2, out day) == 0 || (cursor.Current != ' ' && cursor.Current != '-'))
+            {
+                return RtcErrorBadParse;
+            }
+
+            cursor.Advance();
+            if (!cursor.TryReadName(MonthNames, out var monthIndex) || (cursor.Current != ' ' && cursor.Current != '-'))
+            {
+                return RtcErrorBadParse;
+            }
+
+            month = monthIndex + 1;
+            cursor.Advance();
+            var yearDigits = cursor.ReadUpTo(4, out year);
+            if ((yearDigits != 2 && yearDigits != 4) || !cursor.Expect(' '))
+            {
+                return RtcErrorBadParse;
+            }
+
+            if (yearDigits == 2)
+            {
+                year += year < 50 ? 2000 : 1900;
+            }
+
+            if (cursor.ReadUpTo(2, out hour) == 0 || !cursor.Expect(':') || cursor.ReadUpTo(2, out minute) == 0)
+            {
+                return RtcErrorBadParse;
+            }
+
+            if (cursor.Current == ':')
+            {
+                cursor.Advance();
+                if (cursor.ReadUpTo(2, out second) == 0)
+                {
+                    return RtcErrorBadParse;
+                }
+
+                if (cursor.Current == ' ')
+                {
+                    cursor.Advance();
+                    if (!TryParseZone(cursor, out offsetMinutes))
+                    {
+                        return RtcErrorBadParse;
+                    }
+                }
+            }
+            else if (cursor.Current != ' ')
+            {
+                return RtcErrorBadParse;
+            }
+        }
+        else
+        {
+            // asctime: "Mon DD HH:MM:SS YYYY", the day possibly space padded.
+            if (!cursor.TryReadName(MonthNames, out var monthIndex) || !cursor.Expect(' '))
+            {
+                return RtcErrorBadParse;
+            }
+
+            month = monthIndex + 1;
+            if (cursor.Current == ' ')
+            {
+                cursor.Advance();
+                if (cursor.ReadUpTo(1, out day) == 0)
+                {
+                    return RtcErrorBadParse;
+                }
+            }
+            else if (cursor.ReadUpTo(2, out day) == 0)
+            {
+                return RtcErrorBadParse;
+            }
+
+            if (!cursor.Expect(' ') || cursor.ReadUpTo(2, out hour) == 0 || !cursor.Expect(':')
+                || cursor.ReadUpTo(2, out minute) == 0 || !cursor.Expect(':')
+                || cursor.ReadUpTo(2, out second) == 0 || !cursor.Expect(' ')
+                || cursor.ReadUpTo(4, out year) != 4)
+            {
+                return RtcErrorBadParse;
+            }
+        }
+
+        return FinishParse(year, month, day, hour, minute, second, 0, offsetMinutes, out utcTick);
+    }
+
+    // Zone after the seconds: nothing (UTC), "+hhmm"/"-hhmm", a known name, or a military letter.
+    private static bool TryParseZone(TextCursor cursor, out int offsetMinutes)
+    {
+        offsetMinutes = 0;
+        if (cursor.AtEnd)
+        {
+            return true;
+        }
+
+        if (cursor.Current == '+' || cursor.Current == '-')
+        {
+            var sign = cursor.Current == '-' ? -1 : 1;
+            cursor.Advance();
+            if (!cursor.TryReadFixed(2, out var hours) || !cursor.TryReadFixed(2, out var minutes))
+            {
+                return false;
+            }
+
+            offsetMinutes = sign * (hours * 60 + minutes);
+            return true;
+        }
+
+        // Longest names first so that a short name never shadows one it prefixes.
+        foreach (var zone in ZoneNamesLongestFirst)
+        {
+            if (cursor.TryMatch(zone.Name, zone.Name.Length))
+            {
+                offsetMinutes = zone.Minutes;
+                return true;
+            }
+        }
+
+        var letter = char.ToUpperInvariant(cursor.Current);
+        if (letter == 'Z')
+        {
+            return true;
+        }
+
+        // RFC 822 military zones: A-I = +1..+9 hours, K-M = +10..+12, N-Y = -1..-12; J is unused.
+        if (letter >= 'A' && letter <= 'I')
+        {
+            offsetMinutes = (letter - 'A' + 1) * 60;
+            return true;
+        }
+
+        if (letter >= 'K' && letter <= 'M')
+        {
+            offsetMinutes = (letter - 'K' + 10) * 60;
+            return true;
+        }
+
+        if (letter >= 'N' && letter <= 'Y')
+        {
+            offsetMinutes = -(letter - 'N' + 1) * 60;
+            return true;
+        }
+
+        return false;
+    }
+
     private static int AddTickDelta(CpuContext ctx, ulong microsecondsPerUnit)
     {
         var destinationAddress = ctx[CpuRegister.Rdi];

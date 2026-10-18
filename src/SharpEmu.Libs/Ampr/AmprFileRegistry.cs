@@ -6,6 +6,9 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using SharpEmu.HLE;
+using SharpEmu.Libs.Diagnostics;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Ampr;
 
@@ -71,6 +74,14 @@ internal static class AmprFileRegistry
 
     public static uint RegisterAprResolvedPath(string guestPath, string hostPath)
     {
+        var profile = FileIoProfile.Begin();
+        var id = RegisterAprResolvedPathCore(guestPath, hostPath);
+        FileIoProfile.End(FileIoProfile.Op.AprRegister, profile);
+        return id;
+    }
+
+    private static uint RegisterAprResolvedPathCore(string guestPath, string hostPath)
+    {
         // APR file ids are part of the guest ABI: ResolveFilepathsToIds returns
         // the 31-bit FNV-1a hash of the guest path. Keep the collision-safe
         // process-local handles used by Register() separate from this path so a
@@ -87,7 +98,14 @@ internal static class AmprFileRegistry
             else if (!_hostPathsById.TryGetValue(fileId, out var indexed) ||
                      (!indexed.Ambiguous && IsSameHostFile(indexed.HostPath, hostPath)))
             {
-                if (TryGetApp0Relative(guestPath, out var relative) && relative.Length != 0)
+                // An id already mapped to this file was published together with
+                // the file's other app0 spellings (index walk, index cache, or an
+                // earlier resolve), and publishing them again changes nothing.
+                // Skipping it saves four hashes and four dictionary merges per
+                // asset, under this lock, on the ~223k-path boot scan.
+                if (indexed.HostPath is null &&
+                    TryGetApp0Relative(guestPath, out var relative) &&
+                    relative.Length != 0)
                 {
                     RegisterApp0Relative(relative, hostPath);
                 }
@@ -108,7 +126,11 @@ internal static class AmprFileRegistry
         return handle;
     }
 
+    // Both sides normally come straight out of ResolveGuestPath, which already
+    // returns Path.GetFullPath output, so the equal case needs no normalization
+    // at all - and it runs under _resolvedFileGate once per resolved asset.
     private static bool IsSameHostFile(string left, string right) =>
+        HostFsPath.Comparer.Equals(left, right) ||
         HostFsPath.Comparer.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
 
     public static bool TryGetHostPath(uint id, out string hostPath)
@@ -278,6 +300,7 @@ internal static class AmprFileRegistry
                 }
                 else
                 {
+                    var enumerated = 0;
                     foreach (var hostPath in Directory.EnumerateFiles(
                                  normalizedRoot,
                                  "*",
@@ -292,6 +315,16 @@ internal static class AmprFileRegistry
                         }
 
                         relatives.Add(relative);
+
+                        // A large app0 walk can run well past the native backend's
+                        // stall-watchdog window on its own -- this is a slow but
+                        // live guest export, not a stuck one. Keep resetting the
+                        // watchdog's "no progress" timer for as long as we're
+                        // still finding files.
+                        if (++enumerated % 2000 == 0)
+                        {
+                            GuestThreadExecution.NotifyHostWorkProgress();
+                        }
                     }
                 }
             }
@@ -459,39 +492,75 @@ internal static class AmprFileRegistry
         return false;
     }
 
-    private static string GetIndexCachePath(string normalizedRoot, int version)
+    private static string GetIndexCachePath(string normalizedRoot, int version) =>
+        GetCacheFilePath(normalizedRoot, $"v{version}");
+
+    /// <summary>
+    /// Where the host directory index persists its listings of this app0 image,
+    /// beside the id cache and under the same per-root name.
+    /// </summary>
+    internal static string GetDirectoryIndexSnapshotPath(string app0Root) =>
+        GetCacheFilePath(Path.GetFullPath(app0Root), "dirs.v1");
+
+    /// <summary>
+    /// The dump fingerprint the id cache is validated against; 0 when there is none.
+    /// </summary>
+    internal static long GetDumpFingerprint(string app0Root) =>
+        GetParamJsonWriteTicks(Path.GetFullPath(app0Root));
+
+    // Preferred directory -> the directory every cache file of this process uses.
+    // The id cache and the directory-index snapshot resolve it from different
+    // threads at the same moment; deciding once keeps a writer and a later
+    // reader of the same file on the same directory.
+    private static readonly ConcurrentDictionary<string, Lazy<string>> _cacheDirectories =
+        new(StringComparer.Ordinal);
+
+    private static string GetCacheFilePath(string normalizedRoot, string tag)
     {
         var overrideDir = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE");
-        var cacheDir = !string.IsNullOrWhiteSpace(overrideDir)
+        var preferredDir = !string.IsNullOrWhiteSpace(overrideDir)
             ? overrideDir
             : Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "SharpEmu",
                 "ampr-index");
-        try
-        {
-            Directory.CreateDirectory(cacheDir);
-            var probePath = Path.Combine(cacheDir, $".write-test-{Environment.ProcessId}");
-            using (File.Create(probePath)) { }
-            File.Delete(probePath);
-        }
-        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
-        {
-            // Sandboxed launches and mitigated child processes can lose access
-            // to the profile AppData directory. Keep the index in the user
-            // data root so the next launch can still reuse it.
-            cacheDir = Path.Combine(SharpEmuPaths.DataRoot, "user", "ampr-index");
-            Directory.CreateDirectory(cacheDir);
-            Console.Error.WriteLine(
-                $"[LOADER][WARN] ampr.app0_index_cache_fallback path={cacheDir}: {exception.Message}");
-        }
+        var cacheDir = _cacheDirectories.GetOrAdd(
+            preferredDir,
+            static preferred => new Lazy<string>(
+                () => ResolveCacheDirectory(preferred),
+                LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
         // Distinct roots must not share a cache file. Folding case is only
         // correct where the host filesystem folds it too.
         var rootKey = OperatingSystem.IsWindows() ? normalizedRoot.ToLowerInvariant() : normalizedRoot;
         // Keep raw hashes for cache filenames. Guest file identifiers use 31 bits.
         var rootHash = FnvContinueUtf8(OffsetBasis, rootKey);
-        return Path.Combine(cacheDir, $"app0-{rootHash:x8}.v{version}.idx");
+        return Path.Combine(cacheDir, $"app0-{rootHash:x8}.{tag}.idx");
+    }
+
+    private static string ResolveCacheDirectory(string preferredDir)
+    {
+        try
+        {
+            Directory.CreateDirectory(preferredDir);
+            // Unique per probe: two probes sharing one name made the loser see a
+            // sharing violation and fall back to a different directory.
+            var probePath = Path.Combine(preferredDir, $".write-test-{Environment.ProcessId}-{Guid.NewGuid():N}");
+            using (File.Create(probePath)) { }
+            File.Delete(probePath);
+            return preferredDir;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            // Sandboxed launches and mitigated child processes can lose access
+            // to the profile AppData directory. Keep the index beside the
+            // executable so the next launch can still reuse it.
+            var fallbackDir = SharpEmuPaths.UserPath("ampr-index");
+            Directory.CreateDirectory(fallbackDir);
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] ampr.app0_index_cache_fallback path={fallbackDir}: {exception.Message}");
+            return fallbackDir;
+        }
     }
 
     private static bool TryLoadIndexCache(

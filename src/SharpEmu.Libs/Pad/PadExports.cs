@@ -38,6 +38,11 @@ public static class PadExports
     [ThreadStatic]
     private static PadState _cachedInputState;
 
+    // Microsecond timestamp of the sample held in _cachedInputState, reported to
+    // the guest unchanged for as long as that sample is the current one.
+    [ThreadStatic]
+    private static ulong _cachedSampleTimestampMicroseconds;
+
     private static int _controlsAnnouncementLogged;
     private static readonly bool LogPadState =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PAD_STATE"), "1", StringComparison.Ordinal);
@@ -266,10 +271,24 @@ public static class PadExports
 
         if (informationAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         Span<byte> information = stackalloc byte[ControllerInformationSize];
+        information.Clear();
+        WriteControllerInformation(information, session);
+
+        return ctx.Memory.TryWrite(informationAddress, information)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
+    }
+
+    // ScePadControllerInformation (0x1C): +0x00 f32 touchPad pixelDensity,
+    // +0x04 u16 resolution x, +0x06 u16 resolution y, +0x08 u8 deadZoneLeft,
+    // +0x09 u8 deadZoneRight, +0x0A u8 connectionType, +0x0B u8 connectedCount,
+    // +0x0C bool connected, +0x10 i32 deviceClass.
+    private static void WriteControllerInformation(Span<byte> information, PadSession session)
+    {
         BinaryPrimitives.WriteSingleLittleEndian(information[0x00..], 44.86f);
         BinaryPrimitives.WriteUInt16LittleEndian(information[0x04..], 1920);
         BinaryPrimitives.WriteUInt16LittleEndian(information[0x06..], 943);
@@ -279,10 +298,6 @@ public static class PadExports
         information[0x0B] = session.Connected ? (byte)1 : (byte)0;
         information[0x0C] = session.Connected ? (byte)1 : (byte)0;
         BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
-
-        return ctx.Memory.TryWrite(informationAddress, information)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -300,6 +315,11 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadGetExtControllerInformation(CpuContext ctx)
     {
+        // ABI: int scePadGetExtControllerInformation(int32_t handle,
+        // ScePadExtControllerInformation *info). The 0x2C-byte structure starts
+        // with ScePadControllerInformation (0x1C, filled as by
+        // scePadGetControllerInformation); the extension-unit tail stays zero:
+        // no extension unit is attached.
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var informationAddress = ctx[CpuRegister.Rsi];
         if (!TryGetSession(ctx, handle, out var session))
@@ -309,24 +329,15 @@ public static class PadExports
 
         if (informationAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         Span<byte> information = stackalloc byte[ExtendedControllerInformationSize];
         information.Clear();
-        BinaryPrimitives.WriteSingleLittleEndian(information[0x00..], 44.86f);
-        BinaryPrimitives.WriteUInt16LittleEndian(information[0x04..], 1920);
-        BinaryPrimitives.WriteUInt16LittleEndian(information[0x06..], 943);
-        information[0x08] = 30;
-        information[0x09] = 30;
-        information[0x0A] = (byte)session.PortType;
-        information[0x0B] = session.Connected ? (byte)1 : (byte)0;
-        information[0x0C] = session.Connected ? (byte)1 : (byte)0;
-        BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
-
+        WriteControllerInformation(information, session);
         return ctx.Memory.TryWrite(informationAddress, information)
             ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
     }
 
     [SysAbiExport(
@@ -345,7 +356,7 @@ public static class PadExports
 
         if (informationAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         // ScePadDeviceClassExtendedInformation: deviceClass 0 = standard pad
@@ -358,7 +369,7 @@ public static class PadExports
 
         return ctx.Memory.TryWrite(informationAddress, information)
             ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
     }
 
     [SysAbiExport(
@@ -389,7 +400,7 @@ public static class PadExports
         Span<byte> padData = stackalloc byte[PadDataSize];
         if (!ctx.Memory.TryRead(padDataAddress, padData))
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         Span<byte> classData = stackalloc byte[deviceClassDataSize];
@@ -409,7 +420,7 @@ public static class PadExports
 
         return ctx.Memory.TryWrite(classDataAddress, classData)
             ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
     }
 
     [SysAbiExport(
@@ -428,12 +439,12 @@ public static class PadExports
 
         if (dataAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         return WritePadData(ctx, dataAddress, handle, session, "scePadReadState")
             ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
     }
 
     [SysAbiExport(
@@ -453,12 +464,12 @@ public static class PadExports
 
         if (dataAddress == 0 || count < 1 || count > 64)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         return WritePadData(ctx, dataAddress, handle, session, "scePadRead")
             ? ctx.SetReturn(1)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
     }
 
     [SysAbiExport(
@@ -468,13 +479,31 @@ public static class PadExports
     LibraryName = "libScePad")]
     public static int PadSetVibrationMode(CpuContext ctx)
     {
+        // ABI: int scePadSetVibrationMode(int32_t handle, int32_t mode). Modes 1-3
+        // and 5 are defined; the host keeps one rumble path for all of them.
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var mode = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (!GetSessions(ctx).IsInitialized)
+        {
+            return ctx.SetReturn(OrbisPadErrorNotInitialized);
+        }
+
+        if (mode <= 0)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
+        }
+
         if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
-        return ctx.SetReturn(session.Connected ? 0 : OrbisPadErrorDeviceNotConnected);
+        if (!session.Connected)
+        {
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
+        }
+
+        return ctx.SetReturn(mode is > 3 and not 5 ? OrbisPadErrorInvalidArgument : 0);
     }
 
     [SysAbiExport(
@@ -498,20 +527,30 @@ public static class PadExports
 
         if (parameterAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         Span<byte> parameter = stackalloc byte[120];
         if (!ctx.Memory.TryRead(parameterAddress, parameter))
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
+        // ScePadTriggerEffectParam: u8 triggerMask (bit 0 L2, bit 1 R2), 7 pad,
+        // then one 56-byte command per trigger whose first u32 is the mode
+        // (0 off .. 6 multiple-position vibration).
         var triggerMask = parameter[0];
+        if ((triggerMask & ~0x03) != 0 ||
+            BinaryPrimitives.ReadUInt32LittleEndian(parameter[8..]) > 6 ||
+            BinaryPrimitives.ReadUInt32LittleEndian(parameter[64..]) > 6)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
+        }
+
         HostPlatform.Current.Input.SetAdaptiveTriggerEffect(
             (triggerMask & 0x01) != 0 ? DecodeTriggerEffect(parameter[8..64]) : null,
             (triggerMask & 0x02) != 0 ? DecodeTriggerEffect(parameter[64..120]) : null);
-        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(0);
     }
 
     // Size taken from the caller's own frame rather than assumed: the guest
@@ -536,7 +575,7 @@ public static class PadExports
 
         if (stateAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         // No host pad exposes DualSense adaptive-trigger feedback, so every
@@ -546,8 +585,8 @@ public static class PadExports
         Span<byte> state = stackalloc byte[TriggerEffectStateSize];
         state.Clear();
         return ctx.Memory.TryWrite(stateAddress, state)
-            ? ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
     }
 
     private static HostAdaptiveTriggerEffect DecodeTriggerEffect(ReadOnlySpan<byte> command)
@@ -729,17 +768,17 @@ public static class PadExports
 
         if (parameterAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         // ScePadVibrationParam: { uint8_t largeMotor; uint8_t smallMotor; }
         Span<byte> parameter = stackalloc byte[2];
         if (!ctx.Memory.TryRead(parameterAddress, parameter))
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
-        HostPlatform.Current.Input.SetRumble(parameter[0], parameter[1]);
+        PadHaptics.SetVibration(parameter[0], parameter[1]);
         return ctx.SetReturn(0);
     }
 
@@ -764,14 +803,14 @@ public static class PadExports
 
         if (parameterAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         // ScePadColor: { uint8_t r; uint8_t g; uint8_t b; uint8_t reserved; }
         Span<byte> color = stackalloc byte[4];
         if (!ctx.Memory.TryRead(parameterAddress, color))
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
         HostPlatform.Current.Input.SetLightbar(color[0], color[1], color[2]);
@@ -820,6 +859,8 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadIsRemoteController(CpuContext ctx)
     {
+        // ABI: int scePadIsRemoteController(int32_t handle, bool *isRemote).
+        // The host pad is always local (no Remote Play controller).
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var resultAddress = ctx[CpuRegister.Rsi];
         if (!TryGetSession(ctx, handle, out _))
@@ -832,10 +873,82 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorInvalidArgument);
         }
 
-        ReadOnlySpan<byte> isRemote = [0];
-        return ctx.Memory.TryWrite(resultAddress, isRemote)
+        return ctx.Memory.TryWrite(resultAddress, [0])
             ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            : ctx.SetReturn(OrbisPadErrorInvalidArgument);
+    }
+
+    [SysAbiExport(
+        Nid = "QjwkT2Ycmew",
+        ExportName = "scePadReadExt",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadReadExt(CpuContext ctx)
+    {
+        // ABI: int scePadReadExt(int32_t handle, ScePadData *data, int32_t num) —
+        // scePadRead for a handle from scePadOpenExt. No extension unit is
+        // attached, so the samples are plain ScePadData (0x78 bytes) with the
+        // device-unique tail empty; returns the number written.
+        return PadRead(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "dhQXEvmrVNQ",
+        ExportName = "scePadSetLightBarBaseBrightness",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetLightBarBaseBrightness(CpuContext ctx)
+    {
+        // ABI: int scePadSetLightBarBaseBrightness(int32_t handle, uint8_t brightness).
+        // The host light (GCDeviceLight) takes a colour only, with no separate
+        // base brightness, so the level has no host effect.
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!TryGetSession(ctx, handle, out _))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "NKs8QDFoPTs",
+        ExportName = "scePadSetParticularMode",
+        Target = Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetParticularMode(CpuContext ctx)
+    {
+        // ABI: int scePadSetParticularMode(bool mode). A process-wide switch with
+        // no handle and no failure case; the host input path has no mode to change.
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "DmBx8K+jDWw",
+        ExportName = "scePadSetProcessPrivilege",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetProcessPrivilege(CpuContext ctx)
+    {
+        // ABI: int scePadSetProcessPrivilege(int32_t privilege). The title is the
+        // only process reading the host pad, so every privilege is accepted.
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "KLmYx9ij2h0",
+        ExportName = "scePadSetAngularVelocityBiasCorrectionState",
+        Target = Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetAngularVelocityBiasCorrectionState(CpuContext ctx)
+    {
+        // ABI: int scePadSetAngularVelocityBiasCorrectionState(int32_t handle, bool enable).
+        // Host gyro data (GameController motion) is already bias-corrected by the
+        // OS, so the switch has nothing further to toggle.
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return TryGetSession(ctx, handle, out _)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
 
     private static bool WritePadData(CpuContext ctx, ulong dataAddress, int handle, PadSession session, string exportName)
@@ -882,17 +995,25 @@ public static class PadExports
 
         WriteTouchData(data, input.Touch);
         data[0x4C] = 1;
-        var timestampTicks = Stopwatch.GetTimestamp();
-        var timestampMicroseconds =
-            ((ulong)(timestampTicks / Stopwatch.Frequency) * 1_000_000UL) +
-            ((ulong)(timestampTicks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
+        // The timestamp belongs to the sample, not to the call. A controller
+        // reports at a fixed rate and every read between two reports returns the
+        // same data with the same timestamp; a title that detects a new press by
+        // comparing timestamps relies on that. Stamping each call with the clock
+        // turns one physical press into as many distinct "samples" as the title
+        // happens to read - Quake polls scePadReadState about two hundred thousand
+        // times a second - and an edge found in one of them is gone before the
+        // frame that would act on it.
         BinaryPrimitives.WriteUInt64LittleEndian(
             data[0x50..],
-            timestampMicroseconds);
+            _cachedSampleTimestampMicroseconds);
         data[0x68] = 1;
 
         var guestWriteSucceeded = ctx.Memory.TryWrite(dataAddress, data);
         PadInputChangeTrace.Record(exportName, handle, input, guestWriteSucceeded);
+        if (PadReadDiagnostics.Enabled)
+        {
+            PadReadDiagnostics.Record(dataAddress, guestWriteSucceeded, buttons, leftX, leftY, rightX, rightY, l2, r2);
+        }
         return guestWriteSucceeded;
     }
 
@@ -980,6 +1101,9 @@ public static class PadExports
             ControllerButtons = controllerButtons,
         };
         _lastInputSampleTicks = now;
+        _cachedSampleTimestampMicroseconds =
+            ((ulong)(now / Stopwatch.Frequency) * 1_000_000UL) +
+            ((ulong)(now % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
         return _cachedInputState;
     }
 

@@ -49,28 +49,7 @@ public static class GameServiceStubs
     public static int NpTrophy2CreateHandle(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpTrophy2RegisterContext(CpuContext ctx) => Ok(ctx);
 
-    // SceNpTrophy2GameDetails is six uint32 counters and a 128 byte title,
-    // SceNpTrophy2GameData six uint32 counters.
-    private const int NpTrophy2GameDetailsSize = 6 * sizeof(uint) + 128;
-    private const int NpTrophy2GameDataSize = 6 * sizeof(uint);
-
-    // Titles size their trophy arrays from the returned counts, so a success has to
-    // write them: left alone, they hold whatever the caller's heap held (an Unreal
-    // title resizes a TArray to it and aborts). The counts are those of the set
-    // sceNpTrophy2GetTrophyInfoArray returns, empty when the title ships none.
-    [SysAbiExport(Nid = "4IzqhhUQ3nk", ExportName = "sceNpTrophy2GetGameInfo",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
-    public static int NpTrophy2GetGameInfo(CpuContext ctx)
-    {
-        Span<byte> details = stackalloc byte[NpTrophy2GameDetailsSize];
-        Span<byte> data = stackalloc byte[NpTrophy2GameDataSize];
-        FillTrophy2GameInfo(details, data, SharpEmu.Libs.Np.TrophyService.Trophies);
-        return WriteOutput(ctx, ctx[CpuRegister.Rdx], details) &&
-            WriteOutput(ctx, ctx[CpuRegister.Rcx], data)
-                ? Ok(ctx)
-                : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-    }
-
+    // sceNpTrophy2GetGameInfo lives in NpTrophy2Exports (it fills the output structures).
     // The counts of SceNpTrophy2GameDetails and SceNpTrophy2GameData. The groups, the title and the
     // progress stay zero.
     internal static void FillTrophy2GameInfo(
@@ -258,10 +237,6 @@ public static class GameServiceStubs
         ctx[CpuRegister.Rax] = unchecked((ulong)notFound);
         return notFound;
     }
-
-    [SysAbiExport(Nid = "dPj4ZtRcIWk", ExportName = "sceContentSearchInit",
-        Target = Generation.Gen5, LibraryName = "libSceContentSearch")]
-    public static int ContentSearchInit(CpuContext ctx) => Ok(ctx);
 
     [SysAbiExport(Nid = "zoxb0wEChEM", ExportName = "sceContentDeleteInitialize",
         Target = Generation.Gen5, LibraryName = "libSceContentDelete")]

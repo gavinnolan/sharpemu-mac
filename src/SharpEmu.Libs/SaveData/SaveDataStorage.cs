@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.SaveData;
 
@@ -22,7 +23,7 @@ public static class SaveDataStorage
     {
         var configured = overrideDir ?? Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR");
         var root = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(SharpEmuPaths.DataRoot, "user", "savedata")
+            ? SharpEmuPaths.UserPath("savedata")
             : configured;
         return Path.GetFullPath(root);
     }

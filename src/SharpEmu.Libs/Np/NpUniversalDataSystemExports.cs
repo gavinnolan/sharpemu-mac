@@ -449,6 +449,69 @@ public static class NpUniversalDataSystemExports
     public static int NpUniversalDataSystemEventPropertyArraySetArray(CpuContext ctx) =>
         AddArrayNode(ctx, childIsArray: true);
 
+    [SysAbiExport(
+        Nid = "BypQuF113-k",
+        ExportName = "sceNpUniversalDataSystemEventPropertyArraySetInt32",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyArraySetInt32(CpuContext ctx) =>
+        AddArrayValue(ctx, new UdsValue(UdsValueKind.Int32, unchecked((int)ctx[CpuRegister.Rsi])));
+
+    [SysAbiExport(
+        Nid = "yMi0xAOpmXM",
+        ExportName = "sceNpUniversalDataSystemEventPropertyArraySetUInt32",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyArraySetUInt32(CpuContext ctx) =>
+        AddArrayValue(ctx, new UdsValue(UdsValueKind.UInt32, unchecked((uint)ctx[CpuRegister.Rsi])));
+
+    [SysAbiExport(
+        Nid = "viVXAwmmYrY",
+        ExportName = "sceNpUniversalDataSystemEventPropertyArraySetInt64",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyArraySetInt64(CpuContext ctx) =>
+        AddArrayValue(ctx, new UdsValue(UdsValueKind.Int64, unchecked((long)ctx[CpuRegister.Rsi])));
+
+    [SysAbiExport(
+        Nid = "Qo9qR7v5zO4",
+        ExportName = "sceNpUniversalDataSystemEventPropertyArraySetUInt64",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyArraySetUInt64(CpuContext ctx) =>
+        AddArrayValue(ctx, new UdsValue(UdsValueKind.UInt64, ctx[CpuRegister.Rsi]));
+
+    [SysAbiExport(
+        Nid = "sbSYZLR5AiE",
+        ExportName = "sceNpUniversalDataSystemEventPropertyArraySetFloat64",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyArraySetFloat64(CpuContext ctx)
+    {
+        ctx.GetXmmRegister(0, out var low, out _);
+        return AddArrayValue(
+            ctx,
+            new UdsValue(UdsValueKind.Float64, BitConverter.Int64BitsToDouble(unchecked((long)low))));
+    }
+
+    /// <summary>Event handle, then a size_t output. Unknown or destroyed events are INVALID_ARGUMENT.</summary>
+    [SysAbiExport(
+        Nid = "+s14jq-KGYw",
+        ExportName = "sceNpUniversalDataSystemEventEstimateSize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventEstimateSize(CpuContext ctx)
+    {
+        var sizeAddress = ctx[CpuRegister.Rsi];
+        if (sizeAddress == 0 ||
+            !NpUniversalDataSystemState.TryEstimateEventSize(ctx[CpuRegister.Rdi], out var size))
+        {
+            return InvalidArgument(ctx);
+        }
+
+        return ctx.TryWriteUInt64(sizeAddress, size) ? Success(ctx) : MemoryFault(ctx);
+    }
+
     private static int SetObjectPrimitive(CpuContext ctx, UdsValueKind kind, object value)
     {
         if (!TryReadObjectKey(ctx, out var key, out var error))

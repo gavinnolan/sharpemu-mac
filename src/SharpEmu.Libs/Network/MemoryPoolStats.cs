@@ -16,6 +16,7 @@ internal static class MemoryPoolStats
     public static bool TryWrite(CpuContext ctx, ulong address, ulong poolSize)
     {
         Span<byte> stats = stackalloc byte[Size];
+        stats.Clear();
         BinaryPrimitives.WriteUInt64LittleEndian(stats, poolSize);
         return ctx.Memory.TryWrite(address, stats);
     }
