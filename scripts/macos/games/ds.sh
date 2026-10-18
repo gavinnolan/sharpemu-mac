@@ -52,6 +52,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TAG="$1"
 MODE="${3:-ingame}"
 case "$MODE" in ingame) SECONDS_LIMIT="${2:-600}" ;; full) SECONDS_LIMIT="${2:-1200}" ;; *) SECONDS_LIMIT="${2:-300}" ;; esac
+# The full route, and ingame runs that stay in the world longer than the 600 s entry cap allows.
+[[ "$MODE" == full || "$SECONDS_LIMIT" -gt 600 ]] && export SHARPEMU_GAME_SESSION_RUN=1
 shift $(( $# < 3 ? $# : 3 ))
 
 MAIN_ROOT="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd || echo "$REPO_ROOT")"
@@ -79,7 +81,10 @@ case "$MODE" in
     # it skips the stage-entry cinematic. The in-world HUD (run-game.sh's hud marker) ends the
     # presses; the character stands at the spawn point for 30 s and the run stops.
     PLAN="$BINK|0:mark:skip-logos,0:rep:enter:8:2"
-    PLAN+=";@mark=hud~560|0:mark:spawn-idle,30:mark:end,31:mark:stop" ;;
+    # SHARPEMU_DS_INWORLD_SECONDS (default 30) is how long the character stands at the spawn
+    # before the run stops: memory and session measurements need minutes in the world.
+    INWORLD="${SHARPEMU_DS_INWORLD_SECONDS:-30}"
+    PLAN+=";@mark=hud~560|0:mark:spawn-idle,$INWORLD:mark:end,$((INWORLD + 1)):mark:stop" ;;
   full)
     # Segments are named plan markers (metrics.md has one row each). Status of each is in the
     # comments; "pending" ones have inputs derived from research but could not be timed because
@@ -159,7 +164,6 @@ fi
 export SHARPEMU_DATA_ROOT="$DATA_ROOT"
 
 export SHARPEMU_GAME_ENTRY_RUN=1
-[[ "$MODE" == full ]] && export SHARPEMU_GAME_SESSION_RUN=1   # the full route outlasts the 600 s entry cap
 case "$MODE" in ingame|full) export SHARPEMU_HUD_WATCH=1 ;; esac
 if (( ANCHOR_LEGACY )); then
   export SHARPEMU_INPUT_START_AFTER_LOG="${SHARPEMU_INPUT_START_AFTER_LOG:-Scheduled guest thread 'Bink IO'}"

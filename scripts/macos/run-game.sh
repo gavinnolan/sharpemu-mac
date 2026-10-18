@@ -246,11 +246,15 @@ footprint_at=()
 #   SHARPEMU_SAMPLE_AT     native call stacks, `sample <pid> SHARPEMU_SAMPLE_SECONDS (5)`
 #   SHARPEMU_TRACE_AT      managed sampled stacks of every thread for SHARPEMU_TRACE_SECONDS (10),
 #                          dotnet-trace cpu-sampling -> trace-<t>.nettrace + .speedscope.json
+#   SHARPEMU_GCDUMP_AT     managed heap object graph (what is live, by type and retained size),
+#                          dotnet-gcdump collect -> gcdump-<t>.gcdump + gcdump-<t>.txt (report);
+#                          it forces a full blocking GC in the game, so place it after measurements
 #   SHARPEMU_FS_USAGE_AT   file-system calls with sizes and latencies, `sudo fs_usage -w -f filesys`
 #                          for SHARPEMU_FS_USAGE_SECONDS (5); needs passwordless sudo
-sample_at=(); trace_at=(); fs_usage_at=()
+sample_at=(); trace_at=(); fs_usage_at=(); gcdump_at=()
 [[ -n "${SHARPEMU_SAMPLE_AT:-}" ]] && IFS=, read -r -a sample_at <<< "$SHARPEMU_SAMPLE_AT"
 [[ -n "${SHARPEMU_TRACE_AT:-}" ]] && IFS=, read -r -a trace_at <<< "$SHARPEMU_TRACE_AT"
+[[ -n "${SHARPEMU_GCDUMP_AT:-}" ]] && IFS=, read -r -a gcdump_at <<< "$SHARPEMU_GCDUMP_AT"
 [[ -n "${SHARPEMU_FS_USAGE_AT:-}" ]] && IFS=, read -r -a fs_usage_at <<< "$SHARPEMU_FS_USAGE_AT"
 EVIDENCE_PIDS=()
 SAMPLER_PIDS=()
@@ -294,6 +298,13 @@ while :; do
       "$HOME/.dotnet/tools/dotnet-trace" convert "$trace.nettrace" --format Speedscope -o "$trace" >> "$trace.log" 2>&1 ) &
     EVIDENCE_PIDS+=($!)
     trace_at=("${trace_at[@]:1}")
+  fi
+  if (( ${#gcdump_at[@]} > 0 )) && (( now >= gcdump_at[0] )); then
+    gcdump="$OUT/gcdump-$(printf %04d "$now")"
+    ( "$HOME/.dotnet/tools/dotnet-gcdump" collect -p "$GPID" -o "$gcdump.gcdump" > "$gcdump.log" 2>&1
+      "$HOME/.dotnet/tools/dotnet-gcdump" report "$gcdump.gcdump" > "$gcdump.txt" 2>> "$gcdump.log" ) &
+    EVIDENCE_PIDS+=($!)
+    gcdump_at=("${gcdump_at[@]:1}")
   fi
   if (( ${#fs_usage_at[@]} > 0 )) && (( now >= fs_usage_at[0] )); then
     sudo -n "$(command -v timeout)" "${SHARPEMU_FS_USAGE_SECONDS:-5}" fs_usage -w -f filesys "$GPID" \
