@@ -213,6 +213,9 @@ public sealed class SemaphoreAndEventFlagWaitTests
         ctx[CpuRegister.Rdx] = 0;
         Assert.Equal(0, KernelSemaphoreCompatExports.PosixSemInit(ctx));
 
+        // Taken before the deadline is: a slow runner can spend milliseconds between reading
+        // the clock and entering the wait, which a later start would leave out of the elapsed time.
+        var started = DateTime.UtcNow;
         KernelRuntimeCompatExports.GetClockTime(0, out var seconds, out var nanoseconds);
         nanoseconds += 20_000_000;
         if (nanoseconds >= 1_000_000_000)
@@ -225,7 +228,6 @@ public sealed class SemaphoreAndEventFlagWaitTests
         Assert.True(ctx.TryWriteUInt64(abstime + 8, (ulong)nanoseconds));
         ctx[CpuRegister.Rdi] = sem;
         ctx[CpuRegister.Rsi] = abstime;
-        var started = DateTime.UtcNow;
         Assert.Equal(-1, KernelSemaphoreCompatExports.PosixSemTimedWait(ctx));
         Assert.True(DateTime.UtcNow - started >= TimeSpan.FromMilliseconds(15));
         Assert.True(ctx.TryReadUInt32(ctx.FsBase + 0x40, out var errno));
