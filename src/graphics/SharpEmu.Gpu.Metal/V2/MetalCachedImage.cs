@@ -405,6 +405,9 @@ internal sealed class MetalCachedImage : IDisposable
     /// </summary>
     public ulong AllocatedBytes;
 
+    /// <summary>The tile backing of a sparse texture (MetalImageCache.Sparse.cs); null for an ordinary one.</summary>
+    public MetalSparseResidency? Sparse;
+
     /// <summary>What the cache added to its total for this image when it registered it, taken back on removal.</summary>
     public ulong CountedBytes;
 

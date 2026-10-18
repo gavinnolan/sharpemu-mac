@@ -221,6 +221,21 @@ internal static partial class MetalV2Native
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendWithValue(nint receiver, nint selector, nuint value);
 
+    // -[MTLDevice sparseTileSizeWithTextureType:pixelFormat:sampleCount:]
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial MtlSize SendSparseTileSize(
+        nint receiver, nint selector, nuint textureType, nuint pixelFormat, nuint sampleCount);
+
+    // -[MTLResourceStateCommandEncoder updateTextureMapping:mode:region:mipLevel:slice:]
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendUpdateTextureMapping(
+        nint receiver, nint selector, nint texture, nuint mode, MtlRegion region, nuint mipLevel, nuint slice);
+
+    // Ties one object's lifetime to another's: OBJC_ASSOCIATION_RETAIN releases the value
+    // when the object is deallocated.
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_setAssociatedObject")]
+    public static partial void SetAssociatedObject(nint obj, nint key, nint value, nuint policy);
+
     // A selector taking one NSRange, which the ABI passes as its two words.
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendRange(nint receiver, nint selector, nuint location, nuint length);

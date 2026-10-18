@@ -38,8 +38,11 @@ internal sealed partial class MetalImageCache
     }
 
     // MTLTexture.allocatedSize, asked once per texture: a window view holds no memory of its own.
+    // A sparse texture's heap counts too: it is committed whole once used.
     private static ulong TextureAllocatedBytes(MetalCachedImage image) =>
-        image.Texture == 0 || image.IsWindowLinearView ? 0 : MetalV2Native.SendValue64(image.Texture, SelAllocatedSize);
+        image.Texture == 0 || image.IsWindowLinearView
+            ? 0
+            : MetalV2Native.SendValue64(image.Texture, SelAllocatedSize) + SparseHeapBytes(image);
 
     private static int CensusKind(MetalCachedImage image)
     {
