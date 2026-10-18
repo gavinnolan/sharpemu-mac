@@ -425,6 +425,22 @@ internal sealed class MetalGuestMemory : IDisposable
         _residentDirty = true;
     }
 
+    /// <summary>The summed size of the windows whose bits are set.</summary>
+    public ulong WindowBytes(ulong windows)
+    {
+        var bytes = 0UL;
+        for (; windows != 0; windows &= windows - 1)
+        {
+            var index = System.Numerics.BitOperations.TrailingZeroCount(windows);
+            if (index < _windowCount)
+            {
+                bytes += _windows[index].Size;
+            }
+        }
+
+        return bytes;
+    }
+
     /// <summary>Every window, for a submission that cannot name the ones it needs.</summary>
     public ulong AllWindows => _windowCount >= 64 ? ulong.MaxValue : (1UL << _windowCount) - 1;
 
@@ -488,6 +504,7 @@ internal sealed class MetalGuestMemory : IDisposable
 
         if (!StageEverything && TryResolveWindow(gpuVa, size, out var resolved))
         {
+            MetalGpuReferenceCensus.Mark(gpuVa, size);
             return resolved;
         }
 
@@ -501,7 +518,13 @@ internal sealed class MetalGuestMemory : IDisposable
     public bool TryResolveInPlace(ulong gpuVa, ulong size, out MetalGuestRange range)
     {
         range = default;
-        return !StageEverything && TryResolveWindow(gpuVa, size, out range);
+        if (StageEverything || !TryResolveWindow(gpuVa, size, out range))
+        {
+            return false;
+        }
+
+        MetalGpuReferenceCensus.Mark(gpuVa, size);
+        return true;
     }
 
     /// <summary>The window whose buffer a GPU address lies in, or -1.</summary>
@@ -556,8 +579,16 @@ internal sealed class MetalGuestMemory : IDisposable
         size != 0 && size <= ulong.MaxValue - gpuVa && _backing.TryResolveBackingAliasSpan(gpuVa, size, out _);
 
     /// <summary>The window range of an address that must be written by the GPU; zero when it is not backed.</summary>
-    public MetalGuestRange ResolveWritable(ulong gpuVa, ulong size) =>
-        TryResolveWindow(gpuVa, size, out var resolved) ? resolved : default;
+    public MetalGuestRange ResolveWritable(ulong gpuVa, ulong size)
+    {
+        if (!TryResolveWindow(gpuVa, size, out var resolved))
+        {
+            return default;
+        }
+
+        MetalGpuReferenceCensus.Mark(gpuVa, size);
+        return resolved;
+    }
 
     /// <summary>
     /// The longest prefix of a range that one window covers, or an invalid range when
@@ -566,8 +597,16 @@ internal sealed class MetalGuestMemory : IDisposable
     /// a binary search, which is how an image too scattered to map in one piece is cut
     /// into the pieces that do map.
     /// </summary>
-    public MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size) =>
-        ResolveWritablePrefix(gpuVa, size, warn: true);
+    public MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size)
+    {
+        var prefix = ResolveWritablePrefix(gpuVa, size, warn: true);
+        if (prefix.IsValid)
+        {
+            MetalGpuReferenceCensus.Mark(gpuVa, prefix.Size);
+        }
+
+        return prefix;
+    }
 
     private MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size, bool warn)
     {
@@ -781,6 +820,7 @@ internal sealed class MetalGuestMemory : IDisposable
 
             if (prefix.IsValid && prefix.Size >= _maxUploadBytes)
             {
+                MetalGpuReferenceCensus.Mark(gpuVa, prefix.Size);
                 Interlocked.Increment(ref _oversizedInPlace);
                 MetalV2Diagnostics.WarnOnce(
                     $"oversized-in-place:{size:X}",
@@ -813,6 +853,7 @@ internal sealed class MetalGuestMemory : IDisposable
     /// </summary>
     public void ReadForStaging(ulong gpuVa, Span<byte> span)
     {
+        MetalGpuReferenceCensus.Mark(gpuVa, (ulong)span.Length, MetalRefKind.Staged);
         if (_memory.TryRead(gpuVa, span))
         {
             return;

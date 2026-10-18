@@ -977,6 +977,7 @@ internal sealed partial class MetalRenderHost
             }
 
             _renderEncoder = MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor);
+            MetalMemoryTelemetry.RenderEncoders.Add();
             if (_renderEncoder == 0)
             {
                 throw Fatal(
@@ -1170,6 +1171,7 @@ internal sealed partial class MetalRenderHost
         if (_computeEncoder == 0)
         {
             _computeEncoder = MetalNative.Send(computeBuffer, SelComputeEncoder);
+            MetalMemoryTelemetry.ComputeEncoders.Add();
         }
 
         if (_computeEncoder == 0)
@@ -2267,6 +2269,7 @@ internal sealed partial class MetalRenderHost
             }
 
             var encoder = MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor);
+            MetalMemoryTelemetry.RenderEncoders.Add();
             if (encoder != 0)
             {
                 MetalNative.SendVoid(encoder, SelEndEncoding);
@@ -2662,6 +2665,7 @@ internal sealed partial class MetalRenderHost
             }
 
             var encoder = MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor);
+            MetalMemoryTelemetry.RenderEncoders.Add();
             if (encoder == 0)
             {
                 MetalV2Diagnostics.WarnOnce("clear-encoder", "A Metal clear pass could not be encoded.");

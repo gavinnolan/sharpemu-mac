@@ -100,6 +100,46 @@ class MetricsTests(unittest.TestCase):
             reasons = module.summarise(run, "x")["crash"]["reasons"]
             self.assertEqual(2, len(reasons))
 
+    def test_memory_columns_from_memstat_and_system_logs(self):
+        MB = 1048576
+        with tempfile.TemporaryDirectory() as folder:
+            run = make_run(folder, result="alive at 100s")
+            with (run / "markers.tsv").open("a") as handle:
+                handle.write(f"{LAUNCH + 30}\thud\n")
+            rows = []
+            for second, unique, swapped, footprint in [(10, 2000, 0, 3000), (25, 6000, 0, 9000), (40, 7000, 500, 12000),
+                                                       (50, 7100, 600, 12100), (65, 7050, 650, 12200)]:
+                rows.append(json.dumps({"t": LAUNCH + second, "unique": {"resident": unique * MB, "dirty": 0, "swapped": swapped * MB},
+                                        "task": {"phys_footprint": footprint * MB},
+                                        "categories": {"guest_shm": {"resident": unique * MB // 2, "swapped": swapped * MB}}}))
+            (run / "memstat.log").write_text("\n".join(rows) + "\n")
+            (run / "system-mem.log").write_text(
+                f"t={LAUNCH + 20} dt=5.0 swapouts=100 compressions=1000 pageouts=0 swap_used_mb=1000.0 pressure=1\n"
+                f"t={LAUNCH + 45} dt=5.0 swapouts=300 compressions=2000 pageouts=5 swap_used_mb=1600.0 pressure=2\n"
+                f"t={LAUNCH + 60} dt=5.0 swapouts=50 compressions=500 pageouts=0 swap_used_mb=1700.0 pressure=2\n")
+            metrics = module.summarise(run, "")
+            whole, world = metrics["memory"]["whole_run"], metrics["memory"]["in_world"]
+            self.assertEqual(7700.0, whole["unique_mb_peak"])
+            self.assertEqual(7700.0, world["unique_mb_peak"])
+            self.assertEqual(12200.0, world["phys_footprint_mb_peak"])
+            self.assertEqual(350, world["swapouts"])  # the 20 s sample is before the hud marker at 30 s
+            self.assertEqual(2500, world["compressions"])
+            self.assertEqual(100.0, world["swap_used_mb_delta"])
+            self.assertEqual(450, whole["swapouts"])
+            # in-world window is 30 s .. last log time (70): last third starts at ~56.7 s -> only the 65 s sample
+            self.assertEqual(7700.0, world["steady_state_unique_mb"])
+            by_name = {s["name"]: s for s in metrics["segments"]}
+            self.assertEqual(2000.0, by_name["title"]["memory"]["unique_mb_peak"])  # the 10 s sample, segment 10..12 s
+            text = module.markdown(metrics)
+            self.assertIn("| unique MB |", text)
+            self.assertIn("steady-state unique", text)
+
+    def test_memory_section_without_memstat_log(self):
+        with tempfile.TemporaryDirectory() as folder:
+            metrics = module.summarise(make_run(folder, result="alive at 100s"), "")
+            self.assertEqual(0, metrics["memory"]["whole_run"]["samples"])
+            self.assertIn("no memstat.log samples", module.markdown(metrics))
+
     def test_writes_json_and_markdown(self):
         with tempfile.TemporaryDirectory() as folder:
             run = make_run(folder)

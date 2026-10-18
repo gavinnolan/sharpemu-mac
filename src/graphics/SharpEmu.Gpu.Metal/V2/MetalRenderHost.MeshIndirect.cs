@@ -307,6 +307,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var encoder = MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
+        MetalMemoryTelemetry.ComputeEncoders.Add();
         if (encoder == 0)
         {
             throw Fatal("A Metal compute encoder could not be created for an indirect launch.");

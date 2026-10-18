@@ -28,6 +28,16 @@
 # flip, SHARPEMU_FRAME_TIMES), markers.tsv (epoch<TAB>name per plan marker), screenshots (every
 # SHARPEMU_SHOT_EVERY seconds and one shot-mark-<name>.png per marker, when a window-id
 # helper is available; SHARPEMU_HUD_WATCH=1 adds the `hud` marker, see hud-detect.py) and run.env (launch_epoch is the wall clock at launch). SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
+#
+# Memory evidence (memstat.py has the formats):
+#   system-mem.log  always: every SHARPEMU_SYSMEM_EVERY (5) s the vm_stat deltas (pageins, pageouts,
+#                   swapins, swapouts, compressions, decompressions), swap used and the memory pressure level.
+#   memstat.log     SHARPEMU_MEMSTAT=1: every SHARPEMU_MEMSTAT_EVERY (15) s one JSON line from memstat
+#                   (scripts/macos/memstat.c, built on demand): resident / dirty / compressed bytes with each VM
+#                   object counted once (footprint charges every mapping of the guest's shared backing object),
+#                   by category, next to the kernel's phys_footprint. Needs task_for_pid: runs through
+#                   passwordless `sudo -n` (skipped with a note in memstat.err when sudo asks for a password).
+#   SHARPEMU_LOG_MEMORY=1 (read by the app) adds [MEM] lines to game.log, see MemoryTelemetry.cs.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -61,6 +71,13 @@ SECONDS_LIMIT="$3"
 PLAN="${4:--}"
 INPUT_ANCHOR="${SHARPEMU_INPUT_START_AFTER_LOG:-}"
 shift 3; [[ $# -gt 0 ]] && shift
+# Harness settings may come as ENV=VALUE arguments (ds.sh passes its defaults that way); the last one wins.
+ENV_ARGS=("$@")
+setting() {
+  local name="$1" value="${!1:-$2}" e
+  for e in "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}"; do [[ "$e" == "$name="* ]] && value="${e#*=}"; done
+  printf '%s' "$value"
+}
 
 [[ -f "$EBOOT" ]] || { echo "eboot not found: $EBOOT" >&2; exit 2; }
 [[ -x "$APP_DIR/SharpEmu" ]] || { echo "no SharpEmu in $APP_DIR (run scripts/macos/build-app.sh)" >&2; exit 2; }
@@ -172,6 +189,8 @@ cleanup() {
   fi
   [[ -n "$GPID" ]] && stop_game "$GPID"
   GPID=""
+  local sampler
+  for sampler in "${SAMPLER_PIDS[@]+"${SAMPLER_PIDS[@]}"}"; do kill -TERM "$sampler" 2>/dev/null || true; done
   if (( LOCK_HELD )) && [[ "$(cat "$SHARPEMU_GAME_LOCK/pid" 2>/dev/null)" == "$$" ]]; then rm -rf "$SHARPEMU_GAME_LOCK"; fi
   LOCK_HELD=0
 }
@@ -234,6 +253,19 @@ sample_at=(); trace_at=(); fs_usage_at=()
 [[ -n "${SHARPEMU_TRACE_AT:-}" ]] && IFS=, read -r -a trace_at <<< "$SHARPEMU_TRACE_AT"
 [[ -n "${SHARPEMU_FS_USAGE_AT:-}" ]] && IFS=, read -r -a fs_usage_at <<< "$SHARPEMU_FS_USAGE_AT"
 EVIDENCE_PIDS=()
+SAMPLER_PIDS=()
+python3 "$REPO_ROOT/scripts/macos/memstat.py" sysmem --pid "$GPID" --every "$(setting SHARPEMU_SYSMEM_EVERY 5)" \
+  --out "$OUT/system-mem.log" > /dev/null 2>&1 &
+SAMPLER_PIDS+=($!)
+if [[ "$(setting SHARPEMU_MEMSTAT 0)" == 1 ]]; then
+  if MEMSTAT_BIN="$("$REPO_ROOT/scripts/macos/build-memstat.sh" 2>"$OUT/memstat.err")" && sudo -n true 2>>"$OUT/memstat.err"; then
+    python3 "$REPO_ROOT/scripts/macos/memstat.py" sample --pid "$GPID" --every "$(setting SHARPEMU_MEMSTAT_EVERY 15)" \
+      --out "$OUT/memstat.log" --bin "$MEMSTAT_BIN" >> "$OUT/memstat.err" 2>&1 &
+    SAMPLER_PIDS+=($!)
+  else
+    echo "memstat disabled: could not build memstat or passwordless sudo is unavailable (see memstat.err)" >&2
+  fi
+fi
 status=""
 while :; do
   now=$(( $(date +%s) - start ))

@@ -70,6 +70,7 @@ internal sealed partial class MetalImageCache
         }
 
         Interlocked.Increment(ref _imageSetVersion);
+        NoteReleasedForTelemetry(image, cause);
 
         ForgetDeferredRefreshesLocked(image);
 

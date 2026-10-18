@@ -47,6 +47,7 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         AllocationProfiler.StartIfRequested();
+        SharpEmu.Logging.MemoryTelemetry.Start();
 
         // Must precede anything that can touch HostPlatform/HostViewMemory.
         HostComposition.Register();

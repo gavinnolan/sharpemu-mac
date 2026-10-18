@@ -612,6 +612,7 @@ internal static partial class MetalV2Presenter
 
             var drawableTexture = MetalNative.Send(drawable, MetalNative.Selector("texture"));
             var commandBuffer = MetalNative.Send(_presentQueue, MetalNative.Selector("commandBuffer"));
+            MetalMemoryTelemetry.CommandBuffers.Add();
             if (drawableTexture == 0 || commandBuffer == 0)
             {
                 return;
@@ -620,6 +621,7 @@ internal static partial class MetalV2Presenter
             var pass = CreateClearPass(drawableTexture);
             var encoder = MetalNative.Send(
                 commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
+            MetalMemoryTelemetry.RenderEncoders.Add();
             if (encoder == 0)
             {
                 return;
@@ -671,6 +673,7 @@ internal static partial class MetalV2Presenter
 
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
+            MetalMemoryTelemetry.Commits.Add();
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
             PerfOverlay.RecordPresent();
             ReportPresentationStatistics();
