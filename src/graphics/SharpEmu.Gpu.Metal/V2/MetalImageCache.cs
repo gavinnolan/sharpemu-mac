@@ -146,6 +146,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         _owner = owner;
         _transfer = transfer;
         _guestMemory = guestMemory;
+        MetalBlockCubeDump.Peek ??= guestMemory.TryPeek;
         _pages = pages;
         _backing = backing;
         _memoryBudgetBytes = ResolveMemoryBudget();

@@ -359,6 +359,14 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
         ulong guestBase, ulong pieceSize)
     {
+        EncodeGuestToTextureCore(context, description, range, source, stencilSource, texture, guestBase, pieceSize);
+        MetalBlockCubeDump.Capture(context, _tiler, description, source, texture, guestBase, pieceSize);
+    }
+
+    private void EncodeGuestToTextureCore(IMetalSubmissionContext context, in ImageDescription description,
+        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
+        ulong guestBase, ulong pieceSize)
+    {
         // Per-sample tiled layouts are not decoded on either backend; the Vulkan cache
         // leaves a multisampled image untouched too.
         if (!Ready(context, description, source, texture, guestBase, pieceSize))
