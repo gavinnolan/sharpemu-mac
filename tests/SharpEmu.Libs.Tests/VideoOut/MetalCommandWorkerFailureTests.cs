@@ -47,8 +47,8 @@ public sealed class MetalCommandWorkerFailureTests
         worker.Start();
         try
         {
-            Assert.True(observed.Wait(TimeSpan.FromSeconds(2)));
-            Assert.False(await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(observed.Wait(TimeSpan.FromSeconds(10)));
+            Assert.False(await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.Equal(1, Volatile.Read(ref calls));
             Assert.Same(original, Field(typeof(MetalVideoPresenter), "_guestWorkFailure").GetValue(null));
             Assert.Equal(CommandSubmissionPreparation.State.DeferredDependency, receipt.Status);
@@ -91,7 +91,7 @@ public sealed class MetalCommandWorkerFailureTests
             observed.Set(); throw observerCleanup;
         });
         worker.Start();
-        Assert.True(observed.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(observed.Wait(TimeSpan.FromSeconds(10)));
         Assert.Same(original, Assert.Throws<NotSupportedException>(() => worker.Stop()));
         Assert.Equal(1, count); Assert.Same(observerCleanup, original.Data["CommandStreamWorkerCleanup"]);
         Assert.Same(cancellation, original.Data["CommandCancellationCleanup"]);

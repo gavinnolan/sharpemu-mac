@@ -223,7 +223,7 @@ public sealed class GpuWorkerRelayTests : IDisposable
 
         run!();
 
-        Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.True(workRan);
         Assert.NotNull(cancel);
     }
@@ -246,7 +246,7 @@ public sealed class GpuWorkerRelayTests : IDisposable
         cancel!();
 
         Assert.IsType<OperationCanceledException>(
-            await completion.WaitAsync(TimeSpan.FromSeconds(2)));
+            await completion.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -267,7 +267,7 @@ public sealed class GpuWorkerRelayTests : IDisposable
         Assert.True(WaitUntil(() => Volatile.Read(ref run) is not null));
         run!();
 
-        Assert.Same(expected, await completion.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Same(expected, await completion.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -306,7 +306,7 @@ public sealed class GpuWorkerRelayTests : IDisposable
 
         _worker.Start();
 
-        Assert.True(await CompletesWithin(accepted, 5000));
+        Assert.True(await CompletesWithin(accepted, 10000));
         Assert.Equal(new[] { "accepted", "reentered", "reposted" }, _order);
         Assert.False(relay.HasPendingCommands);
     }

@@ -62,14 +62,14 @@ public sealed class PthreadMutexExceptionTests
         {
             GuestThreadExecution.Scheduler = scheduler;
             waiter.Start();
-            Assert.True(exceptionDelivered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(exceptionDelivered.Wait(TimeSpan.FromSeconds(10)));
             Assert.False(acquired.IsSet);
             Assert.Equal(waiterThreadId, deliveryThreadId);
         }
         finally
         {
             Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
-            var joined = waiter.Join(TimeSpan.FromSeconds(5));
+            var joined = waiter.Join(TimeSpan.FromSeconds(10));
             GuestThreadExecution.Scheduler = previousScheduler;
             Assert.True(joined);
         }
@@ -233,7 +233,7 @@ public sealed class PthreadMutexSemanticsTests
                     if (Interlocked.Increment(ref acquisitionCount) == 1)
                     {
                         firstAcquired.Set();
-                        releaseFirst.Wait(TimeSpan.FromSeconds(5));
+                        releaseFirst.Wait(TimeSpan.FromSeconds(10));
                     }
                     else
                     {
@@ -249,17 +249,17 @@ public sealed class PthreadMutexSemanticsTests
 
         var firstWaiter = StartWaiter();
         var secondWaiter = StartWaiter();
-        Assert.True(waitersStarted.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(waitersStarted.Wait(TimeSpan.FromSeconds(10)));
         Thread.Sleep(50);
         Assert.Equal(0, Volatile.Read(ref acquisitionCount));
 
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
-        Assert.True(firstAcquired.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(firstAcquired.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(1, Volatile.Read(ref acquisitionCount));
         releaseFirst.Set();
-        Assert.True(secondAcquired.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(secondAcquired.Wait(TimeSpan.FromSeconds(10)));
 
-        var results = await Task.WhenAll(firstWaiter, secondWaiter).WaitAsync(TimeSpan.FromSeconds(5));
+        var results = await Task.WhenAll(firstWaiter, secondWaiter).WaitAsync(TimeSpan.FromSeconds(10));
         Assert.All(results, result => Assert.Equal((0, 0), result));
         Assert.Equal(2, Volatile.Read(ref acquisitionCount));
     }

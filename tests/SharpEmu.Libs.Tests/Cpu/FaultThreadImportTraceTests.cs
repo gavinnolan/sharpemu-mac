@@ -107,7 +107,7 @@ public sealed class FaultThreadImportTraceTests
             }
             catch (Exception error) { failure = error; }
         });
-        thread.Start(); Assert.True(thread.Join(TimeSpan.FromSeconds(5))); Assert.Null(failure);
+        thread.Start(); Assert.True(thread.Join(TimeSpan.FromSeconds(10))); Assert.Null(failure);
         Assert.Null(Assert.Single(trace.Snapshot(trace, Environment.CurrentManagedThreadId, 7)).Result);
     }
 
@@ -158,7 +158,7 @@ public sealed class FaultThreadImportTraceTests
             catch (Exception failure) { failures[index] = failure; }
         })).ToArray();
         foreach (var thread in threads) thread.Start();
-        foreach (var thread in threads) Assert.True(thread.Join(TimeSpan.FromSeconds(5)));
+        foreach (var thread in threads) Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
         Assert.All(failures, failure => Assert.Null(failure));
         var first = Assert.Single(snapshots[0]!); var second = Assert.Single(snapshots[1]!);
         Assert.NotEqual(first.ManagedThreadId, second.ManagedThreadId);

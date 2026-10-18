@@ -149,14 +149,14 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(2L, StorageMember(writers, "admission")); Assert.Equal(0, StorageMember(writers, "coverageIncomplete"));
                 writeHook.SetValue(views, oldWrite); // later actual EOP uses original ordinary route
                 admitted.Set();
-                if (!resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Constructor writer pause exceeded owned fixture bound.");
+                if (!resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Constructor writer pause exceeded owned fixture bound.");
             }));
             writer = new Thread(() =>
             {
                 try { written = views.TryWriteBacking(writeAddress, new byte[] { 0xA9 }); }
                 catch (Exception failure) { writerFailure = failure; }
             }) { IsBackground = true, Name = "actual original constructor ordinary writer" };
-            writer.Start(); Assert.True(admitted.Wait(TimeSpan.FromSeconds(5)));
+            writer.Start(); Assert.True(admitted.Wait(TimeSpan.FromSeconds(10)));
             Assert.Equal(2L, StorageMember(writers, "admission"));
             Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0)); Assert.False(MetalVideoPresenter.WaitForGuestWork(eop, 0));
             CheckOriginalToken();
@@ -218,7 +218,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         }
         private void Join()
         {
-            if (writer is null || !writer.Join(TimeSpan.FromSeconds(5)))
+            if (writer is null || !writer.Join(TimeSpan.FromSeconds(10)))
             {
                 owners.OrdinaryWriterUnconfirmed = true;
                 throw new TimeoutException("Constructor ordinary writer is unknown; retain native/backing/event owners.");

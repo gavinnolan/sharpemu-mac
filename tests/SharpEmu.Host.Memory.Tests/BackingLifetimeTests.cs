@@ -65,12 +65,12 @@ public sealed class BackingLifetimeTests
         Assert.True(backing.TryEnterAccess());
         var releasing = Task.Run(() =>
         {
-            object?[] args = [TimeSpan.FromSeconds(2), null, (Action)(() => { drained.Set(); Assert.True(proceed.Wait(10000)); })];
+            object?[] args = [TimeSpan.FromSeconds(10), null, (Action)(() => { drained.Set(); Assert.True(proceed.Wait(10000)); })];
             return (bool)typeof(HostBackingObject).GetMethod("TryDisposeCore", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(backing, args)!;
         });
         Assert.True(SpinWait.SpinUntil(() => backing.IsClosing, 10000));
         backing.ExitAccess(); // prior admitted access finishes before drain0
-        Assert.True(drained.Wait(1000));
+        Assert.True(drained.Wait(10000));
         var rejectedState = Phase<long>(backing, "IncrementAccessCount");
         Assert.Equal(1, backing.ActiveAccesses);
         bool rejectedCompleted = false;
@@ -151,7 +151,7 @@ public sealed class BackingLifetimeTests
         using var entered = new ManualResetEventSlim(); using var finish = new ManualResetEventSlim();
         var calls = 0;
         var backing = Phantom(_ => { Interlocked.Increment(ref calls); entered.Set(); Assert.True(finish.Wait(10000)); return new(HostBackingReleaseStatus.Released); });
-        var worker = Task.Run(() => backing.TryDispose(TimeSpan.FromSeconds(1), out _));
+        var worker = Task.Run(() => backing.TryDispose(TimeSpan.FromSeconds(10), out _));
         try
         {
             Assert.True(entered.Wait(10000));

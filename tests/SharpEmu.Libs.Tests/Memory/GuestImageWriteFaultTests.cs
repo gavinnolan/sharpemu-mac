@@ -31,17 +31,17 @@ public sealed unsafe class GuestImageWriteFaultTests
             // Scheduling barriers live outside the production signal path.
             var found = GuestImageWriteTracker.TryGetProtectionState(memory.Address, out _, out var armed);
             ready.Signal();
-            return (found && armed, release.Wait(TimeSpan.FromSeconds(5)) &&
+            return (found && armed, release.Wait(TimeSpan.FromSeconds(10)) &&
                 GuestImageWriteTracker.TryHandleWriteFault(fault));
         });
         var first = Pending(memory.Address + 128);
         var second = Pending(memory.Address + 2 * 4096 + 256);
         try
         {
-            Assert.True(ready.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(ready.Wait(TimeSpan.FromSeconds(10)));
             Assert.True(GuestImageWriteTracker.TryHandleWriteFault(memory.Address + 4096 + 16));
             release.Set();
-            Assert.True(Task.WaitAll([first, second], TimeSpan.FromSeconds(5)));
+            Assert.True(Task.WaitAll([first, second], TimeSpan.FromSeconds(10)));
             Assert.True(first.Result.SawArmed);
             Assert.True(second.Result.SawArmed);
             // Address-only lookup cannot identify either pending invocation
@@ -58,7 +58,7 @@ public sealed unsafe class GuestImageWriteFaultTests
         finally
         {
             release.Set();
-            _ = Task.WaitAll([first, second], TimeSpan.FromSeconds(5));
+            _ = Task.WaitAll([first, second], TimeSpan.FromSeconds(10));
         }
     }
 

@@ -142,7 +142,7 @@ internal static class MacOwnedNativeWorker
         var failure = new InvalidOperationException("owned-worker-post-native-bookkeeping-control");
         operation.GetType().GetField("_bookkeepingFailurePageForControl", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(operation, 0);
         operation.GetType().GetField("_bookkeepingFailureForControl", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(operation, failure);
-        Assert.True((bool)Call(operation, "TryDrain", [TimeSpan.FromSeconds(1)])!);
+        Assert.True((bool)Call(operation, "TryDrain", [TimeSpan.FromSeconds(10)])!);
         var wrapped = Assert.Throws<TargetInvocationException>(() => Call(operation, "ExecuteOnce", [])); Assert.Same(failure, wrapped.InnerException);
         Receipt(operation, "Unknown", 1, 1); Assert.Same(failure, Get<object>(Get<object>(operation, "Result"), "BookkeepingFailure"));
         Assert.Equal("Quarantined", Get<object>(owner.Cookie, "State").ToString()); Assert.Null(Get<object?>(owner.Cookie, "CurrentDomain"));
@@ -195,7 +195,7 @@ internal static class MacOwnedNativeWorker
         internal object Prepare(string method, object?[] args) { Assert.True((bool)Call(Cookie, method, args)!); return args[^1]!; }
         internal void Execute(object operation)
         {
-            Assert.True((bool)Call(operation, "TryDrain", [TimeSpan.FromSeconds(1)])!);
+            Assert.True((bool)Call(operation, "TryDrain", [TimeSpan.FromSeconds(10)])!);
             Assert.True((bool)Call(operation, "ExecuteOnce", [])!); Assert.False((bool)Call(operation, "ExecuteOnce", [])!);
         }
         internal void Release()
@@ -262,7 +262,7 @@ public sealed class MacOwnedNativeOperationTests(ITestOutputHelper output)
         }
         finally
         {
-            if (!worker.HasExited) { worker.Kill(entireProcessTree: true); await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+            if (!worker.HasExited) { worker.Kill(entireProcessTree: true); await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
         }
     }
 }

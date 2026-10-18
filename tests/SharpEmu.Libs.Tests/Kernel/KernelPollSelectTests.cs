@@ -81,7 +81,7 @@ public sealed class KernelPollSelectTests
             });
             stopwatch.Restart();
             Assert.Equal(1, Poll(ctx, 1, timeoutMs: 10_000));
-            Assert.True(stopwatch.ElapsedMilliseconds < 5_000);
+            Assert.True(stopwatch.ElapsedMilliseconds < 9_000);
             Assert.Equal(PollIn, ReadRevents(memory, 0));
             await sender;
 

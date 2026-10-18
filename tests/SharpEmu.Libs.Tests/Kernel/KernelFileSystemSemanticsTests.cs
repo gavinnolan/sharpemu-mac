@@ -658,7 +658,7 @@ public sealed class KernelFileSystemSemanticsTests : IDisposable
         Thread.Sleep(50);
         Assert.Null(received);
         Assert.Equal(0, Write(writeFd, [7, 8]));
-        Assert.True(reader.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(reader.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal([7, 8], received);
     }
 

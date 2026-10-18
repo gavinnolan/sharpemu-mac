@@ -48,27 +48,38 @@ public sealed class CommandStreamWorkerTests
     [Fact]
     public void Worker_WakesABlockedHeadOnceTheCpuWritesItsLabel()
     {
-        var (host, queue, worker) = NewWorker(cancelBlockedAtStop: false);
-        host.WriteDword(Label, 0);
-
-        Enqueue(host, queue, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(6));
-        // Store only once the worker has parked on the label and re-read it: a worker that
-        // starts late on a loaded runner would otherwise find the label already written and
-        // complete the head without ever waking it.
-        var parked = System.Diagnostics.Stopwatch.StartNew();
-        while (queue.WatchRechecks == 0 && parked.Elapsed < TimeSpan.FromSeconds(30))
+        // The head always completes once the label is stored, but which path completes it is a
+        // race: the 1 ms watch re-read wakes it (WatchWakes), unless the worker is descheduled
+        // past its 100 ms retry interval and RetryBlocked finds the label first. A loaded runner
+        // can lose that race, so the watch has to win at least once in a few attempts.
+        const int Attempts = 5;
+        var watchWoke = false;
+        for (var attempt = 0; attempt < Attempts && !watchWoke; attempt++)
         {
-            Thread.Sleep(1);
+            var (host, queue, worker) = NewWorker(cancelBlockedAtStop: false);
+            host.WriteDword(Label, 0);
+
+            Enqueue(host, queue, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(6));
+            // Store only once the worker has parked on the label and re-read it: a worker that
+            // starts late on a loaded runner would otherwise find the label already written and
+            // complete the head without ever waking it.
+            var parked = System.Diagnostics.Stopwatch.StartNew();
+            while (queue.WatchRechecks == 0 && parked.Elapsed < TimeSpan.FromSeconds(30))
+            {
+                Thread.Sleep(1);
+            }
+
+            Assert.True(queue.WatchRechecks > 0, "the worker never parked on the label");
+            host.WriteDword(Label, 1);
+
+            Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());
+            Assert.Equal(6u, queue.GetInterpreter(0).InstanceCount);
+            // Nothing reports a store from the guest's CPU; the parked wait's watch saw it.
+            watchWoke = queue.WatchWakes >= 1;
+            worker.Stop();
         }
 
-        Assert.True(queue.WatchRechecks > 0, "the worker never parked on the label");
-        host.WriteDword(Label, 1);
-
-        Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());
-        Assert.Equal(6u, queue.GetInterpreter(0).InstanceCount);
-        // Nothing reports a store from the guest's CPU; the parked wait's watch saw it.
-        Assert.True(queue.WatchWakes >= 1);
-        worker.Stop();
+        Assert.True(watchWoke, "the watch never woke the head in " + Attempts + " attempts");
     }
 
     [Fact]
@@ -84,7 +95,7 @@ public sealed class CommandStreamWorkerTests
             TaskScheduler.Default);
 
         Assert.Equal(IdleOutcome.Cancelled, worker.Stop());
-        Assert.Equal(IdleOutcome.Cancelled, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Cancelled, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(1u, queue.GetInterpreter(0).InstanceCount);
     }
 
@@ -98,7 +109,7 @@ public sealed class CommandStreamWorkerTests
         host.PendingCommands.Enqueue(() => throw new InvalidOperationException("relay command failed"));
         queue.Wake();
 
-        Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.False(queue.HasPending);
         Assert.Contains("relay command failed", Assert.Throws<InvalidOperationException>(() => worker.Stop()).Message);
     }

@@ -13,7 +13,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 public sealed class MetalCompileSchedulerTests
 {
     private static readonly TimeSpan Held = TimeSpan.FromMilliseconds(150);
-    private static readonly TimeSpan Released = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan Released = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan Forever = TimeSpan.FromHours(1);
 
     [Fact]
@@ -60,8 +60,9 @@ public sealed class MetalCompileSchedulerTests
         var quiet = TimeSpan.FromMilliseconds(300);
         var scheduler = new MetalCompileScheduler(4, quiet, Forever);
         scheduler.RuntimeStarted();
-        scheduler.RuntimeDone();
+        // Taken before the quiet period starts, so a descheduled thread cannot shorten the elapsed time.
         var started = Stopwatch.GetTimestamp();
+        scheduler.RuntimeDone();
         using var prewarm = scheduler.EnterPrewarm(static () => false);
         Assert.True(prewarm.Entered);
         Assert.True(Stopwatch.GetElapsedTime(started) >= quiet - TimeSpan.FromMilliseconds(20));

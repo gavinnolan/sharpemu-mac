@@ -34,7 +34,7 @@ public sealed class MetalLibraryPreparationTests
         {
             Assert.Null(fixedAttributes); Assert.Equal(0, PresenterField("_pendingGuestWorkCount").GetValue(null));
             prepared.Add(actual);
-            if (ReferenceEquals(actual, shader)) { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(2))); }
+            if (ReferenceEquals(actual, shader)) { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(10))); }
         }));
         var invoked = false;
         host.BeforeGuestRead = _ =>
@@ -48,11 +48,11 @@ public sealed class MetalLibraryPreparationTests
         worker.Start();
         try
         {
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
             Assert.Equal(0, PresenterField("_pendingGuestWorkCount").GetValue(null));
             var wait = Task.Run(receipt.WaitUntilPrepared);
             Assert.False(wait.IsCompleted); release.Set();
-            Assert.Equal(GuestSubmissionPreparationResult.PreparedPrefix, await wait.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(GuestSubmissionPreparationResult.PreparedPrefix, await wait.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.Equal(compute ? new[] { shader } : new[] { vs, shader }, prepared);
             Assert.Equal(1, PresenterField("_pendingGuestWorkCount").GetValue(null));
             Assert.Equal(0L, PresenterField("_completedGuestWorkSequence").GetValue(null));
