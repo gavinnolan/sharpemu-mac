@@ -1,6 +1,6 @@
 # GOAL.md Phase 1 report: memory usage (DRAFT, in progress)
 
-Status: batch 3 merged (main d91ee58a8); the 30-minute exit-criteria session is pending. Numbers below are from the runs so far.
+Status: STOPPED by the user on 2026-10-18 (game launches drive the machine OOM). Batch 3 merged (main 630fc822b) but never measured; Phase 1 exit criteria not met.
 
 ## Exit criteria (GOAL.md)
 Peak and steady-state footprint substantially lower; no growth over a 30-minute session; no memory-pressure swapping/compression during gameplay; before/after numbers and the effect on boot time and FPS.
