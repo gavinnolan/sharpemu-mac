@@ -4,6 +4,8 @@
 """Glue around the memstat tool (memstat.c) and the system pressure log.
 
   memstat.py sample  --pid P --every S --out memstat.log      run memstat on P every S seconds until P exits
+  memstat.py sample  ... --zero-at 60,120                     also scan guest_shm for zero pages at the first sample at or after those seconds
+  memstat.py zero    --pid P --out file --bin memstat         one memstat --zero-scan sample, written to file
   memstat.py sysmem  --pid P --every S --out system-mem.log   vm_stat / swap / pressure deltas every S seconds
   memstat.py summary RUN_DIR                                  print what ds-metrics.py will report
 
@@ -11,6 +13,8 @@ memstat needs task_for_pid, so `sample` runs it through passwordless `sudo -n` (
 succeed; with no sudo and no get-task-allow on the target the log stays empty and the run goes on).
 Every sample is one JSON line, written by memstat.c: unique (de-duplicated per VM object) resident /
 dirty / swapped bytes in total and per category, plus the kernel's phys_footprint for comparison.
+A --zero-scan sample adds "zero_scan": how many resident guest_shm pages (per 16 KiB host page) are all
+zero, and a histogram of the zero fraction per 32 MiB granule (see memstat.c).
 
 system-mem.log is one line per interval, "key=value" fields:
   t=<epoch> dt=<s> pageins= pageouts= swapins= swapouts= compressions= decompressions=  (deltas over dt)
@@ -130,17 +134,33 @@ def alive(pid):
         return True
 
 
-def run_sample(pid, every, out, binary):
+def run_sample(pid, every, out, binary, zero_at=()):
     out = Path(out)
+    zero_at = sorted(zero_at)
+    started = time.time()
     while alive(pid):
         began = time.time()
-        proc = subprocess.run(["sudo", "-n", binary, str(pid)], capture_output=True, text=True, timeout=60)
+        zero = bool(zero_at) and began - started >= zero_at[0]
+        if zero:
+            zero_at.pop(0)
+        proc = subprocess.run(["sudo", "-n", binary, str(pid)] + (["--zero-scan"] if zero else []),
+                              capture_output=True, text=True, timeout=300 if zero else 60)
         if proc.returncode == 0 and proc.stdout.strip().startswith("{"):
             with out.open("a") as handle:
                 handle.write(proc.stdout.strip() + "\n")
         elif proc.returncode != 0 and not out.exists():
             out.with_suffix(".err").write_text(proc.stderr)
         time.sleep(max(0.0, every - (time.time() - began)))
+    return 0
+
+
+def run_zero(pid, out, binary):
+    """One memstat --zero-scan sample, written to out (a single JSON line)."""
+    proc = subprocess.run(["sudo", "-n", binary, str(pid), "--zero-scan"], capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0 or not proc.stdout.strip().startswith("{"):
+        sys.stderr.write(proc.stderr)
+        return proc.returncode or 1
+    Path(out).write_text(proc.stdout.strip() + "\n")
     return 0
 
 
@@ -193,18 +213,24 @@ def run_sysmem(pid, every, out):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("sample", "sysmem"):
+    for name in ("sample", "sysmem", "zero"):
         p = sub.add_parser(name)
         p.add_argument("--pid", type=int, required=True)
-        p.add_argument("--every", type=float, default=15.0 if name == "sample" else 5.0)
+        if name != "zero":
+            p.add_argument("--every", type=float, default=15.0 if name == "sample" else 5.0)
         p.add_argument("--out", required=True)
-        if name == "sample":
+        if name != "sysmem":
             p.add_argument("--bin", required=True)
+        if name == "sample":
+            p.add_argument("--zero-at", default="", help="comma list of seconds since start")
     p = sub.add_parser("summary")
     p.add_argument("run")
     args = parser.parse_args()
     if args.command == "sample":
-        return run_sample(args.pid, args.every, args.out, args.bin)
+        zero_at = [float(v) for v in args.zero_at.split(",") if v.strip()]
+        return run_sample(args.pid, args.every, args.out, args.bin, zero_at)
+    if args.command == "zero":
+        return run_zero(args.pid, args.out, args.bin)
     if args.command == "sysmem":
         return run_sysmem(args.pid, args.every, args.out)
     run = Path(args.run)

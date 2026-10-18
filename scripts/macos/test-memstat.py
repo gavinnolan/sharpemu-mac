@@ -5,8 +5,10 @@
 
 The self-test builds memstat, starts a child that maps one 64 MiB shared-memory object three times
 and touches 40 MiB of it through two of the mappings, and expects memstat to count the object once
-(40 MiB unique, 120 MiB when every mapping is summed). It needs passwordless `sudo -n` for
-task_for_pid and is skipped without it.
+(40 MiB unique, 120 MiB when every mapping is summed). A second test runs `--zero-scan` on a child
+with a 128 MiB object (three 32 MiB granules written: all nonzero, all explicit zeros, 62.5% zeros;
+the fourth untouched) and expects 96 MiB resident, 52 MiB zero, and the untouched tail never read.
+It needs passwordless `sudo -n` for task_for_pid and is skipped without it.
 """
 import importlib.util
 import json
@@ -38,6 +40,21 @@ os.ftruncate(fd, size)
 views = [libc.mmap(None, size, 3, 1, fd, 0) for _ in range(3)]
 ctypes.memset(views[0], 1, 32 * MB)            # first 32 MiB through view 0
 ctypes.memset(views[1] + 24 * MB, 2, 16 * MB)  # 24..40 MiB through view 1: 8 MiB overlap
+print("ready", flush=True)
+time.sleep(60)
+'''
+
+ZERO_CHILD = CHILD.split("size = 64 * MB")[0] + r'''
+size = 128 * MB
+name = ("/mz-%d" % os.getpid()).encode()
+fd = libc.shm_open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+libc.shm_unlink(name)
+os.ftruncate(fd, size)
+views = [libc.mmap(None, size, 3, 1, fd, 0) for _ in range(3)]
+ctypes.memset(views[0], 1, 32 * MB)                  # granule 0: all nonzero
+ctypes.memset(views[1] + 32 * MB, 0, 32 * MB)        # granule 1: zeros written explicitly (resident, all zero)
+ctypes.memset(views[2] + 64 * MB, 0, 20 * MB)        # granule 2: 20 MiB zeros ...
+ctypes.memset(views[0] + 84 * MB, 3, 12 * MB)        # ... then 12 MiB nonzero; granule 3 untouched
 print("ready", flush=True)
 time.sleep(60)
 '''
@@ -129,6 +146,37 @@ class ToolSelfTest(unittest.TestCase):
             self.assertGreaterEqual(shm["naive_resident"], 120 * MB)  # summing the three mappings
             self.assertGreater(row["task"]["phys_footprint"], 40 * MB)
             self.assertLess(elapsed, 2.0)
+        finally:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+
+
+    def test_zero_scan_counts_resident_zero_pages_once_and_skips_untouched_pages(self):
+        binary = subprocess.run([str(HERE / "build-memstat.sh")], capture_output=True, text=True, check=True).stdout.strip()
+        child = subprocess.Popen([sys.executable, "-c", ZERO_CHILD], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual("ready", child.stdout.readline().strip())
+            proc = subprocess.run(["sudo", "-n", binary, str(child.pid), "--zero-scan"], capture_output=True, text=True, check=True)
+            row = json.loads(proc.stdout)
+            scan = row["zero_scan"]
+            slack = 256 * 1024  # the interpreter's own few KiB of shared memory
+            self.assertEqual(16384, scan["page_size"])
+            self.assertEqual(0, scan["read_errors"])
+            self.assertLess(scan["resident_pages"] * 16384 - 96 * MB, slack)
+            self.assertGreaterEqual(scan["resident_pages"] * 16384, 96 * MB)  # once, not 3 x; the untouched 32 MiB is not read
+            self.assertLess(scan["zero_bytes"] - 52 * MB, slack)
+            self.assertGreaterEqual(scan["zero_bytes"], 52 * MB)
+            self.assertEqual(scan["zero_pages"] * 16384, scan["zero_bytes"])
+            self.assertEqual(scan["resident_pages"] * 16384, scan["scanned_bytes"])
+            self.assertEqual(32, scan["granule_mib"])
+            granules = scan["granules"]  # the helper's three resident granules; the tail granule has no resident pages
+            self.assertGreaterEqual(granules["zero_lt50"], 1)
+            self.assertGreaterEqual(granules["zero_gt90"], 1)
+            self.assertGreaterEqual(granules["zero_50_90"], 1)
+            self.assertLessEqual(sum(granules.values()), 3 + 4)  # plus a few tiny foreign shm granules
+            plain = subprocess.run(["sudo", "-n", binary, str(child.pid)], capture_output=True, text=True, check=True)
+            self.assertNotIn("zero_scan", json.loads(plain.stdout))
         finally:
             child.kill()
             child.wait()
