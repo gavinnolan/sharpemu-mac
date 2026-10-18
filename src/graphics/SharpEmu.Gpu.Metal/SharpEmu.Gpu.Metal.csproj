@@ -33,6 +33,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
     <InternalsVisibleTo Include="SharpEmu.Gpu.Metal.Tests" />
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Metal.LeakTests" />
     <InternalsVisibleTo Include="SharpEmu.Tools.ShaderCompileBench" />
   </ItemGroup>
 
