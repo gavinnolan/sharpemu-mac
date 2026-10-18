@@ -166,6 +166,57 @@ public sealed class DirectImageTableTests
         Assert.Single(snapshot.Images, image => image.All(word => word == 0));
     }
 
+    // Word 2 bit 31 is RESOURCE_LEVEL, a defined field, not a reserved bit: a candidate with
+    // it set (Demon's Souls' reflection-probe cubes) stays a real descriptor.
+    [Fact]
+    public void CandidateWithTheResourceLevelBitIsKept()
+    {
+        var plan = ShaderResourcePlan.Extract(CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 2);
+        bool Read(ulong address, out uint word)
+        {
+            var success = ReadWaveIndexedMemory(address, out word);
+            if (address == 0x1000 + 0x100 + 5 * 32 + 8) word = 0x8000_0000u;
+            return success;
+        }
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.DoesNotContain(snapshot.Images, image => image.All(word => word == 0));
+        Assert.Single(snapshot.Images, image => image[2] == 0x8000_0000u);
+    }
+
+    // A DIM_CUBE access through a table holding a cube and a 2D placeholder: the placeholder
+    // cannot be read as a cube, so it binds null instead of failing the specialization.
+    [Fact]
+    public void CubeAccessNullsANonCubeCandidate()
+    {
+        var program = CreateWaveIndexedDescriptorProgram();
+        program = program with
+        {
+            Instructions = program.Instructions.Select(instruction => instruction.Pc == 64
+                ? Image(64, "ImageLoad", 4, dmask: 1, vectorAddress: 1, dimension: 3)
+                : instruction).ToArray(),
+        };
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        Assert.True(plan.Info.Images[0].CubeAccess);
+        bool Read(ulong address, out uint word)
+        {
+            var success = ReadWaveIndexedMemory(address, out word);
+            if (address == 0x1000 + 0x100 + 2 * 32 + 12) word = 0xFACu | (11u << 28);
+            if (address == 0x1000 + 0x100 + 2 * 32 + 16) word = 5;
+            return success;
+        }
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.Single(snapshot.Images, image => image.All(word => word == 0));
+        Assert.Single(snapshot.Images, image => image[3] >> 28 == 11);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
