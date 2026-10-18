@@ -12,9 +12,9 @@ namespace SharpEmu.Platform.MacOS.Input;
 /// lightbar or adaptive triggers) because a running session owns the pad's outputs.
 /// </summary>
 [SupportedOSPlatform("macos")]
-public sealed class MacLauncherGamepadProvider : ILauncherGamepadProvider
+public sealed class MacGameControllerLauncherGamepadProvider : ILauncherGamepadProvider
 {
-    public static MacLauncherGamepadProvider Instance { get; } = new();
+    public static MacGameControllerLauncherGamepadProvider Instance { get; } = new();
 
     private readonly object _gate = new();
     private MacGameControllerGamepad? _gamepad;

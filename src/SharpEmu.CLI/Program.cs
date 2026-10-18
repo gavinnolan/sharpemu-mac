@@ -105,7 +105,7 @@ internal static partial class Program
 
         if (args.Length == 0)
         {
-            return LauncherComposition.Run();
+            return SharpEmu.GUI.GuiLauncher.Run();
         }
 
         // The executable uses the GUI subsystem, so CLI mode has to connect

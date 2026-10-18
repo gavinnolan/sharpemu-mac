@@ -34,7 +34,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
          SDL3 is forbidden in macOS outputs. The graphics/platform package split
          removed SDL from the macOS closure; audio is CoreAudio and there
          are no remaining SDL exceptions. -->
-    <SharpEmuMacForbidPortableUi Condition="'$(SharpEmuMacForbidPortableUi)' == ''">true</SharpEmuMacForbidPortableUi>
     <SharpEmuMacForbidSdl Condition="'$(SharpEmuMacForbidSdl)' == ''">true</SharpEmuMacForbidSdl>
     <!-- The strip hook, for the SDL-removal workstream and for any transitive
          package that insists on shipping a forbidden native. Off by default on
@@ -47,7 +46,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SharpEmuMacOutputCheckScript>$(RepoRoot)build/platforms/macos/check-macos-output.sh</SharpEmuMacOutputCheckScript>
     <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacStripForbiddenAssets)' == 'true'">$(_SharpEmuMacCheckFlags) --strip</_SharpEmuMacCheckFlags>
     <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacForbidSdl)' == 'true'">$(_SharpEmuMacCheckFlags) --forbid-sdl</_SharpEmuMacCheckFlags>
-    <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacForbidPortableUi)' == 'true'">$(_SharpEmuMacCheckFlags) --forbid-portable-ui</_SharpEmuMacCheckFlags>
   </PropertyGroup>
 
   <!-- Runs after the publish copy and after this project's own
@@ -71,9 +69,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <!-- their presence in an osx-* closure means a reference leaked back. This -->
   <!-- runs before single-file bundling, so it sees the real closure even     -->
   <!-- though the finished artifact is one compressed executable.            -->
-  <!--                                                                       -->
-  <!-- Native Mac frontend mode excludes every Avalonia/Skia/HarfBuzz asset, -->
-  <!-- including compressed managed payloads and native font dependencies.   -->
   <!-- ===================================================================== -->
   <!-- The host-platform split moved SdlHostAudio into
        SharpEmu.Adapters.Sdl and dropped ppy.SDL3-CS from SharpEmu.HLE, so the
@@ -96,20 +91,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                    Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('moltenvk'))
                    Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().StartsWith('libvulkan'))" />
       <_SharpEmuMacForbiddenClosure Include="@(ResolvedFileToPublish->'%(Filename)%(Extension)')"
-        Condition="'$(SharpEmuMacForbidPortableUi)' == 'true'
-                   And ($([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('avalonia'))
-                        Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('skiasharp'))
-                        Or $([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('harfbuzz'))
-                        Or '%(Filename)' == 'SharpEmu.GUI'
-                        Or '%(Filename)' == 'SharpEmu.Fonts.Skia')" />
-      <_SharpEmuMacForbiddenClosure Include="@(ResolvedFileToPublish->'%(Filename)%(Extension)')"
         Condition="'$(SharpEmuMacForbidSdl)' == 'true'
                    And $([System.String]::Copy('%(Filename)').ToLowerInvariant().Contains('sdl3'))" />
     </ItemGroup>
     <Error Condition="'@(_SharpEmuMacForbiddenClosure)' != ''"
-      Text="macOS publish-closure policy violation: @(_SharpEmuMacForbiddenClosure, ', '). The macOS build is Metal/AppKit/GameController/CoreAudio only, so no Vulkan, MoltenVK or SDL dependency (or portable UI/font dependency in native-frontend mode) may enter an osx-* publish closure. Find the project or package reference that pulled it in and scope it to win-*/linux-*; see build/platforms/macos/macos.targets." />
+      Text="macOS publish-closure policy violation: @(_SharpEmuMacForbiddenClosure, ', '). The macOS build is Metal/AppKit/GameController/CoreAudio only, so no Vulkan, MoltenVK or SDL dependency may enter an osx-* publish closure. Find the project or package reference that pulled it in and scope it to win-*/linux-*; see build/platforms/macos/macos.targets." />
     <Message Condition="'@(_SharpEmuMacForbiddenClosure)' == ''" Importance="high"
-      Text="macOS publish closure: clean (GPU/SDL and selected frontend dependency policies passed)." />
+      Text="macOS publish closure: clean (GPU/SDL dependency policies passed)." />
   </Target>
 
   <!-- Deliberately not hooked to `Build`. The incremental build directory is a

@@ -7,6 +7,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <ProjectReference Include="../SharpEmu.Application/SharpEmu.Application.csproj" />
+    <ProjectReference Include="../SharpEmu.GUI/SharpEmu.GUI.csproj" />
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\SharpEmu.Debugger\SharpEmu.Debugger.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
@@ -39,7 +40,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
-    <ProjectReference Include="../platforms/macos/SharpEmu.Launcher.MacOS/SharpEmu.Launcher.MacOS.csproj" />
     <ProjectReference Include="..\platforms\macos\SharpEmu.Host.MacOS\SharpEmu.Host.MacOS.csproj" />
     <ProjectReference Include="..\platforms\macos\SharpEmu.Fonts.CoreTextMac\SharpEmu.Fonts.CoreTextMac.csproj" />
   </ItemGroup>
@@ -50,8 +50,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\platforms\windows\SharpEmu.Host.Windows\SharpEmu.Host.Windows.csproj" />
   </ItemGroup>
 
+  <!-- Guest font rasterizer. macOS uses CoreText (referenced above); the GUI's
+       own text rendering comes from Avalonia.Skia on every platform. -->
   <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux' Or '$(_SharpEmuHostOS)' == 'windows'">
-    <ProjectReference Include="../SharpEmu.GUI/SharpEmu.GUI.csproj" />
     <ProjectReference Include="..\adapters\SharpEmu.Fonts.Skia\SharpEmu.Fonts.Skia.csproj" />
   </ItemGroup>
 
@@ -170,13 +171,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
     <!-- Nothing in the emulator reads culture data: every ToString/TryParse in
          src passes CultureInfo.InvariantCulture explicitly, there is no
-         `new CultureInfo(...)` anywhere, the UI strings come from the project's
-         own JSON rather than resource satellites, and the macOS bundle carries
-         none of the NuGet natives that want ICU (no Avalonia, no Skia). Invariant
-         mode therefore drops the libicucore load from process startup at no
-         behavioural cost. The one observable change is that culture-sensitive
-         string ordering becomes ordinal, which affects list ordering only.
-         Scoped to osx-* so the Windows/Linux GUI builds keep full ICU. -->
+         `new CultureInfo(...)` anywhere, and the UI strings come from the
+         project's own JSON rather than resource satellites. Avalonia does not
+         need ICU either: it ships its own Unicode tables, shapes text with
+         HarfBuzz and renders with Skia. Invariant mode therefore drops the
+         libicucore load from process startup at no behavioural cost. The one
+         observable change is that culture-sensitive string ordering (the
+         trophy hub's name sort) becomes ordinal, which affects list ordering
+         only. Scoped to osx-* so the Windows/Linux builds keep full ICU. -->
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
