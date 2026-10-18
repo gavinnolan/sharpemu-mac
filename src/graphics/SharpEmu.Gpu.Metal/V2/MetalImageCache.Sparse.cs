@@ -58,7 +58,9 @@ internal sealed class MetalSparseResidency(nint texture, nint heap, ulong heapBy
 // formats on Apple GPUs, so only images whose shape lacks both qualify; a usage the image
 // later needs replaces it with an ordinary texture through the usual path.
 //
-// SHARPEMU_METAL_V2_SPARSE_LARGE=0 makes every texture an ordinary one.
+// Opt-in (SHARPEMU_METAL_V2_SPARSE_LARGE=1) until a GPU-worker use-after-free it causes in
+// Demon's Souls is fixed (runs 20261018-205945 and -210405 crashed in objc_msgSend; the same
+// build with it off ran clean).
 internal sealed unsafe partial class MetalImageCache
 {
     private const ulong DefaultSparseMinimumBytes = 64UL * 1024 * 1024;
@@ -70,7 +72,7 @@ internal sealed unsafe partial class MetalImageCache
     private const nuint AssociationRetain = 0x301;
 
     private static readonly bool SparseLargeDefault =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SPARSE_LARGE") != "0";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SPARSE_LARGE") == "1";
 
     private static readonly nint SelSupportsFamily = MetalNative.Selector("supportsFamily:");
     private static readonly nint SelSparseTileSize = MetalNative.Selector("sparseTileSizeWithTextureType:pixelFormat:sampleCount:");
