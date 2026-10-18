@@ -46,6 +46,12 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // A GUI-launched emulator on macOS: lead a process group and exit with the GUI.
+        if (args.Length > 0)
+        {
+            OwnerProcessWatch.StartIfRequested();
+        }
+
         AllocationProfiler.StartIfRequested();
         SharpEmu.Logging.MemoryTelemetry.Start();
 
