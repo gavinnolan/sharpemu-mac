@@ -851,13 +851,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 continue;
             }
 
-            foreach (var band in BandsWithin(transfer, guestBase, limit))
-            {
-                var rebased = band;
-                rebased.TiledOffset = Rebase(band.TiledOffset, guestBase, "a tile transfer");
-                _tiles.Add(rebased);
-                linearBase = Math.Min(linearBase, band.LinearOffset);
-            }
+            AddBandsWithin(transfer, guestBase, limit, ref linearBase);
         }
 
         if (linearBase == ulong.MaxValue)
@@ -1144,18 +1138,21 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     /// that cannot be cut that way (a mip tail, which is one block the layout places by
     /// hand, or a volume whose blocks span depth) is kept whole or dropped whole.
     /// </summary>
-    private IEnumerable<MetalTileTransfer> BandsWithin(MetalTileTransfer transfer, ulong from, ulong to)
+    // Each band is rebased onto the piece (guest offsets from guestBase) and added to
+    // _tiles, and linearBase drops to the lowest linear offset added. Not an iterator: it
+    // runs for every tile of every transfer, and an iterator allocated each time.
+    private void AddBandsWithin(in MetalTileTransfer transfer, ulong from, ulong to, ref ulong linearBase)
     {
         if (transfer.TiledOffset >= from && transfer.TiledOffset + transfer.TiledSize <= to)
         {
-            yield return transfer;
-            yield break;
+            AddBand(transfer, from, ref linearBase);
+            return;
         }
 
         var pitchBytes = (ulong)transfer.Pitch * transfer.BytesPerElement;
         if (!TryBandBytes(transfer, out var rowBytes, out var rowHeight) || pitchBytes == 0)
         {
-            yield break;
+            return;
         }
 
         var transferEnd = transfer.TiledOffset + transfer.TiledSize;
@@ -1175,8 +1172,16 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             band.TiledHeight = rowHeight;
             band.LinearOffset = transfer.LinearOffset + (row * rowHeight * pitchBytes);
             band.LinearSize = ((ulong)(band.Height - 1) * pitchBytes) + ((ulong)transfer.Width * transfer.BytesPerElement);
-            yield return band;
+            AddBand(band, from, ref linearBase);
         }
+    }
+
+    private void AddBand(in MetalTileTransfer band, ulong guestBase, ref ulong linearBase)
+    {
+        var rebased = band;
+        rebased.TiledOffset = Rebase(band.TiledOffset, guestBase, "a tile transfer");
+        _tiles.Add(rebased);
+        linearBase = Math.Min(linearBase, band.LinearOffset);
     }
 
     private static bool Selected(

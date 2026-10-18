@@ -396,7 +396,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 var copy = new DeferredLabelCopy(
                     _guestMemory.GdsBuffer, source, destination.Buffer, destination.Offset, (int)bytes, write.Destination);
                 _ = EncodeOrderedCopy(in copy, write.Destination, null, 0,
-                    MetalGpuWriteOrigin.EndOfPipeLabel, $"eop gds bytes={bytes}", sourceIsFinal: false);
+                    MetalGpuWriteOrigin.EndOfPipeLabel, "eop gds", null, bytes, sourceIsFinal: false);
                 Interlocked.Increment(ref _gpuTimedLabels);
                 return;
             }
@@ -538,7 +538,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var serial = EncodeOrderedCopy(in copy, write.Destination,
             GpuClobberDiagnostics.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
             bytes == sizeof(uint) ? (uint)write.Value : write.Value,
-            MetalGpuWriteOrigin.EndOfPipeLabel, $"eop label bytes={bytes}");
+            MetalGpuWriteOrigin.EndOfPipeLabel, "eop label", null, (ulong)bytes);
         Interlocked.Increment(ref _gpuTimedLabels);
         if (EndOfPipeTrace)
         {
@@ -585,7 +585,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         string? landedKind,
         ulong landedValue,
         MetalGpuWriteOrigin origin,
-        string profile,
+        string profileWhat,
+        string? profileKind,
+        ulong profileBytes,
         bool sourceIsFinal = true)
     {
         ulong serial;
@@ -621,7 +623,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // Beginning the transfer marked this submission as carrying GPU work, which is
             // what keeps a completion queued behind it — the interrupt of this same packet
             // — from running inline ahead of the bytes.
-            context.ProfileEncoded(profile);
+            if (context.WantsEncodedLabels)
+            {
+                context.ProfileEncoded(profileKind is null
+                    ? $"{profileWhat} bytes={profileBytes}"
+                    : $"{profileWhat} {profileKind} bytes={profileBytes}");
+            }
             serial = context.SubmissionSerial;
             if (DsTrace.Gpu)
             {
@@ -756,7 +763,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var copy = new DeferredLabelCopy(
             staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address);
         var serial = EncodeOrderedCopy(in copy, address, GpuClobberDiagnostics.Enabled ? "landed:" + kind : null,
-            FirstValue(source), MetalGpuWriteOrigin.Copy, $"cp write {kind} bytes={size}");
+            FirstValue(source), MetalGpuWriteOrigin.Copy, "cp write", kind, size);
 
         // Parse-time readers see the bytes as written until they land (MetalPendingWriteOverlay).
         if (_cpOverlay.Count >= MaxOverlayEntriesBeforeRetire)

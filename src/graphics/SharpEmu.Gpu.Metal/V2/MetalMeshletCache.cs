@@ -23,16 +23,66 @@ public static class MeshletBuilder
 
     public readonly record struct Result(uint[] Words, uint MeshletCount, uint VertexBase, uint PrimitiveBase);
 
+    /// <summary>
+    /// The lists one build fills, kept by a caller that builds repeatedly so a rebuild
+    /// allocates nothing: an index range can be hundreds of thousands of indices, and
+    /// fresh lists of that size landed on the large object heap on every rebuild.
+    /// </summary>
+    public sealed class Scratch
+    {
+        internal readonly List<uint> Headers = [];
+        internal readonly List<uint> VertexList = [];
+        internal readonly List<uint> PrimitiveList = [];
+        internal readonly uint[] Current = new uint[MaxLocalVertices];
+
+        public uint MeshletCount => (uint)(Headers.Count / 4);
+
+        public uint VertexBase => MeshletCount * 4;
+
+        public uint PrimitiveBase => VertexBase + (uint)VertexList.Count;
+
+        /// <summary>The number of words <see cref="CopyTo"/> writes.</summary>
+        public int WordCount => Headers.Count + VertexList.Count + PrimitiveList.Count;
+
+        /// <summary>Writes the built buffer: headers, then the vertex list, then the prim list.</summary>
+        public void CopyTo(Span<uint> words)
+        {
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(Headers).CopyTo(words);
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(VertexList).CopyTo(words[(int)VertexBase..]);
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(PrimitiveList).CopyTo(words[(int)PrimitiveBase..]);
+        }
+
+        internal void Reset(int indexCount, int triangles)
+        {
+            Headers.Clear();
+            VertexList.Clear();
+            PrimitiveList.Clear();
+            VertexList.EnsureCapacity(indexCount);
+            PrimitiveList.EnsureCapacity(triangles);
+        }
+    }
+
     public static Result Build(ReadOnlySpan<uint> indices, uint maxVertices, uint maxPrimitives)
+    {
+        var scratch = new Scratch();
+        BuildInto(indices, maxVertices, maxPrimitives, scratch);
+        var words = new uint[scratch.WordCount];
+        scratch.CopyTo(words);
+        return new Result(words, scratch.MeshletCount, scratch.VertexBase, scratch.PrimitiveBase);
+    }
+
+    /// <summary>Builds the meshlets into <paramref name="scratch"/>, replacing what it held.</summary>
+    public static void BuildInto(ReadOnlySpan<uint> indices, uint maxVertices, uint maxPrimitives, Scratch scratch)
     {
         maxVertices = Math.Clamp(maxVertices, 3, MaxLocalVertices);
         maxPrimitives = Math.Clamp(maxPrimitives, 1, MaxLocalVertices);
         var triangles = indices.Length / 3;
-        var headers = new List<uint>();
-        var vertexList = new List<uint>(indices.Length);
-        var primitiveList = new List<uint>(triangles);
+        scratch.Reset(indices.Length, triangles);
+        var headers = scratch.Headers;
+        var vertexList = scratch.VertexList;
+        var primitiveList = scratch.PrimitiveList;
 
-        var current = new uint[maxVertices];
+        var current = scratch.Current;
         var currentVertices = 0u;
         var currentPrimitives = 0u;
         var meshletVertexStart = 0u;
@@ -127,15 +177,6 @@ public static class MeshletBuilder
         }
 
         Flush();
-
-        var meshlets = (uint)(headers.Count / 4);
-        var vertexBase = meshlets * 4;
-        var primitiveBase = vertexBase + (uint)vertexList.Count;
-        var words = new uint[primitiveBase + primitiveList.Count];
-        headers.CopyTo(words, 0);
-        vertexList.CopyTo(words, (int)vertexBase);
-        primitiveList.CopyTo(words, (int)primitiveBase);
-        return new Result(words, meshlets, vertexBase, primitiveBase);
     }
 }
 
@@ -187,6 +228,9 @@ internal sealed class MetalMeshletCache
     private readonly ICpuMemory _memory;
     private readonly Dictionary<Key, Entry> _entries = [];
     private readonly byte[] _chunk = new byte[HashChunkBytes];
+    private readonly MeshletBuilder.Scratch _scratch = new();
+    private readonly System.IO.Hashing.XxHash3 _hasher = new();
+    private uint[] _indices = [];
     private readonly List<(nint Buffer, ulong Serial)> _retired = [];
     private ulong _bytes;
     private ulong _tick;
@@ -264,28 +308,43 @@ internal sealed class MetalMeshletCache
         }
 
         var buildStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-        var bytes = new byte[rangeBytes];
-        if (!_memory.TryRead(rangeAddress, bytes))
+        // The index words and the build lists are scratch reused across rebuilds: a dynamic
+        // index range is rebuilt every frame, and arrays of its size went to the LOH each time.
+        if (_indices.Length < indexCount)
         {
-            NoteFallback(Fallback.Unreadable);
-            return false;
+            _indices = new uint[Math.Max(indexCount, (uint)Math.Min((ulong)_indices.Length * 2, int.MaxValue / sizeof(uint)))];
         }
 
-        var indices = new uint[indexCount];
+        var indices = _indices.AsSpan(0, (int)indexCount);
         if (index32)
         {
-            System.Buffer.BlockCopy(bytes, 0, indices, 0, bytes.Length);
+            if (!_memory.TryRead(rangeAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(indices)))
+            {
+                NoteFallback(Fallback.Unreadable);
+                return false;
+            }
         }
         else
         {
+            // The 16-bit indices are read into the back half of the words and widened in
+            // place front to back: word i is written after halfword i, which it never overtakes.
+            var halves = System.Runtime.InteropServices.MemoryMarshal.Cast<uint, ushort>(indices)[(int)indexCount..];
+            if (!_memory.TryRead(rangeAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(halves)))
+            {
+                NoteFallback(Fallback.Unreadable);
+                return false;
+            }
+
             for (var i = 0; i < indices.Length; i++)
             {
-                indices[i] = BitConverter.ToUInt16(bytes, i * 2);
+                indices[i] = halves[i];
             }
         }
 
-        var built = MeshletBuilder.Build(indices, maxVertices, maxPrimitives);
-        var size = (ulong)built.Words.Length * sizeof(uint);
+        var built = _scratch;
+        MeshletBuilder.BuildInto(indices, maxVertices, maxPrimitives, built);
+        var wordCount = built.WordCount;
+        var size = (ulong)wordCount * sizeof(uint);
         if (!MakeRoom(size, completedSerial))
         {
             ReleaseRetired(completedSerial);
@@ -296,7 +355,7 @@ internal sealed class MetalMeshletCache
         var buffer = _guestMemory.CreateMeshletBuffer(size, out var contents);
         unsafe
         {
-            built.Words.AsSpan().CopyTo(new Span<uint>((void*)contents, built.Words.Length));
+            built.CopyTo(new Span<uint>((void*)contents, wordCount));
         }
 
         entry = new Entry
@@ -328,7 +387,8 @@ internal sealed class MetalMeshletCache
 
     private bool TryHash(ulong address, ulong bytes, out ulong hash)
     {
-        var hasher = new XxHash3();
+        var hasher = _hasher;
+        hasher.Reset();
         for (ulong offset = 0; offset < bytes;)
         {
             var count = (int)Math.Min((ulong)_chunk.Length, bytes - offset);

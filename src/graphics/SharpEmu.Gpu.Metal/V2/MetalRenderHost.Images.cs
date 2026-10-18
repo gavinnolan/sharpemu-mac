@@ -306,7 +306,10 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoid(descriptor, SelRelease);
         }
 
-        context.ProfileEncoded($"image-resolve {width}x{height} samples={source.Shape.SampleCount}");
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded($"image-resolve {width}x{height} samples={source.Shape.SampleCount}");
+        }
     }
 
     private static readonly nint SelSetResolveTexture = MetalNative.Selector("setResolveTexture:");
@@ -383,9 +386,12 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 
-        context.ProfileEncoded(
-            $"image-copy extent={extent.Width}x{extent.Height}x{extent.Depth} " +
-            $"layers={Math.Min(sourceRange.LayerCount, destinationRange.LayerCount)}");
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded(
+                $"image-copy extent={extent.Width}x{extent.Height}x{extent.Depth} " +
+                $"layers={Math.Min(sourceRange.LayerCount, destinationRange.LayerCount)}");
+        }
     }
 
     public bool IsMetadata(ulong address) => _imageCache.IsMetadata(address);

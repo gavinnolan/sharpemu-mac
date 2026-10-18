@@ -142,6 +142,11 @@ internal sealed partial class MetalRenderHost
 
     private string? _lastTransferLabel;
 
+    // The label is read by the shader and pass profilers, and by the write guard and slot trap
+    // that name the last transfer (LastTransferDescription is read only with the guard on).
+    bool IMetalSubmissionContext.WantsEncodedLabels =>
+        MetalShaderProfile.Enabled || PassProfileEnabled || _guard is not null || _slotTrap is not null;
+
     /// <summary>The last image transfer, fill or copy encoded, for a diagnostic that has
     /// to name which one wrote a guest byte.</summary>
     internal string LastTransferDescription => _lastTransferLabel ?? "none";

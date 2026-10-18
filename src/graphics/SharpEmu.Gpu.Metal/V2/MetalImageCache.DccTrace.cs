@@ -70,6 +70,10 @@ internal sealed partial class MetalImageCache
         return $"first_mismatch=0x{(mismatch < 0 ? 0 : mismatch):X} last_code=0x{lastCode:X} values=[{string.Join(',', top)}]";
     }
 
+    // Whether TraceDccWriter could print for this range, so a caller builds its text only then.
+    public static bool TracesDccWriter(ulong address, ulong size) =>
+        DccTraceActive && DccTraceAddress != 0 && DccTraceCovers(address, size);
+
     public void TraceDccWriter(ulong address, ulong size, string what)
     {
         if (!DccTraceActive || DccTraceAddress == 0 || !DccTraceCovers(address, size) ||

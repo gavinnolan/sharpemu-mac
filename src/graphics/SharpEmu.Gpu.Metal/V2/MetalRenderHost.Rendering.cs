@@ -2304,7 +2304,10 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoid(descriptor, SelRelease);
         }
 
-        context.ProfileEncoded($"clear {width}x{height} layers={range.LayerCount}");
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded($"clear {width}x{height} layers={range.LayerCount}");
+        }
     }
 
     /// <summary>A clear of one subresource, either folded into a pass or encoded alone.</summary>
@@ -2703,7 +2706,10 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoid(descriptor, SelRelease);
         }
 
-        context.ProfileEncoded($"clear {width}x{height} layers={range.LayerCount}");
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded($"clear {width}x{height} layers={range.LayerCount}");
+        }
     }
 
     private static void ConfigureClearAttachment(nint attachment, nint texture, in SubresourceRange range)

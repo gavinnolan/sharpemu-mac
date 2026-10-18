@@ -67,7 +67,10 @@ internal sealed partial class MetalRenderHost
             pristine = _guestMemory.Allocate(staging.Size, 256, out _);
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
             staged.EncodeGather(context.CommandBuffer, address, staging, pristine);
-            context.ProfileEncoded($"stage storage bytes=0x{staging.Size:X}");
+            if (context.WantsEncodedLabels)
+            {
+                context.ProfileEncoded($"stage storage bytes=0x{staging.Size:X}");
+            }
         }
         else
         {
@@ -137,7 +140,10 @@ internal sealed partial class MetalRenderHost
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
             _stagedRanges!.Touch(entry, context.SubmissionSerial);
             staged.EncodeGather(context.CommandBuffer, entry.Address, entry.Staging, entry.Pristine);
-            context.ProfileEncoded($"stage storage bytes=0x{size:X}");
+            if (context.WantsEncodedLabels)
+            {
+                context.ProfileEncoded($"stage storage bytes=0x{size:X}");
+            }
         }
         else if (entry.Pristine.IsValid)
         {

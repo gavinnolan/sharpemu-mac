@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -182,6 +183,55 @@ internal static class MetalV2Diagnostics
         {
             Console.Error.WriteLine($"[METAL-V2][INFO] {message}");
         }
+    }
+
+    // An interpolated message is formatted only while its key has not been reported: many
+    // of these sit on per-draw and per-transfer paths, and the message was built (and its
+    // holes evaluated) on every call only to be dropped.
+    public static void WarnOnce(string key, [InterpolatedStringHandlerArgument(nameof(key))] ref OnceMessageHandler message)
+    {
+        if (message.Wanted)
+        {
+            WarnOnce(key, message.ToStringAndClear());
+        }
+    }
+
+    public static void InfoOnce(string key, [InterpolatedStringHandlerArgument(nameof(key))] ref OnceMessageHandler message)
+    {
+        if (message.Wanted)
+        {
+            InfoOnce(key, message.ToStringAndClear());
+        }
+    }
+
+    [InterpolatedStringHandler]
+    public ref struct OnceMessageHandler
+    {
+        private DefaultInterpolatedStringHandler _inner;
+
+        public OnceMessageHandler(int literalLength, int formattedCount, string key, out bool shouldAppend)
+        {
+            Wanted = shouldAppend = !_reported.ContainsKey(key);
+            _inner = shouldAppend ? new DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+        }
+
+        public bool Wanted { get; }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) => _inner.AppendFormatted(value, format);
+
+        public void AppendFormatted<T>(T value, int alignment) => _inner.AppendFormatted(value, alignment);
+
+        public void AppendFormatted<T>(T value, int alignment, string? format) => _inner.AppendFormatted(value, alignment, format);
+
+        public void AppendFormatted(ReadOnlySpan<char> value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted(string? value) => _inner.AppendFormatted(value);
+
+        public string ToStringAndClear() => _inner.ToStringAndClear();
     }
 
     public static void Trace(string message)

@@ -26,6 +26,21 @@ public sealed record RegisteredShader(
     public (ulong Address, uint SizeBytes)[] CodeRanges =>
         IsFused ? [(CodeAddress, CodeSizeBytes), (ContinuationAddress, ContinuationSizeBytes)] : [(CodeAddress, CodeSizeBytes)];
 
+    public const int MaxCodeRanges = 2;
+
+    // CodeRanges without the array, for the per-draw path: the number of ranges written.
+    public int CopyCodeRanges(Span<(ulong Address, uint SizeBytes)> destination)
+    {
+        destination[0] = (CodeAddress, CodeSizeBytes);
+        if (!IsFused)
+        {
+            return 1;
+        }
+
+        destination[1] = (ContinuationAddress, ContinuationSizeBytes);
+        return 2;
+    }
+
     public uint TotalCodeSizeBytes => CodeSizeBytes + ContinuationSizeBytes;
 }
 
@@ -83,20 +98,48 @@ public sealed class ShaderHeaderRegistry
             }
         }
 
-        return new RegisteredShader(
-            codeAddress,
-            headerAddress,
-            codeSize,
-            scratchDwords,
-            userDataAddress,
-            inputSemanticsAddress,
-            inputSemanticsCount,
-            continuationAddress,
-            continuationSize)
+        // Every draw resolves its shaders again, so an unchanged header hands back the record
+        // it made last time instead of a new one. The header is still read and compared above
+        // and here, so a guest that rewrites it gets a fresh record as before.
+        lock (_recent)
         {
-            ContinuationScratchDwords = continuationScratchDwords,
-        };
+            if (_recent.TryGetValue(codeAddress, out var recent) &&
+                recent.HeaderAddress == headerAddress && recent.CodeSizeBytes == codeSize &&
+                recent.ScratchDwords == scratchDwords && recent.UserDataAddress == userDataAddress &&
+                recent.InputSemanticsAddress == inputSemanticsAddress && recent.InputSemanticsCount == inputSemanticsCount &&
+                recent.ContinuationAddress == continuationAddress && recent.ContinuationSizeBytes == continuationSize &&
+                recent.ContinuationScratchDwords == continuationScratchDwords)
+            {
+                return recent;
+            }
+
+            var registered = new RegisteredShader(
+                codeAddress,
+                headerAddress,
+                codeSize,
+                scratchDwords,
+                userDataAddress,
+                inputSemanticsAddress,
+                inputSemanticsCount,
+                continuationAddress,
+                continuationSize)
+            {
+                ContinuationScratchDwords = continuationScratchDwords,
+            };
+
+            // Bounded: dropping the records only costs rebuilding them.
+            if (_recent.Count >= MaxRecent && !_recent.ContainsKey(codeAddress))
+            {
+                _recent.Clear();
+            }
+
+            _recent[codeAddress] = registered;
+            return registered;
+        }
     }
+
+    private const int MaxRecent = 4096;
+    private readonly Dictionary<ulong, RegisteredShader> _recent = new();
 
     // A bounded, nonfatal description for diagnostics of draws that remain rejected.
     internal bool TryGetDiagnosticCodeRanges(ulong address, out (ulong Address, uint SizeBytes)[] ranges)

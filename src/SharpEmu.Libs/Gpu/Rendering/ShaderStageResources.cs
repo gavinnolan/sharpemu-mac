@@ -187,9 +187,14 @@ public sealed class PixelInputInfo
     public uint SystemInputBase { get; init; }
     public uint CustomInterpolationMask { get; init; }
     public uint PerspectiveCenterRegister { get; init; } = NoPerspectiveCenterRegister;
-    public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
-    public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
-    public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
+    // Each instance still owns its default arrays, made on first read: the resolver sets all
+    // three for every draw, and initializers allocated them only to be replaced.
+    public uint[] InterpolatorSettings { get => _interpolatorSettings ??= new uint[InterpolatorCount]; init => _interpolatorSettings = value; }
+    public byte[] TargetOutputModes { get => _targetOutputModes ??= new byte[TargetCount]; init => _targetOutputModes = value; }
+    public ColorComponentMap[] TargetExportMappings { get => _targetExportMappings ??= new ColorComponentMap[TargetCount]; init => _targetExportMappings = value; }
+    private uint[]? _interpolatorSettings;
+    private byte[]? _targetOutputModes;
+    private ColorComponentMap[]? _targetExportMappings;
     // SPI_PS_IN_CONTROL.PS_W32_EN (bit 15).
     public bool GuestWave32 { get; set; }
     public bool IeeeMode { get; set; }
