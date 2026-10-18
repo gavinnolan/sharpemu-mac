@@ -19,6 +19,7 @@ public sealed class ResourceRuntimeInputs
     public GuestWordReader? ReadMemory { get; init; }
     public GuestWordReader? ReadCleanMemory { get; init; }
     public ComputeSelectorState? ComputeState { get; set; }
+    public Action<uint, uint, ulong, ulong, ReadOnlyMemory<uint>>? TraceImageCandidate { get; init; }
 
     // Told true before the flattened table's words are evaluated and false after, so a reader
     // wrapper can tell the words only the table reads from those the descriptors depend on.
@@ -40,6 +41,7 @@ public sealed class ResourceRuntimeInputs
         ReadMemory = reader,
         ReadCleanMemory = ReadCleanMemory,
         ComputeState = ComputeState,
+        TraceImageCandidate = TraceImageCandidate,
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),

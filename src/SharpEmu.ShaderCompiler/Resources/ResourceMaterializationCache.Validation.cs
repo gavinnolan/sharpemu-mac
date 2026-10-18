@@ -114,9 +114,14 @@ public sealed partial class ResourceMaterializationCache
     }
 
     // Validate for an entry whose reads do not move: every recorded byte is compared.
-    private bool ValidateJoined(Entry entry, ResidentGuestBytesReader residentReader, out bool unreadable)
+    // A changed descriptor word becomes the rejection sample, as in Validate, so the variants
+    // behind this one that hold the old word are refused without being read.
+    private bool ValidateJoined(Entry entry, ResidentGuestBytesReader residentReader, out bool unreadable,
+        out bool descriptorChanged, out RejectionSample rejection)
     {
         unreadable = false;
+        descriptorChanged = false;
+        rejection = default;
         if (entry.Joined is null)
         {
             entry.Joined = JoinedReadsOf(entry, entry.JoinedHint);
@@ -131,26 +136,50 @@ public sealed partial class ResourceMaterializationCache
                 _scratch = new byte[Math.Max(length, _scratch.Length * 2)];
             var current = _scratch.AsSpan(0, length);
             var address = reads.Addresses[read];
-            var joined = residentReader(address, current, reads.Clean[read]);
+            var joined = ReadWithProfile(residentReader, address, current, reads.Clean[read], CacheDetail.ValidateRead);
             if (!joined && reads.RangeCount[read] == 1)
             {
                 unreadable = true;
+                CountDiagnostic(Diagnostic.Unreadable);
                 return false;
             }
 
             for (var range = reads.FirstRange[read]; range < reads.FirstRange[read] + reads.RangeCount[read]; range++)
             {
                 var rangeLength = entry.RangeLengths[range];
-                var bytes = current.Slice((int)(entry.RangeAddresses[range] - address), rangeLength);
+                // The joined reads are derived from the ranges; a range they no longer cover is
+                // not validated, so the entry misses rather than comparing the wrong bytes.
+                var rangeStart = entry.RangeAddresses[range];
+                if (rangeLength > length || rangeStart < address || rangeStart - address > (ulong)(length - rangeLength))
+                    return false;
+                var bytes = current.Slice((int)(rangeStart - address), rangeLength);
                 // A gap the host refuses to read: the ranges are read on their own.
-                if (!joined && !residentReader(entry.RangeAddresses[range], bytes, entry.RangeClean[range]))
+                if (!joined && !ReadWithProfile(residentReader, rangeStart, bytes, entry.RangeClean[range], CacheDetail.ValidateRead))
                 {
                     unreadable = true;
+                    CountDiagnostic(Diagnostic.Unreadable);
                     return false;
                 }
 
-                if (!bytes.SequenceEqual(entry.Bytes.AsSpan(entry.RangeOffsets[range], rangeLength)))
+                using var comparisonProfile = MeasureDetail(CacheDetail.ValidateCompare);
+                var previous = entry.Bytes.AsSpan(entry.RangeOffsets[range], rangeLength);
+                if (!bytes.SequenceEqual(previous))
+                {
+                    RecordChangedWords(entry, range, bytes);
+                    CountDiagnostic(Diagnostic.BytesChanged);
+                    for (var offset = 0; offset + sizeof(uint) <= rangeLength; offset += sizeof(uint))
+                    {
+                        if (!entry.WordTableOnly[(entry.RangeOffsets[range] + offset) / sizeof(uint)] &&
+                            !bytes.Slice(offset, sizeof(uint)).SequenceEqual(previous.Slice(offset, sizeof(uint))))
+                        {
+                            descriptorChanged = true;
+                            rejection = new RejectionSample(range, rangeStart, rangeLength, entry.RangeClean[range],
+                                offset, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]));
+                            break;
+                        }
+                    }
                     return false;
+                }
             }
         }
 

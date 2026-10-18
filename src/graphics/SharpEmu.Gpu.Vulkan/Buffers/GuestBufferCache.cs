@@ -5,6 +5,8 @@ using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
@@ -48,7 +50,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly GpuBuffer _gds;
     private readonly GpuBuffer _bdaPageTable;
     private readonly GuestBufferRegistry<GpuBuffer> _registry = new(CachingPageSize, PageOwnerTable.AddressSpaceSize);
-    private readonly SpanSet _gpuModifiedRanges = new();
+    private readonly AvlSpanSet _gpuModifiedRanges = new();
     private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
     private readonly GpuRingBuffer _staging;
@@ -80,7 +82,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
         _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
         _stream = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Stream, 64 * MiB);
-        _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 32 * MiB);
+        _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
         StreamOffsetAlignment = device.MinUniformBufferOffsetAlignment;
         _gds.Mapped.Clear();
@@ -93,6 +95,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     public IGuestImageCache? ImageCache { get; set; }
+
+    // An overlaid read gets pending dump values copied in by OverlayGuestPublications instead of waiting.
+    internal enum PublicationAccess { Read, OverlaidRead, Write }
+
+    internal Action<ulong, ulong, PublicationAccess>? CompleteGuestPublications { get; set; }
+
+    // Arguments: buffer, offset of the guest address in that buffer, guest address, size.
+    internal Action<GpuBuffer, ulong, ulong, ulong>? OverlayGuestPublications { get; set; }
 
     public GpuBuffer GdsBuffer => _gds;
 
@@ -200,8 +210,12 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return CreateBuffer(guestAddress, size);
     }
 
-    public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false, ResourceSlotIdentifier bufferIdentifier = default)
+    public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false,
+        ResourceSlotIdentifier bufferIdentifier = default, ulong traceShaderHash = 0)
     {
+        CompleteGuestPublications?.Invoke(guestAddress, size, isWritten ? PublicationAccess.Write : PublicationAccess.OverlaidRead);
+        if (isWritten && ImageClearTrace.Enabled) ImageCache?.TraceGuestWrite("shader-buffer-write", guestAddress, size, shaderHash: traceShaderHash);
+        if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-obtain", guestAddress, size, $"written={isWritten} texel={isTexelBuffer} hash=0x{traceShaderHash:X16}", remember: true);
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferAcquisitionChecks);
         var command = _scheduler.Current;
         if (command.IsInvalid || !IsValidRange(guestAddress, size))
@@ -219,6 +233,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
             {
                 _stream.Commit();
+                if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
+                OverlayGuestPublications?.Invoke(_stream, streamOffset, guestAddress, size);
                 return (_stream, streamOffset);
             }
         }
@@ -258,12 +274,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
             NoteHotWindowWrite(guestAddress, size);
         }
+        else OverlayGuestPublications?.Invoke(buffer, buffer.Offset(guestAddress), guestAddress, size);
 
         return (buffer, buffer.Offset(guestAddress));
     }
 
     public (GpuBuffer Buffer, ulong Offset) ObtainBufferForImage(ulong guestAddress, ulong size)
     {
+        CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Read);
         if (!IsValidRange(guestAddress, size))
         {
             throw SubmissionScheduler.Fatal("The image source range is invalid.");
@@ -332,6 +350,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
+        CompleteGuestPublications?.Invoke(guestAddress, (ulong)data.Length, PublicationAccess.Write);
         if (guestAddress == 0 || data.IsEmpty || (ulong)data.Length > ulong.MaxValue - guestAddress)
         {
             throw SubmissionScheduler.Fatal("The host DMA write range is invalid.");
@@ -369,6 +388,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private void FillBuffer(ulong guestAddress, ulong size, uint value, bool isGds, bool publishFill)
     {
+        if (!isGds) CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
         if ((guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress)
         {
             throw SubmissionScheduler.Fatal("The fill range must be aligned to four bytes.");
@@ -391,6 +411,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var images = RequireImageCache();
+        if (ImageClearTrace.Enabled) images.TraceGuestWrite("command-fill", guestAddress, size, value);
+        images.TraceMetadataFill(guestAddress, size, value);
         _ = images.ClearMetadata(guestAddress);
         var region = images.QueryRegion(guestAddress, size);
         if (!HasGpuDirtyBytes(guestAddress, size) && !region.GpuImageBytes)
@@ -596,6 +618,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void CopyBuffer(ulong dstVaddr, ulong srcVaddr, ulong size, bool dstGds, bool srcGds)
     {
+        if (!dstGds) CompleteGuestPublications?.Invoke(dstVaddr, size, PublicationAccess.Write);
+        if (!srcGds) CompleteGuestPublications?.Invoke(srcVaddr, size, PublicationAccess.Read);
         var dstMemory = !dstGds;
         var srcMemory = !srcGds;
         if ((dstMemory && dstVaddr == 0) || (srcMemory && srcVaddr == 0) || size == 0 ||
@@ -609,6 +633,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var images = RequireImageCache();
+        if (ImageClearTrace.Enabled && dstMemory) images.TraceGuestWrite("command-copy", dstVaddr, size, srcGds ? 0 : srcVaddr);
         var srcRegion = srcMemory ? images.QueryRegion(srcVaddr, size) : default;
         var dstRegion = dstMemory ? images.QueryRegion(dstVaddr, size) : default;
         if (srcMemory && dstMemory && !HasGpuDirtyBytes(srcVaddr, size) && !HasGpuDirtyBytes(dstVaddr, size) &&
@@ -1326,6 +1351,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private PendingDownload? BeginReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
         bool allowPending, bool markHot = false)
     {
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("cpu-synchronize", guestAddress, size, $"write={isWrite} source={source}");
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
         using var foreignRead = _device.Slabs.BeginForeignRead();
         var readbackStarted = GuestMemoryProfile.ReadbackDetailsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -1672,6 +1698,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var planner = new BufferDownloadBatchPlanner(_download.Size);
         foreach (var piece in copies)
         {
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("buffer-download-planned", piece.Address, piece.Size, $"sourceOffset=0x{piece.SourceOffset:X}");
             var copy = piece;
             while (copy.Size != 0)
             {
@@ -1832,10 +1859,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var offset = baseOffset + placement.DataOffset;
             _download.Invalidate(offset, placement.DataSize);
             GpuWritebackEpoch.Advance();
+            if (SharpEmu.Libs.Gpu.GpuCommands.VisibilityResultTrace.Enabled)
+                SharpEmu.Libs.Gpu.GpuCommands.VisibilityResultTrace.Download(copy.Address,
+                    _download.Mapped.Slice((int)offset, (int)placement.DataSize), _backing.TryReadBacking);
             if (!_backing.TryWriteBacking(copy.Address, _download.Mapped.Slice((int)offset, (int)placement.DataSize)))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
             }
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("buffer-published", copy.Address, placement.DataSize, $"tick={completionTick}");
         }
 
         batch.Clear();
@@ -2005,6 +2036,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 buffer.NoteGpuWrite(copy.DstOffset, copy.Size);
             }
 
+            if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-upload", guestAddress, size, $"bytes={totalSize} copies={copies.Count}");
             var command = _scheduler.Current;
             command.EndRendering();
             var native = new CommandBuffer(command.Handle);

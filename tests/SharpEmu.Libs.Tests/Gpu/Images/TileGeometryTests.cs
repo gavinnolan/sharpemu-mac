@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -43,6 +44,34 @@ public sealed class TileGeometryTests
         Assert.Equal(0x0010u, DepthOffset(4, 2, 0));
         Assert.Equal(0x0008u, DepthOffset(4, 0, 1));
         Assert.Equal(0x009cu, DepthOffset(4, 3, 5));
+    }
+
+    [Theory]
+    [InlineData(1u, 8u, 0u, 320u)]
+    [InlineData(1u, 0u, 2u, 8u)]
+    [InlineData(1u, 0u, 128u, 16384u)]
+    [InlineData(2u, 8u, 0u, 384u)]
+    [InlineData(2u, 0u, 16u, 4608u)]
+    [InlineData(2u, 0u, 64u, 18432u)]
+    [InlineData(4u, 0u, 4u, 64u)]
+    [InlineData(4u, 4u, 0u, 128u)]
+    [InlineData(4u, 8u, 0u, 256u)]
+    [InlineData(4u, 0u, 8u, 4352u)]
+    [InlineData(4u, 0u, 16u, 512u)]
+    [InlineData(8u, 0u, 4u, 4096u)]
+    [InlineData(8u, 8u, 0u, 8448u)]
+    [InlineData(8u, 0u, 16u, 16896u)]
+    [InlineData(16u, 0u, 4u, 4096u)]
+    [InlineData(16u, 4u, 0u, 8192u)]
+    [InlineData(16u, 0u, 8u, 16640u)]
+    public void Gen5RenderTargetBlockOffsets_MatchTheGuestDetiler(uint bytes, uint x, uint y, uint expected)
+    {
+        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KBGen5, bytes, out var layout));
+        Assert.True(TileGeometry.TryGetBlockOffset(layout, x, y, 0, out var offset));
+        Assert.Equal(expected, offset);
+        // The fork keeps GnmTiling's mode-27 CPU equation qualified against the pinned PAL
+        // AddrLib fixture (tests/Fixtures/Bgra1024Array); upstream's switch of that table to
+        // these Gen5 bits is not taken until it is validated on the Metal path.
     }
 
     [Theory]

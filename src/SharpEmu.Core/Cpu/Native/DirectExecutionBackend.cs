@@ -535,6 +535,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 	private string? _probeImportReturn;
 
 	private ulong _probeImportReturnAddress;
+	private ulong _probeImportRootAddress;
 
 	private long _probeImportReturnAddressCount;
 
@@ -1044,7 +1045,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private const int MinTlsPatchInstructionBytes = 9;
 
-	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr);
+	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr, nint transferStubAddress);
 	private static readonly ImportGatewayDelegate ImportGatewayDelegateInstance = ImportDispatchGatewayManaged;
 
 	private static readonly Lazy<nint> ImportGatewayAddress = new(() => ResolveWin64CallbackPtr(
@@ -1430,6 +1431,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 			Volatile.Read(ref _lastSessionImportsHit),
 			Volatile.Read(ref _lastSessionUniqueNidsHit));
 
+	private NativeFunctionTrace? _nativeFunctionTrace;
+
 	public bool TryExecute(CpuContext context, ulong entryPoint, Generation generation, IReadOnlyDictionary<ulong, string> importStubs, IReadOnlyDictionary<string, ulong> runtimeSymbols, CpuExecutionOptions executionOptions, out OrbisGen2Result result)
 	{
 		var sessionCounters = new NativeImportSessionCounters();
@@ -1501,6 +1504,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 		_probeImportReturnAddress = ParseOptionalHexAddress(
 			Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_RET_ADDRESS"));
 		_probeImportReturnAddressCount = 0;
+		InitializeMutexTrace();
+		_probeImportRootAddress = ParseOptionalHexAddress(
+			Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_ROOT_ADDRESS"));
 		_importFilter = Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_FILTER");
 		_disableImportLoopGuard = !string.Equals(
 			Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"),
@@ -1547,6 +1553,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 			CreateTlsHandler();
 			PatchTlsPatterns();
+            _nativeFunctionTrace ??= NativeFunctionTrace.FromEnvironment();
 			return ExecuteEntry(context, entryPoint, out result);
 		}
 		catch (Exception ex)
@@ -2850,12 +2857,19 @@ public sealed unsafe partial class DirectExecutionBackend :
 			ptr2[num++] = 184;
 			*(long*)(ptr2 + num) = ImportGatewayPtr;
 			num += 8;
+            // The gateway selects a host-stack transfer without reading the old guest pack.
+            ptr2[num++] = 0x4C; ptr2[num++] = 0x8D; ptr2[num++] = 0x4C; ptr2[num++] = 0x24; ptr2[num++] = 0x20;
 			ptr2[num++] = byte.MaxValue;
 			ptr2[num++] = 208;
 			ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x64; ptr2[num++] = 0x24; ptr2[num++] = 0x28; // mov r12,[rsp+0x28]
 			// Host calls can grow the stack. Keep the new limit before switching back.
 			ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x54; ptr2[num++] = 0x24; ptr2[num++] = 0x30; // mov r10,[rsp+0x30]
 			EmitHostStackBounds(ptr2, ref num, save: true);
+            ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x5C; ptr2[num++] = 0x24; ptr2[num++] = 0x20;
+            ptr2[num++] = 0x4D; ptr2[num++] = 0x85; ptr2[num++] = 0xDB;
+            ptr2[num++] = 0x74; ptr2[num++] = 0x07;
+            ptr2[num++] = 0x48; ptr2[num++] = 0x83; ptr2[num++] = 0xC4; ptr2[num++] = 0x38;
+            ptr2[num++] = 0x41; ptr2[num++] = 0xFF; ptr2[num++] = 0xE3;
 			ptr2[num++] = 72;
 			ptr2[num++] = 131;
 			ptr2[num++] = 196;
@@ -7748,6 +7762,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 		WriteGuestFlowTraces();
 		DsTrace.Shutdown();
 		ClearGuestThreads();
+		_nativeFunctionTrace?.Dispose();
+		_nativeFunctionTrace = null;
 		if (ReferenceEquals(_faultRecoveryBackend, this))
 		{
 			// The platform's fault hooks stay installed (they chain to the

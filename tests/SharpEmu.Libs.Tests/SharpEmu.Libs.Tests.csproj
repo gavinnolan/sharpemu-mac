@@ -99,5 +99,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <Compile Include="../Fixtures/Bgra1024Array/Bgra1024Oracle.cs" Link="Fixtures/Bgra1024Oracle.cs" />
     <Compile Include="../Fixtures/R8FourKArray/R8FourKOracle.cs" Link="Fixtures/R8FourKOracle.cs" />
+    <EmbeddedResource Include="../../docs/guest-ownership-trace.md" LogicalName="GuestOwnershipTraceGuide" />
   </ItemGroup>
 </Project>

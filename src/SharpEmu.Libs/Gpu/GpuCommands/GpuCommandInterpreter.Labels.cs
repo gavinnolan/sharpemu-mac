@@ -21,6 +21,13 @@ public sealed partial class GpuCommandInterpreter
 
     private static int _unknownGcrWarnings;
 
+    private bool WaitForPublication()
+    {
+        if (!_host.HasPendingPublications(QueueId)) return false;
+        Suspend();
+        return true;
+    }
+
     // What an end-of-pipe or release write stores, decoded from the packet's data select.
     internal enum EndOfPipeData : byte
     {
@@ -161,8 +168,7 @@ public sealed partial class GpuCommandInterpreter
                 var kind = withInterrupt
                     ? (writeBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
                     : (writeBack ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite);
-                WriteEndOfPipeQword(destination, clock, kind);
-                _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, interruptContextId, ReferenceClock: true));
+                PublishLabel(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, interruptContextId, ReferenceClock: true), true);
                 return;
             }
             case EndOfPipeData.Gds:
@@ -201,8 +207,7 @@ public sealed partial class GpuCommandInterpreter
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack32 : EndOfPipeWriteKind.Interrupt32)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack32 : EndOfPipeWriteKind.Write32);
-        WriteEndOfPipeDword(destination, value, kind);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId));
+        PublishLabel(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId), false);
     }
 
     private void Write64(ulong destination, ulong value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
@@ -210,8 +215,23 @@ public sealed partial class GpuCommandInterpreter
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack64 : EndOfPipeWriteKind.Write64);
-        WriteEndOfPipeQword(destination, value, kind);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId));
+        PublishLabel(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId), true);
+    }
+
+    // A host that publishes labels after its work (TryDeferEndOfPipe) owns the write; a host
+    // that defers one kind itself (DefersEndOfPipeLabel) records the pending value; any other
+    // host takes the write now.
+    private void PublishLabel(in EndOfPipeWrite write, bool is64Bit)
+    {
+        if (_host.TryDeferEndOfPipe(QueueId, in write))
+        {
+            _lastWriteLength = 0;
+            return;
+        }
+
+        if (is64Bit) WriteEndOfPipeQword(write.Destination, write.Value, write.Kind);
+        else WriteEndOfPipeDword(write.Destination, (uint)write.Value, write.Kind);
+        _host.RecordEndOfPipe(in write);
     }
 
     // GDS words land after the work before them, which on the hardware is what makes them
@@ -219,6 +239,7 @@ public sealed partial class GpuCommandInterpreter
     // is; any other host reads the GDS once the GPU has finished.
     private void WriteGdsWords(ulong destination, ulong value, bool withInterrupt, uint contextId)
     {
+        if (WaitForPublication()) return;
         var wordOffset = (uint)(value & 0xFFFFu);
         var wordCount = (uint)(value >> 16);
         var write = new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, SubmitId, destination, GdsWordOffset: wordOffset, GdsWordCount: wordCount);
@@ -287,8 +308,11 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
-    internal void QueueInterrupt(uint interruptContextId) =>
-        _host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.InterruptOnly, SubmitId, EventId: InterruptEventId, ContextId: interruptContextId));
+    internal void QueueInterrupt(uint interruptContextId)
+    {
+        var write = new EndOfPipeWrite(EndOfPipeWriteKind.InterruptOnly, SubmitId, EventId: InterruptEventId, ContextId: interruptContextId);
+        if (!_host.TryDeferEndOfPipe(QueueId, in write)) _host.RecordEndOfPipe(in write);
+    }
 
     private static bool ReleaseMemGcrNeedsBarrier(uint eopEventType, uint gcrControl) =>
         eopEventType != 0x28 ||
@@ -447,8 +471,33 @@ public sealed partial class GpuCommandInterpreter
             case 0x19:
             case 0x1A:
             case 0x1B:
+                break;
             case 0x38:
+            {
+                var counterId = (eventAddress >> 3) & 0x3Fu;
+                if (eventIndex != 1 || counterId >= (ulong)_syntheticOcclusionCounters.Length)
+                {
+                    throw _host.Fatal($"The occlusion-counter selection is not supported: index=0x{eventIndex:X8} counter={counterId}.");
+                }
+
+                // The address field holds packed control data, not a guest pointer.
+                _selectedOcclusionCounter = (int)counterId;
+                _occlusionDumpStrideBytes = 4u << (int)((eventAddress >> 9) & 0x3u);
+                _occlusionDumpInstanceMask = (uint)((eventAddress >> 11) & 0xFF_FFFFu);
+                break;
+            }
             case 0x3A:
+                if (eventIndex != 0)
+                {
+                    throw _host.Fatal($"The occlusion-counter reset index is invalid: index=0x{eventIndex:X8}.");
+                }
+
+                _syntheticOcclusionCounters[_selectedOcclusionCounter] = 0;
+                if (_selectedOcclusionCounter == 0 && !_host.ResetOcclusionCounter(QueueId) &&
+                    _host.TryReadOcclusionCounter(QueueId, out var resetCount))
+                {
+                    _occlusionCounterStart = resetCount;
+                }
                 break;
             case 0x39:
             {
@@ -457,18 +506,40 @@ public sealed partial class GpuCommandInterpreter
                     throw _host.Fatal($"The occlusion-counter dump is invalid: index=0x{eventIndex:X8} address=0x{eventAddress:X16}.");
                 }
 
-                // Publish visible occlusion results for each depth block.
-                const ulong readyBit = 1UL << 63;
-                var result = readyBit | ((ulong)Interlocked.Increment(ref _syntheticOcclusionCounter) & (readyBit - 1));
-                // The DB writes the counters when the pipeline reaches the event, so they land in
-                // order with the command-processor stores recorded before it: UE4 zeroes each
-                // query block with a WRITE_DATA right before its begin dump, and dumps written as
-                // parsed were wiped when that deferred clear landed, so every query read occluded.
-                for (var depthBlock = 0u; depthBlock < 16u; depthBlock++)
+                if (_selectedOcclusionCounter == 0 &&
+                    _host.DumpOcclusionCounter(QueueId, eventAddress, _occlusionDumpInstanceMask, _occlusionDumpStrideBytes))
                 {
-                    WriteCommandProcessorQword(eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong)), result, "ZPASS_DUMP");
+                    if (VisibilityResultTrace.Enabled)
+                        VisibilityResultTrace.Occlusion($"dump queue={QueueId} submit={SubmitId} address=0x{eventAddress:X16} counter=0 deferred=True mask=0x{_occlusionDumpInstanceMask:X6} stride={_occlusionDumpStrideBytes}");
+                    break;
                 }
 
+                const ulong readyBit = 1UL << 63;
+                var hostCount = 0UL;
+                var aggregate = _selectedOcclusionCounter == 0 && _host.TryReadOcclusionCounter(QueueId, out hostCount);
+                var count = aggregate ? (hostCount - _occlusionCounterStart) & (readyBit - 1) : SyntheticOcclusionCounter;
+                var result = readyBit | count;
+                if (VisibilityResultTrace.Enabled)
+                    VisibilityResultTrace.Occlusion($"dump queue={QueueId} submit={SubmitId} address=0x{eventAddress:X16} counter={_selectedOcclusionCounter} aggregate={aggregate} host={hostCount} resetBase={_occlusionCounterStart} value={count} mask=0x{_occlusionDumpInstanceMask:X6} stride={_occlusionDumpStrideBytes}");
+                for (var depthBlock = 0u; depthBlock < 24u; depthBlock++)
+                {
+                    if ((_occlusionDumpInstanceMask & (1u << (int)depthBlock)) != 0)
+                    {
+                        var destination = eventAddress + ((ulong)depthBlock * _occlusionDumpStrideBytes);
+                        // One virtual depth block holds the host sum. The other blocks are empty.
+                        // The DB writes the counters when the pipeline reaches the event, so they land in
+                        // order with the command-processor stores recorded before it: UE4 zeroes each
+                        // query block with a WRITE_DATA right before its begin dump, and dumps written as
+                        // parsed were wiped when that deferred clear landed, so every query read occluded.
+                        WriteCommandProcessorQword(destination, aggregate && depthBlock != 0 ? readyBit : result, "ZPASS_DUMP");
+                    }
+                }
+
+                if (_occlusionDumpInstanceMask != 0 && VisibilityResultTrace.Enabled)
+                    VisibilityResultTrace.Published(QueueId, SubmitId, eventAddress, result,
+                        _occlusionDumpInstanceMask, _occlusionDumpStrideBytes, _host.Memory as SharpEmu.HLE.IGuestBackedSpace, aggregate);
+                if (!aggregate)
+                    _syntheticOcclusionCounters[_selectedOcclusionCounter] = (SyntheticOcclusionCounter + 1) & (readyBit - 1);
                 break;
             }
 
@@ -497,9 +568,10 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var flip = PendingFlip;
-        var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(
-            EndOfPipeWriteKind.Flip, SubmitId, FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId));
+        var requestId = _host.PrepareFlip(QueueId, flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
+        var write = new EndOfPipeWrite(
+            EndOfPipeWriteKind.Flip, SubmitId, FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
+        if (!_host.TryDeferEndOfPipe(QueueId, in write)) _host.RecordEndOfPipe(in write);
         _host.Flush();
     }
 
@@ -510,12 +582,15 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteEndOfPipeDword(destination, value, EndOfPipeWriteKind.FlipWithWrite32);
+        var deferred = _host.HasPendingPublications(QueueId);
+        if (!deferred) WriteEndOfPipeDword(destination, value, EndOfPipeWriteKind.FlipWithWrite32);
         var flip = PendingFlip;
-        var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(
+        var requestId = _host.PrepareFlip(QueueId, flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
+        var write = new EndOfPipeWrite(
             EndOfPipeWriteKind.FlipWithWrite32, SubmitId, destination, value,
-            FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId));
+            FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
+        if (deferred) PublishLabel(in write, false);
+        else _host.RecordEndOfPipe(in write);
         _host.Flush();
     }
 
@@ -531,12 +606,15 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteEndOfPipeDword(destination, value, EndOfPipeWriteKind.FlipWithInterruptWriteBack32);
+        var deferred = _host.HasPendingPublications(QueueId);
+        if (!deferred) WriteEndOfPipeDword(destination, value, EndOfPipeWriteKind.FlipWithInterruptWriteBack32);
         var flip = PendingFlip;
-        var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(
+        var requestId = _host.PrepareFlip(QueueId, flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
+        var write = new EndOfPipeWrite(
             EndOfPipeWriteKind.FlipWithInterruptWriteBack32, SubmitId, destination, value, InterruptEventId,
-            FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId));
+            FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
+        if (deferred) PublishLabel(in write, false);
+        else _host.RecordEndOfPipe(in write);
         _host.Flush();
     }
 
