@@ -96,7 +96,15 @@ internal sealed class MetalPipelineCompiler : IDisposable
             try
             {
                 var compileStarted = Stopwatch.GetTimestamp();
-                var result = build();
+                // A pool thread has no autorelease pool, and building a pipeline autoreleases
+                // strings and descriptors: the build frees its own. The state it returns is
+                // owned (new*), not autoreleased, so it outlives the pool.
+                nint result;
+                using (MetalAutoreleasePool.Enter())
+                {
+                    result = build();
+                }
+
                 started.CompileTicks = Stopwatch.GetTimestamp() - compileStarted;
                 return result;
             }

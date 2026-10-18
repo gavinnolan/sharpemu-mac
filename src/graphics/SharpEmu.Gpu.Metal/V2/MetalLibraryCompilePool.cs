@@ -57,7 +57,13 @@ internal sealed class MetalLibraryCompilePool
         {
             try
             {
-                work();
+                // A compile creates strings and functions through factories that autorelease
+                // them, on a thread that has no pool: each unit of work frees its own.
+                using (MetalAutoreleasePool.Enter())
+                {
+                    work();
+                }
+
                 done.SetResult();
             }
             catch (Exception exception)

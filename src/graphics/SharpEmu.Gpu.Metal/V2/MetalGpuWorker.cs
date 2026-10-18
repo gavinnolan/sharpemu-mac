@@ -398,6 +398,9 @@ internal sealed class MetalCompletionQueue : IDisposable
             }
 
             Interlocked.Add(ref _wakeWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - wakeStarted);
+            // This thread has no pool, and the completions it runs call into Metal: each
+            // pass frees what the event reads and the completion work autorelease.
+            using var pool = MetalAutoreleasePool.Enter();
             if (SignaledValue < target)
             {
                 var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();

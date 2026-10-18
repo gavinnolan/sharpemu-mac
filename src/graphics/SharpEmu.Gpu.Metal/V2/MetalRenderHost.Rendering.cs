@@ -93,8 +93,30 @@ internal sealed partial class MetalRenderHost
         MetalNative.Selector("memoryBarrierWithScope:afterStages:beforeStages:");
     private static readonly nint SelComputeMemoryBarrier = MetalNative.Selector("memoryBarrierWithScope:");
 
+    // The two encoders the host holds open across calls, and across worker passes when a
+    // coalesced flush keeps the buffer open. The command buffer hands them back
+    // autoreleased, so each is retained when opened and released once, right after
+    // endEncoding (the command buffer keeps its own reference to what it recorded).
     private nint _renderEncoder;
     private nint _computeEncoder;
+
+    /// <summary>Takes the host's own reference on an encoder it will hold in a field.</summary>
+    private static nint RetainEncoder(nint encoder)
+    {
+        if (encoder != 0)
+        {
+            MetalNative.SendVoid(encoder, SelRetain);
+        }
+
+        return encoder;
+    }
+
+    /// <summary>Closes an encoder opened through <see cref="RetainEncoder"/> and gives its reference back.</summary>
+    private static void EndAndReleaseEncoder(nint encoder)
+    {
+        MetalNative.SendVoid(encoder, SelEndEncoding);
+        MetalNative.SendVoid(encoder, SelRelease);
+    }
     private long _renderPasses;
     private long _passEndClear;
     private long _passEndTarget;
@@ -976,7 +998,7 @@ internal sealed partial class MetalRenderHost
                 PassProfileAttachRender(descriptor);
             }
 
-            _renderEncoder = MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor);
+            _renderEncoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
             if (_renderEncoder == 0)
             {
                 throw Fatal(
@@ -1080,7 +1102,7 @@ internal sealed partial class MetalRenderHost
                 ResolveStoreActions(in next, hasNext);
             }
 
-            MetalNative.SendVoid(_renderEncoder, SelEndEncoding);
+            EndAndReleaseEncoder(_renderEncoder);
             _renderEncoder = 0;
             PassProfileClose();
         }
@@ -1133,7 +1155,7 @@ internal sealed partial class MetalRenderHost
         }
 
         _transferSharesCompute = false;
-        MetalNative.SendVoid(_computeEncoder, SelEndEncoding);
+        EndAndReleaseEncoder(_computeEncoder);
         _computeEncoder = 0;
         _boundComputePipeline = 0;
         PassProfileClose();
@@ -1171,6 +1193,8 @@ internal sealed partial class MetalRenderHost
         {
             _computeEncoder = MetalNative.Send(computeBuffer, SelComputeEncoder);
         }
+
+        RetainEncoder(_computeEncoder);
 
         if (_computeEncoder == 0)
         {

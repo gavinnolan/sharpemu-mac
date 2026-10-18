@@ -264,8 +264,9 @@ internal sealed partial class MetalRenderHost :
             throw GpuFatal.Fatal("A Metal command buffer could not be created.");
         }
 
-        // Retain it: the queue hands back an autoreleased buffer and nothing here
-        // runs inside an autorelease pool the whole time it is being recorded.
+        // Retain it: the queue hands back an autoreleased buffer, and the buffer stays open
+        // across worker passes (a coalesced flush) while each pass drains its own pool.
+        // Released once, when the in-flight ring is done with it (or in Dispose).
         MetalNative.Send(_commandBuffer, MetalNative.Selector("retain"));
         _submissionSerial = ++_nextSerial;
         var completed = CompletedSerial;
@@ -487,7 +488,7 @@ internal sealed partial class MetalRenderHost :
         {
             _encodersInBuffer++;
             PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
-            MetalNative.SendVoid(_computeEncoder, SelEndEncoding);
+            EndAndReleaseEncoder(_computeEncoder);
             _computeEncoder = 0;
             _boundComputePipeline = 0;
             PassProfileClose();
@@ -596,6 +597,17 @@ internal sealed partial class MetalRenderHost :
         DrainFinishedSubmissions();
         ReportStepCaps();
         RetainInFlight(_commandBuffer, serial);
+        // The host's own reference on the buffer it just committed, for the wait that reads
+        // its timing after this flush (or after a later call that flushed nothing). The
+        // in-flight ring releases its reference once the GPU is done with the buffer, and
+        // this thread's pool drops the autoreleased one, so a bare pointer kept here
+        // would dangle by then.
+        MetalNative.SendVoid(_commandBuffer, SelRetain);
+        if (_previousCommandBuffer != 0)
+        {
+            MetalNative.SendVoid(_previousCommandBuffer, SelRelease);
+        }
+
         _previousCommandBuffer = _commandBuffer;
         _previousSerial = serial;
         _commandBuffer = 0;
@@ -2299,7 +2311,12 @@ internal sealed partial class MetalRenderHost :
                 _commandBuffer = 0;
             }
 
-            _previousCommandBuffer = 0;
+            if (_previousCommandBuffer != 0)
+            {
+                MetalNative.SendVoid(_previousCommandBuffer, SelRelease);
+                _previousCommandBuffer = 0;
+            }
+
             _scheduleNudge?.Dispose();
             ReleaseInFlightSubmissions();
             ReportStepCaps();
