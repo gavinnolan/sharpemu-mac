@@ -157,7 +157,7 @@ public sealed class TitleDisplayPatchesTests
     [InlineData(1920u, 1080u)]
     [InlineData(2560u, 1440u)]
     [InlineData(1280u, 720u)]
-    public void TheDisplayModeStrategyHoldsTheHdModeAndShrinksOnlyItsRenderTargets(uint width, uint height)
+    public void TheDisplayModeStrategyHoldsTheHdModeAndShrinksOnlyTheSceneSize(uint width, uint height)
     {
         var profile = TitleDisplayPatches.DisplayModeFor("PPSA01342")!;
         Assert.Null(TitleDisplayPatches.DisplayModeFor("PPSA00000"));
@@ -190,12 +190,18 @@ public sealed class TitleDisplayPatchesTests
         }
         else
         {
-            Assert.Equal(profile.HdOutputSites.Count + profile.HdInternalSites.Count, sizePatches.Count);
+            Assert.Equal(
+                profile.HdInternalSites.Select(site => site.Offset).Order(),
+                sizePatches.Select(patch => patch.Offset).Order());
             Assert.All(sizePatches.Where(patch => patch.Old.SequenceEqual(Le32(1920))),
                 patch => Assert.Equal(Le32(width), patch.New));
             Assert.All(sizePatches.Where(patch => patch.Old.SequenceEqual(Le32(1080))),
                 patch => Assert.Equal(Le32(height), patch.New));
         }
+
+        // The title composites its UI at the HD output size: the output, the display-buffer
+        // views it registers with video out and the UI's own sizes all stay 1920x1080.
+        Assert.DoesNotContain(patches, patch => HdOutputOffsets.Contains(patch.Offset));
 
         // Nothing the UI lays out in is touched: the canvas tables, the 4K literals and the
         // display-size getters keep the title's values.
@@ -213,7 +219,7 @@ public sealed class TitleDisplayPatchesTests
     }
 
     [Fact]
-    public void ApplyInDisplayModeAt720pLeavesEveryUiSiteAlone()
+    public void ApplyInDisplayModeAt720pShrinksOnlyTheSceneAndKeepsTheHdOutput()
     {
         var profile = TitleDisplayPatches.DisplayModeFor("PPSA01342")!;
         var sites = TitleDisplayPatches.SitesFor("PPSA01342")!;
@@ -221,9 +227,14 @@ public sealed class TitleDisplayPatchesTests
         using var memory = new SharpEmu.Core.Memory.PhysicalVirtualMemory();
         Assert.True(memory.TryAllocateAtOrAbove(0x200000000UL, imageSize, executable: false, 0x4000, out var imageBase));
         ProgramHeader[] headers = [CreateLoad(0, imageSize)];
-        foreach (var site in sites.Concat(profile.HdOutputSites).Concat(profile.HdInternalSites))
+        foreach (var site in sites.Concat(profile.HdInternalSites))
         {
             Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
+        }
+
+        foreach (var (offset, hdValue) in HdOutputValues)
+        {
+            Assert.True(memory.TryWrite(imageBase + offset, Le32(hdValue)));
         }
 
         foreach (var offset in profile.DefaultModeSites)
@@ -261,10 +272,16 @@ public sealed class TitleDisplayPatchesTests
             Assert.Equal(site.New, code);
         }
 
-        foreach (var site in profile.HdOutputSites.Concat(profile.HdInternalSites))
+        foreach (var site in profile.HdInternalSites)
         {
             Assert.True(memory.TryRead(imageBase + site.Offset, value));
             Assert.Equal(Le32(site.Slot == TitleDisplayPatches.Slot.Width ? 1280u : 720u), value);
+        }
+
+        foreach (var (offset, expected) in HdOutputValues)
+        {
+            Assert.True(memory.TryRead(imageBase + offset, value));
+            Assert.Equal(Le32(expected), value);
         }
 
         foreach (var site in sites)
@@ -275,6 +292,17 @@ public sealed class TitleDisplayPatchesTests
             Assert.Equal(expected, actual);
         }
     }
+
+    // Demon's Souls' HD output size (output table index 1) and the 1920x1080 views of its
+    // display buffers that it registers with sceVideoOutSetBufferAttribute2 in the HD mode.
+    private static readonly (ulong Offset, uint Value)[] HdOutputValues =
+    [
+        (0x1FFA5D4, 1920), (0x1FFBE34, 1080),
+        (0x9453E2, 1920), (0x9453E7, 1080),
+        (0x94547B, 1920), (0x945480, 1080),
+    ];
+
+    private static readonly HashSet<ulong> HdOutputOffsets = HdOutputValues.Select(site => site.Offset).ToHashSet();
 
     private static byte[] Encode(TitleDisplayPatches.Site site, uint width, uint height) =>
         site.Slot switch
