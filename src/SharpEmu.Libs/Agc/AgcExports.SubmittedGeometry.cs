@@ -78,6 +78,47 @@ public static partial class AgcExports
         return recorded.ToArray();
     }
 
+    // Whether RecordShaderRegisters(registers) would equal recorded, without building it.
+    private static bool ShaderRegistersMatch(IReadOnlyDictionary<uint, uint> registers, KeyValuePair<uint, uint>[] recorded)
+    {
+        Span<uint> offsets = stackalloc uint[(int)(3 * ShaderRegisterWindowLength + UserDataRegisterWindowLength)];
+        var count = 0;
+        foreach (var start in (ReadOnlySpan<uint>)[SpiShaderPgmLoVs, SpiShaderPgmLoGs, SpiShaderPgmLoEs])
+        {
+            for (var offset = start; offset < start + ShaderRegisterWindowLength; offset++)
+            {
+                offsets[count++] = offset;
+            }
+        }
+
+        var userData = SelectExportUserDataRegister(registers);
+        for (var offset = userData; offset < userData + UserDataRegisterWindowLength; offset++)
+        {
+            offsets[count++] = offset;
+        }
+
+        offsets = offsets[..count];
+        offsets.Sort();
+        var matched = 0;
+        for (var index = 0; index < offsets.Length; index++)
+        {
+            var offset = offsets[index];
+            if ((index != 0 && offset == offsets[index - 1]) || !registers.TryGetValue(offset, out var value))
+            {
+                continue;
+            }
+
+            if (matched >= recorded.Length || recorded[matched].Key != offset || recorded[matched].Value != value)
+            {
+                return false;
+            }
+
+            matched++;
+        }
+
+        return matched == recorded.Length;
+    }
+
     private static GeometryCaptureFingerprint CreateCaptureFingerprint(
         SubmittedDcbState captureState,
         ulong indexAddress,

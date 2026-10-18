@@ -27,16 +27,12 @@ internal sealed partial class ShaderPipelineCache
     {
         description = string.Empty;
         var instructions = program.Instructions;
-        string[] expectedOpcodes =
-        [
-            "SMovB32", "STtraceData", "SInstPrefetch", "VLshlAddU32", "SBufferLoadDword", "SWaitcnt", "VCmpxGtU32", "SCbranchExecz",
-            "SBufferLoadDword", "SWaitcnt", "VAndB32", "BufferLoadFormatX", "SWaitcnt", "BufferStoreFormatX", "SEndpgm",
-        ];
+        var expectedOpcodes = MaskedDwordCopyOpcodes;
         var groupsX = input.DispatchThreadDimensions ? RenderExecutor.GroupsFromThreads(input.DispatchThreadsX, input.ThreadsX) : input.DispatchThreadsX;
         var groupsY = input.DispatchThreadDimensions ? RenderExecutor.GroupsFromThreads(input.DispatchThreadsY, input.ThreadsY) : input.DispatchThreadsY;
         var groupsZ = input.DispatchThreadDimensions ? RenderExecutor.GroupsFromThreads(input.DispatchThreadsZ, input.ThreadsZ) : input.DispatchThreadsZ;
         if (instructions.Count != expectedOpcodes.Length ||
-            !instructions.Select(static instruction => instruction.Opcode).SequenceEqual(expectedOpcodes) ||
+            !HasOpcodes(instructions, expectedOpcodes) ||
             !IsExactMaskedDwordCopyInstructionShape(instructions) ||
             groupsY != 1 || groupsZ != 1 ||
             input.ThreadsX != 64 || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
@@ -114,6 +110,26 @@ internal sealed partial class ShaderPipelineCache
         }
 
         description = $"dst=0x{destinationAddress:X16} bytes={output.Length} elements={elementCount} mask=0x{sourceMask:X8} dispatch={groupsX}x{input.ThreadsX}";
+        return true;
+    }
+
+    // Checked for every dispatch, so the list is built once and compared without LINQ.
+    private static readonly string[] MaskedDwordCopyOpcodes =
+    [
+        "SMovB32", "STtraceData", "SInstPrefetch", "VLshlAddU32", "SBufferLoadDword", "SWaitcnt", "VCmpxGtU32", "SCbranchExecz",
+        "SBufferLoadDword", "SWaitcnt", "VAndB32", "BufferLoadFormatX", "SWaitcnt", "BufferStoreFormatX", "SEndpgm",
+    ];
+
+    private static bool HasOpcodes(IReadOnlyList<Gen5ShaderInstruction> instructions, string[] opcodes)
+    {
+        for (var index = 0; index < opcodes.Length; index++)
+        {
+            if (!string.Equals(instructions[index].Opcode, opcodes[index], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
         return true;
     }
 

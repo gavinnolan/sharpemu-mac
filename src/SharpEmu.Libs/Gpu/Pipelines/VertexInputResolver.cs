@@ -69,7 +69,7 @@ public static class VertexInputResolver
             metadataCache?.Add(shader, codeHash, metadata);
         }
 
-        var attributes = new List<VertexAttributeResource>();
+        List<VertexAttributeResource>? attributes = null;
         VertexInputBuffer[] buffers = [];
         // A shader without input semantics never reads its vertex tables, which may be null.
         if (metadata.VertexAttributeRegister >= 0 && metadata.InputSemantics.Length != 0)
@@ -91,7 +91,7 @@ public static class VertexInputResolver
         return new VertexInputInfo
         {
             Buffers = buffers,
-            Attributes = attributes.ToArray(),
+            Attributes = attributes is null ? [] : attributes.ToArray(),
             FetchEmbedded = metadata.VertexAttributeRegister >= 0,
             FetchAttributeRegister = Math.Max(metadata.VertexAttributeRegister, 0),
             FetchBufferRegister = Math.Max(metadata.VertexBufferRegister, 0),
@@ -115,6 +115,12 @@ public static class VertexInputResolver
         ((channels > 1 ? 5u : 0u) << 3) |
         ((channels > 2 ? 6u : 0u) << 6) |
         ((channels > 3 ? 7u : 1u) << 9);
+
+    [ThreadStatic]
+    private static List<ResolvedBuffer>? _mergeScratch;
+
+    [ThreadStatic]
+    private static Stack<ResolvedBuffer>? _spareBuffers;
 
     private sealed class ResolvedBuffer
     {
@@ -327,7 +333,16 @@ public static class VertexInputResolver
     // Attributes with one stride and fetch rate whose bases lie within one record share a buffer.
     public static VertexInputBuffer[] MergeBuffers(List<VertexAttributeResource> resources, ulong shaderAddress)
     {
-        var buffers = new List<ResolvedBuffer>();
+        // Per-thread scratch: this runs for every draw, and the buffers never outlive the call.
+        var buffers = _mergeScratch ??= new List<ResolvedBuffer>(VertexInputInfo.MaxBuffers);
+        var spares = _spareBuffers ??= new Stack<ResolvedBuffer>(VertexInputInfo.MaxBuffers);
+        foreach (var buffer in buffers)
+        {
+            buffer.AttributeIndices.Clear();
+            spares.Push(buffer);
+        }
+
+        buffers.Clear();
         for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
         {
             var resource = resources[resourceIndex];
@@ -375,13 +390,11 @@ public static class VertexInputResolver
                 throw GpuFatal.Fatal($"The vertex program has too many buffers: shader=0x{shaderAddress:X16}.");
             }
 
-            var created = new ResolvedBuffer
-            {
-                Address = descriptor.Address,
-                Stride = descriptor.Stride,
-                RecordCount = descriptor.RecordCount,
-                FetchIndex = resource.FetchIndex,
-            };
+            var created = spares.Count != 0 ? spares.Pop() : new ResolvedBuffer();
+            created.Address = descriptor.Address;
+            created.Stride = descriptor.Stride;
+            created.RecordCount = descriptor.RecordCount;
+            created.FetchIndex = resource.FetchIndex;
             created.AttributeIndices.Add(resourceIndex);
             buffers.Add(created);
         }

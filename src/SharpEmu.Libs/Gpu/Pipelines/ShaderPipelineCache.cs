@@ -515,7 +515,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return false;
         }
 
-        if (context.BlendControls[slot].Enable && (words.Info & BlendBypass) == 0)
+        if (context.BlendControls[slot].Enable && (words.Info & BlendBypass) == 0 &&
+            !ShaderCompilerWarnings.WasReported("blend-clamp-blended-float"))
         {
             ShaderCompilerWarnings.WarnOnce(
                 "blend-clamp-blended-float",

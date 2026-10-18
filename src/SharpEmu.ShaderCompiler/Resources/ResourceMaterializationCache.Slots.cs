@@ -449,7 +449,7 @@ public sealed partial class ResourceMaterializationCache
                     range >= 0 && entry.WordTableOnly[model.Offsets[slot] / sizeof(uint)]);
             }
 
-            refreshed = recorder.Build(plan, inputs, snapshot, entry.Specialization, rebase.MemoryBases, entry.UsedUserData);
+            refreshed = recorder.Build(plan, inputs, snapshot, entry.Specialization, rebase.MemoryBases, entry.UsedUserData, like: entry);
         }
         finally
         {

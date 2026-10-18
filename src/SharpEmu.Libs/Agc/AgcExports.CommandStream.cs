@@ -125,6 +125,13 @@ public static partial class AgcExports
             return false;
         }
 
+        // Checked per draw: the usual match is decided without building the live list; a
+        // mismatch takes the path below, which names the rejection.
+        if (ShaderRegistersMatch(state.ShRegisters, capture.ShaderRegisters))
+        {
+            return true;
+        }
+
         var live = RecordShaderRegisters(state.ShRegisters);
         if (live.Length != capture.ShaderRegisters.Length)
         {
