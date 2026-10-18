@@ -21,10 +21,20 @@ public delegate bool ResidentGuestBytesReader(ulong address, Span<byte> destinat
 public sealed partial class ResourceMaterializationCache
 {
     // Two generations approximate LRU: a full young generation becomes the old one,
-    // and an old entry that is used again is promoted back.
+    // and an old entry that is used again is promoted back. A generation is full at
+    // _generationCapacity keys or at _generationByteBudget estimated retained bytes,
+    // whichever comes first: a count alone let entries with large bindless tables or long
+    // read lists hold hundreds of MB. Dropping the old generation only costs rebuilds.
     private readonly int _generationCapacity;
+    private readonly long _generationByteBudget;
     private Dictionary<ulong, Entry> _young = new();
     private Dictionary<ulong, Entry> _old = new();
+    private long _youngBytes;
+    private long _oldBytes;
+    // The rebases' recent entries (AddressRebase.Learn) hold entries the generations may have
+    // dropped already; past this estimate every rebase forgets them, which only delays learning.
+    private readonly long _recentByteBudget;
+    private long _recentBytes;
     private byte[] _scratch = new byte[256];
     private ReadRecorder? _spareRecorder;
     private ReadRecorder? _secondSpareRecorder;
@@ -46,6 +56,7 @@ public sealed partial class ResourceMaterializationCache
             {
                 _rebases.Clear();
                 _learnedUserData.Clear();
+                _recentBytes = 0;
             }
 
             _rebases.Add(drawKey, rebase = new AddressRebase(plan));
@@ -82,6 +93,15 @@ public sealed partial class ResourceMaterializationCache
         private readonly Dictionary<int, int> _confirmed = new();
         private const int RecentCapacity = 512;
         private readonly Dictionary<ulong, Entry> _recent = new();
+
+        // The estimated bytes the recent entries hold (Entry.EstimatedBytes).
+        public long RecentBytes { get; private set; }
+
+        public void ForgetRecent()
+        {
+            _recent.Clear();
+            RecentBytes = 0;
+        }
 
         private ulong StructureOf(Entry entry)
         {
@@ -531,8 +551,17 @@ public sealed partial class ResourceMaterializationCache
             var structure = StructureOf(built);
             _recent.TryGetValue(structure, out var previous);
             if (_recent.Count >= RecentCapacity)
+            {
                 _recent.Clear();
+                RecentBytes = 0;
+            }
+            else if (previous is not null)
+            {
+                RecentBytes -= previous.EstimatedBytes;
+            }
+
             _recent[structure] = built;
+            RecentBytes += built.EstimatedBytes;
             if (previous is null || previous.UserData.Length != built.UserData.Length ||
                 !previous.UsedUserData.AsSpan().SequenceEqual(built.UsedUserData))
                 return;
@@ -808,10 +837,30 @@ public sealed partial class ResourceMaterializationCache
         }
     }
 
-    public ResourceMaterializationCache(int generationCapacity = 16384)
+    // SHARPEMU_RESOURCE_CACHE_MB overrides the default total.
+    public const long DefaultByteBudget = 256L << 20;
+
+    // byteBudget is the total estimated retained bytes: three quarters for the two
+    // generations, one quarter for the rebases' recent entries. Negative takes the default.
+    public ResourceMaterializationCache(int generationCapacity = 16384, long byteBudget = -1)
     {
         _generationCapacity = Math.Max(1, generationCapacity);
+        var budget = byteBudget >= 0 ? byteBudget : ConfiguredByteBudget();
+        _recentByteBudget = budget / 4;
+        _generationByteBudget = Math.Max(1, (budget - _recentByteBudget) / 2);
     }
+
+    private static long ConfiguredByteBudget() =>
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_MB"), out var megabytes) && megabytes > 0
+            ? megabytes << 20
+            : DefaultByteBudget;
+
+    // The estimated bytes the cache retains: both generations and the rebases' recent entries.
+    public long RetainedBytes => _youngBytes + _oldBytes + _recentBytes;
+
+    public int EntryCount => _young.Count + _old.Count;
+
+    private static long _lastRetainedBytes;
 
     private static long _totalHits;
     private static long _totalMisses;
@@ -883,7 +932,7 @@ public sealed partial class ResourceMaterializationCache
         var refusals = string.Join(",", RefreshRefusalNames.Select((name, index) => FormattableString.Invariant($"{name}:{Interlocked.Exchange(ref _refreshRefusals[index], 0)}")));
         var total = hits + misses;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}") +
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% retained_mb={Volatile.Read(ref _lastRetainedBytes) / (1024.0 * 1024.0):F1} {RawReadPrefetch.TakeReport()}") +
             TakeSlotReport() + TakeRebaseReport() +
             TakeStaleDifferenceReport();
     }
@@ -1537,13 +1586,19 @@ public sealed partial class ResourceMaterializationCache
         if (!_old.TryGetValue(key, out entry!) || !entry.Matches(plan, inputs, rebased))
             return false;
         _old.Remove(key);
+        _oldBytes -= entry.StoredChainBytes;
         Store(key, entry);
         return true;
     }
 
     private void Store(ulong key, Entry entry)
     {
-        if (_young.Count >= _generationCapacity && !_young.ContainsKey(key))
+        var bytes = ChainBytes(entry);
+        if (_young.TryGetValue(key, out var replaced))
+        {
+            _youngBytes -= replaced.StoredChainBytes;
+        }
+        else if (_young.Count >= _generationCapacity || (_young.Count != 0 && _youngBytes + bytes > _generationByteBudget))
         {
             // The dropped generation's table becomes the new young one: a fresh table of this
             // capacity was ~450 KB on the large object heap per rotation.
@@ -1551,10 +1606,24 @@ public sealed partial class ResourceMaterializationCache
             recycled.Clear();
             recycled.EnsureCapacity(_generationCapacity);
             _old = _young;
+            _oldBytes = _youngBytes;
             _young = recycled;
+            _youngBytes = 0;
         }
 
+        entry.StoredChainBytes = bytes;
         _young[key] = entry;
+        _youngBytes += bytes;
+        Volatile.Write(ref _lastRetainedBytes, RetainedBytes);
+    }
+
+    // A key holds its entry and the variants chained behind it.
+    private static long ChainBytes(Entry entry)
+    {
+        long bytes = 0;
+        for (Entry? variant = entry; variant is not null; variant = variant.Next)
+            bytes += variant.EstimatedBytes;
+        return bytes;
     }
 
     // What a hit on the previous entry would give this draw with the words in probe rebased: its
@@ -1577,8 +1646,17 @@ public sealed partial class ResourceMaterializationCache
     // Its own method: a lambda in MaterializeCore that captured the parameters made every call,
     // hits included, allocate the closure on entry.
     private void Learn(AddressRebase rebase, Entry built, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
-        ResidentGuestBytesReader residentReader) =>
+        ResidentGuestBytesReader residentReader)
+    {
+        var before = rebase.RecentBytes;
         rebase.Learn(built, (previous, probe) => Predict(previous, plan, inputs, residentReader, rebase, probe));
+        _recentBytes += rebase.RecentBytes - before;
+        if (_recentBytes <= _recentByteBudget)
+            return;
+        foreach (var other in _rebases.Values)
+            other.ForgetRecent();
+        _recentBytes = 0;
+    }
 
     // The table for this draw without evaluating it: a slot that reads a memory-based buffer at a
     // constant offset takes the word now at that offset, which the moved window has just read; the
@@ -2010,6 +2088,75 @@ public sealed partial class ResourceMaterializationCache
         public ResourceSnapshot? LastHit { get; set; }
         public ulong[]? LastHitActive { get; set; }
         public Entry? Next { get; set; }
+
+        // The chain bytes (ChainBytes) this entry was stored with as a key's head.
+        public long StoredChainBytes { get; set; }
+
+        private long _estimatedBytes = -1;
+
+        // An upper bound on what the entry keeps alive, from its immutable arrays. Arrays it shares
+        // with the entry it was rebuilt from are counted in both. The derived data filled in later
+        // (RangeWindows, BaseWordProbes, TableCopySources, Joined, Slots, LastHit) is counted up
+        // front from the sizes it is made of, so the estimate never changes.
+        public long EstimatedBytes
+        {
+            get
+            {
+                if (_estimatedBytes >= 0)
+                    return _estimatedBytes;
+                var ranges = RangeAddresses.Length;
+                var table = Snapshot.FlattenedResourceTable.Length;
+                var size = EntryObjectBytes +
+                    ArrayBytes(UserData.Length, sizeof(uint)) + ArrayBytes(UsedUserData.Length, sizeof(ulong)) +
+                    ArrayBytes(ranges, sizeof(ulong)) + 2 * ArrayBytes(ranges, sizeof(int)) + ArrayBytes(ranges, sizeof(bool)) +
+                    ArrayBytes(WordTableOnly.Length, sizeof(bool)) + ArrayBytes(Bytes.Length, sizeof(byte)) +
+                    (BaseWordBuffers is null ? 0 : ArrayBytes(BaseWordBuffers.Length, sizeof(int))) +
+                    SnapshotBytes(Snapshot) + SpecializationBytes(Specialization) +
+                    // RangeWindows, BaseWordProbes, TableCopySources.
+                    ArrayBytes(ranges, sizeof(int)) + ArrayBytes(ranges, 2 * sizeof(int)) + ArrayBytes(table, sizeof(int)) +
+                    // JoinedReads: at most one read per range.
+                    ObjectBytes + ArrayBytes(ranges, sizeof(ulong)) + 4 * ArrayBytes(ranges, sizeof(int)) + ArrayBytes(ranges, sizeof(bool)) +
+                    // SlotModel: at most one slot per table word.
+                    ObjectBytes + 2 * ArrayBytes(table, sizeof(ulong)) + 2 * ArrayBytes(table, sizeof(int)) +
+                    // LastHit: a snapshot shell with its patched buffers.
+                    ObjectBytes + JaggedBytes(Snapshot.Buffers) + ArrayBytes(UsedUserData.Length, sizeof(ulong));
+                _estimatedBytes = size;
+                return size;
+            }
+        }
+
+        private const long ObjectBytes = 64;
+        private const long EntryObjectBytes = 256;
+
+        private static long ArrayBytes(int length, int elementBytes) => 24 + (long)length * elementBytes;
+
+        private static long JaggedBytes(uint[][] arrays)
+        {
+            var size = ArrayBytes(arrays.Length, IntPtr.Size);
+            foreach (var array in arrays)
+                size += ArrayBytes(array.Length, sizeof(uint));
+            return size;
+        }
+
+        private static long SnapshotBytes(ResourceSnapshot snapshot)
+        {
+            var size = ObjectBytes + JaggedBytes(snapshot.Buffers) + JaggedBytes(snapshot.Images) + JaggedBytes(snapshot.Samplers) +
+                ArrayBytes(snapshot.FlattenedResourceTable.Length, sizeof(uint)) + ArrayBytes(snapshot.UserData.Length, sizeof(uint)) +
+                ArrayBytes(snapshot.DeviceAddressRanges.Length, Unsafe.SizeOf<DeviceAddressRange>()) +
+                ArrayBytes(snapshot.BindlessImages.Length, IntPtr.Size);
+            foreach (var table in snapshot.BindlessImages)
+            {
+                size += ObjectBytes + ArrayBytes(table.VariantImages.Length, sizeof(uint)) + JaggedBytes(table.Descriptors) +
+                    ArrayBytes(table.DescriptorVariants.Length, sizeof(byte)) + ArrayBytes(table.Entries.Length, sizeof(int));
+            }
+
+            return size;
+        }
+
+        private static long SpecializationBytes(ResourceSpecialization specialization) =>
+            ObjectBytes + 6 * ObjectBytes +
+            32L * (specialization.Buffers.Count + specialization.Images.Count + specialization.BufferCandidateTables.Count +
+                specialization.ImageDescriptorGroups.Count + specialization.SamplerDescriptorGroups.Count + specialization.Samplers.Count);
 
         // A rebased word is an address the hit patches in, so it does not distinguish entries.
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ulong[] rebased)

@@ -653,4 +653,70 @@ public sealed class ResourceMaterializationCacheTests
         Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
         Assert.Equal(1, cache.Hits);
     }
+
+    // The retained-byte estimate, not only the key count, decides when a generation is full:
+    // many distinct draws stay under the budget however many keys they add.
+    [Fact]
+    public void RetainedBytesStayWithinTheBudget()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        const long budget = 64 * 1024;
+        var cache = new ResourceMaterializationCache(generationCapacity: 1 << 20, byteBudget: budget);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
+        var oneEntry = cache.RetainedBytes;
+        Assert.True(oneEntry > 0);
+        for (ulong draw = 1; draw < 4096; draw++)
+        {
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _, shaderBase: draw * 0x100));
+            // Both generations at their share, plus the entry that opened the young one.
+            Assert.True(cache.RetainedBytes <= budget + oneEntry, $"retained={cache.RetainedBytes} after {draw} draws");
+        }
+
+        Assert.True(cache.EntryCount < 4096);
+        Assert.True(cache.EntryCount * oneEntry <= budget + oneEntry);
+        Assert.Equal(4096, cache.Misses);
+    }
+
+    // An entry the byte budget dropped is materialized again, to the same descriptors.
+    [Fact]
+    public void AnEvictedEntryRebuildsIdentically()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(generationCapacity: 1 << 20, byteBudget: 16 * 1024);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out var firstSpecialization));
+        for (ulong draw = 1; draw < 512; draw++)
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _, shaderBase: draw * 0x100));
+        var misses = cache.Misses;
+        var reads = heap.Reads;
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var rebuilt, out var rebuiltSpecialization));
+        Assert.Equal(misses + 1, cache.Misses);
+        Assert.True(heap.Reads > reads);
+        Assert.NotSame(first, rebuilt);
+        Assert.Equal(firstSpecialization, rebuiltSpecialization);
+        Assert.Equal(first.Images.Select(image => image.ToArray()), rebuilt.Images.Select(image => image.ToArray()));
+        Assert.Equal(first.Buffers.Select(buffer => buffer.ToArray()), rebuilt.Buffers.Select(buffer => buffer.ToArray()));
+        Assert.Equal(first.Samplers.Select(sampler => sampler.ToArray()), rebuilt.Samplers.Select(sampler => sampler.ToArray()));
+        Assert.Equal(first.FlattenedResourceTable, rebuilt.FlattenedResourceTable);
+        Assert.Equal(first.DeviceAddressRanges, rebuilt.DeviceAddressRanges);
+
+        // And the rebuilt entry is cached again.
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var again, out _));
+        Assert.Same(rebuilt, again);
+    }
+
+    // The default budget keeps the count bound: small entries still rotate at the key count.
+    [Fact]
+    public void TheDefaultBudgetLeavesSmallEntriesToTheCountBound()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(generationCapacity: 64);
+        for (ulong draw = 0; draw < 256; draw++)
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _, shaderBase: draw * 0x100));
+        Assert.True(cache.EntryCount <= 128);
+        Assert.True(cache.RetainedBytes < ResourceMaterializationCache.DefaultByteBudget);
+    }
 }
