@@ -548,7 +548,7 @@ internal sealed partial class MetalImageCache
             MetalV2Diagnostics.InfoOnce(
                 "image-budget",
                 $"The image cache is over its budget with no evictable image: used={_totalUsedMemory / MiB}MB " +
-                $"budget={_memoryBudgetBytes / MiB}MB images={_slots.Count}.");
+                $"budget={_memoryBudgetBytes / MiB}MB in_use={_inUseBytes / MiB}MB images={_slots.Count}.");
         }
     }
 
