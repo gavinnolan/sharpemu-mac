@@ -117,14 +117,21 @@ public static partial class KernelMemoryCompatExports
 
         // Titles that stream from .pak archives pread in chunks well past the
         // 85 KiB large-object threshold, so a fresh array per call put every
-        // read's staging buffer on the LOH.
-        var buffer = ArrayPool<byte>.Shared.Rent(requested);
+        // read's staging buffer on the LOH. The read goes straight into the
+        // guest's host mapping when it hands the range out in place, and
+        // through a pooled buffer otherwise.
+        byte[]? buffer = null;
         try
         {
             int read;
             try
             {
-                read = ReadOpenFileAt(stream, buffer.AsSpan(0, requested), offset);
+                if (!ctx.Memory.TryFillInPlace(bufferAddress, requested, (Stream: stream, Offset: offset),
+                        static (state, destination) => ReadOpenFileAt(state.Stream, destination, state.Offset), out read))
+                {
+                    buffer = ArrayPool<byte>.Shared.Rent(requested);
+                    read = ReadOpenFileAt(stream, buffer.AsSpan(0, requested), offset);
+                }
             }
             catch (IOException)
             {
@@ -142,7 +149,7 @@ public static partial class KernelMemoryCompatExports
 
             SharpEmu.HLE.GuestLoadProgress.NoteFileRead(read);
 
-            if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
+            if (read > 0 && buffer is not null && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -152,7 +159,10 @@ public static partial class KernelMemoryCompatExports
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 

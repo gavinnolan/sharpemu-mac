@@ -119,6 +119,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
     private readonly nint _device;
     private readonly MetalTiler _tiler;
+    private const int MaxPlans = 2048;
     private readonly Dictionary<PlanKey, TransferPlan> _plans = [];
     private readonly List<MetalSubresourceCopy> _copies = [];
     private readonly List<MetalTileTransfer> _tiles = [];
@@ -1302,6 +1303,14 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         }
 
         plan = description.IsDepth ? PlanDepth(description) : PlanColor(description);
+        // A plan is a pure function of its key, so dropping them all only costs replanning.
+        // Every distinct shape a title streams (and every resize) adds one, each with a copy
+        // per level and layer.
+        if (_plans.Count >= MaxPlans)
+        {
+            _plans.Clear();
+        }
+
         _plans[key] = plan;
         return plan;
     }
