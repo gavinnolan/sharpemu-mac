@@ -11,7 +11,11 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// program instead of waiting for each in turn (MetalRenderHost.CreateShaderModule). A
 /// front-end call blocks its thread for the whole compile, tens of milliseconds to
 /// seconds, so the pool has its own threads rather than the .NET pool's. First come,
-/// first served. SHARPEMU_METAL_V2_ASYNC_LIBRARIES=0 compiles on the caller again.
+/// first served, but a job the worker needs before a pool thread took it runs on the
+/// worker at once (<see cref="TryRunHere"/>) instead of waiting behind the others.
+/// Everything here is the game's own work; the background prewarm compiles on its own
+/// threads and gives way to it (MetalCompileScheduler).
+/// SHARPEMU_METAL_V2_ASYNC_LIBRARIES=0 compiles on the caller again.
 /// </summary>
 internal sealed class MetalLibraryCompilePool
 {
@@ -20,9 +24,48 @@ internal sealed class MetalLibraryCompilePool
 
     private static readonly Lazy<MetalLibraryCompilePool> _shared = new(() => new MetalLibraryCompilePool(ThreadCount));
 
-    private readonly BlockingCollection<(Action Work, TaskCompletionSource Done)> _queue = new();
+    private readonly BlockingCollection<Job> _queue = new();
 
-    private MetalLibraryCompilePool(int threads)
+    /// <summary>One queued compile: it runs once, on a pool thread or on the caller that needs it.</summary>
+    internal sealed class Job(Action work)
+    {
+        private const int Queued = 0;
+        private const int Taken = 1;
+
+        private readonly TaskCompletionSource _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _state;
+
+        public Task Task => _done.Task;
+
+        // True when this call ran the work; false when another thread has it (or had it).
+        internal bool TryRun()
+        {
+            if (Interlocked.CompareExchange(ref _state, Taken, Queued) != Queued)
+            {
+                return false;
+            }
+
+            try
+            {
+                // A compile creates strings and functions through factories that autorelease
+                // them, on a thread that may have no pool: each unit of work frees its own.
+                using (MetalAutoreleasePool.Enter())
+                {
+                    work();
+                }
+
+                _done.SetResult();
+            }
+            catch (Exception exception)
+            {
+                _done.SetException(exception);
+            }
+
+            return true;
+        }
+    }
+
+    internal MetalLibraryCompilePool(int threads)
     {
         for (var index = 0; index < threads; index++)
         {
@@ -43,33 +86,26 @@ internal sealed class MetalLibraryCompilePool
     /// </summary>
     internal static int ThreadCount => MetalShaderPrewarm.WorkerCount;
 
-    /// <summary>Queues <paramref name="work"/>; the task ends with it, or with its exception.</summary>
-    public Task Run(Action work)
+    /// <summary>Queues <paramref name="work"/>; the job's task ends with it, or with its exception.</summary>
+    public Job Run(Action work)
     {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _queue.Add((work, done));
-        return done.Task;
+        var job = new Job(work);
+        _queue.Add(job);
+        return job;
     }
+
+    /// <summary>
+    /// Runs a job nobody has started on the calling thread, which needs it now: true when it
+    /// ran here (the job is then done), false when a pool thread already has it.
+    /// </summary>
+    public bool TryRunHere(Job job) => job.TryRun();
 
     private void Run()
     {
-        foreach (var (work, done) in _queue.GetConsumingEnumerable())
+        foreach (var job in _queue.GetConsumingEnumerable())
         {
-            try
-            {
-                // A compile creates strings and functions through factories that autorelease
-                // them, on a thread that has no pool: each unit of work frees its own.
-                using (MetalAutoreleasePool.Enter())
-                {
-                    work();
-                }
-
-                done.SetResult();
-            }
-            catch (Exception exception)
-            {
-                done.SetException(exception);
-            }
+            // A job the caller took for itself is skipped.
+            job.TryRun();
         }
     }
 }

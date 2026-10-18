@@ -1432,6 +1432,10 @@ internal sealed partial class MetalImageCache
         }
 
         PromoteLinearView(image);
+        if (image.Shape.TextureType != Mtl.TextureType3D)
+        {
+            MapSparseLayers(image, range.BaseLayer, range.LayerCount);
+        }
         var shape = image.Shape;
         var volume = shape.TextureType == Mtl.TextureType3D;
         var layers = volume ? Math.Max(shape.Depth >> (int)range.BaseLevel, 1) : shape.ArrayLength;
@@ -1536,6 +1540,7 @@ internal sealed partial class MetalImageCache
 
         var image = _slots[selected];
         PromoteLinearView(image);
+        EnsureSparseBacked(image);
         ref readonly var description = ref image.Description;
         var range = new SubresourceRange(0, image.Shape.MipLevels, 0, image.Shape.ArrayLength);
         if (description.IsDepth)

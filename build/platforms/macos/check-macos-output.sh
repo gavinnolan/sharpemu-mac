@@ -68,6 +68,11 @@ forbidden_find_args=(
     # way an ELF shared object reaches a macOS output.
     -o '(' -name '*.so' ')'
     -o '(' -name '*.so.*' ')'
+    # Avalonia's Windows and Linux backends; the GUI references only the
+    # native (AppKit) backend on osx-* (see SharpEmu.GUI.csproj).
+    -o '(' -iname 'Avalonia.Win32*' ')'
+    -o '(' -iname 'Avalonia.X11*' ')'
+    -o '(' -iname 'Avalonia.FreeDesktop*' ')'
 )
 
 # The macOS runtime path is native (Metal, AppKit, GameController), so SDL3 is

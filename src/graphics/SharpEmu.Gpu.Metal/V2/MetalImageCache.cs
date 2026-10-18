@@ -243,7 +243,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 viewMip = -1;
                 viewLayer = -1;
                 var merged = result.IsValid ? _slots[result].Description : request.Description;
-                var overlap = ResolveOverlap(in merged, request.Role, candidate, result, exactFormat);
+                var overlap = ResolveOverlap(in merged, in request, candidate, result, exactFormat);
                 if (overlap.Image.IsValid)
                 {
                     result = overlap.Image;
@@ -701,6 +701,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             PromoteLinearView(image);
             EnsureStorageUsageLocked(image);
+            EnsureSparseBacked(image);
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
             RefreshFromGuest(image);
@@ -739,6 +740,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         MaterializeSampledDccClear(imageIdentifier, image, in request);
+        if (request.Role == ImageRole.Texture && image.Description.IsDepth &&
+            TryDepthTwinView(image, in request.View, out var depthView))
+        {
+            // A colour twin sampled through the depth texture: a same-format view, whose
+            // swizzle needs no usage the depth texture lacks.
+            return image.GetOrCreateView(depthView, out resourceId, sameFormatSwizzle: true);
+        }
+
         EnsureViewUsageLocked(image, in request.View);
         return image.GetOrCreateView(request.View, out resourceId);
     }
@@ -878,6 +887,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RefreshFromGuest(image);
         }
 
+        // After the upload, which gives back the tiles of layers whose guest bytes are zero:
+        // the pass writes these layers (a sparse image never waits for its pass to upload).
+        MapSparseLayers(image, request.View.BaseLayer, request.View.LayerCount);
         image.Uses.RenderTarget = true;
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
         {
@@ -925,6 +937,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         image.LastAccessTick = _collectionTick;
         PromoteLinearView(image);
         writes |= !ReadOnlyDepthPassesEnabled;
+
         writesDepth |= !ReadOnlyDepthPassesEnabled;
         var stencilOnly = writes && !writesDepth && image.Description.HasStencil;
         if (writes)
@@ -944,6 +957,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (!defer)
         {
             RefreshFromGuest(image);
+        }
+
+        // After the upload, as for a colour target.
+        if (writes)
+        {
+            MapSparseLayers(image, request.View.BaseLayer, request.View.LayerCount);
         }
 
         image.Uses.DepthTarget = true;
@@ -1038,6 +1057,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         PromoteLinearView(image);
+        EnsureSparseBacked(image);
         WatchImage(imageIdentifier);
         // A resolve or a depth copy writes one subresource, and taking GPU ownership
         // drops whatever the image still owes from guest memory and its aliases. Take
@@ -1057,13 +1077,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// </summary>
     public void PrepareImageWrite(MetalCachedImage image)
     {
-        if (!image.IsWindowLinearView && image.FirstLevel == 0 && !image.Shape.Lossy)
+        if (!image.IsWindowLinearView && image.FirstLevel == 0 && !image.Shape.Lossy && image.Sparse is null)
         {
             return;
         }
 
         using var held = _lock.Hold();
         PromoteLinearView(image);
+        EnsureSparseBacked(image);
     }
 
     public void RefreshImage(ResourceSlotIdentifier imageIdentifier)
@@ -1220,6 +1241,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return true;
         }
 
+        EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
         if (!_transfer.TryEncodeTextureToTexture(
                 context, in other.Description, other.Texture, in image.Description, image.Texture))
@@ -1408,7 +1430,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // dropped instead of being copied image-to-image.
     private OverlapResolution ResolveOverlap(
         in ImageDescription requested,
-        ImageRole role,
+        in ImageRequest request,
         ResourceSlotIdentifier cachedImageIdentifier,
         ResourceSlotIdentifier mergedImageIdentifier,
         bool exactFormat)
@@ -1419,6 +1441,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         ref var cachedInfo = ref cached.Description;
+        var role = request.Role;
         var safeToDelete = _collectionTick - Math.Min(_collectionTick, cached.LastAccessTick) > TicksBeforeRemoval;
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
@@ -1459,6 +1482,26 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             ReportRelease(MetalImageReleaseCause.SubsetOfLarger, cachedInfo, requested, default);
             ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SubsetOfLarger);
             return new OverlapResolution(mergedImageIdentifier);
+        }
+
+        if (sameSurface && !exactFormat)
+        {
+            // A depth surface sampled as its colour twin binds the depth texture itself
+            // (MetalImageCache.DepthTwin.cs), and a colour twin that only served samples
+            // gives way to the depth target that now owns the bytes.
+            if (ServesAsDepthTwin(cached, in requested, in request))
+            {
+                _depthTwinBinds++;
+                return new OverlapResolution(mergedImageIdentifier.IsValid ? mergedImageIdentifier : cachedImageIdentifier);
+            }
+
+            if (IsReleasableColorTwin(cached, in requested, role))
+            {
+                _depthTwinReleases++;
+                ReportRelease(MetalImageReleaseCause.SameAddressReplaced, cachedInfo, requested, default);
+                ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SameAddressReplaced);
+                return new OverlapResolution(mergedImageIdentifier);
+            }
         }
 
         if (sameSurface)
@@ -1548,7 +1591,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             shape = LossyShapeFor(in admitted, shape);
         }
 
-        var texture = windowView ? viewTexture : CreateTexture(in shape, in admitted);
+        MetalSparseResidency? sparse = null;
+        var texture = windowView ? viewTexture : CreateImageTexture(in shape, in admitted, out sparse);
         // Stamped before the collection below runs: an image that has never been used
         // reads as the oldest one in the cache, so an over-budget collection evicted the
         // image it was making room for and the caller read a freed slot.
@@ -1557,6 +1601,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             LastAccessTick = _collectionTick,
             NeededWindowFrame = _idleClock.Frames,
             LevelsChangedFrame = _idleClock.Frames,
+            Sparse = sparse,
         };
         if (windowView)
         {
@@ -1722,32 +1767,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private nint CreateTexture(in MetalTextureShape shape, in ImageDescription description)
     {
-        var descriptor = MetalNative.Send(
-            MetalNative.Send(MetalNative.Class("MTLTextureDescriptor"), SelAlloc), SelInit);
-        if (descriptor == 0)
-        {
-            throw GpuFatal.Fatal("A Metal texture descriptor could not be created.");
-        }
-
+        var descriptor = NewTextureDescriptor(in shape);
         try
         {
-            MetalV2Native.SendVoidValue(descriptor, SelSetTextureType, (nuint)shape.TextureType);
-            MetalV2Native.SendVoidValue(descriptor, SelSetPixelFormat, (nuint)shape.PixelFormat);
-            MetalV2Native.SendVoidValue(descriptor, SelSetWidth, Math.Max(shape.Width, 1));
-            MetalV2Native.SendVoidValue(descriptor, SelSetHeight, Math.Max(shape.Height, 1));
-            MetalV2Native.SendVoidValue(descriptor, SelSetDepth, Math.Max(shape.Depth, 1));
-            MetalV2Native.SendVoidValue(descriptor, SelSetMipmapLevelCount, Math.Max(shape.MipLevels, 1));
-            MetalV2Native.SendVoidValue(descriptor, SelSetArrayLength, Math.Max(shape.ArrayLength, 1));
-            MetalV2Native.SendVoidValue(descriptor, SelSetSampleCount, Math.Max(shape.SampleCount, 1));
-            MetalV2Native.SendVoidValue(descriptor, SelSetUsage, (nuint)shape.Usage);
-            MetalV2Native.SendVoidValue(descriptor, SelSetStorageMode, Mtl.StorageModePrivate);
-            // Metal asserts on a lossy descriptor with a usage that cannot be compressed, so
-            // the usage decides here whatever the shape asks for.
-            if (shape.Lossy && (shape.Usage & CompressionBreakingUsage) == 0)
-            {
-                MetalV2Native.SendVoidValue(descriptor, SelSetCompressionType, CompressionTypeLossy);
-            }
-
             var texture = MetalNative.Send(_owner.Device, SelNewTexture, descriptor);
             if (texture == 0)
             {
@@ -1763,6 +1785,36 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             MetalNative.SendVoid(descriptor, SelRelease);
         }
+    }
+
+    // A private-storage texture descriptor for the shape; the caller releases it.
+    private static nint NewTextureDescriptor(in MetalTextureShape shape)
+    {
+        var descriptor = MetalNative.Send(
+            MetalNative.Send(MetalNative.Class("MTLTextureDescriptor"), SelAlloc), SelInit);
+        if (descriptor == 0)
+        {
+            throw GpuFatal.Fatal("A Metal texture descriptor could not be created.");
+        }
+
+        MetalV2Native.SendVoidValue(descriptor, SelSetTextureType, (nuint)shape.TextureType);
+        MetalV2Native.SendVoidValue(descriptor, SelSetPixelFormat, (nuint)shape.PixelFormat);
+        MetalV2Native.SendVoidValue(descriptor, SelSetWidth, Math.Max(shape.Width, 1));
+        MetalV2Native.SendVoidValue(descriptor, SelSetHeight, Math.Max(shape.Height, 1));
+        MetalV2Native.SendVoidValue(descriptor, SelSetDepth, Math.Max(shape.Depth, 1));
+        MetalV2Native.SendVoidValue(descriptor, SelSetMipmapLevelCount, Math.Max(shape.MipLevels, 1));
+        MetalV2Native.SendVoidValue(descriptor, SelSetArrayLength, Math.Max(shape.ArrayLength, 1));
+        MetalV2Native.SendVoidValue(descriptor, SelSetSampleCount, Math.Max(shape.SampleCount, 1));
+        MetalV2Native.SendVoidValue(descriptor, SelSetUsage, (nuint)shape.Usage);
+        MetalV2Native.SendVoidValue(descriptor, SelSetStorageMode, Mtl.StorageModePrivate);
+        // Metal asserts on a lossy descriptor with a usage that cannot be compressed, so
+        // the usage decides here whatever the shape asks for.
+        if (shape.Lossy && (shape.Usage & CompressionBreakingUsage) == 0)
+        {
+            MetalV2Native.SendVoidValue(descriptor, SelSetCompressionType, CompressionTypeLossy);
+        }
+
+        return descriptor;
     }
 
     // How much of an image one transfer may map and stage at a time. A guest-memory
@@ -1830,6 +1882,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        PrepareSparseUpload(image, residentStart, residentEnd);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var residentSize = residentEnd - residentStart;
         var whole = residentSize <= MaxTransferPieceBytes
@@ -1898,6 +1951,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
+        PrepareSparseUpload(image, start, end);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         _transfer.EncodeGuestToTexture(
             context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,

@@ -405,6 +405,9 @@ internal sealed class MetalCachedImage : IDisposable
     /// </summary>
     public ulong AllocatedBytes;
 
+    /// <summary>The tile backing of a sparse texture (MetalImageCache.Sparse.cs); null for an ordinary one.</summary>
+    public MetalSparseResidency? Sparse;
+
     /// <summary>What the cache added to its total for this image when it registered it, taken back on removal.</summary>
     public ulong CountedBytes;
 
@@ -684,7 +687,12 @@ internal sealed class MetalCachedImage : IDisposable
     }
 
     /// <summary>The view for a request, with its cached gpuResourceID.</summary>
-    public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId)
+    /// <param name="sameFormatSwizzle">
+    /// The view keeps the texture's format, and its swizzle is made without the
+    /// pixel-format-view usage: Metal gives a depth texture a same-format swizzled view
+    /// without it (MetalImageCache.DepthTwin.cs).
+    /// </param>
+    public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId, bool sameFormatSwizzle = false)
     {
         resourceId = 0;
         if (Texture == 0)
@@ -702,7 +710,7 @@ internal sealed class MetalCachedImage : IDisposable
         // cache creates without that usage -- can still have the subresource view
         // a mipped or layered attachment binds.
         var viewable = (Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0;
-        if (!viewable && !identitySwizzle)
+        if (!viewable && !identitySwizzle && !(sameFormatSwizzle && viewFormat == Shape.PixelFormat))
         {
             // Metal raises on a swizzled view of a texture without the usage, so the view
             // reads the components in the texture's own order, and that is reported.

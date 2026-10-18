@@ -221,6 +221,41 @@ internal static partial class MetalV2Native
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendWithValue(nint receiver, nint selector, nuint value);
 
+    // -[MTLDevice sparseTileSizeWithTextureType:pixelFormat:sampleCount:] returns a 24-byte
+    // MTLSize. x86_64 returns a struct that size through a hidden result pointer passed
+    // first, which only objc_msgSend_stret expects: objc_msgSend takes that pointer for the
+    // receiver and messages the stack (the Demon's Souls GPU-worker crashes under Rosetta).
+    // arm64 returns it through x8 and has objc_msgSend alone.
+    public static MtlSize SendSparseTileSize(
+        nint receiver, nint selector, nuint textureType, nuint pixelFormat, nuint sampleCount)
+    {
+        if (RuntimeInformation.ProcessArchitecture == Architecture.X64)
+        {
+            SendSparseTileSizeStret(out var size, receiver, selector, textureType, pixelFormat, sampleCount);
+            return size;
+        }
+
+        return SendSparseTileSizeArm64(receiver, selector, textureType, pixelFormat, sampleCount);
+    }
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend_stret")]
+    private static partial void SendSparseTileSizeStret(
+        out MtlSize result, nint receiver, nint selector, nuint textureType, nuint pixelFormat, nuint sampleCount);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial MtlSize SendSparseTileSizeArm64(
+        nint receiver, nint selector, nuint textureType, nuint pixelFormat, nuint sampleCount);
+
+    // -[MTLResourceStateCommandEncoder updateTextureMapping:mode:region:mipLevel:slice:]
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendUpdateTextureMapping(
+        nint receiver, nint selector, nint texture, nuint mode, MtlRegion region, nuint mipLevel, nuint slice);
+
+    // Ties one object's lifetime to another's: OBJC_ASSOCIATION_RETAIN releases the value
+    // when the object is deallocated.
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_setAssociatedObject")]
+    public static partial void SetAssociatedObject(nint obj, nint key, nint value, nuint policy);
+
     // A selector taking one NSRange, which the ABI passes as its two words.
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendRange(nint receiver, nint selector, nuint location, nuint length);

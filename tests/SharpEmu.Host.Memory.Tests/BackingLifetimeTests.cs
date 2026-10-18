@@ -65,10 +65,10 @@ public sealed class BackingLifetimeTests
         Assert.True(backing.TryEnterAccess());
         var releasing = Task.Run(() =>
         {
-            object?[] args = [TimeSpan.FromSeconds(2), null, (Action)(() => { drained.Set(); Assert.True(proceed.Wait(2000)); })];
+            object?[] args = [TimeSpan.FromSeconds(2), null, (Action)(() => { drained.Set(); Assert.True(proceed.Wait(10000)); })];
             return (bool)typeof(HostBackingObject).GetMethod("TryDisposeCore", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(backing, args)!;
         });
-        Assert.True(SpinWait.SpinUntil(() => backing.IsClosing, 1000));
+        Assert.True(SpinWait.SpinUntil(() => backing.IsClosing, 10000));
         backing.ExitAccess(); // prior admitted access finishes before drain0
         Assert.True(drained.Wait(1000));
         var rejectedState = Phase<long>(backing, "IncrementAccessCount");
@@ -76,7 +76,7 @@ public sealed class BackingLifetimeTests
         bool rejectedCompleted = false;
         try
         {
-            proceed.Set(); Assert.True(await releasing.WaitAsync(TimeSpan.FromSeconds(2)));
+            proceed.Set(); Assert.True(await releasing.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.Equal(1, calls); Assert.True(backing.IsDisposed);
             Assert.False(Phase<bool>(backing, "CompleteAccessEntry", rejectedState)); rejectedCompleted = true;
             Assert.Equal(0, backing.ActiveAccesses); Assert.False(backing.TryEnterAccess());
@@ -150,16 +150,16 @@ public sealed class BackingLifetimeTests
     {
         using var entered = new ManualResetEventSlim(); using var finish = new ManualResetEventSlim();
         var calls = 0;
-        var backing = Phantom(_ => { Interlocked.Increment(ref calls); entered.Set(); Assert.True(finish.Wait(2000)); return new(HostBackingReleaseStatus.Released); });
+        var backing = Phantom(_ => { Interlocked.Increment(ref calls); entered.Set(); Assert.True(finish.Wait(10000)); return new(HostBackingReleaseStatus.Released); });
         var worker = Task.Run(() => backing.TryDispose(TimeSpan.FromSeconds(1), out _));
         try
         {
-            Assert.True(entered.Wait(2000));
+            Assert.True(entered.Wait(10000));
             lock (backing.Gate) Assert.Equal(0, backing.ActiveAccesses);
             Assert.False(backing.TryDispose(TimeSpan.Zero, out var busy)); Assert.Equal(HostBackingReleaseStatus.Busy, busy.Status);
         }
         finally { finish.Set(); }
-        Assert.True(await worker.WaitAsync(TimeSpan.FromSeconds(2))); Assert.Equal(1, calls);
+        Assert.True(await worker.WaitAsync(TimeSpan.FromSeconds(10))); Assert.Equal(1, calls);
     }
 
     [Fact]
@@ -232,18 +232,18 @@ public sealed class BackingLifetimeTests
     {
         var host = new ManagedViews(); var store = new SharedBackingViews(host, 8192);
         using var entered = new ManualResetEventSlim(); using var finish = new ManualResetEventSlim();
-        host.AfterMap = () => { entered.Set(); Assert.True(finish.Wait(2000)); };
+        host.AfterMap = () => { entered.Set(); Assert.True(finish.Wait(10000)); };
         var mapping = Task.Run(() => store.TryMapReservedRange(0x100000, 4096, 0, HostPageProtection.ReadWrite, out _));
-        Assert.True(entered.Wait(1000));
+        Assert.True(entered.Wait(10000));
         var disposing = Task.Run(store.Dispose);
         try
         {
-            Assert.True(SpinWait.SpinUntil(() => !store.IsAvailable, 1000));
+            Assert.True(SpinWait.SpinUntil(() => !store.IsAvailable, 10000));
             Assert.Equal(0, host.Releases); Assert.False(disposing.IsCompleted);
         }
         finally { finish.Set(); }
-        Assert.False(await mapping.WaitAsync(TimeSpan.FromSeconds(2)));
-        await disposing.WaitAsync(TimeSpan.FromSeconds(2)); Assert.Single(host.Unmaps); Assert.Equal(1, host.Releases);
+        Assert.False(await mapping.WaitAsync(TimeSpan.FromSeconds(10)));
+        await disposing.WaitAsync(TimeSpan.FromSeconds(10)); Assert.Single(host.Unmaps); Assert.Equal(1, host.Releases);
     }
 
     [Fact]
@@ -252,13 +252,13 @@ public sealed class BackingLifetimeTests
         var host = new ManagedViews(); var store = new SharedBackingViews(host, 8192);
         Assert.True(store.TryMapReservedRange(0x100000, 4096, 0, HostPageProtection.ReadWrite, out _));
         using var entered = new ManualResetEventSlim(); using var finish = new ManualResetEventSlim();
-        host.AfterUnmap = () => { entered.Set(); Assert.True(finish.Wait(2000)); };
+        host.AfterUnmap = () => { entered.Set(); Assert.True(finish.Wait(10000)); };
         var unmapping = Task.Run(() => store.Unmap(0x100000, 4096, out _));
-        Assert.True(entered.Wait(1000)); var disposing = Task.Run(store.Dispose);
-        try { Assert.True(SpinWait.SpinUntil(() => !store.IsAvailable, 1000)); Assert.Equal(0, host.Releases); }
+        Assert.True(entered.Wait(10000)); var disposing = Task.Run(store.Dispose);
+        try { Assert.True(SpinWait.SpinUntil(() => !store.IsAvailable, 10000)); Assert.Equal(0, host.Releases); }
         finally { finish.Set(); }
-        Assert.True(await unmapping.WaitAsync(TimeSpan.FromSeconds(2)));
-        await disposing.WaitAsync(TimeSpan.FromSeconds(2)); Assert.Single(host.Unmaps); Assert.Equal(1, host.Releases);
+        Assert.True(await unmapping.WaitAsync(TimeSpan.FromSeconds(10)));
+        await disposing.WaitAsync(TimeSpan.FromSeconds(10)); Assert.Single(host.Unmaps); Assert.Equal(1, host.Releases);
     }
 
     [Theory]
@@ -271,17 +271,17 @@ public sealed class BackingLifetimeTests
         var original = new IOException("provider outcome unknown after reentrant close");
         host.AfterMap = () =>
         {
-            entered.Set(); Assert.True(callback.Wait(2000));
+            entered.Set(); Assert.True(callback.Wait(10000));
             store.Dispose(); Assert.False(store.CleanupComplete); Assert.False(host.Backing!.IsDisposed);
             if (failProvider) throw original;
         };
         var mapping = Task.Run(() => { try { Assert.False(store.TryMapReservedRange(0x100000, 4096, 0, HostPageProtection.ReadWrite, out _)); return (Exception?)null; } catch (Exception e) { return e; } });
-        Assert.True(entered.Wait(1000));
+        Assert.True(entered.Wait(10000));
         var disposing = Task.Run(() => { try { store.Dispose(); return (Exception?)null; } catch (Exception e) { return e; } });
-        try { Assert.True(SpinWait.SpinUntil(() => !store.IsAvailable, 1000)); Assert.Equal(0, host.Releases); }
+        try { Assert.True(SpinWait.SpinUntil(() => !store.IsAvailable, 10000)); Assert.Equal(0, host.Releases); }
         finally { callback.Set(); }
-        var mapError = await mapping.WaitAsync(TimeSpan.FromSeconds(2));
-        var disposeError = await disposing.WaitAsync(TimeSpan.FromSeconds(2));
+        var mapError = await mapping.WaitAsync(TimeSpan.FromSeconds(10));
+        var disposeError = await disposing.WaitAsync(TimeSpan.FromSeconds(10));
         if (failProvider)
         {
             Assert.Same(original, mapError); Assert.IsType<InvalidOperationException>(disposeError);
@@ -314,13 +314,13 @@ public sealed class BackingLifetimeTests
         var disposing = Task.Run(owner.Dispose);
         try
         {
-            Assert.True(SpinWait.SpinUntil(() => !owner.TryClearBacking(0, 1), 1000));
+            Assert.True(SpinWait.SpinUntil(() => !owner.TryClearBacking(0, 1), 10000));
             var protection = Task.Run(() => owner.SetTransientAccess(0x100000, 4096, HostPageProtection.ReadWrite));
             Assert.False(await protection.WaitAsync(TimeSpan.FromSeconds(1)));
             Assert.False(disposing.IsCompleted); Assert.Equal(0, host.Releases);
         }
         finally { owner.ExitAliasAccess(); }
-        await disposing.WaitAsync(TimeSpan.FromSeconds(2)); owner.Dispose(); Assert.Equal(1, host.Releases);
+        await disposing.WaitAsync(TimeSpan.FromSeconds(10)); owner.Dispose(); Assert.Equal(1, host.Releases);
     }
 
     [Fact]

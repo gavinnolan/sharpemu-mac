@@ -93,13 +93,25 @@ internal sealed partial class MetalRenderHost
         public Gen5MslShader Shader => Compiled.Shader;
 
         // The library compile on the module pool; Library and Function are set once it is
-        // done, which RequireModule waits for.
+        // done, which RequireModule waits for, or runs itself while no pool thread has it.
         public Task? Compiling;
+        public MetalLibraryCompilePool.Job? Job;
+
+        // What the compile spent waiting for the prewarm's compile of the same source, and
+        // whether prewarm compiles were in the driver when it started: the split of the
+        // worker's library wait on the PERF line.
+        public long PrewarmWaitTicks;
+        public bool Contended;
 
         // The post-tessellation form a rectangle-list pipeline draws through, built the
         // first time one uses this vertex program.
         public nint RectangleLibrary;
         public nint RectangleFunction;
+
+        // The binary archive keys of the library and of the rectangle-list library (zero
+        // with no archive): the pipeline made from them stores them under these.
+        public UInt128 ArchiveKey;
+        public UInt128 RectangleArchiveKey;
 
         // The stage it was built for, to build it again once the shader cache bound
         // released the library (Function zero) and a pipeline needs it.
@@ -147,6 +159,7 @@ internal sealed partial class MetalRenderHost
         {
             try
             {
+                _ = MetalCompileScheduler.TakeThreadPrewarmWait();
                 if (stage == ShaderStage.Compute)
                 {
                     // The background prewarm may have this source in hand; its library is
@@ -154,10 +167,12 @@ internal sealed partial class MetalRenderHost
                     MetalShaderPrewarm.WaitWhileCompiling(metal);
                 }
 
+                module.Contended = MetalCompileScheduler.Shared.PrewarmInFlight > 0;
                 BuildModule(module, stage);
             }
             finally
             {
+                Volatile.Write(ref module.PrewarmWaitTicks, MetalCompileScheduler.TakeThreadPrewarmWait());
                 MetalShaderPrewarm.GameCompileDone();
             }
         }
@@ -166,7 +181,8 @@ internal sealed partial class MetalRenderHost
         MetalShaderPrewarm.GameCompileStarted();
         if (MetalLibraryCompilePool.Enabled)
         {
-            module.Compiling = MetalLibraryCompilePool.Shared.Run(build);
+            module.Job = MetalLibraryCompilePool.Shared.Run(build);
+            module.Compiling = module.Job.Task;
         }
         else
         {
@@ -201,7 +217,8 @@ internal sealed partial class MetalRenderHost
         // caches, so they are counted separately. A graphics library the library prewarm
         // already compiled is taken from it instead.
         var library = CompileLibrary(
-            shader.Source, module.Hash, shader.UsesPerVertexInputs, prewarmable: stage != ShaderStage.Compute);
+            shader.Source, module.Hash, shader.UsesPerVertexInputs, prewarmable: stage != ShaderStage.Compute,
+            out module.ArchiveKey);
         Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -241,7 +258,8 @@ internal sealed partial class MetalRenderHost
             }
 
             var library = CompileLibrary(
-                Gen5MslRectangleList.BuildSource(module.Compiled.AcquireShader()), module.Hash, usesPerVertexInputs: false, prewarmable: true);
+                Gen5MslRectangleList.BuildSource(module.Compiled.AcquireShader()), module.Hash, usesPerVertexInputs: false, prewarmable: true,
+                out module.RectangleArchiveKey);
             var function = MetalNative.Send(
                 library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(Gen5MslRectangleList.EntryPoint));
             if (function == 0)
@@ -258,17 +276,22 @@ internal sealed partial class MetalRenderHost
     }
 
     // Computes are left to the compute prewarm, which compiles them before the game runs.
-    private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs, bool prewarmable)
+    private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs, bool prewarmable, out UInt128 archiveKey)
     {
+        // The background prewarm gives way while the game compiles (MetalCompileScheduler).
+        using var runtime = MetalCompileScheduler.Shared.Runtime();
         var listed = prewarmable && MetalLibraryPrewarm.Active;
         var key = listed ? MetalLibraryPrewarm.Key(source, usesPerVertexInputs) : 0;
         if (listed && MetalLibraryPrewarm.TryTake(key, out var prewarmed))
         {
             MetalLibraryPrewarm.NoteTaken(key);
+            archiveKey = MetalBinaryArchive.For(_device) is not null
+                ? MetalBinaryArchive.LibraryKey(source, usesPerVertexInputs)
+                : default;
             return prewarmed;
         }
 
-        var library = TryCompileLibrary(_device, source, usesPerVertexInputs, out var error);
+        var library = TryCompileLibrary(_device, source, usesPerVertexInputs, out var error, out archiveKey);
         if (library == 0)
         {
             throw Fatal($"An MSL library failed to compile: hash=0x{hash:X16} {error}");
@@ -285,9 +308,26 @@ internal sealed partial class MetalRenderHost
     // The one MSL front-end call, shared with the shader prewarm so both ask the driver
     // with the same options and hit the same cache entries. Zero and a description on
     // failure; any thread.
-    internal static nint TryCompileLibrary(nint device, string source, bool usesPerVertexInputs, out string error)
+    internal static nint TryCompileLibrary(nint device, string source, bool usesPerVertexInputs, out string error) =>
+        TryCompileLibrary(device, source, usesPerVertexInputs, out error, out _);
+
+    // The title's binary archive is asked first: a library stored there is its AIR, with no
+    // front end to run (MetalBinaryArchive). The key comes back for storing it there later.
+    internal static nint TryCompileLibrary(
+        nint device, string source, bool usesPerVertexInputs, out string error, out UInt128 archiveKey)
     {
         error = string.Empty;
+        archiveKey = default;
+        if (MetalBinaryArchive.For(device) is { } archive)
+        {
+            archiveKey = MetalBinaryArchive.LibraryKey(source, usesPerVertexInputs);
+            var stored = archive.TryLoadLibrary(archiveKey);
+            if (stored != 0)
+            {
+                return stored;
+            }
+        }
+
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
         {
@@ -355,8 +395,26 @@ internal sealed partial class MetalRenderHost
             if (!compiling.IsCompleted)
             {
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                ((IAsyncResult)compiling).AsyncWaitHandle.WaitOne();
-                Interlocked.Add(ref _libraryWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+                // A module still queued behind the pool's other compiles runs here and now:
+                // the worker needs it before any of them.
+                if (module.Job is { } job && MetalLibraryCompilePool.Shared.TryRunHere(job))
+                {
+                    Interlocked.Increment(ref _libraryInlineCompiles);
+                }
+                else
+                {
+                    ((IAsyncResult)compiling).AsyncWaitHandle.WaitOne();
+                }
+
+                var waited = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                Interlocked.Add(ref _libraryWaitTicks, waited);
+                Interlocked.Increment(ref _libraryWaits);
+                var onPrewarm = Math.Min(waited, Volatile.Read(ref module.PrewarmWaitTicks));
+                Interlocked.Add(ref _libraryWaitPrewarmTicks, onPrewarm);
+                if (module.Contended)
+                {
+                    Interlocked.Add(ref _libraryWaitContendedTicks, waited - onPrewarm);
+                }
             }
 
             // A failed compile is fatal where the module is first needed, as it was where
@@ -642,18 +700,39 @@ internal sealed partial class MetalRenderHost
             }
 
             nint error = 0;
+            using var runtime = MetalCompileScheduler.Shared.Runtime();
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            state = mesh is null
-                ? MetalNative.Send(
-                    _device, MetalNative.Selector("newRenderPipelineStateWithDescriptor:error:"), descriptor, ref error)
-                : MetalNative.SendNewMeshPipeline(
-                    _device,
-                    MetalNative.Selector("newRenderPipelineStateWithMeshDescriptor:options:reflection:error:"),
-                    descriptor,
-                    0,
-                    0,
-                    ref error);
+            var archive = MetalBinaryArchive.For(_device);
+            var archives = archive?.AcquirePipelineArchives() ?? 0;
+            state = 0;
+            if (archives != 0)
+            {
+                // The title's archive first; only a miss compiles.
+                MetalNative.SendVoid(descriptor, SelSetBinaryArchives, archives);
+                state = NewRenderPipelineState(descriptor, mesh is not null, MetalBinaryArchive.FailOnBinaryArchiveMiss, ref error);
+                MetalNative.SendVoid(descriptor, SelSetBinaryArchives, 0);
+                MetalNative.SendVoid(archives, SelRelease);
+                archive!.NotePipelineLookup(state != 0);
+                error = 0;
+            }
+
+            var missed = state == 0;
+            if (missed)
+            {
+                state = NewRenderPipelineState(descriptor, mesh is not null, 0, ref error);
+            }
+
             Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            if (state != 0 && archive is not null)
+            {
+                archive.NoteRenderPipeline(
+                    descriptor,
+                    mesh is null ? MetalBinaryArchive.PipelineKind.Render : MetalBinaryArchive.PipelineKind.Mesh,
+                    rectangleList ? vertexModule.RectangleArchiveKey : vertexModule.ArchiveKey,
+                    pixelModule?.ArchiveKey ?? default,
+                    missed);
+            }
+
             if (state == 0)
             {
                 throw Fatal(
@@ -669,6 +748,19 @@ internal sealed partial class MetalRenderHost
 
         return state;
     }
+
+    private static readonly nint SelSetBinaryArchives = MetalNative.Selector("setBinaryArchives:");
+
+    private nint NewRenderPipelineState(nint descriptor, bool mesh, nuint options, ref nint error) =>
+        MetalNative.SendNewMeshPipeline(
+            _device,
+            MetalNative.Selector(mesh
+                ? "newRenderPipelineStateWithMeshDescriptor:options:reflection:error:"
+                : "newRenderPipelineStateWithDescriptor:options:reflection:error:"),
+            descriptor,
+            options,
+            0,
+            ref error);
 
     private static bool IsIntegerFormat(ulong format) => format is
         MtlFormat.R8Uint or MtlFormat.R8Sint or MtlFormat.Rg8Uint or MtlFormat.Rg8Sint or
@@ -819,7 +911,8 @@ internal sealed partial class MetalRenderHost
         var module = RequireModule(description.Program);
         var function = module.Function;
         var hash = description.Stage.Hash;
-        if (!Compiler.TryTake(description.Program.Id, () => BuildComputePipelineState(function, hash), out var state))
+        var archiveKey = module.ArchiveKey;
+        if (!Compiler.TryTake(description.Program.Id, () => BuildComputePipelineState(function, hash, archiveKey), out var state))
         {
             return false;
         }
@@ -830,15 +923,12 @@ internal sealed partial class MetalRenderHost
 
     // Runs on the compile pool: MTLDevice is thread safe, and nothing here touches
     // the host's own state.
-    private nint BuildComputePipelineState(nint function, ulong hash)
+    private nint BuildComputePipelineState(nint function, ulong hash, UInt128 archiveKey)
     {
         nint error = 0;
+        using var runtime = MetalCompileScheduler.Shared.Runtime();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var state = MetalNative.Send(
-            _device,
-            MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
-            function,
-            ref error);
+        var state = NewComputePipelineState(function, archiveKey, ref error);
         Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         if (state == 0)
         {
@@ -850,6 +940,65 @@ internal sealed partial class MetalRenderHost
         return state;
     }
 
+    // A compute library's archive file holds its pipeline's binary too: that is asked
+    // first, and a pipeline compiled here is stored with the library.
+    private nint NewComputePipelineState(nint function, UInt128 archiveKey, ref nint error)
+    {
+        var archive = MetalBinaryArchive.For(_device);
+        var stored = archive?.OpenLibraryArchive(archiveKey) ?? 0;
+        if (stored != 0)
+        {
+            var pool = MetalNative.objc_autoreleasePoolPush();
+            nint state = 0;
+            try
+            {
+                var descriptor = MetalNative.Send(
+                    MetalNative.Send(MetalNative.Class("MTLComputePipelineDescriptor"), MetalNative.Selector("alloc")),
+                    MetalNative.Selector("init"));
+                if (descriptor != 0)
+                {
+                    MetalNative.SendVoid(descriptor, MetalNative.Selector("setComputeFunction:"), function);
+                    MetalNative.SendVoid(
+                        descriptor,
+                        SelSetBinaryArchives,
+                        MetalNative.Send(MetalNative.Class("NSArray"), MetalNative.Selector("arrayWithObject:"), stored));
+                    nint missError = 0;
+                    state = MetalNative.SendNewMeshPipeline(
+                        _device,
+                        MetalNative.Selector("newComputePipelineStateWithDescriptor:options:reflection:error:"),
+                        descriptor,
+                        MetalBinaryArchive.FailOnBinaryArchiveMiss,
+                        0,
+                        ref missError);
+                    MetalNative.SendVoid(descriptor, SelRelease);
+                }
+            }
+            finally
+            {
+                MetalNative.SendVoid(stored, SelRelease);
+                MetalNative.objc_autoreleasePoolPop(pool);
+            }
+
+            archive!.NotePipelineLookup(state != 0);
+            if (state != 0)
+            {
+                return state;
+            }
+        }
+
+        var compiled = MetalNative.Send(
+            _device,
+            MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
+            function,
+            ref error);
+        if (compiled != 0)
+        {
+            archive?.CaptureCompute(archiveKey, function);
+        }
+
+        return compiled;
+    }
+
     public PipelineHandle CreateComputePipeline(ComputePipelineDescription description)
     {
         var module = RequireModule(description.Program);
@@ -857,12 +1006,9 @@ internal sealed partial class MetalRenderHost
         // The driver turns the function into a GPU binary here, on the worker thread,
         // and the guest's dispatch packet waits for it. Measured on Demon's Souls'
         // load phase this is tens to hundreds of milliseconds per new shader.
+        using var runtime = MetalCompileScheduler.Shared.Runtime();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var state = MetalNative.Send(
-            _device,
-            MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
-            module.Function,
-            ref error);
+        var state = NewComputePipelineState(module.Function, module.ArchiveKey, ref error);
         Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         if (state == 0)
         {
@@ -1155,6 +1301,8 @@ internal sealed partial class MetalRenderHost
         // Let whatever is still compiling finish before the device goes away.
         _compiler?.Dispose();
         _compiler = null;
+        // What this run added to the title's archive is written before its functions go.
+        MetalBinaryArchive.For(_device)?.Flush(wait: true, TimeSpan.FromSeconds(10));
         foreach (var entry in _pipelineEntries.Values)
         {
             if (entry.State != 0)

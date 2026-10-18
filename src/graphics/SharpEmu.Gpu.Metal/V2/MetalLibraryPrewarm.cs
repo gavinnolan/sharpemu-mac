@@ -67,6 +67,14 @@ internal static class MetalLibraryPrewarm
     internal static readonly bool Disabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LIBRARY_PREWARM") == "0";
 
+    /// <summary>
+    /// Whether a compiled library is kept for the module that asks for it. The hold-until-done
+    /// and precompile-only modes compile and release instead (MetalShaderPrecompile): the
+    /// guest is held meanwhile, so nothing would take them before they went idle, and the
+    /// module that asks later is a hit in macOS's shader cache.
+    /// </summary>
+    internal static bool KeepLibraries { get; set; } = !MetalShaderPrecompile.Current.HoldsUntilComplete;
+
     private sealed class Slot(ulong key, bool usesPerVertexInputs, byte[] compressed)
     {
         public readonly ulong Key = key;
@@ -204,6 +212,8 @@ internal static class MetalLibraryPrewarm
             };
             lock (_sync)
             {
+                _stopping = false;
+                _started = false;
                 _device = device;
                 _order = order;
                 _written = new ConcurrentDictionary<ulong, byte>();
@@ -296,9 +306,74 @@ internal static class MetalLibraryPrewarm
     /// <summary>True while the queued sources are compiling.</summary>
     public static bool Running => _running;
 
+    /// <summary>
+    /// Compiles every queued source to completion on the calling thread and
+    /// <see cref="MetalShaderPrewarm.WorkerCount"/> others, instead of <see cref="Begin"/>'s
+    /// background threads; for the hold-until-done and precompile-only modes, which hold
+    /// the guest until it returns. <paramref name="compiled"/> runs once per source. The
+    /// number of sources it took; zero when the list is not open or already began.
+    /// </summary>
+    public static int Precompile(Action? compiled)
+    {
+        List<Slot> order;
+        lock (_sync)
+        {
+            if (_started || _stopping || _slots is null)
+            {
+                return 0;
+            }
+
+            _started = true;
+            order = _order;
+        }
+
+        if (order.Count == 0)
+        {
+            return 0;
+        }
+
+        var work = new ConcurrentQueue<Slot>(order);
+        _running = true;
+        var started = Stopwatch.GetTimestamp();
+        void drain()
+        {
+            while (!_stopping && work.TryDequeue(out var slot))
+            {
+                CompileSlot(slot);
+                compiled?.Invoke();
+            }
+        }
+
+        var threads = Enumerable.Range(0, Math.Max(0, MetalShaderPrewarm.WorkerCount - 1))
+            .Select(index => new Thread(drain) { IsBackground = true, Name = $"SharpEmu library precompile {index}" })
+            .ToArray();
+        foreach (var thread in threads)
+        {
+            thread.Start();
+        }
+
+        drain();
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        _running = false;
+        Console.Error.WriteLine(string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"[LOADER][INFO] Library precompile done: libraries={order.Count} compiled={Volatile.Read(ref _compiled)} " +
+            $"failed={Volatile.Read(ref _failed)} held={Volatile.Read(ref _held)} " +
+            $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}"));
+        return order.Count;
+    }
+
     private static void CompileSlot(Slot slot)
     {
-        if (Interlocked.CompareExchange(ref slot.State, Compiling, Queued) != Queued)
+        // Waits while the game compiles (MetalCompileScheduler). The slot stays queued until
+        // then, so a module that asks for this source meanwhile claims it and compiles it
+        // itself instead of waiting for a compile that has not started.
+        using var prewarm = MetalCompileScheduler.Shared.EnterPrewarm(static () => _stopping);
+        if (!prewarm.Entered || Interlocked.CompareExchange(ref slot.State, Compiling, Queued) != Queued)
         {
             return;
         }
@@ -317,6 +392,13 @@ internal static class MetalLibraryPrewarm
             else
             {
                 Interlocked.Increment(ref _compiled);
+            }
+
+            if (library != 0 && !KeepLibraries)
+            {
+                // Compiled for macOS's shader cache only; see KeepLibraries.
+                MetalNative.SendVoid(library, SelRelease);
+                library = 0;
             }
 
             slot.Library = library;
@@ -444,8 +526,10 @@ internal static class MetalLibraryPrewarm
         {
             var started = Stopwatch.GetTimestamp();
             slot.Done.Wait();
-            Interlocked.Add(ref _waitTicks, Stopwatch.GetTimestamp() - started);
+            var waited = Stopwatch.GetTimestamp() - started;
+            Interlocked.Add(ref _waitTicks, waited);
             Interlocked.Increment(ref _waits);
+            MetalCompileScheduler.NotePrewarmWait(waited);
         }
 
         lock (slot)

@@ -44,6 +44,12 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // A GUI-launched emulator on macOS: lead a process group and exit with the GUI.
+        if (args.Length > 0)
+        {
+            OwnerProcessWatch.StartIfRequested();
+        }
+
         AllocationProfiler.StartIfRequested();
         SharpEmu.Logging.MemoryTelemetry.Start();
 
@@ -975,7 +981,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1200,6 +1206,21 @@ internal static partial class Program
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))
             {
                 strictDynlibResolution = true;
+                continue;
+            }
+
+            // The Metal backend's shader prewarm reads these when it starts: hold the guest
+            // until every recorded shader and listed library is compiled, and with
+            // --precompile-only close the session after that instead of letting it run.
+            if (string.Equals(argument, "--precompile-only", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.SetEnvironmentVariable("SHARPEMU_SHADER_PRECOMPILE_ONLY", "1");
+                continue;
+            }
+
+            if (string.Equals(argument, "--shader-prewarm-hold", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.SetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_HOLD", "complete");
                 continue;
             }
 

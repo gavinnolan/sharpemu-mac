@@ -12,7 +12,8 @@ namespace SharpEmu.GUI;
 /// Loops a game's sce_sys/snd0.at9 preview music while the game is selected
 /// in the library, like the console home screen. The ATRAC9 stream is decoded
 /// to WAV on a background task (vendored LibAtrac9); playback uses winmm's
-/// PlaySound, so this is Windows-only and a no-op elsewhere.
+/// PlaySound on Windows and AVFoundation's AVAudioPlayer on macOS, and is a
+/// no-op elsewhere.
 /// </summary>
 internal sealed class SndPreviewPlayer
 {
@@ -27,23 +28,37 @@ internal sealed class SndPreviewPlayer
     private bool _playing;
     private bool _paused;
     private bool _muted;
+    private MacAudioPlayer? _mac;
+    private double _volume = 1.0;
     private string? _cachedPath;
     private byte[]? _cachedWav;
 
     /// <summary>
-    /// Playback gain in [0, 1]. winmm has no per-sound gain, so this sets the
-    /// process's wave-out volume, which PlaySound plays through.
+    /// Playback gain in [0, 1]. winmm has no per-sound gain, so on Windows this
+    /// sets the process's wave-out volume, which PlaySound plays through; on
+    /// macOS it is the AVAudioPlayer's own volume.
     /// </summary>
     public double Volume
     {
         set
         {
-            if (!OperatingSystem.IsWindows())
+            if (!Supported)
             {
                 return;
             }
 
             var level = double.IsFinite(value) ? Math.Clamp(value, 0.0, 1.0) : 1.0;
+            if (OperatingSystem.IsMacOS())
+            {
+                lock (_sync)
+                {
+                    _volume = level;
+                    _mac?.SetVolume((float)level);
+                }
+
+                return;
+            }
+
             var channel = (uint)Math.Round(level * 0xFFFF);
             _ = waveOutSetVolume(0, channel | (channel << 16));
         }
@@ -65,7 +80,7 @@ internal sealed class SndPreviewPlayer
         }
         set
         {
-            if (!OperatingSystem.IsWindows())
+            if (!Supported)
             {
                 return;
             }
@@ -75,7 +90,7 @@ internal sealed class SndPreviewPlayer
                 _muted = value;
                 if (value && _playing)
                 {
-                    _ = PlaySound(0, 0, 0);
+                    PauseBackendLocked();
                     _playing = false;
                     _paused = true;
                 }
@@ -86,7 +101,7 @@ internal sealed class SndPreviewPlayer
     /// <summary>Starts looping the given snd0.at9 after a short debounce.</summary>
     public void Play(string at9Path)
     {
-        if (!OperatingSystem.IsWindows())
+        if (!Supported)
         {
             return;
         }
@@ -139,6 +154,24 @@ internal sealed class SndPreviewPlayer
                 _cachedWav = wav;
                 StopLocked();
 
+                if (OperatingSystem.IsMacOS())
+                {
+                    _mac = MacAudioPlayer.Create(wav, loop: true, (float)_volume);
+                    if (_mac is null)
+                    {
+                        return;
+                    }
+
+                    if (_muted)
+                    {
+                        _paused = true;
+                        return;
+                    }
+
+                    _playing = _mac.Play();
+                    return;
+                }
+
                 // The WAV image must stay pinned while winmm plays from it.
                 _pinnedWav = GCHandle.Alloc(wav, GCHandleType.Pinned);
                 if (_muted)
@@ -158,7 +191,7 @@ internal sealed class SndPreviewPlayer
 
     public void Stop()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!Supported)
         {
             return;
         }
@@ -176,7 +209,7 @@ internal sealed class SndPreviewPlayer
     /// </summary>
     public void Pause()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!Supported)
         {
             return;
         }
@@ -188,7 +221,7 @@ internal sealed class SndPreviewPlayer
                 return;
             }
 
-            _ = PlaySound(0, 0, 0);
+            PauseBackendLocked();
             _playing = false;
             _paused = true;
         }
@@ -197,13 +230,25 @@ internal sealed class SndPreviewPlayer
     /// <summary>Restarts the track silenced by <see cref="Pause"/>.</summary>
     public void Resume()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!Supported)
         {
             return;
         }
 
         lock (_sync)
         {
+            if (OperatingSystem.IsMacOS())
+            {
+                if (!_paused || _muted || _mac is null)
+                {
+                    return;
+                }
+
+                _paused = false;
+                _playing = _mac.Play();
+                return;
+            }
+
             if (!_paused || _muted || !_pinnedWav.IsAllocated)
             {
                 return;
@@ -214,9 +259,32 @@ internal sealed class SndPreviewPlayer
         }
     }
 
+    private static bool Supported => OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
+
+    private void PauseBackendLocked()
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            _mac?.Pause();
+        }
+        else
+        {
+            _ = PlaySound(0, 0, 0);
+        }
+    }
+
     private void StopLocked()
     {
-        _ = PlaySound(0, 0, 0);
+        if (OperatingSystem.IsMacOS())
+        {
+            _mac?.Dispose();
+            _mac = null;
+        }
+        else
+        {
+            _ = PlaySound(0, 0, 0);
+        }
+
         _playing = false;
         _paused = false;
         if (_pinnedWav.IsAllocated)
@@ -337,7 +405,7 @@ internal sealed class SndPreviewPlayer
         return wav;
     }
 
-    private static void WriteWavHeader(byte[] wav, int channels, int sampleRate, int sampleCount)
+    internal static void WriteWavHeader(byte[] wav, int channels, int sampleRate, int sampleCount)
     {
         var span = wav.AsSpan();
         Encoding.ASCII.GetBytes("RIFF").CopyTo(span);
