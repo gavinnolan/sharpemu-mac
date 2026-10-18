@@ -62,7 +62,6 @@ internal static class MetalLibraryPrewarm
     private const int Ready = 2;
     private const int Claimed = 3;
 
-    private static readonly nint SelRetain = MetalNative.Selector("retain");
     private static readonly nint SelRelease = MetalNative.Selector("release");
 
     internal static readonly bool Disabled =
@@ -75,6 +74,7 @@ internal static class MetalLibraryPrewarm
         public byte[]? Compressed = compressed;
         public int State;
         public nint Library;
+        public long ReadyTicks;
         public readonly ManualResetEventSlim Done = new(false);
     }
 
@@ -100,6 +100,49 @@ internal static class MetalLibraryPrewarm
     private static long _waitTicks;
     private static int _claimed;
     private static int _misses;
+    private static int _held;
+
+    /// <summary>The prewarmed libraries held for a module that has not asked for them yet.</summary>
+    public static int HeldLibraries => Volatile.Read(ref _held);
+
+    /// <summary>
+    /// Releases the prewarmed libraries no module took within the idle time of a module
+    /// (ready before <paramref name="readyBefore"/>, a Stopwatch timestamp): the module that
+    /// asks later compiles its source, a hit in macOS's shader cache since this process
+    /// compiled it. Any thread.
+    /// </summary>
+    public static int ReleaseIdle(long readyBefore)
+    {
+        if (Volatile.Read(ref _held) == 0 || Volatile.Read(ref _slots) is not { } slots)
+        {
+            return 0;
+        }
+
+        var released = 0;
+        foreach (var slot in slots.Values)
+        {
+            if (Volatile.Read(ref slot.State) != Ready || slot.ReadyTicks > readyBefore)
+            {
+                continue;
+            }
+
+            lock (slot)
+            {
+                if (slot.Library == 0)
+                {
+                    continue;
+                }
+
+                MetalNative.SendVoid(slot.Library, SelRelease);
+                slot.Library = 0;
+            }
+
+            Interlocked.Decrement(ref _held);
+            released++;
+        }
+
+        return released;
+    }
 
     /// <summary>Whether a list is open: modules then record into it and take from it.</summary>
     public static bool Active => Volatile.Read(ref _slots) is not null;
@@ -277,6 +320,11 @@ internal static class MetalLibraryPrewarm
             }
 
             slot.Library = library;
+            if (library != 0)
+            {
+                slot.ReadyTicks = Stopwatch.GetTimestamp();
+                Interlocked.Increment(ref _held);
+            }
         }
         catch (Exception exception)
         {
@@ -407,7 +455,13 @@ internal static class MetalLibraryPrewarm
                 return false;
             }
 
-            library = MetalNative.Send(slot.Library, SelRetain);
+            // The slot's reference goes to the module, so the library lives as long as the
+            // module keeps it and not for the session (MetalRenderHost.ShaderCache releases
+            // an idle module's). A second module of this source compiles it, which macOS's
+            // shader cache answers now that this process has compiled it once.
+            library = slot.Library;
+            slot.Library = 0;
+            Interlocked.Decrement(ref _held);
         }
 
         var hits = Interlocked.Increment(ref _hits);
@@ -500,6 +554,7 @@ internal static class MetalLibraryPrewarm
                 {
                     MetalNative.SendVoid(slot.Library, SelRelease);
                     slot.Library = 0;
+                    Interlocked.Decrement(ref _held);
                 }
             }
         }

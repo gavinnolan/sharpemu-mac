@@ -1211,6 +1211,7 @@ internal sealed partial class MetalRenderHost
     // An encoder opened again after the pipeline was bound has no pipeline state.
     private void EnsureComputePipelineState(nint encoder, MetalPipelineEntry entry)
     {
+        UsePipelineState(entry);
         if (_boundComputePipeline != entry.State)
         {
             MetalNative.SendVoid(encoder, SelSetComputePipelineState, entry.State);
@@ -1286,6 +1287,9 @@ internal sealed partial class MetalRenderHost
             throw Fatal("A draw has no bound Metal render pipeline state.");
         if (!ReferenceEquals(_boundGraphicsPipeline, entry))
         {
+            // Every later draw of this encoder with the entry (its rectangle states too) is
+            // in the same command buffer.
+            UsePipelineState(entry);
             MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
             _boundRenderState = entry.State;
             MetalV2Native.SendVoidValue(

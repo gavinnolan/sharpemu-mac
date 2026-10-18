@@ -276,6 +276,8 @@ internal sealed partial class MetalRenderHost :
         // Staging slabs idle for a while are released or made purgeable here too, not only
         // when a transfer asks for one: a load that stops transferring keeps submitting.
         StagingTiler?.TrimStaging(completed);
+        // So are the shader modules and pipeline states past their bound (ShaderCache).
+        MaybeTrimShaderCache(completed);
         // Every watch whose submission the GPU has finished is checked here, on the one
         // thread that records them, rather than from the completion handler.
         _guard?.Verify(completed);
@@ -2087,6 +2089,8 @@ internal sealed partial class MetalRenderHost :
             $"library_wait_ms={(Interlocked.Exchange(ref _libraryWaitTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
             $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
+            // Modules and pipeline states resident against made, and what the bound released.
+            $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             // Shared (CPU-visible) memory the transfer staging and the upload rings hold.
             $"{DescribeStagingWindow()} " +

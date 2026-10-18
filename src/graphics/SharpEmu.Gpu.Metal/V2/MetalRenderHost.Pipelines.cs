@@ -67,6 +67,17 @@ internal sealed partial class MetalRenderHost
         // program fetches makes every vertex the same one, and the draw then rasterises
         // nothing at all while looking perfectly ordinary from the outside.
         public string? VertexLayout;
+
+        // What the state is made again from once the shader cache bound released it
+        // (State zero; MetalRenderHost.ShaderCache): the description the executor created
+        // it from, which shares its parts with the executor's own pipeline key.
+        public GraphicsPipelineDescription? GraphicsDescription;
+        public ComputePipelineDescription? ComputeDescription;
+
+        // The last command buffer that encoded the state and the time it was opened: the
+        // state is only released once that command buffer is done and it has been idle.
+        public ulong LastUsedSerial;
+        public long LastUsedTicks;
     }
 
     // One compiled MSL module: its library, its function, and the shader it came from.
@@ -89,6 +100,14 @@ internal sealed partial class MetalRenderHost
         // first time one uses this vertex program.
         public nint RectangleLibrary;
         public nint RectangleFunction;
+
+        // The stage it was built for, to build it again once the shader cache bound
+        // released the library (Function zero) and a pipeline needs it.
+        public ShaderStage Stage;
+
+        // When a pipeline was last made from it: only pipeline creation reads the library
+        // and the function; a pipeline state keeps what it needs of them.
+        public long LastUsedTicks;
     }
 
     private static readonly nint SelSetAttachmentPixelFormat = MetalNative.Selector("setPixelFormat:");
@@ -115,6 +134,8 @@ internal sealed partial class MetalRenderHost
         {
             Compiled = metal,
             Hash = hash,
+            Stage = stage,
+            LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
         };
 
         // The library compiles on the module pool and the handle is returned at once: the
@@ -195,7 +216,8 @@ internal sealed partial class MetalRenderHost
             }
 
             module.Library = library;
-            module.Function = function;
+            Volatile.Write(ref module.Function, function);
+            Interlocked.Increment(ref _residentModules);
         }
         finally
         {
@@ -342,6 +364,12 @@ internal sealed partial class MetalRenderHost
             compiling.GetAwaiter().GetResult();
         }
 
+        module.LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (Volatile.Read(ref module.Function) == 0)
+        {
+            RebuildModule(module);
+        }
+
         return module;
     }
 
@@ -426,8 +454,11 @@ internal sealed partial class MetalRenderHost
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
             VertexHash = vertexModule.Hash,
             VertexLayout = vertexLayout,
+            GraphicsDescription = description,
+            LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
         };
         _pipelineEntries[entry.Id] = entry;
+        Interlocked.Increment(ref _residentPipelines);
         return new PipelineHandle(entry.Id, 0, false);
 
         static ulong depthFormatOf(GraphicsPipelineDescription value) =>
@@ -875,8 +906,11 @@ internal sealed partial class MetalRenderHost
             ThreadsPerThreadgroup = threads,
             Profile = ProfileLabelFor(module, null, null),
             VertexHash = module.Hash,
+            ComputeDescription = description,
+            LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
         };
         _pipelineEntries[entry.Id] = entry;
+        Interlocked.Increment(ref _residentPipelines);
         return new PipelineHandle(entry.Id, 0, false);
     }
 
@@ -1131,7 +1165,10 @@ internal sealed partial class MetalRenderHost
             // The first rectangle state is entry.State itself.
             for (var index = 1; index < (entry.RectangleStates?.Length ?? 0); index++)
             {
-                MetalNative.SendVoid(entry.RectangleStates![index], SelRelease);
+                if (entry.RectangleStates![index] != 0)
+                {
+                    MetalNative.SendVoid(entry.RectangleStates[index], SelRelease);
+                }
             }
         }
 
