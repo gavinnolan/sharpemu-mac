@@ -7,6 +7,7 @@ using static SharpEmu.Gpu.Vulkan.Presentation.VulkanVideoPresenter;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
+[Collection(AllocationMeasurementCollection.Name)]
 public sealed class ConcurrentResolveTests
 {
     [Fact]
@@ -29,10 +30,9 @@ public sealed class ConcurrentResolveTests
         // A warm-up pass first: the runtime's own tier-up/OSR work for the hot loop allocates on
         // the calling thread, and when it lands inside the measured pass depends on CPU load.
         Pass();
-        var allocated = GC.GetAllocatedBytesForCurrentThread();
-        Pass();
+        var allocated = AllocationMeasurementCollection.Measure(Pass);
 
-        Assert.Equal(allocated, GC.GetAllocatedBytesForCurrentThread());
+        Assert.Equal(0, allocated);
         Assert.Equal(2, assumptions.Answers.Count);
         Assert.All(assumptions.Answers, proof =>
         {

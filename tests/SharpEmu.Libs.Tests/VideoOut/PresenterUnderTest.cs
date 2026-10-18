@@ -9,11 +9,13 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Gpu.Vulkan.Images;
 using SharpEmu.Gpu.Vulkan.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Gpu.Vulkan.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using SharpEmu.Gpu.Vulkan.Presentation;
 using Silk.NET.Vulkan;
+using SharpEmu.Gpu.Vulkan.Buffers;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
@@ -55,8 +57,15 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_device", vulkan.Device);
         SetField("_supportsFragmentShaderBarycentric", vulkan.SupportsFragmentShaderBarycentric);
         SetField("_supportsFillRectangle", vulkan.SupportsFillRectangle);
+        SetField("_supportsShaderClipDistance", vulkan.SupportsClipDistance);
         SetField("_deviceInfo", vulkan.DeviceInfo);
         SetField("_scheduler", Harness.Scheduler);
+        SetField("_guestPublications", new PendingGuestPublications());
+        Harness.Cache.CompleteGuestPublications = (address, size, access) =>
+            InvokeMethod("CompleteOverlappingPublications", address, size, access == GuestBufferCache.PublicationAccess.Write,
+                access == GuestBufferCache.PublicationAccess.OverlaidRead);
+        Harness.Cache.OverlayGuestPublications = (buffer, offset, address, size) =>
+            InvokeMethod("OverlayPendingDumps", buffer, offset, address, size);
         SetField("_relay", Harness.Worker.Relay);
         SetField("_bufferCache", Harness.Cache);
         SetField("_imageCache", Harness.Images);
@@ -68,6 +77,8 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
         SetField("_descriptorHeap", new DescriptorHeap(vulkan.DeviceInfo, Harness.Scheduler));
         SetField("_maxPushDescriptors", vulkan.MaxPushDescriptors);
+        vulkan.Vk.GetPhysicalDeviceProperties(vulkan.Physical, out var deviceProperties);
+        SetField("_shaderDescriptorLimits", deviceProperties.Limits);
         SetField("_noAttachmentSampleCounts", SampleCountFlags.Count1Bit);
         HostBuffers = new VulkanHostBufferPool(128UL * 1024 * 1024, allocation => InvokeMethod("DestroyHostBufferAllocation", allocation));
         SetField("_hostBufferPool", HostBuffers);
@@ -77,7 +88,7 @@ internal sealed class PresenterUnderTest : IDisposable
         {
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
-            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes",
+            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes", "_rectangleStageCode",
             "_preparedTextures", "_barriersAfterRendering", "_feedbackSnapshotPool",
         })
         {
@@ -141,6 +152,7 @@ internal sealed class PresenterUnderTest : IDisposable
                 }
 
                 InvokeMethod("WaitForAllGuestSubmissions");
+                GetField<SharpEmu.Gpu.Vulkan.VulkanOcclusionQueries?>("_occlusionQueries")?.Dispose();
                 DestroyPipelineResources();
                 Samplers.Dispose();
                 HostBuffers.Dispose();

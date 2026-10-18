@@ -624,6 +624,26 @@ public sealed unsafe class MetalSingleCopyTests(ITestOutputHelper output)
         Assert.Equal(1, Field(rig.SingleCopy.Describe(), "device_address_restores"));
     }
 
+    // A copy this large would run unlocked, without the hooks; its source holds a released
+    // chunk, so it takes the locked path, which restores the bytes before copying them.
+    [Fact]
+    public void ALargeCopyOutOfAReleasedChunkCopiesTheGuestsBytes()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var request = Request(rig.ImageAddress, GuestTileMode.Standard64KB);
+        var size = request.Description.Data.Size;
+        Assert.True(size >= Chunk && size <= 3 * Mib);
+        var bytes = Pattern(size, 29);
+        rig.Release(request, bytes, (int)(size / Chunk));
+        var destination = rig.Address + BackingSize - size;
+
+        Assert.True(rig.Views.TryCopyBacking(destination, rig.ImageAddress, size));
+        Assert.Equal(bytes, rig.Raw(destination, size));
+        Assert.Equal(bytes, rig.Raw(rig.ImageAddress, size));
+        Assert.Equal(0, rig.Views.SingleCopy!.ReleasedChunks);
+    }
+
     // A lossy texture's texels are approximated, so its guest bytes are the only exact copy.
     [Fact]
     public void ALossyTextureIsNeverReleased()

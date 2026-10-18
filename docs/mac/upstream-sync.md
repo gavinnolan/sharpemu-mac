@@ -64,3 +64,4 @@ merged app is recorded separately from these integration checks.
 | Date | Fetched upstream | New commits | Integrated | Branch |
 | --- | --- | --- | --- | --- |
 | 2026-10-07 | `b02c06181a296f4dc7d9ee2a44780a6ecd959592` | 1 | `caa2f92a481cdf4850883ba5a52725f51742c089` | `sync/upstream-b02c061` |
+| 2026-10-18 | `ac5991b` | 2 | `conflicts` | `worktree-agent-a1b4e495703ad2a9c` |

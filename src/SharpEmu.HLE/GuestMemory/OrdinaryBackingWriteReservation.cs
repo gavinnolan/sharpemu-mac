@@ -103,7 +103,7 @@ public sealed class OrdinaryBackingWriteReservation : IDisposable
         if (Volatile.Read(ref state) == 1) throw new InvalidOperationException("Cannot consume live ordinary admission acquisition.");
         if (Interlocked.Exchange(ref state, 3) == 3) return;
         try { if (admitted) HostBackingObject.EndManagedWrite(operation, !attempted || (completedAttempt && succeeded)); }
-        finally { owner.ExitAliasAccess(); }
+        finally { owner.ExitOrdinaryWriteReceiptAccess(); }
     }
     private void RequireThread()
     { if (Environment.CurrentManagedThreadId != thread) throw new InvalidOperationException("Ordinary write reservation belongs to its original thread."); }

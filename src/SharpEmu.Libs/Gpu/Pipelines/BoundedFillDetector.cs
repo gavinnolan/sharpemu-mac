@@ -54,11 +54,8 @@ public static class BoundedFillDetector
 
     private static BoundedCopy? DetectModuloCopy(Gen5ShaderProgram program)
     {
-        var instructions = program.Instructions
-            .Where(instruction => instruction.Opcode is not ("SWaitcnt" or "STtraceData" or "SInstPrefetch") &&
-                !(instruction.Opcode == "SMovB32" && instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }]))
-            .ToArray();
-        if (!instructions.Select(instruction => instruction.Opcode).SequenceEqual(ModuloCopyOpcodes))
+        var instructions = ShaderOpcodePattern.Match(program.Instructions, ModuloCopyOpcodes, ignoreMarkers: true);
+        if (instructions is null)
         {
             return null;
         }
@@ -280,11 +277,8 @@ public static class BoundedFillDetector
 
     private static BoundedFill? DetectPattern(Gen5ShaderProgram program)
     {
-        var instructions = program.Instructions
-            .Where(instruction => instruction.Opcode is not ("SWaitcnt" or "STtraceData" or "SInstPrefetch") &&
-                !(instruction.Opcode == "SMovB32" && instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }]))
-            .ToArray();
-        if (!instructions.Select(instruction => instruction.Opcode).SequenceEqual(PatternFillOpcodes))
+        var instructions = ShaderOpcodePattern.Match(program.Instructions, PatternFillOpcodes, ignoreMarkers: true);
+        if (instructions is null)
         {
             return null;
         }

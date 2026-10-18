@@ -159,13 +159,16 @@ public sealed class HleDispatchTimingTests
                 var counter = typeof(DirectExecutionBackend).GetField("_perfHleCompleted", Statics)!;
                 var before = (long)counter.GetValue(null)!;
                 var handle = GCHandle.Alloc(fixture.Backend);
+                // The gateway publishes a context-transfer stub (or zero) through this slot.
+                var transferSlot = Marshal.AllocHGlobal(IntPtr.Size);
                 try
                 {
-                    Assert.Equal(0UL, typeof(DirectExecutionBackend).GetMethod("ImportDispatchGatewayManaged", Statics)!.Invoke(null, [GCHandle.ToIntPtr(handle), 0, fixture.Pack]));
+                    Assert.Equal(0UL, typeof(DirectExecutionBackend).GetMethod("ImportDispatchGatewayManaged", Statics)!.Invoke(null, [GCHandle.ToIntPtr(handle), 0, fixture.Pack, transferSlot]));
+                    Assert.Equal(IntPtr.Zero, Marshal.ReadIntPtr(transferSlot));
                     Assert.Null(typeof(HleDispatchTiming).GetField("_thread", Statics)!.GetValue(null));
                     Assert.Equal(before, counter.GetValue(null));
                 }
-                finally { handle.Free(); }
+                finally { Marshal.FreeHGlobal(transferSlot); handle.Free(); }
             }
             catch (Exception exception) { failure = exception; }
         });
@@ -207,8 +210,10 @@ public sealed class HleDispatchTimingTests
         internal ulong DispatchGateway(int index)
         {
             var handle = GCHandle.Alloc(Backend);
-            try { return (ulong)typeof(DirectExecutionBackend).GetMethod("ImportDispatchGatewayManaged", Statics)!.Invoke(null, [GCHandle.ToIntPtr(handle), index, Pack])!; }
-            finally { handle.Free(); }
+            // The gateway publishes a context-transfer stub (or zero) through this slot.
+            var transferSlot = Marshal.AllocHGlobal(IntPtr.Size);
+            try { return (ulong)typeof(DirectExecutionBackend).GetMethod("ImportDispatchGatewayManaged", Statics)!.Invoke(null, [GCHandle.ToIntPtr(handle), index, Pack, transferSlot])!; }
+            finally { Marshal.FreeHGlobal(transferSlot); handle.Free(); }
         }
         public void Dispose() => Marshal.FreeHGlobal(Pack); // uninitialized fixture owns no production backend native resources
     }

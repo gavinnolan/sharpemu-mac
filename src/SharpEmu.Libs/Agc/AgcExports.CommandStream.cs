@@ -264,6 +264,7 @@ public static partial class AgcExports
             {
                 case PendingDraw draw:
                 {
+                    using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDrawTranslation);
                     var executing = _executing;
                     _executing = draw.State;
                     RecordKnownColorTargets(draw.State, draw.Banks);
@@ -290,6 +291,7 @@ public static partial class AgcExports
                 }
                 case PendingDispatch dispatch:
                 {
+                    using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDispatchTranslation);
                     var executing = _executing;
                     _executing = dispatch.State;
                     try
@@ -392,7 +394,7 @@ public static partial class AgcExports
             {
                 var snapshot = banks.Snapshot();
                 var pending = new PendingDraw(submitId, state, snapshot, indexed, indexedArguments, autoArguments,
-                    state.CurrentVertexSnapshot, state.CurrentIndexSnapshot, _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0));
+                    state.CurrentVertexSnapshot, state.CurrentIndexSnapshot, _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed));
                 if (producing)
                 {
                     Sink!.EnqueueDeferred(pending, isDraw: true);

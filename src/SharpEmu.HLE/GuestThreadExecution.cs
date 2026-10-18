@@ -275,6 +275,9 @@ public static class GuestThreadExecution
     private static GuestCpuContinuation _pendingContextTransferTarget;
 
     [ThreadStatic]
+    private static Action<bool>? _contextTransferCompletion;
+
+    [ThreadStatic]
     private static bool _hasCurrentImportCallFrame;
 
     [ThreadStatic]
@@ -363,6 +366,7 @@ public static class GuestThreadExecution
 
     public static ulong EnterGuestThread(ulong threadHandle)
     {
+        CompleteCurrentContextTransfer(false);
         GpuMemory.GpuMemoryAccessProfile.InitializeCurrentThread();
         var previous = _currentGuestThreadHandle;
         _currentGuestThreadHandle = threadHandle;
@@ -387,6 +391,7 @@ public static class GuestThreadExecution
 
     public static void RestoreGuestThread(ulong previousThreadHandle)
     {
+        CompleteCurrentContextTransfer(false);
         _currentGuestThreadHandle = previousThreadHandle;
         GuestFastPath.BindGuestThread(previousThreadHandle);
         _pendingBlockReason = null;
@@ -714,10 +719,20 @@ public static class GuestThreadExecution
         return true;
     }
 
-    public static void RequestCurrentContextTransfer(GuestCpuContinuation target)
+    public static void RequestCurrentContextTransfer(GuestCpuContinuation target, Action<bool>? completion = null)
     {
         _pendingContextTransferTarget = target;
         _pendingContextTransfer = true;
+        _contextTransferCompletion = completion;
+    }
+
+    public static void CompleteCurrentContextTransfer(bool succeeded)
+    {
+        var completion = _contextTransferCompletion;
+        _contextTransferCompletion = null;
+        _pendingContextTransfer = false;
+        _pendingContextTransferTarget = default;
+        completion?.Invoke(succeeded);
     }
 
     public static bool TryConsumeCurrentContextTransfer(out GuestCpuContinuation target)

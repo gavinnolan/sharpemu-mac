@@ -25,14 +25,12 @@ public sealed class PadHapticsTests : IDisposable
     {
         PadHaptics.ResetForTests();
         PadHaptics.SetHostInputForTests(_input);
-        PadExports.ResetOpenedPadForTests();
         _ctx = new CpuContext(_memory, Generation.Gen5);
     }
 
     public void Dispose()
     {
         PadHaptics.ResetForTests();
-        PadExports.ResetOpenedPadForTests();
     }
 
     [Fact]
@@ -75,11 +73,18 @@ public sealed class PadHapticsTests : IDisposable
         Assert.Equal([((byte)100, (byte)20), ((byte)100, (byte)60), ((byte)50, (byte)60)], _input.Rumble);
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void SetVibrationExport_RoutesThroughHaptics()
     {
         PadHaptics.SubmitAudioHaptics(200, 0);
-        _ctx[CpuRegister.Rdi] = 0;
+        Assert.Equal(0, PadExports.PadInit(_ctx));
+        _ctx[CpuRegister.Rdi] = 0x10000000;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = 0;
+        var handle = PadExports.PadOpen(_ctx);
+        Assert.True(handle > 0);
+        _ctx[CpuRegister.Rdi] = (ulong)handle;
         _ctx[CpuRegister.Rsi] = Base + 0x100;
         Assert.True(_memory.TryWrite(Base + 0x100, new byte[] { 10, 90 }));
 

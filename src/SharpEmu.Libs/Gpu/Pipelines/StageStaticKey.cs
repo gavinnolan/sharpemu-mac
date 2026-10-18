@@ -40,35 +40,7 @@ public static class StageStaticKey
         key.Add(Bit(info.Dx10Clamp));
         key.Add(info.ScratchDwords);
         key.Add(info.PositionExportControl);
-        key.Add(Bit(info.ClipSpace.Enabled));
-        if (info.ClipSpace.Enabled)
-        {
-            key.Add(Bits(info.ClipSpace.ScaleX));
-            key.Add(Bits(info.ClipSpace.ScaleY));
-            key.Add(Bits(info.ClipSpace.OffsetX));
-            key.Add(Bits(info.ClipSpace.OffsetY));
-            key.Add(Bits(info.ClipSpace.HalfExtentX));
-            key.Add(Bits(info.ClipSpace.HalfExtentY));
-        }
-
-        key.Add(Bit(info.ClipSpace.DepthNegativeOneToOne) | (Bit(info.ClipSpace.PositionYDown) << 1) |
-            (Bit(info.ClipSpace.PositionXMirror) << 2) | ((uint)info.ClipSpace.DepthPlanes << 3) |
-            (Bit(info.ClipSpace.XyPreDivided) << 6) | (Bit(info.ClipSpace.ZPreDivided) << 7) |
-            (Bit(info.ClipSpace.WReciprocal) << 8) | (Bit(info.ClipSpace.DepthRemap) << 9));
-        if (info.ClipSpace.DepthRemap)
-        {
-            key.Add(Bits(info.ClipSpace.DepthScale));
-            key.Add(Bits(info.ClipSpace.DepthOffset));
-        }
-
-        if (info.ClipSpace.UserClipPlanes is { Length: > 0 } userClipPlanes)
-        {
-            key.Add(((uint)userClipPlanes.Length << 1) | Bit(info.ClipSpace.UserClipPlanesCullOnly));
-            foreach (var coefficient in userClipPlanes)
-            {
-                key.Add(Bits(coefficient));
-            }
-        }
+        AddClipSpace(info.ClipSpace, key);
 
         key.Add((uint)requiredOutputCount);
         key.Add(Bit(primitiveShader.HasValue));
@@ -149,6 +121,62 @@ public static class StageStaticKey
         for (var index = 0; index < info.InputCount; index++)
         {
             key.Add(info.InterpolatorSettings[index]);
+        }
+    }
+
+    public static void Build(MeshDrawConfiguration info, int requiredOutputCount, List<uint> key)
+    {
+        key.Clear();
+        key.Add(info.Geometry.ThreadsPerGroup);
+        key.Add(info.Execution.DeviceSubgroupLaneCount);
+        key.Add(Bit(info.Geometry.InputTriangleStrip));
+        key.Add(Bit(info.Geometry.InputPointList));
+        key.Add(info.Geometry.InputPrimitiveCountPerWorkgroup);
+        key.Add(info.Geometry.InputVertexCountPerWorkgroup);
+        key.Add(info.Geometry.OutputVertexCapacity);
+        key.Add(info.Geometry.OutputPrimitiveCapacity);
+        key.Add(info.Geometry.ProvokingVertex);
+        key.Add(info.Geometry.WaveSize);
+        key.Add(Bit(info.Geometry.IeeeMode));
+        key.Add(info.Geometry.ScratchDwords);
+        key.Add(info.Geometry.LocalDataShareDwords);
+        key.Add(info.Geometry.PositionExportControl);
+        key.Add((uint)requiredOutputCount);
+        AddClipSpace(info.Geometry.ClipSpace, key);
+    }
+
+    // The clip-space part of a vertex or mesh key: the clip-disabled viewport transform and the
+    // guest clip-space conventions the program applies.
+    private static void AddClipSpace(in ClipSpaceTransform clipSpace, List<uint> key)
+    {
+        key.Add(Bit(clipSpace.Enabled));
+        if (clipSpace.Enabled)
+        {
+            key.Add(Bits(clipSpace.ScaleX));
+            key.Add(Bits(clipSpace.ScaleY));
+            key.Add(Bits(clipSpace.OffsetX));
+            key.Add(Bits(clipSpace.OffsetY));
+            key.Add(Bits(clipSpace.HalfExtentX));
+            key.Add(Bits(clipSpace.HalfExtentY));
+        }
+
+        key.Add(Bit(clipSpace.DepthNegativeOneToOne) | (Bit(clipSpace.PositionYDown) << 1) |
+            (Bit(clipSpace.PositionXMirror) << 2) | ((uint)clipSpace.DepthPlanes << 3) |
+            (Bit(clipSpace.XyPreDivided) << 6) | (Bit(clipSpace.ZPreDivided) << 7) |
+            (Bit(clipSpace.WReciprocal) << 8) | (Bit(clipSpace.DepthRemap) << 9));
+        if (clipSpace.DepthRemap)
+        {
+            key.Add(Bits(clipSpace.DepthScale));
+            key.Add(Bits(clipSpace.DepthOffset));
+        }
+
+        if (clipSpace.UserClipPlanes is { Length: > 0 } userClipPlanes)
+        {
+            key.Add(((uint)userClipPlanes.Length << 1) | Bit(clipSpace.UserClipPlanesCullOnly));
+            foreach (var coefficient in userClipPlanes)
+            {
+                key.Add(Bits(coefficient));
+            }
         }
     }
 
