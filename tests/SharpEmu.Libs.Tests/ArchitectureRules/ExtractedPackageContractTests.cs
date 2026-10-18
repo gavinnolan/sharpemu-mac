@@ -79,7 +79,7 @@ public sealed class ExtractedPackageContractTests
         // offline shader-compile benchmark, which times internal compiler phases.
         foreach (var friend in project.Descendants("InternalsVisibleTo"))
             Assert.Contains(friend.Attribute("Include")!.Value,
-                new[] { "SharpEmu.Libs.Tests", $"{assembly}.Tests", "SharpEmu.Tools.ShaderCompileBench" });
+                new[] { "SharpEmu.Libs.Tests", $"{assembly}.Tests", $"{assembly}.LeakTests", "SharpEmu.Tools.ShaderCompileBench" });
     }
 
     [Theory]

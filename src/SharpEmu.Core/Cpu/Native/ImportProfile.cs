@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -282,17 +283,17 @@ internal static class ImportProfile
         var cores = windowWall > TimeSpan.Zero
             ? windowCpu.TotalSeconds / windowWall.TotalSeconds
             : 0;
-        builder.Append("[IMPORTS] t=").Append(uptime.TotalSeconds.ToString("F1"))
+        builder.Append("[IMPORTS] t=").Append(uptime.TotalSeconds.ToString("F1", CultureInfo.InvariantCulture))
             .Append("s calls=").Append(totalCalls)
-            .Append(" wall_s=").Append((totalTicks * TicksToUs / 1_000_000.0).ToString("F2"))
+            .Append(" wall_s=").Append((totalTicks * TicksToUs / 1_000_000.0).ToString("F2", CultureInfo.InvariantCulture))
             .Append(" transition_s=")
-            .Append(((prologueTicks + epilogueTicks) * TicksToUs / 1_000_000.0).ToString("F2"))
-            .Append(" body_s=").Append((bodyTicks * TicksToUs / 1_000_000.0).ToString("F2"))
+            .Append(((prologueTicks + epilogueTicks) * TicksToUs / 1_000_000.0).ToString("F2", CultureInfo.InvariantCulture))
+            .Append(" body_s=").Append((bodyTicks * TicksToUs / 1_000_000.0).ToString("F2", CultureInfo.InvariantCulture))
             .Append(" transition_share=")
             .Append(totalTicks > 0
-                ? ((prologueTicks + epilogueTicks) * 100.0 / totalTicks).ToString("F1")
+                ? ((prologueTicks + epilogueTicks) * 100.0 / totalTicks).ToString("F1", CultureInfo.InvariantCulture)
                 : "0")
-            .Append("% busy_cores=").Append(cores.ToString("F2"))
+            .Append("% busy_cores=").Append(cores.ToString("F2", CultureInfo.InvariantCulture))
             .Append(" unslotted=").Append(Volatile.Read(ref _unslotted))
             .AppendLine(" (inclusive elapsed, not CPU; min_us is the uncontended floor)");
 
@@ -329,19 +330,19 @@ internal static class ImportProfile
             builder.Append("[IMPORTS]   ")
                 .Append((index < names.Length ? names[index] : "?").PadRight(42))
                 .Append(" n=").Append(calls)
-                .Append(" total_ms=").Append((total * TicksToUs / 1000.0).ToString("F1"))
-                .Append(" avg_us=").Append((total * TicksToUs / calls).ToString("F3"))
+                .Append(" total_ms=").Append((total * TicksToUs / 1000.0).ToString("F1", CultureInfo.InvariantCulture))
+                .Append(" avg_us=").Append((total * TicksToUs / calls).ToString("F3", CultureInfo.InvariantCulture))
                 .Append(" min_us=")
-                .Append((minTicks == long.MaxValue ? 0 : minTicks * TicksToUs).ToString("F3"))
-                .Append(" max_us=").Append((Volatile.Read(ref slot.MaxTicks) * TicksToUs).ToString("F1"))
+                .Append((minTicks == long.MaxValue ? 0 : minTicks * TicksToUs).ToString("F3", CultureInfo.InvariantCulture))
+                .Append(" max_us=").Append((Volatile.Read(ref slot.MaxTicks) * TicksToUs).ToString("F1", CultureInfo.InvariantCulture))
                 .Append(" pro_us=")
-                .Append((Volatile.Read(ref slot.PrologueTicks) * TicksToUs / calls).ToString("F3"))
+                .Append((Volatile.Read(ref slot.PrologueTicks) * TicksToUs / calls).ToString("F3", CultureInfo.InvariantCulture))
                 .Append(" body_us=")
-                .Append((Volatile.Read(ref slot.BodyTicks) * TicksToUs / calls).ToString("F3"))
+                .Append((Volatile.Read(ref slot.BodyTicks) * TicksToUs / calls).ToString("F3", CultureInfo.InvariantCulture))
                 .Append(" epi_us=")
-                .Append((Volatile.Read(ref slot.EpilogueTicks) * TicksToUs / calls).ToString("F3"))
+                .Append((Volatile.Read(ref slot.EpilogueTicks) * TicksToUs / calls).ToString("F3", CultureInfo.InvariantCulture))
                 .Append(" +n=").Append(windowCalls)
-                .Append(" +ms=").Append((windowTicks * TicksToUs / 1000.0).ToString("F1"))
+                .Append(" +ms=").Append((windowTicks * TicksToUs / 1000.0).ToString("F1", CultureInfo.InvariantCulture))
                 .AppendLine();
         }
 
