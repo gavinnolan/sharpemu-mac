@@ -26,8 +26,12 @@ public sealed class GraphicsPrograms
 {
     public ShaderProgram Vertex { get; init; }
     public ShaderProgram Pixel { get; init; }
-    public VertexInputInfo VertexInput { get; init; } = new();
-    public PixelInputInfo PixelInput { get; init; } = new();
+    // A default is made on first read: an initializer made one for every draw only for the
+    // resolver to replace it.
+    public VertexInputInfo VertexInput { get => _vertexInput ??= new(); init => _vertexInput = value; }
+    public PixelInputInfo PixelInput { get => _pixelInput ??= new(); init => _pixelInput = value; }
+    private VertexInputInfo? _vertexInput;
+    private PixelInputInfo? _pixelInput;
 
     // False when the provider could not build the programs; the executor skips the draw.
     public bool Available { get; init; } = true;
@@ -47,7 +51,9 @@ public sealed class GraphicsPrograms
 public sealed class ComputeProgram
 {
     public ShaderProgram Program { get; init; }
-    public ComputeInputInfo Input { get; init; } = new();
+    // Made on first read, like GraphicsPrograms' inputs.
+    public ComputeInputInfo Input { get => _input ??= new(); init => _input = value; }
+    private ComputeInputInfo? _input;
 
     // False when the provider could not build the program; the executor skips the dispatch.
     public bool Available { get; init; } = true;

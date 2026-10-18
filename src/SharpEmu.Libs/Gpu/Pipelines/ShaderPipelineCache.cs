@@ -33,6 +33,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private uint[]? _pixelUserData;
     private uint[]? _computeUserData;
     private readonly List<Gen5PixelOutputBinding> _boundOutputs = new(ContextRegisters.ColorTargetCount);
+    // What the last draw resolved, shared by a draw that resolves equal ones; kept under _resolveGate.
+    // Nothing writes a resolved draw's arrays.
+    private Gen5PixelOutputBinding[] _lastBoundOutputs = [];
+    private readonly PixelInputArrays _pixelInputArrays = new();
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly object _gate = new();
@@ -272,7 +276,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
                 outputModes, outputMappings);
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount,
-                depthAspectBound, stencilAspectBound);
+                depthAspectBound, stencilAspectBound, _pixelInputArrays);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
@@ -339,7 +343,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertexOptions.RequiredVertexOutputCount = (int)attributeCount;
             vertexOptions.PrimitiveShader = primitiveShader;
             vertexOptions.MeshPerVertexParameterMask = perVertexParameters;
-            vertexOptions.VertexInterpolants = manualInterpolation?.Interpolants.Select(interpolant => interpolant.Encoded).ToArray() ?? [];
+            vertexOptions.VertexInterpolants = manualInterpolation is null ? [] : EncodedInterpolantsOf(manualInterpolation);
             if (!TryPrepareProgram(
                 vertexCompileSource,
                 vertexOptions,
@@ -360,11 +364,26 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             Vertex = vertexProgram,
             Pixel = pixelProgramHandle,
             VertexInput = vertexInfo,
-            PixelInput = pixelInfo ?? new PixelInputInfo(),
+            PixelInput = pixelInfo ?? InactivePixelInput,
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = FindPositionStream(vertexInfo),
         };
     }
+
+    // The pixel input of a draw without a pixel stage. Nothing writes a resolved draw's inputs
+    // but the resolver, which sets the stage of a pixel input it resolved, so draws share one.
+    private static readonly PixelInputInfo InactivePixelInput = new()
+    {
+        InterpolatorSettings = new uint[PixelInputInfo.InterpolatorCount],
+        TargetOutputModes = new byte[PixelInputInfo.TargetCount],
+        TargetExportMappings = new ColorComponentMap[PixelInputInfo.TargetCount],
+    };
+
+    // A plan is cached per program and inputs (ResolvePerVertexInputs), and so are its encoded interpolants.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ManualInterpolationPlan, uint[]> EncodedInterpolants = new();
+
+    private static uint[] EncodedInterpolantsOf(Gen5ManualInterpolationPlan plan) =>
+        EncodedInterpolants.GetValue(plan, static plan => plan.Interpolants.Select(interpolant => interpolant.Encoded).ToArray());
 
     // The vertex tables of the draw, the clip-space transform when clipping is off and the
     // draw's clip-space conventions.
@@ -499,7 +518,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             });
         }
 
-        return outputs.ToArray();
+        if (System.Runtime.InteropServices.CollectionsMarshal.AsSpan(outputs).SequenceEqual(_lastBoundOutputs))
+        {
+            return _lastBoundOutputs;
+        }
+
+        return _lastBoundOutputs = outputs.ToArray();
     }
 
     // CB_COLOR_INFO.BLEND_CLAMP on a FLOAT target clamps the colour to [0, 1]; normalized

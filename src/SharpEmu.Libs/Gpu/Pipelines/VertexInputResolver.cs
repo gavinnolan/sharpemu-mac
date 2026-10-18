@@ -69,7 +69,7 @@ public static class VertexInputResolver
             metadataCache?.Add(shader, codeHash, metadata);
         }
 
-        List<VertexAttributeResource>? attributes = null;
+        VertexAttributeResource[] attributes = [];
         VertexInputBuffer[] buffers = [];
         // A shader without input semantics never reads its vertex tables, which may be null.
         if (metadata.VertexAttributeRegister >= 0 && metadata.InputSemantics.Length != 0)
@@ -84,14 +84,19 @@ public static class VertexInputResolver
                     $"user_data=[{string.Join(",", userData.ToArray().Select(word => $"{word:X8}"))}].");
             }
 
-            attributes = ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress);
-            buffers = MergeBuffers(attributes, shader.CodeAddress);
+            // Per-thread scratch: the list never outlives the call; the draw keeps the array.
+            var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
+            resources.Clear();
+            ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress, resources);
+            buffers = MergeBuffers(resources, shader.CodeAddress);
+            attributes = resources.ToArray();
+            resources.Clear();
         }
 
         return new VertexInputInfo
         {
             Buffers = buffers,
-            Attributes = attributes is null ? [] : attributes.ToArray(),
+            Attributes = attributes,
             FetchEmbedded = metadata.VertexAttributeRegister >= 0,
             FetchAttributeRegister = Math.Max(metadata.VertexAttributeRegister, 0),
             FetchBufferRegister = Math.Max(metadata.VertexBufferRegister, 0),
@@ -118,6 +123,9 @@ public static class VertexInputResolver
 
     [ThreadStatic]
     private static List<ResolvedBuffer>? _mergeScratch;
+
+    [ThreadStatic]
+    private static List<VertexAttributeResource>? _attributeScratch;
 
     [ThreadStatic]
     private static Stack<ResolvedBuffer>? _spareBuffers;
@@ -261,6 +269,19 @@ public static class VertexInputResolver
         ulong shaderAddress)
     {
         var resources = new List<VertexAttributeResource>(semantics.Length);
+        ApplySemantics(context, semantics, attributeTable, bufferTable, shaderAddress, resources);
+        return resources;
+    }
+
+    // ApplySemantics into a list the caller owns.
+    private static void ApplySemantics(
+        CpuContext context,
+        ReadOnlySpan<uint> semantics,
+        ulong attributeTable,
+        ulong bufferTable,
+        ulong shaderAddress,
+        List<VertexAttributeResource> resources)
+    {
         Span<uint> descriptorWords = stackalloc uint[4];
         foreach (var word in semantics)
         {
@@ -326,8 +347,6 @@ public static class VertexInputResolver
                 BufferIndex: -1,
                 OffsetBytes: 0));
         }
-
-        return resources;
     }
 
     // Attributes with one stride and fetch rate whose bases lie within one record share a buffer.
