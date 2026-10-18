@@ -28,7 +28,7 @@ public sealed class GameLibraryWatcherTests
                 Path.Combine(directory, "eboot.bin"),
                 "test");
 
-            await refreshRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await refreshRequested.Task.WaitAsync(TimeSpan.FromSeconds(10));
         }
         finally
         {

@@ -237,6 +237,8 @@ public sealed unsafe class MetalDepthTwinTests(ITestOutputHelper output)
             _pages = new PageGuard(_space);
             _memory = new MetalGuestMemory(device, _backing, new NoMemory());
             Cache = new MetalImageCache(new Owner(Harness), Harness.Transfer, _memory, _pages, _backing);
+            // Exact textures: lossy compression is not this suite's subject.
+            Cache.LossyTextures = false;
         }
 
         public MetalTransferHarness Harness { get; }

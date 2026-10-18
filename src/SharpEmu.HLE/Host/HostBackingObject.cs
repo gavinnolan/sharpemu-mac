@@ -68,6 +68,15 @@ public sealed class HostBackingObject : IDisposable
     public ulong ChunkBytes { get; init; }
 
     /// <summary>
+    /// Bytes per purgeable object behind the chunks, a multiple of <see cref="ChunkBytes"/>
+    /// (the last object may be short); 0 when <see cref="ChunkBytes"/> is 0. A no-copy GPU
+    /// buffer costs about the square of the objects it spans under Rosetta, so windows over
+    /// the backing are sized in objects, not chunks.
+    /// </summary>
+    /// <remarks>Host-package contract; written by the owning backend.</remarks>
+    public ulong ObjectBytes { get; init; }
+
+    /// <summary>
     /// The backend's release of whole chunks, set together with <see cref="ChunkBytes"/>.
     /// Arguments are the backing, a chunk-aligned offset and a size that is a multiple of
     /// <see cref="ChunkBytes"/> or ends at <see cref="Size"/>. Afterwards every byte of the
@@ -75,6 +84,14 @@ public sealed class HostBackingObject : IDisposable
     /// </summary>
     /// <remarks>Host-package contract; written by the owning backend.</remarks>
     public Func<HostBackingObject, ulong, ulong, HostBackingDiscard>? DiscardChunks { get; init; }
+
+    /// <summary>
+    /// The backend's second mapping of a chunked backing for GPU windows
+    /// (<see cref="IHostBackingGpuAlias"/>), set together with <see cref="ChunkBytes"/>;
+    /// null when the backend cannot make one. Each call makes a new mapping the caller owns.
+    /// </summary>
+    /// <remarks>Host-package contract; written by the owning backend.</remarks>
+    public Func<HostBackingObject, IHostBackingGpuAlias?>? CreateGpuAlias { get; init; }
 
     /// <summary>
     /// Creates a backing object for storage the caller has already reserved at

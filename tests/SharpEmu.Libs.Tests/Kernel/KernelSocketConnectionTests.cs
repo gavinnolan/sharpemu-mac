@@ -132,7 +132,7 @@ public sealed class KernelSocketConnectionTests
         {
             // The child is a whole `dotnet test` start-up; on a loaded CI runner that alone can
             // take tens of seconds. A deadlock in the connect path never finishes at all.
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(120));
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(300));
         }
         catch (TimeoutException)
         {

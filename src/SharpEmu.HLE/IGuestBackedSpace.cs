@@ -19,10 +19,18 @@ public interface IGuestBackedSpace
     // object whose pages cannot be given back while it is mapped (the POSIX shm default).
     ulong BackingChunkBytes => 0;
 
+    // Bytes per purgeable object behind those chunks (several chunks each), or 0 for one
+    // object: the unit a no-copy GPU window over the backing costs in.
+    ulong BackingObjectBytes => BackingChunkBytes;
+
     // The guest freed these backing bytes (direct memory released, flexible memory or pool
     // pages unmapped or decommitted): the whole chunks inside the range that no view maps go
     // back to the OS and read zero when they are used again. True when anything was released.
     bool TryReleaseBacking(ulong offset, ulong size) => false;
+
+    // Which chunks of a chunked backing a texture holds in place of the backing
+    // (single-copy textures); null when the backing is one object.
+    GuestMemory.GuestSingleCopy? SingleCopy => null;
 
     bool IsBackedView(ulong address);
     bool IsBackedRange(ulong address, ulong size);

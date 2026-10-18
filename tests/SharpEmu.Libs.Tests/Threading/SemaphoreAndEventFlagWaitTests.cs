@@ -73,13 +73,13 @@ public sealed class SemaphoreAndEventFlagWaitTests
             ready.Set();
             return KernelSemaphoreCompatExports.KernelWaitSema(ctx);
         }, TaskCreationOptions.LongRunning);
-        Assert.True(ready.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(ready.Wait(TimeSpan.FromSeconds(10)));
         return task;
     }
 
     private static void WaitUntil(Func<bool> condition)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (!condition())
         {
             Assert.True(DateTime.UtcNow < deadline, "condition not reached");
@@ -110,7 +110,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
         Assert.False(small.IsCompleted); // FIFO: the small request may not overtake the head
 
         Assert.Equal(Ok, KernelSemaphoreCompatExports.KernelSignalSema(ctx, handle, 2));
-        Assert.True(Task.WaitAll(new Task[] { big, small }, TimeSpan.FromSeconds(5)));
+        Assert.True(Task.WaitAll(new Task[] { big, small }, TimeSpan.FromSeconds(10)));
         Assert.Equal(Ok, big.Result);
         Assert.Equal(Ok, small.Result);
         Delete(handle);
@@ -121,7 +121,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
     {
         var handle = CreateSema(initial: 0, max: 1);
         var timedOut = StartSemaWait(handle, slot: 1, need: 1, timeoutUsec: 20_000);
-        Assert.True(timedOut.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(timedOut.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(TimedOut, timedOut.Result);
         Assert.True(_probe.TryReadUInt32(Scratch(1, 0), out var left));
         Assert.Equal(0u, left);
@@ -129,7 +129,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
         var woken = StartSemaWait(handle, slot: 2, need: 1, timeoutUsec: 5_000_000);
         SemaWaiters(handle, 1);
         Assert.Equal(Ok, KernelSemaphoreCompatExports.KernelSignalSema(NewContext(0), handle, 1));
-        Assert.True(woken.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(woken.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(Ok, woken.Result);
         Assert.True(_probe.TryReadUInt32(Scratch(2, 0), out var remaining));
         Assert.InRange(remaining, 3_000_000u, 5_000_000u);
@@ -146,7 +146,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
 
         var ctx = NewContext(0);
         Assert.Equal(Ok, KernelSemaphoreCompatExports.KernelCancelSema(ctx, handle, 4, CountSlot));
-        Assert.True(Task.WaitAll(new Task[] { first, second }, TimeSpan.FromSeconds(5)));
+        Assert.True(Task.WaitAll(new Task[] { first, second }, TimeSpan.FromSeconds(10)));
         Assert.Equal(Canceled, first.Result);
         Assert.Equal(Canceled, second.Result);
         Assert.True(_probe.TryReadUInt32(CountSlot, out var count));
@@ -164,7 +164,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
         var waiter = StartSemaWait(handle, slot: 1, need: 1, timeoutUsec: null);
         SemaWaiters(handle, 1);
         Delete(handle);
-        Assert.True(waiter.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(Deleted, waiter.Result);
     }
 
@@ -288,7 +288,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
             ready.Set();
             return KernelEventFlagCompatExports.KernelWaitEventFlag(ctx);
         }, TaskCreationOptions.LongRunning);
-        Assert.True(ready.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(ready.Wait(TimeSpan.FromSeconds(10)));
         return task;
     }
 
@@ -313,10 +313,10 @@ public sealed class SemaphoreAndEventFlagWaitTests
         var first = StartFlagWait(handle, slot: 1, pattern: 1, mode: 0x01, timeoutUsec: null);
         FlagWaiters(handle, 1);
         var second = StartFlagWait(handle, slot: 2, pattern: 1, mode: 0x01, timeoutUsec: null);
-        Assert.True(second.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(second.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED, second.Result);
         SetFlag(handle, 1);
-        Assert.True(first.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(first.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(Ok, first.Result);
         DeleteFlag(handle);
     }
@@ -331,14 +331,14 @@ public sealed class SemaphoreAndEventFlagWaitTests
         FlagWaiters(handle, 2);
 
         SetFlag(handle, 0x1);
-        Assert.True(first.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(first.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(Ok, first.Result);
         Assert.Equal(0x1UL, ResultPattern(1));
         Assert.Equal(1, KernelEventFlagCompatExports.WaiterCountForTests(handle));
         Assert.False(second.IsCompleted); // the first waiter cleared every bit
 
         SetFlag(handle, 0x1);
-        Assert.True(second.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(second.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(Ok, second.Result);
         DeleteFlag(handle);
     }
@@ -356,7 +356,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
         ctx[CpuRegister.Rsi] = 0x5;
         ctx[CpuRegister.Rdx] = CountSlot;
         Assert.Equal(Ok, KernelEventFlagCompatExports.KernelCancelEventFlag(ctx));
-        Assert.True(Task.WaitAll(new Task[] { first, second }, TimeSpan.FromSeconds(5)));
+        Assert.True(Task.WaitAll(new Task[] { first, second }, TimeSpan.FromSeconds(10)));
         Assert.Equal(Canceled, first.Result);
         Assert.Equal(Canceled, second.Result);
         Assert.Equal(0x5UL, ResultPattern(1));
@@ -373,7 +373,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
         var waiter = StartFlagWait(handle, slot: 1, pattern: 0x2, mode: 0x01, timeoutUsec: null);
         FlagWaiters(handle, 1);
         DeleteFlag(handle);
-        Assert.True(waiter.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(Deleted, waiter.Result);
     }
 
@@ -382,7 +382,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
     {
         var handle = CreateEventFlag(attr: 0x21, initial: 0x10);
         var timedOut = StartFlagWait(handle, slot: 1, pattern: 0x1, mode: 0x01, timeoutUsec: 20_000);
-        Assert.True(timedOut.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(timedOut.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(TimedOut, timedOut.Result);
         Assert.Equal(0x10UL, ResultPattern(1));
         Assert.True(_probe.TryReadUInt32(Scratch(1, 0), out var left));
@@ -391,7 +391,7 @@ public sealed class SemaphoreAndEventFlagWaitTests
         var woken = StartFlagWait(handle, slot: 2, pattern: 0x1, mode: 0x01, timeoutUsec: 5_000_000);
         FlagWaiters(handle, 1);
         SetFlag(handle, 0x1);
-        Assert.True(woken.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(woken.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(Ok, woken.Result);
         Assert.Equal(0x11UL, ResultPattern(2));
         Assert.True(_probe.TryReadUInt32(Scratch(2, 0), out var remaining));

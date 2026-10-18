@@ -86,6 +86,13 @@ public static partial class Gen5MslTranslator
     private static bool ValidatePixelOutputs(IReadOnlyList<Gen5PixelOutputBinding> outputs, out string error)
     {
         error = string.Empty;
+        // Synthetic dual-source alpha (an alpha copy at index one) has no Metal emission: the
+        // Metal path feeds dual-source blending from the program's own second export instead.
+        if (outputs.Any(output => output.DualSourceAlpha))
+        {
+            error = "synthetic dual-source alpha is not supported by the Metal backend";
+            return false;
+        }
         var dualSource = outputs.Any(output => output.BlendSourceIndex != 0);
         if (dualSource && (outputs.Count != 2 ||
             outputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
@@ -4109,6 +4116,11 @@ public static partial class Gen5MslTranslator
             out uint targetPc)
         {
             targetPc = 0;
+            if (instruction.Control is ShaderLinkedBranchControl linked)
+            {
+                targetPc = linked.TargetPc;
+                return true;
+            }
             if (instruction.Encoding != Gen5ShaderEncoding.Sopp ||
                 instruction.Words.Count == 0)
             {

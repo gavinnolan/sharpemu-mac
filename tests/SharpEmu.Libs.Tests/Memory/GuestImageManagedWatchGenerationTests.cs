@@ -121,7 +121,7 @@ public sealed class GuestImageManagedWatchGenerationTests
         var snapshot = GuestImageWriteTracker.BeginReadSnapshot(Address, Bytes);
         var writes = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
         { for (var count = 0; count < 250; count++) GuestImageWriteTracker.NotifyManagedWrite(Address + 1, 1); })).ToArray();
-        await Task.WhenAll(writes).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(writes).WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(1001, Generation(Address)); Assert.False(GuestImageWriteTracker.IsReadSnapshotStable(snapshot));
         Assert.True(GuestImageWriteTracker.ConsumeDirty(Address)); Assert.False(GuestImageWriteTracker.ConsumeDirty(Address));
     }

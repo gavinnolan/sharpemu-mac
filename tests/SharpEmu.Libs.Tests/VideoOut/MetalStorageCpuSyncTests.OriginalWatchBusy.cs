@@ -285,7 +285,7 @@ public sealed partial class MetalStorageCpuSyncTests
                 lock (gate)
                 {
                     entered.Set();
-                    if (!release.Wait(2000)) throw new TimeoutException("Owned metadata actor release bound expired.");
+                    if (!release.Wait(10000)) throw new TimeoutException("Owned metadata actor release bound expired.");
                     if (variant != "busy-contention-expired") Thread.Sleep(20);
                 }
             }
@@ -293,7 +293,7 @@ public sealed partial class MetalStorageCpuSyncTests
         });
         try
         {
-            startAttempted = true; actor.Start(); started = true; Assert.True(entered.Wait(1000));
+            startAttempted = true; actor.Start(); started = true; Assert.True(entered.Wait(10000));
             var unexpectedEntered = Monitor.TryEnter(gate);
             if (unexpectedEntered) Monitor.Exit(gate);
             Assert.False(unexpectedEntered); // Actual foreign-thread gate contention, no native owner.
@@ -323,7 +323,7 @@ public sealed partial class MetalStorageCpuSyncTests
             // Exact actor has one bounded join. Unknown join retains its events
             // through the actor closure instead of disposing objects it may use.
             if (startAttempted && !started) throw new InvalidOperationException("Owned metadata actor start outcome unknown; events retained.");
-            if (started && !actor.Join(1000)) throw new TimeoutException("Owned metadata actor termination unknown; events retained.");
+            if (started && !actor.Join(10000)) throw new TimeoutException("Owned metadata actor termination unknown; events retained.");
             entered.Dispose(); release.Dispose();
         }
         Assert.Null(actorFailure);

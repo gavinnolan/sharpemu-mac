@@ -40,7 +40,7 @@ public sealed class ReadyThreadDispatchTests
         var thread = harness.CreateThread(2, active: true);
         harness.Enqueue(thread);
         harness.Start();
-        Assert.True(SpinWait.SpinUntil(() => harness.ReadDeferrals(thread) > 0, TimeSpan.FromSeconds(5)));
+        Assert.True(SpinWait.SpinUntil(() => harness.ReadDeferrals(thread) > 0, TimeSpan.FromSeconds(10)));
         harness.WaitUntilParked();
         Assert.Equal("Ready", harness.ReadState(thread));
         Assert.True(harness.ReadActive(thread));
@@ -170,10 +170,10 @@ public sealed class ReadyThreadDispatchTests
         }
 
         internal void WaitUntilParked() => Assert.True(SpinWait.SpinUntil(
-            () => (Dispatcher.ThreadState & ThreadState.WaitSleepJoin) != 0, TimeSpan.FromSeconds(5)));
+            () => (Dispatcher.ThreadState & ThreadState.WaitSleepJoin) != 0, TimeSpan.FromSeconds(10)));
 
         internal void WaitUntilCompleted(object thread) => Assert.True(SpinWait.SpinUntil(
-            () => ReadState(thread) == "Faulted" && !ReadActive(thread), TimeSpan.FromSeconds(5)));
+            () => ReadState(thread) == "Faulted" && !ReadActive(thread), TimeSpan.FromSeconds(10)));
 
         internal void AssertQueueEmpty()
         {

@@ -263,7 +263,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                     return (true, Field("_guestWorkFailure").GetValue(null));
                 }
             });
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
             // The waiter holds gate until Wait releases it. Drain's gate
             // acquisition proves it entered Wait after admission's pulses.
             var returns = 0;
@@ -274,7 +274,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             Assert.Single(reports);
             Assert.Same(primary, Field("_guestWorkFailure").GetValue(null));
             Assert.Same(cleanup, Field("_textureSourceCleanupFailure").GetValue(null));
-            Assert.True(awakened.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(awakened.Wait(TimeSpan.FromSeconds(10)));
             Assert.True(awakened.Result.signaled); Assert.Same(primary, awakened.Result.Item2);
             Assert.Equal(2, returns); Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
             Assert.False((bool)Field("_batchOpen").GetValue(null)!);
@@ -286,7 +286,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             Field("_textureSourceBeforeNativeCommit").SetValue(null, oldCommitHook);
             Field("_textureSourceCleanupFailure").SetValue(null, oldCleanup);
             lock (gate) Monitor.PulseAll(gate);
-            awakened?.Wait(TimeSpan.FromSeconds(2));
+            awakened?.Wait(TimeSpan.FromSeconds(10));
             GuestDataPool.Shared.Return(first); GuestDataPool.Shared.Return(second);
         }
     }

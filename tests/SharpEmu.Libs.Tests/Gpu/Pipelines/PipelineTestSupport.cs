@@ -33,6 +33,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public List<(ShaderStage Stage, ulong Hash, ulong ProgramId)> Modules { get; } = new();
 
+    public List<IGuestCompiledShader> CompiledShaders { get; } = new();
+
     public List<GraphicsPipelineDescription> GraphicsPipelines { get; } = new();
 
     public List<ComputePipelineDescription> ComputePipelines { get; } = new();
@@ -46,6 +48,10 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public bool GraphicsSubgroupOperationsEnabled => true;
 
     public bool SharedInt64AtomicsEnabled => false;
+    public bool MeshShadersSupported { get; set; }
+
+    public MeshShaderLimits MeshLimits { get; set; }
+    public uint MeshSubgroupSize { get; set; } = 32;
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
@@ -78,6 +84,7 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
         Modules.Add((stage, hash, programId));
+        CompiledShaders.Add(shader);
         return _nextHandle++;
     }
 
@@ -130,6 +137,7 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
 
     // Stands in for a backend with mesh pipelines (Metal v2); Vulkan leaves it false.
     public bool SupportsPrimitiveShaderMeshPipelines { get; set; }
+    public bool LinkedShaderCallsSupported { get; set; } = true;
 
 
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)

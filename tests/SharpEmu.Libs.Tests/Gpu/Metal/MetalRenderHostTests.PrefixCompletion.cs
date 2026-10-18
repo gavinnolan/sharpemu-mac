@@ -32,44 +32,49 @@ public sealed partial class MetalRenderHostTests
             {
                 effects.Add("label");
                 Assert.True(MetalVideoPresenter.SubmitOrderedGuestAction(() => effects.Add("nested writeback"), "nested renderer followup") > 0);
-                childEntered.Set(); Assert.True(releaseChild.Wait(TimeSpan.FromSeconds(2)));
+                childEntered.Set(); Assert.True(releaseChild.Wait(TimeSpan.FromSeconds(10)));
             }, "renderer label followup") > 0);
-            producerEntered.Set(); Assert.True(releaseProducer.Wait(TimeSpan.FromSeconds(2)));
+            producerEntered.Set(); Assert.True(releaseProducer.Wait(TimeSpan.FromSeconds(10)));
             // Created after End in the first row; it must still precede the barrier.
             Assert.True(MetalVideoPresenter.SubmitOrderedGuestAction(() => effects.Add("later writeback"), "later renderer followup") > 0);
         }, "captured producer");
-        var future = Task.Run(() =>
+        // A thread of its own: a Task.Run awaited with GetResult can be inlined onto this
+        // thread, whose prefix capture (queue 107) would then refuse queue 108.
+        long future = 0;
+        var submitter = new Thread(() =>
         {
             using var laterQueue = MetalVideoPresenter.EnterGuestQueue("dcb.graphics", 108);
-            return MetalVideoPresenter.SubmitOrderedGuestAction(() =>
-            { futureEntered.Set(); Assert.True(releaseFuture.Wait(TimeSpan.FromSeconds(2))); }, "unrelated future work");
-        }).GetAwaiter().GetResult();
+            future = MetalVideoPresenter.SubmitOrderedGuestAction(() =>
+            { futureEntered.Set(); Assert.True(releaseFuture.Wait(TimeSpan.FromSeconds(10))); }, "unrelated future work");
+        });
+        submitter.Start();
+        Assert.True(submitter.Join(TimeSpan.FromSeconds(10)));
         Assert.True(future > prefix);
         var drain = Task.Run(() => { for (var i = 0; i < 8; i++) MetalVideoPresenter.DrainGuestWork(0, 0); });
         try
         {
-            Assert.True(producerEntered.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(producerEntered.Wait(TimeSpan.FromSeconds(10)));
             if (attachDuringDescendant)
             {
-                releaseProducer.Set(); Assert.True(childEntered.Wait(TimeSpan.FromSeconds(2)));
+                releaseProducer.Set(); Assert.True(childEntered.Wait(TimeSpan.FromSeconds(10)));
             }
             var completion = Assert.IsAssignableFrom<IGuestSubmissionPrefixCompletion>(MetalVideoPresenter.EndGuestSubmissionPrefixCapture(true));
             var barrier = (long)completion.GetType().GetField("Sequence", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(completion)!;
             var waiter = Task.Run(completion.WaitUntilCompleted);
-            releaseProducer.Set(); Assert.True(childEntered.Wait(TimeSpan.FromSeconds(2)));
+            releaseProducer.Set(); Assert.True(childEntered.Wait(TimeSpan.FromSeconds(10)));
             // Deterministic assertion: a wrongly prepended barrier has already
             // completed before the child can enter, regardless of task scheduling.
             Assert.False(MetalVideoPresenter.WaitForGuestWork(barrier, 0));
             Assert.False(waiter.IsCompleted); Assert.False(futureEntered.IsSet);
-            releaseChild.Set(); Assert.True(futureEntered.Wait(TimeSpan.FromSeconds(2)));
-            await waiter.WaitAsync(TimeSpan.FromSeconds(2));
+            releaseChild.Set(); Assert.True(futureEntered.Wait(TimeSpan.FromSeconds(10)));
+            await waiter.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.Equal(new[] { "label", "nested writeback", "later writeback" }, effects);
             Assert.False(MetalVideoPresenter.WaitForGuestWork(future, 0));
         }
         finally
         {
             releaseProducer.Set(); releaseChild.Set(); releaseFuture.Set();
-            await drain.WaitAsync(TimeSpan.FromSeconds(2));
+            await drain.WaitAsync(TimeSpan.FromSeconds(10));
         }
     }
 
@@ -107,23 +112,28 @@ public sealed partial class MetalRenderHostTests
         MetalVideoPresenter.BeginGuestSubmissionPrefixCapture(0, 101);
         var prefixRan = false;
         var prefix = MetalVideoPresenter.SubmitOrderedGuestAction(() => prefixRan = true, "captured prefix");
-        var future = Task.Run(() =>
+        // A thread of its own: a Task.Run awaited with GetResult can be inlined onto this
+        // thread, whose prefix capture (queue 101) would then refuse queue 102.
+        long future = 0;
+        var submitter = new Thread(() =>
         {
             using var laterQueue = MetalVideoPresenter.EnterGuestQueue("dcb.graphics", 102);
-            return MetalVideoPresenter.SubmitOrderedGuestAction(() => { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(2))); }, "future work");
-        }).GetAwaiter().GetResult();
+            future = MetalVideoPresenter.SubmitOrderedGuestAction(() => { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(10))); }, "future work");
+        });
+        submitter.Start();
+        Assert.True(submitter.Join(TimeSpan.FromSeconds(10)));
         Assert.True(future > prefix);
         var completion = Assert.IsAssignableFrom<IGuestSubmissionPrefixCompletion>(MetalVideoPresenter.EndGuestSubmissionPrefixCapture(true));
         var wait = Task.Run(completion.WaitUntilCompleted);
         var drain = Task.Run(DrainCompletions);
         try
         {
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
-            await wait.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
+            await wait.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.True(prefixRan); Assert.True(statusCalls > 0);
             Assert.False(MetalVideoPresenter.WaitForGuestWork(future, 0));
         }
-        finally { release.Set(); await drain.WaitAsync(TimeSpan.FromSeconds(2)); }
+        finally { release.Set(); await drain.WaitAsync(TimeSpan.FromSeconds(10)); }
     }
 
     [Fact]

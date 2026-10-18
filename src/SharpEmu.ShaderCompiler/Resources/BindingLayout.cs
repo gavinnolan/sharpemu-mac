@@ -347,6 +347,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     // though no record keeps a layout.
     public uint BufferWordCount;
     public bool UsesDispatchThreadLimits { get; init; }
+    public bool UsesMeshDrawParameters { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
@@ -362,7 +363,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint MipStatisticsDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
 
-    public uint ShaderDataDwordCount => MipStatisticsDword + MipStatisticsCount;
+    public uint MeshDrawParametersDword => MipStatisticsDword + MipStatisticsCount;
+
+    public uint ShaderDataDwordCount => MeshDrawParametersDword + (UsesMeshDrawParameters ? 6u : 0u);
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -603,6 +606,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesShaderBase,
         uint pushDataStartDword = 0,
         bool usesDispatchThreadLimits = false,
+        bool usesMeshDrawParameters = false,
         bool? portableBuffers = null)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
@@ -615,7 +619,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             .Select(static image => image.BindlessSlot + 1)
             .DefaultIfEmpty(0u)
             .Max();
-        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + bufferWordCount + (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount;
+        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + bufferWordCount +
+            (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u);
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0)
@@ -703,6 +708,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
             MipStatisticsCount = mipStatisticsCount,
             BindlessImageTableCount = bindlessImageTableCount,
+            UsesMeshDrawParameters = usesMeshDrawParameters,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
         };
@@ -725,6 +731,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             UsesDispatchThreadLimits != other.UsesDispatchThreadLimits ||
             MipStatisticsCount != other.MipStatisticsCount ||
             BindlessImageTableCount != other.BindlessImageTableCount ||
+            UsesMeshDrawParameters != other.UsesMeshDrawParameters ||
             !SameValues(UserDataRegisters, other.UserDataRegisters))
         {
             return false;
@@ -774,7 +781,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public override bool Equals(object? obj) => Equals(obj as BindingLayout);
 
-    public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount, BufferWordCount, Descriptors.Count, UsesDispatchThreadLimits);
+    public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount,
+        BufferWordCount, Descriptors.Count, UsesDispatchThreadLimits, UsesMeshDrawParameters);
 }
 
 // Recomputes the layout an emitter was given from the same inputs and the same push
@@ -796,7 +804,14 @@ public static class BindingLayoutValidator
             throw new ResourcePlanException("Only a compute shader can use dispatch thread limits.");
         }
 
-        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits,
+        if (layout.UsesMeshDrawParameters && stage != ShaderStage.Mesh)
+        {
+            throw new ResourcePlanException("Only a mesh shader can use mesh draw parameters.");
+        }
+
+        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare,
+            usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
+            layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters,
             portableBuffers: layout.BufferWordCount != 0);
         if (!expected.Equals(layout))
         {

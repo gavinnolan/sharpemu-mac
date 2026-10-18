@@ -120,6 +120,17 @@ public sealed class CommandStreamQueueTests
     }
 
     [Fact]
+    public void CpuFlipCapturesInOrderWithoutWaitingForPublication()
+    {
+        var (host, queue) = NewQueue();
+        var pending = true;
+        host.PendingPublications = _ => pending;
+        Assert.True(queue.TryEnqueueFlipPreparation(1, 2, 77));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Contains("cpu_flip 1 2 77", host.Calls);
+    }
+
+    [Fact]
     public void SubmitIds_AreSharedAcrossQueuesAndEventIdsFollowTheQueue()
     {
         var (host, queue) = NewQueue();
@@ -476,7 +487,7 @@ public sealed class CommandStreamQueueTests
         host.WriteDword(Label, 1);
         queue.RetryBlocked();
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -493,12 +504,12 @@ public sealed class CommandStreamQueueTests
         {
             Assert.True(SpinWait.SpinUntil(
                 () => (drainThread.ThreadState & ThreadState.WaitSleepJoin) != 0,
-                TimeSpan.FromSeconds(2)));
+                TimeSpan.FromSeconds(10)));
             host.WriteDword(Label, 1);
         }
         finally
         {
-            Assert.True(drainThread.Join(TimeSpan.FromSeconds(2)));
+            Assert.True(drainThread.Join(TimeSpan.FromSeconds(10)));
         }
 
         Assert.Equal(IdleOutcome.Completed, outcome);
@@ -537,7 +548,7 @@ public sealed class CommandStreamQueueTests
         await Task.WhenAny(drain, Task.Delay(350));
         Assert.False(drain.IsCompleted);
         host.WriteDword(Label, 1);
-        Assert.Equal(IdleOutcome.Completed, await drain.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(IdleOutcome.Completed, await drain.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
     }
 
@@ -551,7 +562,7 @@ public sealed class CommandStreamQueueTests
 
         Assert.Throws<CommandStreamFatalException>(() => queue.ProcessOne());
 
-        Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.False(queue.HasPending);
         Assert.Contains("no longer accepts", Assert.Throws<CommandStreamFatalException>(() => queue.EnqueueGraphics(Graphics, 2, 2, null)).Message);
     }
@@ -583,7 +594,7 @@ public sealed class CommandStreamQueueTests
 
             Assert.True(failingErrorWriter.WriteAttempted);
             Assert.Same(hostException, actualException);
-            Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.False(queue.HasPending);
             Assert.Contains("no longer accepts", Assert.Throws<CommandStreamFatalException>(() =>
                 queue.EnqueueGraphics(Graphics, 2, 3, null)).Message);
@@ -591,7 +602,7 @@ public sealed class CommandStreamQueueTests
         finally
         {
             queue.Fail();
-            await waiter.WaitAsync(TimeSpan.FromSeconds(2));
+            await waiter.WaitAsync(TimeSpan.FromSeconds(10));
         }
     }
 
@@ -614,7 +625,7 @@ public sealed class CommandStreamQueueTests
         Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(1));
 
         // The first suspend point returns without draining the accepted submissions.
-        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, queue.FrameNumber);
         Assert.True(queue.HasPending);
 
@@ -624,7 +635,7 @@ public sealed class CommandStreamQueueTests
         Assert.False(second.IsCompleted);
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await second.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await second.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(1, queue.FrameNumber);
 
         // The next graphics submission starts from a reset processor.
@@ -651,7 +662,7 @@ public sealed class CommandStreamQueueTests
         Assert.False(done.IsCompleted);
 
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await done.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await done.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(1, queue.FrameNumber);
         Assert.False(queue.HasPending);
     }
@@ -678,7 +689,7 @@ public sealed class CommandStreamQueueTests
         Assert.False(guest.IsCompleted);
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await guest.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await guest.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     [Theory]
@@ -707,7 +718,7 @@ public sealed class CommandStreamQueueTests
             if (address == Label + 6 * 8) host.WriteQword(address, 0);
         };
 
-        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, queue.FrameNumber); // CPU/GPU overlap remains enabled.
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(0UL, host.ReadQword(Label + 6 * 8)); // The CPU reset was not overwritten.

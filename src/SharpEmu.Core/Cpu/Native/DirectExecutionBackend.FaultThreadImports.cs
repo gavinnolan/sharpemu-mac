@@ -13,7 +13,7 @@ public sealed partial class DirectExecutionBackend
 
     private unsafe ulong DispatchImport(int importIndex, nint argPackPtr)
     {
-        if (!_faultThreadImportDiagnostics) return DispatchImportCore(importIndex, argPackPtr);
+        if (!_faultThreadImportDiagnostics) return DispatchImportWithGuestTraces(importIndex, argPackPtr);
         return DispatchImportWithFaultThreadDiagnostics(importIndex, argPackPtr);
     }
 
@@ -37,7 +37,7 @@ public sealed partial class DirectExecutionBackend
         catch { trace = null; } // optional diagnostics cannot skip/replace dispatch
         try
         {
-            var result = DispatchImportCore(importIndex, argPackPtr); // all existing fast paths, ONCE
+            var result = DispatchImportWithGuestTraces(importIndex, argPackPtr); // all existing fast paths, ONCE
             try { trace?.Complete(originalSequence, result); } catch { }
             return result;
         }

@@ -10,6 +10,7 @@ using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
 using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
@@ -22,6 +23,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly object _guestAllocationGate = new();
     private readonly object _allocationSearchHintGate = new();
     private readonly List<MemoryRegion> _regions = new();
+    private readonly AllocationGapTree _allocationGaps = new();
     private readonly Dictionary<(ulong DesiredAddress, ulong Alignment, bool Executable), ulong> _allocationSearchHints = new();
     private readonly ConcurrentDictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
@@ -130,6 +132,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private const uint PAGE_GUARD = 0x100;
 
     private readonly IHostMemory _hostMemory;
+    private readonly bool _ownsStartupAddressReservations;
 
     private readonly object _fixedAllocationGate = new();
     private readonly HashSet<ulong> _fixedGranuleReservationBases = new();
@@ -141,12 +144,24 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private GuestSpaceOwner? _backedSpace;
 
     public PhysicalVirtualMemory(IHostMemory? hostMemory = null, IHostViewMemory? viewHost = null,
-        ulong backingBytes = GuestMemoryLayout.BackingBytes, bool preReserveGuestAddressSpace = false)
+        ulong backingBytes = GuestMemoryLayout.BackingBytes, bool preReserveGuestAddressSpace = false,
+        bool adoptStartupAddressReservations = false)
     {
         _hostMemory = hostMemory ?? CrossPlatformHostMemory.Instance;
+        if (adoptStartupAddressReservations)
+        {
+            if (viewHost == null)
+                throw new ArgumentException("Startup reservations require a memory view host.", nameof(viewHost));
+            WindowsGuestAddressReservation.Validate(_hostMemory);
+            _ownsStartupAddressReservations = true;
+            _fixedGranuleReservationBases.Add(WindowsGuestAddressReservation.ImageStart);
+        }
         if (viewHost != null)
         {
-            _backedSpace = new GuestSpaceOwner(viewHost, backingBytes, preReserveGuestAddressSpace);
+            HostAddressRange? startupReservation = adoptStartupAddressReservations
+                ? new HostAddressRange(WindowsGuestAddressReservation.DataStart, WindowsGuestAddressReservation.DataSize)
+                : null;
+            _backedSpace = new GuestSpaceOwner(viewHost, backingBytes, preReserveGuestAddressSpace, startupReservation);
             RunBackingSelfTest();
         }
     }
@@ -202,6 +217,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private sealed class CrossPlatformHostMemory : IHostMemory
     {
         public static readonly CrossPlatformHostMemory Instance = new();
+        // The installed host backend answers allocation-bound queries; hosts
+        // without that query keep the interface default (unknown).
+        public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+        {
+            range = default;
+            return HostMemoryAuthority.IsInitialized && HostMemoryAuthority.Current.TryQueryAllocation(address, out range);
+        }
 
         public bool CanEmitOrdinaryWriteDiagnostic =>
             HostMemoryAuthority.IsInitialized && HostMemoryAuthority.Current.CanEmitOrdinaryWriteDiagnostic;
@@ -905,6 +927,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return false;
     }
 
+    private static int _allocationSearchTraceCount;
+
     public bool TryAllocateAtOrAbove(
         ulong desiredAddress,
         ulong size,
@@ -922,6 +946,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var effectiveAlignment = Math.Max(PageSize, alignment == 0 ? PageSize : alignment);
         var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
         var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
+        var traceSearch = Environment.GetEnvironmentVariable("SHARPEMU_LOG_VMEM") == "1" &&
+            Interlocked.Increment(ref _allocationSearchTraceCount) <= 64;
+        var rejectedCandidates = 0;
+        if (traceSearch)
+            Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] start=0x{desiredAddress:X16} cursor=0x{cursor:X16} " +
+                $"size=0x{alignedSize:X} alignment=0x{effectiveAlignment:X} executable={executable}");
 
         // macOS needs alignment over-allocation; Linux uses exact-address search.
         if (OperatingSystem.IsMacOS())
@@ -967,18 +997,64 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             if (TryAllocateAtExact(cursor, alignedSize, executable, out actualAddress))
             {
+                if (traceSearch)
+                    Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] result=allocated address=0x{actualAddress:X16} " +
+                        $"attempt={attempt} rejected={rejectedCandidates}");
                 UpdateAllocationSearchCursor(desiredAddress, effectiveAlignment, executable, actualAddress + alignedSize);
                 return true;
+            }
+
+            // Skip occupied host views after the ownership-aware allocation attempt fails.
+            var hostRegionKnown = _hostMemory.Query(cursor, out var hostRegion);
+            rejectedCandidates++;
+            if (traceSearch && (rejectedCandidates <= 4 || attempt == 0xffff))
+                Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] result=rejected candidate=0x{cursor:X16} attempt={attempt} " +
+                    $"host_known={hostRegionKnown} state={hostRegion.State} base=0x{hostRegion.BaseAddress:X16} " +
+                    $"size=0x{hostRegion.RegionSize:X} allocation_base=0x{hostRegion.AllocationBase:X16} protection=0x{hostRegion.RawProtection:X}");
+            if (hostRegionKnown &&
+                (hostRegion.State == HostRegionState.Committed ||
+                 (hostRegion.State == HostRegionState.Reserved && !OwnsAllocationReservation(hostRegion.AllocationBase))) &&
+                hostRegion.BaseAddress <= cursor &&
+                hostRegion.RegionSize <= ulong.MaxValue - hostRegion.BaseAddress)
+            {
+                var hostRegionEnd = hostRegion.BaseAddress + hostRegion.RegionSize;
+                if (hostRegionEnd > cursor)
+                {
+                    if (hostRegionEnd > ulong.MaxValue - (effectiveAlignment - 1))
+                        return false;
+                    cursor = AlignUp(hostRegionEnd, effectiveAlignment);
+                    continue;
+                }
             }
 
             cursor = AlignUp(cursor + effectiveAlignment, effectiveAlignment);
         }
 
+        if (traceSearch)
+            Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] result=exhausted start=0x{desiredAddress:X16} " +
+                $"cursor=0x{cursor:X16} rejected={rejectedCandidates}");
         return false;
+    }
+
+    private bool OwnsAllocationReservation(ulong allocationBase)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            lock (_fixedAllocationGate)
+            {
+                return _fixedGranuleReservationBases.Contains(allocationBase) || IsTrackedRegionBase(allocationBase);
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
     }
 
     private void ReleaseUntrackedAllocation(ulong address)
     {
+        ulong allocationSize = 0;
         _gate.EnterWriteLock();
         try
         {
@@ -986,6 +1062,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             {
                 if (_regions[i].VirtualAddress == address)
                 {
+                    allocationSize = _regions[i].Size;
+                    _allocationGaps.Remove(_regions[i].VirtualAddress);
                     _regions.RemoveAt(i);
                     break;
                 }
@@ -997,7 +1075,15 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
 
         Interlocked.Increment(ref _mappingGeneration);
-        _hostMemory.Free(address);
+        if (_ownsStartupAddressReservations && WindowsGuestAddressReservation.ContainsImageRange(address, allocationSize))
+        {
+            if (allocationSize != 0)
+                WindowsGuestAddressReservation.DecommitImageRange(address, allocationSize);
+        }
+        else
+        {
+            _hostMemory.Free(address);
+        }
     }
 
     public bool TryAllocateGuestMemory(ulong size, ulong alignment, out ulong address)
@@ -1547,6 +1633,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private bool TrySelectBackingRange(ulong searchStart, ulong size, ulong alignment,
         bool preferOwnedReservation, out ulong address)
     {
+        using var searchProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationAddressSearch);
         address = 0;
         const ulong limit = 0x0000_00FC_0000_0000;
         if (size == 0 || size % GuestMemoryLayout.GuestPage != 0 || size >= limit)
@@ -1560,7 +1647,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
+        var lockStarted = GuestMemoryProfile.GetTimestamp();
         _gate.EnterWriteLock();
+        var selectionStarted = GuestMemoryProfile.GetTimestamp();
         try
         {
             if (!HasBackingOwner())
@@ -1584,17 +1673,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     break;
                 }
 
-                var candidate = start + padding;
+                var candidate = _allocationGaps.Find(start + padding, size, alignment, limit);
+                if (candidate == 0)
+                    break;
                 if (reservedCandidate != 0 && candidate >= reservedCandidate)
                 {
                     address = reservedCandidate;
                     return true;
-                }
-                var occupiedRegion = FindRegion(candidate, 1);
-                if (occupiedRegion is not null)
-                {
-                    start = occupiedRegion.VirtualAddress + occupiedRegion.Size;
-                    continue;
                 }
                 if (TryReserveBackingRange(candidate, size))
                 {
@@ -1626,7 +1711,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     start = unmapped;
                 }
 
-                if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
+                if (OperatingSystem.IsWindows() && TryQueryReservationAllocation(candidate, out var allocation) &&
+                    allocation.Address <= candidate && allocation.Size > candidate - allocation.Address &&
+                    allocation.Address < limit && allocation.Size <= limit - allocation.Address)
+                {
+                    start = Math.Max(start, allocation.Address + allocation.Size);
+                    continue;
+                }
+                if (OperatingSystem.IsWindows() && QueryReservationAddress(candidate, out var info) &&
                     info.BaseAddress <= candidate && info.BaseAddress < limit &&
                     info.RegionSize <= limit - info.BaseAddress)
                 {
@@ -1644,18 +1736,39 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
+            var selectionFinished = GuestMemoryProfile.GetTimestamp();
             _gate.ExitWriteLock();
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.ReservationWriteLockAcquisition,
+                lockStarted, selectionStarted);
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.ReservationLockedSelection,
+                selectionStarted, selectionFinished);
         }
+    }
+
+    private bool QueryReservationAddress(ulong address, out HostRegionInfo info)
+    {
+        using var queryProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationHostQuery);
+        return _hostMemory.Query(address, out info);
+    }
+
+    private bool TryQueryReservationAllocation(ulong address, out HostAddressRange range)
+    {
+        using var queryProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationHostQuery);
+        return _hostMemory.TryQueryAllocation(address, out range);
     }
 
     public bool TryMapBacked(ulong address, ulong size, ulong backingOffset,
         GuestPageProtection protection, out HostViewFailure failure)
     {
         failure = HostViewFailure.AddressUnavailable;
-        _gate.EnterWriteLock();
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualMapWriteLockAcquisition))
+            _gate.EnterWriteLock();
         try
         {
-            if (!TryHoldRange(address, size))
+            bool held;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualMapHoldRange))
+                held = TryHoldRange(address, size);
+            if (!held)
             {
                 return false;
             }
@@ -1665,6 +1778,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
 
+            using var publicationProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualMapBookkeeping);
             var executable = (protection & GuestPageProtection.Execute) != 0;
             InsertRegionSorted(new MemoryRegion
             {
@@ -1685,7 +1799,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryUnmapBacked(ulong address, ulong size)
     {
-        _gate.EnterWriteLock();
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualUnmapWriteLockAcquisition))
+            _gate.EnterWriteLock();
         try
         {
             if (_backedSpace?.UnmapShared(address, size) != true)
@@ -1693,6 +1808,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
 
+            using var bookkeepingProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualUnmapBookkeeping);
             var end = address + size;
             var searchStart = 0;
             var searchEnd = _regions.Count;
@@ -1714,6 +1830,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     break;
                 if (!region.IsBackedView)
                     continue;
+                _allocationGaps.Remove(region.VirtualAddress);
                 _regions.RemoveAt(index);
                 if (region.VirtualAddress < address)
                 {
@@ -1763,6 +1880,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
 
     public ulong BackingChunkBytes => HasBackingOwner() ? _backedSpace!.BackingChunkBytes : 0;
+
+    public ulong BackingObjectBytes => HasBackingOwner() ? _backedSpace!.BackingObjectBytes : 0;
+
+    public SharpEmu.HLE.GuestMemory.GuestSingleCopy? SingleCopy => HasBackingOwner() ? _backedSpace!.SingleCopy : null;
 
     public bool TryReleaseBacking(ulong offset, ulong size)
     {
@@ -1928,6 +2049,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         lock (_guestAllocationGate)
         {
+            if (_disposed)
+                return;
             _gate.EnterWriteLock();
             try
             {
@@ -1938,21 +2061,32 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     {
                         if (!region.IsBackedView && freedBases.Add(region.VirtualAddress))
                         {
+                            if (_ownsStartupAddressReservations &&
+                                WindowsGuestAddressReservation.ContainsImageRange(region.VirtualAddress, region.Size))
+                                continue;
                             _hostMemory.Free(region.VirtualAddress);
                         }
                     }
 
                     foreach (var reservationBase in _fixedGranuleReservationBases)
                     {
+                        if (_ownsStartupAddressReservations && reservationBase == WindowsGuestAddressReservation.ImageStart)
+                            continue;
                         if (freedBases.Add(reservationBase))
                         {
                             _hostMemory.Free(reservationBase);
                         }
                     }
 
+                    if (_ownsStartupAddressReservations)
+                        WindowsGuestAddressReservation.DecommitImageRange(
+                            WindowsGuestAddressReservation.ImageStart, WindowsGuestAddressReservation.ImageSize);
                     _fixedGranuleReservationBases.Clear();
+                    if (_ownsStartupAddressReservations)
+                        _fixedGranuleReservationBases.Add(WindowsGuestAddressReservation.ImageStart);
                     _backedSpace?.ReleaseAddressRanges();
                     _regions.Clear();
+                    _allocationGaps.Clear();
                     _pageProtections.Clear();
                     lock (_allocationSearchHintGate)
                     {
@@ -2767,7 +2901,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.ExitReadLock();
         }
 
-        staged:
+    staged:
         return CopyThroughStaging(destinationAddress, sourceAddress, length);
     }
 
@@ -3001,6 +3135,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             if (mergePrevious && mergeNext)
             {
                 previous!.Size += region.Size + next!.Size;
+                _allocationGaps.Remove(next.VirtualAddress);
+                _allocationGaps.Set(previous.VirtualAddress, previous.Size);
                 _regions.RemoveAt(low);
                 return;
             }
@@ -3008,18 +3144,22 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             if (mergePrevious)
             {
                 previous!.Size += region.Size;
+                _allocationGaps.Set(previous.VirtualAddress, previous.Size);
                 return;
             }
 
             if (mergeNext)
             {
-                next!.VirtualAddress = region.VirtualAddress;
+                _allocationGaps.Remove(next!.VirtualAddress);
+                next.VirtualAddress = region.VirtualAddress;
                 next.Size += region.Size;
+                _allocationGaps.Set(next.VirtualAddress, next.Size);
                 return;
             }
         }
 
         _regions.Insert(low, region);
+        _allocationGaps.Set(region.VirtualAddress, region.Size);
     }
 
     private bool TryGetOverlappingRegionEnd(ulong address, ulong size, out ulong overlapEnd)
@@ -3315,6 +3455,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             Clear();
             _backedSpace?.Dispose();
             _backedSpace = null;
+            if (_ownsStartupAddressReservations && !_hostMemory.Free(WindowsGuestAddressReservation.ImageStart))
+                throw new InvalidOperationException("Could not release the startup guest image reservation.");
             _disposed = true;
         }
     }

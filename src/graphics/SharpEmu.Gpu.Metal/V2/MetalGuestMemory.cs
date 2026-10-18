@@ -84,11 +84,13 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // range stays where it is across ~10 s of the range not being used.
     internal const ulong IdleWindowSerials = 1024;
 
-    // Over a chunked backing (SHARPEMU_GUEST_BACKING=chunked) every 64 KiB chunk is its own VM
-    // map entry, and creating a no-copy buffer costs about the square of the entries it spans:
-    // measured on an M4 under Rosetta, 1.9 ms for 512 entries (32 MiB), 31 ms for 2048, 149 ms
-    // for 4096 and 678 ms for 8192 (artifacts/memopt/single-copy-textures.md §4). Windows stop
-    // growing at this many entries there, which at 64 KiB is the 32 MiB granule itself.
+    // Over a chunked backing every purgeable object is its own VM map entry, and under Rosetta
+    // (a 4 KiB map on the 16 KiB kernel) creating a no-copy buffer costs about the square of
+    // the objects it spans: IOKit makes one memory entry per object, and each one re-simplifies
+    // every map entry left in the range (vm_map_remap_extract -> vm_map_simplify_range, only
+    // for sub-page maps). Measured on an M4: 2 ms for 512 objects, 30 ms for 2048, 187 ms for
+    // 4096; natively 5.4 ms for 16384 (artifacts/memopt/exp-window). Windows stop growing at
+    // this many objects, which at the backing's 2 MiB objects is the 1 GiB default window.
     internal const ulong MaxChunkedWindowEntries = 512;
 
     private static ulong ResolveGranuleBytes() =>
@@ -228,7 +230,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         ICpuMemory memory,
         ulong granuleBytes,
         ulong maxWindowBytes,
-        ulong maxUploadBytes = MaxUploadBytes)
+        ulong maxUploadBytes = MaxUploadBytes,
+        bool? singleCopy = null)
     {
         _device = device;
         _maxUploadBytes = maxUploadBytes;
@@ -255,9 +258,10 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         var maxBufferLength = (ulong)MetalV2Native.SendValue(device, SelMaxBufferLength);
         var cap = maxBufferLength == 0 ? maxWindowBytes : Math.Min(maxWindowBytes, maxBufferLength);
         var chunkBytes = backing.BackingChunkBytes;
-        if (chunkBytes != 0 && MaxChunkedWindowEntries <= ulong.MaxValue / chunkBytes)
+        var objectBytes = backing.BackingObjectBytes;
+        if (objectBytes != 0 && MaxChunkedWindowEntries <= ulong.MaxValue / objectBytes)
         {
-            cap = Math.Min(cap, MaxChunkedWindowEntries * chunkBytes);
+            cap = Math.Min(cap, MaxChunkedWindowEntries * objectBytes);
         }
 
         // Whole granules, and never less than one.
@@ -266,6 +270,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         _touchedWindows = new MetalWindowSet(_partition.IdLimit + 64);
         _pinnedWindows = new MetalWindowSet(_partition.IdLimit + 64);
 
+        InitializeSingleCopyWindows(backing, singleCopy);
         _residencySet = UseResidencySet ? CreateResidencySet(device) : 0;
         _gdsBuffer = CreateSharedBuffer(GdsBytes, "guest.gds", out _, out _);
         _nullBuffer = CreateSharedBuffer(256, "guest.null", out _nullContents, out _);
@@ -281,8 +286,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         CommitResidency();
         Console.Error.WriteLine(
             $"[METAL-V2][INFO] guest memory windows: granule=0x{granuleBytes:X} granules={_granuleCount} " +
-            $"max_window=0x{_maxWindowBytes:X} backing_chunk=0x{chunkBytes:X} alias=0x{aliasBase:X16}+0x{aliasSize:X} " +
-            $"residency_set={(_residencySet != 0 ? 1 : 0)} (windows are created on first use)");
+            $"max_window=0x{_maxWindowBytes:X} backing_chunk=0x{chunkBytes:X} backing_object=0x{objectBytes:X} alias=0x{aliasBase:X16}+0x{aliasSize:X} " +
+            $"residency_set={(_residencySet != 0 ? 1 : 0)} gpu_alias={(_gpuAlias is { } gpuAlias ? $"0x{gpuAlias.Base:X16}" : "none")} " +
+            "(windows are created on first use)");
     }
 
     /// <summary>
@@ -409,9 +415,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                 _partition.Normalize(_completedSerial - IdleWindowSerials, _pinnedWindows, _retiredScratch);
             }
 
+            ApplySingleCopyHolesLocked();
             RetireReplaced();
         }
 
+        DropSingleCopyGuestViews();
         BeginGuestViewSubmission();
     }
 
@@ -890,7 +898,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             return window.Buffer;
         }
 
-        var pointer = _aliasBase + window.Start;
+        // Over the GPU alias when single-copy textures are on: released chunks are holes there.
+        var pointer = _windowBase + window.Start;
         var buffer = MetalV2Native.SendNewBufferNoCopy(
             _device,
             SelNewBufferNoCopy,
@@ -1027,9 +1036,12 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         var offset = alias - _aliasBase;
+        // A released chunk gets its bytes back before any window names it (single-copy textures).
+        RestoreSingleCopyRange(offset, size);
         MetalWindowPartition.Window window;
         lock (_windowLock)
         {
+            FillSingleCopyHolesLocked(offset, size);
             switch (_partition.Place(offset, offset + size, _pinnedWindows, _retiredScratch, out window))
             {
                 case MetalWindowPartition.Placement.Moved:
@@ -1062,6 +1074,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                     }
 
                     return false;
+            }
+
+            if (!TryUseSingleCopyWindowLocked(ref window, offset, size))
+            {
+                return false;
             }
 
             EnsureBuffer(window);
@@ -1679,6 +1696,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
             _retired.Clear();
             _windowBuffers.Clear();
+            _gpuAlias?.Dispose();
         }
 
         DisposeGuestViews();

@@ -260,6 +260,27 @@ internal sealed class MetalWindowPartition
         return changed;
     }
 
+    /// <summary>
+    /// Replaces a window with a new one over the same bytes, so its buffer is made again over
+    /// what the host mapping holds now (a buffer keeps the pages it was made over). The old
+    /// window goes to <paramref name="retired"/>; the caller must not have it pinned.
+    /// </summary>
+    public Window Renew(Window window, List<Window> retired)
+    {
+        var index = IndexOf(window.Start);
+        if (!ReferenceEquals(_windows[index], window))
+        {
+            throw new InvalidOperationException($"Window {window.Id} at 0x{window.Start:X} is not in the partition.");
+        }
+
+        _pieces.Clear();
+        var renewed = NewWindow(window.Start, window.End);
+        renewed.LastUsedSerial = window.LastUsedSerial;
+        _pieces.Add(renewed);
+        Replace(index, index, retired);
+        return renewed;
+    }
+
     private static bool IsIdle(Window window, ulong idleSerial, MetalWindowSet pinned) =>
         window.LastUsedSerial <= idleSerial && !pinned.Contains(window.Id);
 

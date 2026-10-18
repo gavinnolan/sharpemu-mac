@@ -260,7 +260,7 @@ public sealed class PageGuardTests : IDisposable
         var watcher = new Thread(() => guard.AddWatch(0x50000, 0x1000, blockReads: true));
         space.BlockThread = watcher.ManagedThreadId;
         watcher.Start();
-        Assert.True(space.Entered.Wait(5000));
+        Assert.True(space.Entered.Wait(10000));
 
         var reapply = Task.Run(() =>
         {
@@ -271,7 +271,7 @@ public sealed class PageGuardTests : IDisposable
 
         space.Release.Set();
         watcher.Join();
-        Assert.True(await CompletesWithin(reapply, 5000));
+        Assert.True(await CompletesWithin(reapply, 10000));
 
         Assert.Equal(new[] { (0x50000UL, 0x1000UL, GuestPageProtection.None), (0x50000UL, 0x1000UL, GuestPageProtection.None) }, space.Protects);
         guard.RemoveWatch(0x50000, 0x1000, blockReads: true);

@@ -211,7 +211,7 @@ internal static class StaticStageInputs
         info.FloatMode = resource1.FloatMode;
         info.Dx10Clamp = resource1.Dx10Clamp;
         info.GuestWave32 = (shaderInterface.PixelInputControl & (1u << 15)) != 0;
-        attributeCount = Math.Max(attributeCount, ShaderPipelineCache.ReadVertexOutputCount(program, info));
+        attributeCount = Math.Max(attributeCount, ShaderPipelineCache.ReadVertexOutputCount(ShaderPipelineCache.InterpolatedAttributesOf(program), info));
 
         var perVertexParameters = 0u;
         Gen5ManualInterpolationPlan? manual = null;

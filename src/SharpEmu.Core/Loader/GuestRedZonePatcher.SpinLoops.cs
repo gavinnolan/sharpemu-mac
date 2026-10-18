@@ -209,6 +209,8 @@ internal static partial class GuestRedZonePatcher
                 }
 
                 functionCount++;
+                // CollectBranchTargets accumulates (the red-zone scan collects across functions).
+                branchTargets.Clear();
                 CollectBranchTargets(decoded, branchTargets);
                 var canBorrow = TryCollectJumpTableTargets(
                     memory, programHeaders, imageBase, decoded, functionStart, functionEnd, branchTargets);
@@ -238,7 +240,7 @@ internal static partial class GuestRedZonePatcher
                         continue;
                     }
 
-                    if (!TryBuildPatchSpan(decoded, index, branchTargets, canBorrow, out var span, out _))
+                    if (!TryBuildPatchSpan(decoded, index, branchTargets, canBorrow, groupInstructions: false, out var span, out _))
                     {
                         unrelocatable++;
                         continue;

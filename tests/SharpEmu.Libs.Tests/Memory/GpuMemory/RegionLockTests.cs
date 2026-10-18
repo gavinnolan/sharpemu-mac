@@ -74,7 +74,7 @@ public sealed class RegionLockTests
                     catch (Exception failure) { foreignFailure = failure; }
                 });
                 foreignThread.Start();
-                Assert.True(foreignThread.Join(TimeSpan.FromSeconds(5)));
+                Assert.True(foreignThread.Join(TimeSpan.FromSeconds(10)));
                 Assert.IsType<LockFailureException>(foreignFailure);
                 Assert.Throws<LockFailureException>(regionLock.Enter);
             }

@@ -29,6 +29,7 @@ public sealed class GraphicsPrograms
     // A default is made on first read: an initializer made one for every draw only for the
     // resolver to replace it.
     public VertexInputInfo VertexInput { get => _vertexInput ??= new(); init => _vertexInput = value; }
+    public MeshDrawConfiguration? MeshInput { get; init; }
     public PixelInputInfo PixelInput { get => _pixelInput ??= new(); init => _pixelInput = value; }
     private VertexInputInfo? _vertexInput;
     private PixelInputInfo? _pixelInput;
@@ -79,6 +80,10 @@ public interface IShaderPipelineProvider
         DrawIndexedArguments? originalIndirectIndexedDraw = null) =>
         RecordUnsupportedGraphics(vertex, context);
 
+    bool MeshShadersSupported => false;
+
+    void DumpRejectedGraphics(RegisterBanks banks, bool autoDraw) { }
+
     GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
@@ -107,6 +112,16 @@ public interface IShaderPipelineProvider
         GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
             depthAspectBound, stencilAspectBound);
 
+    GraphicsPrograms GetMeshGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound) => new() { Available = false };
+
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,
         in DepthAttachmentState depth,
@@ -130,6 +145,8 @@ public interface IShaderPipelineProvider
         uint dimensionZ);
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
+
+    Task? GetComputePipelineCompletion(ShaderProgram program) => null;
 
     // False means the host is still compiling this pipeline; asking again returns it once
     // the compile finishes, without starting a second one.

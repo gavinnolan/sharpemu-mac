@@ -12,19 +12,22 @@ using Xunit.Abstractions;
 namespace SharpEmu.Gpu.Metal.Tests;
 
 /// <summary>
-/// Windows over the chunked guest backing (SHARPEMU_GUEST_BACKING=chunked), where every
-/// 64 KiB chunk is its own purgeable memory entry and so its own VM map entry. A no-copy
-/// buffer costs about the square of the entries it spans, so windows there stop at
-/// <see cref="MetalGuestMemory.MaxChunkedWindowEntries"/> entries; a window that wide must
-/// still be quick to create and read the chunks' bytes, and an emptied chunk reads on the GPU
-/// what it reads on the CPU. The backing here is built the way MacHostViews builds it.
+/// Windows over the chunked guest backing, where every 2 MiB purgeable object (32 chunks of
+/// 64 KiB) is its own VM map entry. Under Rosetta a no-copy buffer costs about the square of
+/// the objects it spans, so windows there stop at
+/// <see cref="MetalGuestMemory.MaxChunkedWindowEntries"/> objects (1 GiB); a window wider
+/// than the 32 MiB that 64 KiB objects allowed must still be quick to create and read the
+/// chunks' bytes, and a chunk emptied out of its object reads on the GPU what it reads on the
+/// CPU. The backing here is built the way MacHostViews builds it.
 /// </summary>
 public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
 {
     private const ulong Chunk = 64 * 1024;
     private const ulong Mib = 1024 * 1024;
+    private const ulong ObjectBytes = 2 * Mib;
     private const ulong GuestBase = 0x2_0000_0000;
-    private const ulong BackingSize = 64 * Mib;
+    private const ulong BackingSize = 96 * Mib;
+    private const ulong WindowBytes = 64 * Mib;
     private const ulong GranuleBytes = Mib;
     private const ulong RequestedMaxWindowBytes = 1024 * Mib;
 
@@ -42,12 +45,12 @@ public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
             var task = mach_task_self();
             ulong alias = 0;
             Assert.Equal(0, mach_vm_map(task, ref alias, BackingSize, Chunk - 1, VmFlagsAnywhere, 0, 0, 0, 0, 3, 0));
-            for (ulong offset = 0; chunked && offset < BackingSize; offset += Chunk)
+            for (ulong offset = 0; chunked && offset < BackingSize; offset += ObjectBytes)
             {
-                var entrySize = Chunk;
+                var entrySize = ObjectBytes;
                 Assert.Equal(0, mach_make_memory_entry_64(task, ref entrySize, 0, MapMemNamedCreate | MapMemPurgable | 3, out var entry, 0));
                 var target = alias + offset;
-                Assert.Equal(0, mach_vm_map(task, ref target, Chunk, 0, VmFlagsFixed | VmFlagsOverwrite, entry, 0, 0, 3, 3, 0));
+                Assert.Equal(0, mach_vm_map(task, ref target, ObjectBytes, 0, VmFlagsFixed | VmFlagsOverwrite, entry, 0, 0, 3, 3, 0));
                 Assert.Equal(0, mach_port_deallocate(task, entry));
             }
 
@@ -60,19 +63,31 @@ public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
 
             _alias = alias;
             BackingChunkBytes = chunked ? Chunk : 0;
+            BackingObjectBytes = chunked ? ObjectBytes : 0;
         }
 
         public ulong BackingChunkBytes { get; }
 
+        public ulong BackingObjectBytes { get; }
+
         public void Dispose() => mach_vm_deallocate(mach_task_self(), _alias, BackingSize);
 
-        // EMPTY then NONVOLATILE, as MacHostViews.DiscardChunks does it.
+        // One chunk out of its object, as MacHostViews.DiscardChunks does it: the rest of the
+        // object wired, EMPTY then NONVOLATILE, unwired.
         public void Empty(ulong offset)
         {
+            var objectStart = _alias + offset / ObjectBytes * ObjectBytes;
+            var chunk = _alias + offset;
+            var below = (nuint)(chunk - objectStart);
+            var above = (nuint)(objectStart + ObjectBytes - chunk - Chunk);
+            Assert.Equal(0, below == 0 ? 0 : mlock((nint)objectStart, below));
+            Assert.Equal(0, above == 0 ? 0 : mlock((nint)(chunk + Chunk), above));
             var state = 2;
-            Assert.Equal(0, mach_vm_purgable_control(mach_task_self(), _alias + offset, 0, ref state));
+            Assert.Equal(0, mach_vm_purgable_control(mach_task_self(), objectStart, 0, ref state));
             state = 0;
-            Assert.Equal(0, mach_vm_purgable_control(mach_task_self(), _alias + offset, 0, ref state));
+            Assert.Equal(0, mach_vm_purgable_control(mach_task_self(), objectStart, 0, ref state));
+            Assert.Equal(0, below == 0 ? 0 : munlock((nint)objectStart, below));
+            Assert.Equal(0, above == 0 ? 0 : munlock((nint)(chunk + Chunk), above));
         }
 
         private static bool Contains(ulong address, ulong length) =>
@@ -131,7 +146,8 @@ public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
         using (var chunked = new ChunkedBacking(chunked: true))
         using (var memory = Memory(chunked))
         {
-            Assert.Equal(MetalGuestMemory.MaxChunkedWindowEntries * Chunk, memory.MaxWindowBytes);
+            Assert.Equal(Math.Min(RequestedMaxWindowBytes, MetalGuestMemory.MaxChunkedWindowEntries * ObjectBytes), memory.MaxWindowBytes);
+            Assert.True(memory.MaxWindowBytes > MetalGuestMemory.MaxChunkedWindowEntries * Chunk);
         }
 
         // A single-object backing keeps the window it asked for (within the device's limit).
@@ -140,9 +156,9 @@ public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
         Assert.True(whole.MaxWindowBytes > MetalGuestMemory.MaxChunkedWindowEntries * Chunk);
     }
 
-    // A window as wide as the cap spans 512 chunk entries: it is created quickly, the GPU
-    // reads every chunk's bytes through it, and after a chunk is emptied the GPU reads what
-    // the CPU reads there.
+    // A window twice the 32 MiB that 64 KiB objects allowed (32 objects, 1024 chunks): it is
+    // created quickly, the GPU reads every chunk's bytes through it, and after a chunk is
+    // emptied out of its object the GPU reads what the CPU reads there.
     [Fact]
     public void AWindowAcrossManyChunksIsQuickAndReadsEveryChunk()
     {
@@ -154,7 +170,8 @@ public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
         using var backing = new ChunkedBacking(chunked: true);
         using var harness = new MetalTransferHarness(Device.Value);
         using var memory = Memory(backing);
-        var size = memory.MaxWindowBytes;
+        Assert.True(memory.MaxWindowBytes >= WindowBytes);
+        var size = WindowBytes;
         var address = GuestBase + 16 * Mib;
         for (ulong offset = 0; offset < size; offset += Chunk)
         {
@@ -166,7 +183,7 @@ public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
         var timer = Stopwatch.StartNew();
         var range = memory.Resolve(address, size);
         timer.Stop();
-        output.WriteLine($"window of {size / Chunk} chunk entries created in {timer.Elapsed.TotalMilliseconds:F2} ms");
+        output.WriteLine($"window of {size / ObjectBytes} objects ({size / Chunk} chunks) created in {timer.Elapsed.TotalMilliseconds:F2} ms");
         Assert.True(memory.IsInPlace(range));
         Assert.True(timer.ElapsedMilliseconds < 250, $"window creation took {timer.Elapsed.TotalMilliseconds:F1} ms");
 
@@ -236,4 +253,10 @@ public sealed unsafe class MetalChunkedWindowTests(ITestOutputHelper output)
 
     [DllImport("libSystem.B.dylib")]
     private static extern int mach_vm_deallocate(uint task, ulong address, ulong size);
+
+    [DllImport("libc")]
+    private static extern int mlock(nint address, nuint length);
+
+    [DllImport("libc")]
+    private static extern int munlock(nint address, nuint length);
 }

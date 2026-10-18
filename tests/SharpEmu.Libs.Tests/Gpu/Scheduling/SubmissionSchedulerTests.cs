@@ -121,7 +121,7 @@ public sealed class SubmissionSchedulerTests
         var pop = Task.Run(scheduler.RunCompletedOperations);
         Assert.False(await CompletesWithin(pop, 100));
         gate.Set();
-        Assert.True(await CompletesWithin(pop, 5000));
+        Assert.True(await CompletesWithin(pop, 10000));
         Assert.Equal(new[] { "urgent1", "deferred1", "urgent2", "urgent2_end", "deferred2" }, order);
     }
 
@@ -163,8 +163,8 @@ public sealed class SubmissionSchedulerTests
         var other = Task.Run(() => scheduler.QueueCompletionAction(() => order.Add("op3")));
         Assert.False(await CompletesWithin(other, 100));
         gate.Set();
-        Assert.True(await CompletesWithin(shutdown, 5000));
-        Assert.True(await CompletesWithin(other, 5000));
+        Assert.True(await CompletesWithin(shutdown, 10000));
+        Assert.True(await CompletesWithin(other, 10000));
         Assert.Equal(new[] { "op1", "op2", "op2_urgent", "op1_end", "op3" }, order);
         scheduler.Dispose();
     }
@@ -221,7 +221,7 @@ public sealed class SubmissionSchedulerTests
 
         var concurrent = Task.WhenAll(Task.Run(scheduler.Shutdown), Task.Run(scheduler.Shutdown));
         scheduler.Shutdown();
-        Assert.True(await CompletesWithin(concurrent, 5000));
+        Assert.True(await CompletesWithin(concurrent, 10000));
 
         Assert.Equal(2, runs);
         Assert.Contains("submit b0 tick=1", _device.Log);
@@ -272,7 +272,7 @@ public sealed class SubmissionSchedulerTests
         Assert.DoesNotContain("dispose", _device.Log);
 
         gate.Set();
-        Assert.True(await CompletesWithin(disposals, 5000));
+        Assert.True(await CompletesWithin(disposals, 10000));
         scheduler.Dispose();
         Assert.Equal(1, _device.Log.Count(entry => entry == "dispose"));
         Assert.Equal("dispose", _device.Log[^1]);

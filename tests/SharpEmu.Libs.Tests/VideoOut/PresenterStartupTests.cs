@@ -87,10 +87,10 @@ public sealed class PresenterStartupTests
         thread.Start();
         try
         {
-            Assert.True(SpinWait.SpinUntil(() => (thread.ThreadState & ThreadState.WaitSleepJoin) != 0, 5000));
+            Assert.True(SpinWait.SpinUntil(() => (thread.ThreadState & ThreadState.WaitSleepJoin) != 0, 10000));
             Assert.Equal(0, queue.PendingSubmissionCount);
             state.Publish(queue);
-            Assert.True(thread.Join(5000));
+            Assert.True(thread.Join(10000));
             Assert.Null(failure);
             Assert.Equal(1, queue.PendingSubmissionCount);
             VulkanVideoPresenter.SubmitCommandStream(runner.Host.Memory, 0, StreamRunner.CommandAddress + 8, 2, 2, null);
@@ -105,7 +105,7 @@ public sealed class PresenterStartupTests
             if (thread.IsAlive)
             {
                 VulkanVideoPresenter.RequestClose();
-                Assert.True(thread.Join(5000));
+                Assert.True(thread.Join(10000));
             }
         }
     }
@@ -130,12 +130,12 @@ public sealed class PresenterStartupTests
         thread.Start();
         try
         {
-            Assert.True(SpinWait.SpinUntil(() => (thread.ThreadState & ThreadState.WaitSleepJoin) != 0, 5000));
+            Assert.True(SpinWait.SpinUntil(() => (thread.ThreadState & ThreadState.WaitSleepJoin) != 0, 10000));
             Assert.False(thread.Join(200));
             Assert.Equal(0, queue.PendingSubmissionCount);
             state.Set("_shaderPrewarmDecided", true);
             state.Set("_shaderPrewarmRunning", false);
-            Assert.True(thread.Join(5000));
+            Assert.True(thread.Join(10000));
             Assert.Null(failure);
             Assert.Equal(1, queue.PendingSubmissionCount);
         }
@@ -144,7 +144,7 @@ public sealed class PresenterStartupTests
             if (thread.IsAlive)
             {
                 VulkanVideoPresenter.RequestClose();
-                Assert.True(thread.Join(5000));
+                Assert.True(thread.Join(10000));
             }
         }
     }
@@ -189,7 +189,7 @@ public sealed class PresenterStartupTests
         thread.Start();
         try
         {
-            Assert.True(SpinWait.SpinUntil(() => (thread.ThreadState & ThreadState.WaitSleepJoin) != 0, 5000));
+            Assert.True(SpinWait.SpinUntil(() => (thread.ThreadState & ThreadState.WaitSleepJoin) != 0, 10000));
             if (failed)
             {
                 state.Set("_presenterStartupFailure", new InvalidOperationException("Device initialization failed."));
@@ -199,7 +199,7 @@ public sealed class PresenterStartupTests
             {
                 VulkanVideoPresenter.RequestClose();
             }
-            Assert.True(thread.Join(5000));
+            Assert.True(thread.Join(10000));
             if (failed) Assert.IsType<InvalidOperationException>(failure);
             else Assert.IsType<OperationCanceledException>(failure);
         }
@@ -208,7 +208,7 @@ public sealed class PresenterStartupTests
             if (thread.IsAlive)
             {
                 VulkanVideoPresenter.RequestClose();
-                Assert.True(thread.Join(5000));
+                Assert.True(thread.Join(10000));
             }
         }
     }

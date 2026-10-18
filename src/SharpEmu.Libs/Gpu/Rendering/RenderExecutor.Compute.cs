@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using PortableBufferWord = SharpEmu.ShaderCompiler.Resources.PortableBufferWord;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
@@ -146,6 +147,11 @@ public sealed partial class RenderExecutor
 
         ReleaseFragmentWrites();
         _host.EndRendering();
+        if (program.UsesDeviceAddresses)
+        {
+            _host.BeforeDeviceAddressPreparation([input.Stage]);
+        }
+
         using (_host.BeginPreparation())
         {
             // The host may compile this program off the command-stream thread and report that
@@ -170,7 +176,16 @@ public sealed partial class RenderExecutor
             {
                 while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
                 {
-                    Thread.Sleep(1);
+                    using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineWait);
+                    var completion = _pipelines.GetComputePipelineCompletion(computeProgram.Program);
+                    if (completion is null)
+                    {
+                        Thread.Sleep(1);
+                    }
+                    else
+                    {
+                        completion.GetAwaiter().GetResult();
+                    }
                 }
             }
 
@@ -210,10 +225,12 @@ public sealed partial class RenderExecutor
                 physicalGroups[axisOrder[logical]] = logicalGroups[logical];
             }
 
+            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
                 _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
             }
+            _host.EndComputeImageSnapshot(imageSnapshot, bindings);
             _host.ShaderAccessBarrier();
         }
 

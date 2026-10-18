@@ -29,12 +29,23 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
+        // A deferred label is visible here at once; guest CPU threads see it after the dump before it.
+        if (!_host.TryReadDeferredLabel(QueueId, address, is64Bit ? 8UL : 4UL, out var deferred, out var value))
+        {
+            Suspend();
+            return;
+        }
+
         // The first look commits nothing. Committing the recording command buffer so a
         // pending write can land ends the open render pass, and when this queue's own store
         // or a recorded label satisfies the wait the commit buys nothing: nine in ten poll
         // commits on Void Terrarium, Superliminal and Quake resumed without suspending, each
         // one storing and reloading every attachment of the pass.
-        var value = ReadWaitOperand(address, is64Bit, commitPendingWrite: false);
+        if (!deferred)
+        {
+            value = ReadWaitOperand(address, is64Bit, commitPendingWrite: false);
+        }
+
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");
@@ -50,7 +61,7 @@ public sealed partial class GpuCommandInterpreter
             _ = WaitOperation.TryCompare(labelValue, reference, mask, compareFunction, out satisfied);
         }
 
-        if (!satisfied)
+        if (!satisfied && !deferred)
         {
             // Nothing recorded will satisfy it, so the bytes have to change: make sure the
             // work that writes them is on its way before the submission sleeps on them.
@@ -190,12 +201,50 @@ public sealed partial class GpuCommandInterpreter
 
         _predicationVisible = visible;
         PredicateSkip = condition == 0 ? visible : !visible;
+        TracePredication(condition, waitOperation, address, words[0]);
+        VisibilityResultTrace.Predicate(QueueId, SubmitId, address, words[0], condition, waitOperation, PredicateSkip);
     }
 
     private static long _predicationResultWaits;
 
     /// <summary>Zpass predicates since startup that parked until the occlusion results were written.</summary>
     public static long PredicationResultWaits => Interlocked.Read(ref _predicationResultWaits);
+
+    private static long _predicationTraceCount;
+    private readonly Queue<(ulong Address, ulong Value, long Evaluation, long Timestamp)> _skippedPredicates = new();
+
+    // Each evaluation decides which later predicated packets run; see docs/image-clear-tracing.md.
+    private void TracePredication(uint condition, uint waitOperation, ulong address, ulong value)
+    {
+        if (!Images.ImageClearTrace.Enabled) return;
+        var evaluation = Interlocked.Increment(ref _predicationTraceCount);
+        RecheckSkippedPredicates(evaluation);
+        if (evaluation > 256) return;
+        Console.Error.WriteLine($"[GPU][TRACE] Predication address=0x{address:X16} value=0x{value:X16} condition={condition} " +
+            $"wait={waitOperation} skip={PredicateSkip} evaluation={evaluation}");
+        if (evaluation <= 32) _host.TraceWritersOf($"predicate=0x{address:X16}", address, sizeof(ulong));
+        if (PredicateSkip && _skippedPredicates.Count < 64)
+            _skippedPredicates.Enqueue((address, value, evaluation, System.Diagnostics.Stopwatch.GetTimestamp()));
+    }
+
+    // A value that changes after its evaluation shows a writer that ran too late for the skip decision.
+    private void RecheckSkippedPredicates(long evaluation)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        for (var remaining = _skippedPredicates.Count; remaining > 0; remaining--)
+        {
+            var entry = _skippedPredicates.Dequeue();
+            var current = _host.TryReadGuest(entry.Address, bytes) ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes) : entry.Value;
+            if (current != entry.Value)
+            {
+                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(entry.Timestamp).TotalMilliseconds;
+                Console.Error.WriteLine($"[GPU][TRACE] PredicationChanged address=0x{entry.Address:X16} evaluated=0x{entry.Value:X16} " +
+                    $"now=0x{current:X16} evaluation={entry.Evaluation} laterEvaluations={evaluation - entry.Evaluation} elapsedMs={elapsed:F3}");
+                continue;
+            }
+            if (evaluation - entry.Evaluation < 64) _skippedPredicates.Enqueue(entry);
+        }
+    }
 
     internal void WaitForConstantEngine()
     {
@@ -346,7 +395,13 @@ public sealed partial class GpuCommandInterpreter
             return payloadDwords;
         }
 
-        return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) == 0 ? payloadDwords + executeCount : payloadDwords;
+        if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) != 0)
+        {
+            return payloadDwords;
+        }
+
+        TraceSkippedPackets("conditional-execute", packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount, (uint)address);
+        return payloadDwords + executeCount;
     }
 
     internal uint SetPredicationPacket(in PacketContext packet, ReadOnlySpan<uint> payload)

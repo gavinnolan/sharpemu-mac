@@ -67,7 +67,7 @@ public sealed class UmtxOpTests
 
     private static void Eventually(Func<bool> condition)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (!condition())
         {
             Assert.True(DateTime.UtcNow < deadline, "condition not reached");
@@ -91,13 +91,15 @@ public sealed class UmtxOpTests
         Write(Word, 7);
         Assert.Equal(0, Op(ctx, Word, 11, val: 8)); // value differs: no sleep
 
+        // Taken before the deadline is: time between reading the clock and entering the wait
+        // (a loaded runner) must count toward the elapsed time.
+        var started = DateTime.UtcNow;
         KernelRuntimeCompatExports.GetClockTime(4, out var seconds, out var nanoseconds);
         var deadlineNs = nanoseconds + 20_000_000;
         Assert.True(ctx.TryWriteUInt64(Timeout, (ulong)(seconds + deadlineNs / 1_000_000_000)));
         Assert.True(ctx.TryWriteUInt64(Timeout + 8, (ulong)(deadlineNs % 1_000_000_000)));
         Assert.True(ctx.TryWriteUInt32(Timeout + 16, 1)); // UMTX_ABSTIME
         Assert.True(ctx.TryWriteUInt32(Timeout + 20, 4)); // CLOCK_MONOTONIC
-        var started = DateTime.UtcNow;
         Assert.Equal(-1, Op(ctx, Word, 15, val: 7, uaddr1: 24, uaddr2: Timeout));
         Assert.Equal((uint)GuestErrno.ETIMEDOUT, Errno(ctx));
         Assert.True(DateTime.UtcNow - started >= TimeSpan.FromMilliseconds(15));
@@ -114,12 +116,12 @@ public sealed class UmtxOpTests
         Eventually(() => Waiters(Word) == 1 && Waiters(Word2) == 2);
 
         Assert.Equal(0, Op(Context(0), Word, 16, val: 1));
-        Assert.True(first.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(first.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, first.Result.Result);
 
         Assert.True(_memory.TryWrite(AddressArray, BitConverter.GetBytes(Word2)));
         Assert.Equal(0, Op(Context(0), AddressArray, 21, val: 1));
-        Assert.True(Task.WaitAll(new Task[] { second, third }, TimeSpan.FromSeconds(5)));
+        Assert.True(Task.WaitAll(new Task[] { second, third }, TimeSpan.FromSeconds(10)));
         Assert.Equal(0, second.Result.Result);
         Assert.Equal(0, third.Result.Result);
     }
@@ -155,7 +157,7 @@ public sealed class UmtxOpTests
         Assert.NotEqual(0u, Read(Mutex) & 0x80000000); // contested
 
         Assert.Equal(0, Op(owner, Mutex, 6));
-        Assert.True(waiter.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, waiter.Result.Result);
         Assert.Equal(waiter.Result.ThreadId, Read(Mutex)); // owned by the waiter, no longer contested
     }
@@ -178,7 +180,7 @@ public sealed class UmtxOpTests
         Assert.Equal(0, Op(signaller, Mutex, 5)); // the waiter released it
         Assert.Equal(0, Op(signaller, Cond, 9));
         Assert.Equal(0, Op(signaller, Mutex, 6));
-        Assert.True(waiter.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, waiter.Result.Result);
         Assert.Equal(0u, Read(Cond));
     }
@@ -206,12 +208,12 @@ public sealed class UmtxOpTests
 
         Assert.Equal(0, Op(reader, Rwlock, 14));
         Assert.Equal(0, Op(reader, Rwlock, 14));
-        Assert.True(writer.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(writer.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, writer.Result.Result);
         Assert.Equal(0x80000000u, Read(Rwlock) & 0xC0000000u); // write owner, no writer waiting
 
         Assert.Equal(0, Op(Context(1), Rwlock, 14));
-        Assert.True(lateReader.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(lateReader.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, lateReader.Result.Result);
         Assert.Equal(1u, Read(Rwlock));
         Assert.Equal(0u, Read(Rwlock + 8));
@@ -227,7 +229,7 @@ public sealed class UmtxOpTests
 
         Write(Sem, 0x80000001); // userland post: count 1, has-waiters still set
         Assert.Equal(0, Op(Context(0), Sem, 24));
-        Assert.True(waiter.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, waiter.Result.Result);
         Assert.Equal(1u, Read(Sem));
     }

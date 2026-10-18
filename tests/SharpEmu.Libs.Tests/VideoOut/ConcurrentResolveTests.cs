@@ -7,6 +7,7 @@ using static SharpEmu.Gpu.Vulkan.Presentation.VulkanVideoPresenter;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
+[Collection(AllocationMeasurementCollection.Name)]
 public sealed class ConcurrentResolveTests
 {
     [Fact]
@@ -15,16 +16,23 @@ public sealed class ConcurrentResolveTests
         var assumptions = new ConcurrentAssumptions(1, 2);
         assumptions.Record(ConcurrentQuery.ResidentClean, 0x1000, 4, false);
         assumptions.Record(ConcurrentQuery.CleanWord, 0x1000, 4, false);
-        var allocated = GC.GetAllocatedBytesForCurrentThread();
-        for (var index = 0; index < 100000; index++)
+        void Pass()
         {
-            var address = 0x1000UL + (ulong)index * 4;
-            assumptions.Record(ConcurrentQuery.ResidentClean, address, 4, false);
-            assumptions.Record(ConcurrentQuery.CleanWord, address, 4, false);
-            assumptions.Record(ConcurrentQuery.ResidentClean, address, 4, false);
+            for (var index = 0; index < 100000; index++)
+            {
+                var address = 0x1000UL + (ulong)index * 4;
+                assumptions.Record(ConcurrentQuery.ResidentClean, address, 4, false);
+                assumptions.Record(ConcurrentQuery.CleanWord, address, 4, false);
+                assumptions.Record(ConcurrentQuery.ResidentClean, address, 4, false);
+            }
         }
 
-        Assert.Equal(allocated, GC.GetAllocatedBytesForCurrentThread());
+        // A warm-up pass first: the runtime's own tier-up/OSR work for the hot loop allocates on
+        // the calling thread, and when it lands inside the measured pass depends on CPU load.
+        Pass();
+        var allocated = AllocationMeasurementCollection.Measure(Pass);
+
+        Assert.Equal(0, allocated);
         Assert.Equal(2, assumptions.Answers.Count);
         Assert.All(assumptions.Answers, proof =>
         {

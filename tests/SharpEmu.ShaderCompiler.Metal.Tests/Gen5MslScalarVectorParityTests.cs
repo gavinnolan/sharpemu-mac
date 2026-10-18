@@ -197,8 +197,10 @@ public sealed class Gen5MslScalarVectorParityTests(ITestOutputHelper output)
     // A FLAT address whose high dword is an aperture constant lands in LDS or in
     // scratch instead of going through the page table, and the translator has to
     // route it there like the hardware does.
-    [InlineData(0x000000EBu, "sharpemu_lds[", "7u")]       // src_shared_base
-    [InlineData(0x000000EDu, "sharpemu_scratch[", "8u")]   // src_private_base
+    // The shared constants tag LDS with a 0x8 and scratch with a 0x7 top nibble; the aperture
+    // registers read as the virtual segments 1 << 48 and 2 << 48 (Gen5InlineConstants).
+    [InlineData(0x000000EBu, "sharpemu_lds[", "8u")]       // src_shared_base
+    [InlineData(0x000000EDu, "sharpemu_scratch[", "7u")]   // src_private_base
     public void FlatAccessesThroughAnApertureReachTheStorageItNames(
         uint apertureOperand, string storage, string apertureValue)
     {

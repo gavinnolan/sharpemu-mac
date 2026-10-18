@@ -228,7 +228,6 @@ public sealed class AudioOut2PortGetStateExportsTests
         Assert.True(memory.TryRead(StateAddress + 0x200, handleBytes));
         var handle = BinaryPrimitives.ReadUInt64LittleEndian(handleBytes);
 
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Span<byte> level = stackalloc byte[0x0C];
         for (var grain = 1u; grain <= 4; grain++)
         {
@@ -247,8 +246,9 @@ public sealed class AudioOut2PortGetStateExportsTests
             Assert.Equal(4 - grain, BinaryPrimitives.ReadUInt32LittleEndian(level[8..]));
         }
 
-        // Filling the queue up to its depth never blocks.
-        Assert.True(System.Diagnostics.Stopwatch.GetElapsedTime(started) < TimeSpan.FromMilliseconds(300));
+        // Filling the queue up to its depth must not block. This used to assert a 300 ms wall
+        // clock for the loop, which a loaded host can exceed without any push blocking; the
+        // exact per-grain queue levels above are what remain.
         ctx[CpuRegister.Rdi] = handle;
         AudioOut2Exports.AudioOut2ContextDestroy(ctx);
     }

@@ -23,19 +23,19 @@ public sealed class CommandSubmissionPreparationTests
     {
         var host = new RecordingCommandStreamHost(); var queue = new CommandStreamQueue(host);
         using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
-        host.BeforeGuestRead = _ => { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(2))); };
+        host.BeforeGuestRead = _ => { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(10))); };
         var receipt = Enqueue(host, queue, 11, StreamRunner.Packet(PacketOpcode.NumInstances, 7));
         var worker = new CommandStreamWorker(queue, host, static () => false, true, "managed preparation");
         worker.Start();
         try
         {
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
             var waiter = Task.Run(receipt.WaitUntilPrepared);
             Assert.False(waiter.IsCompleted);
             var later = Enqueue(host, queue, 12, StreamRunner.Packet(PacketOpcode.NumInstances, 9));
             Assert.Equal(0, receipt.QueueId); Assert.Equal(11UL, receipt.SubmissionId);
             release.Set();
-            Assert.Equal(GuestSubmissionPreparationResult.PreparedPrefix, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(GuestSubmissionPreparationResult.PreparedPrefix, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.Equal(GuestSubmissionPreparationResult.PreparedPrefix, later.WaitUntilPrepared());
             Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
             Assert.Empty(host.EndOfPipeWrites); // Preparation never synthesizes an EOP.

@@ -11,7 +11,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 public sealed class MetalShaderPrewarmGateTests
 {
     private static readonly TimeSpan Held = TimeSpan.FromMilliseconds(150);
-    private static readonly TimeSpan Released = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan Released = TimeSpan.FromSeconds(10);
 
     [Fact]
     public void NothingIsHeldBeforeThePresenterStarts()

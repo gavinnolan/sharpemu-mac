@@ -122,6 +122,7 @@ public enum GpuPipelineStage
     HostBit = 16384,
     AllGraphicsBit = 32768,
     AllCommandsBit = 65536,
+    MeshShaderBitExt = 0x00100000,
 }
 
 // Matches the Vulkan enum VkPipelineBindPoint.

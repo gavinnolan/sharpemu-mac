@@ -139,7 +139,12 @@ public sealed class MetalV2HostTests
             reader.Start();
         }
 
-        for (var cycle = 0; cycle < 50_000; cycle++)
+        // At least 50 000 cycles, and on until the readers have checked while the image was
+        // reachable: on a loaded machine the 50 000 can finish before a reader is scheduled.
+        var deadline = Environment.TickCount64 + 10_000;
+        for (var cycle = 0;
+             cycle < 50_000 || (Interlocked.Read(ref checkedWhileReachable) < 1_000 && Environment.TickCount64 < deadline);
+             cycle++)
         {
             lock (gate)
             {
