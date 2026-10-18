@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Gpu.Metal.V2;
+using SharpEmu.ShaderCompiler.Metal;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -155,6 +156,60 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
     }
 
     [Fact]
+    public void LibrariesStoredAloneDrawAndComputeWhatTheCompiledOnesDo()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var vertexKey = MetalBinaryArchive.LibraryKey(VertexSource, usesPerVertexInputs: false);
+        var pixelKey = MetalBinaryArchive.LibraryKey(PixelSource, usesPerVertexInputs: false);
+        var computeKey = MetalBinaryArchive.LibraryKey(ComputeSource, usesPerVertexInputs: false);
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(PixelSource);
+        var computeLibrary = Compile(ComputeSource);
+        var descriptor = RenderDescriptor(Function(vertexLibrary, "gen5_vs"), Function(pixelLibrary, "gen5_ps"));
+        var compiled = NewRender(descriptor, 0, 0);
+        var computeFunction = Function(computeLibrary, "gen5_cs");
+        nint error = 0;
+        var compiledCompute = MetalNative.Send(device, MetalNative.Selector("newComputePipelineStateWithFunction:error:"), computeFunction, ref error);
+        Assert.NotEqual(0, compiled);
+        Assert.NotEqual(0, compiledCompute);
+        using (var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+        {
+            // The static precompile's paths: a vertex-only pipeline, a fragment behind a stub
+            // vertex function made from its inputs, a compute pipeline; none is ever made.
+            Assert.True(Store(writing, VertexSource, "gen5_vs", Gen5MslStage.Vertex, vertexKey) > 0);
+            Assert.True(Store(writing, PixelSource, "gen5_ps", Gen5MslStage.Pixel, pixelKey) > 0);
+            Assert.True(Store(writing, ComputeSource, "gen5_cs", Gen5MslStage.Compute, computeKey) > 0);
+            // There already: not stored twice.
+            Assert.Equal(-1, Store(writing, ComputeSource, "gen5_cs", Gen5MslStage.Compute, computeKey));
+            Assert.Equal(3, writing.Stored.Libraries);
+            Assert.True(writing.HasLibrary(vertexKey));
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
+        var storedVertexLibrary = reading.TryLoadLibrary(vertexKey);
+        var storedPixelLibrary = reading.TryLoadLibrary(pixelKey);
+        var storedComputeLibrary = reading.TryLoadLibrary(computeKey);
+        Assert.NotEqual(0, storedVertexLibrary);
+        Assert.NotEqual(0, storedPixelLibrary);
+        Assert.NotEqual(0, storedComputeLibrary);
+        var storedDescriptor = RenderDescriptor(Function(storedVertexLibrary, "gen5_vs"), Function(storedPixelLibrary, "gen5_ps"));
+        var stored = NewRender(storedDescriptor, 0, 0);
+        Assert.NotEqual(0, stored);
+        var storedFunction = Function(storedComputeLibrary, "gen5_cs");
+        var storedCompute = MetalNative.Send(device, MetalNative.Selector("newComputePipelineStateWithFunction:error:"), storedFunction, ref error);
+        Assert.NotEqual(0, storedCompute);
+
+        var expected = Draw(compiled);
+        Assert.Contains(expected, static value => value != 0);
+        Assert.Equal(expected, Draw(stored));
+        Assert.Equal(RunCompute(compiledCompute), RunCompute(storedCompute));
+        Assert.Equal(3, reading.Counters.LibraryHits);
+        Release(storedCompute, storedFunction, stored, storedDescriptor, storedComputeLibrary, storedPixelLibrary, storedVertexLibrary,
+            compiledCompute, computeFunction, compiled, descriptor, computeLibrary, pixelLibrary, vertexLibrary);
+    }
+
+    [Fact]
     public void ADamagedLibraryFileIsDeletedInsteadOfLoaded()
     {
         if (!RequireDevice()) return;
@@ -242,6 +297,37 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Assert.False(MetalBinaryArchive.TryVerify(path, out _));
         File.WriteAllBytes(path, []);
         Assert.False(MetalBinaryArchive.TryVerify(path, out _));
+    }
+
+    [Fact]
+    public void TheStubVertexFunctionOutputsTheFragmentsInterpolatedInputs()
+    {
+        const string fragment = """
+            struct Gen5PsIn
+            {
+                float4 sharpemu_frag_coord [[position]];
+                float4 attr0 [[user(locn0), flat]];
+                vertex_value<float4> attr1 [[user(locn3)]];
+                float3 sharpemu_bary_persp [[barycentric_coord, center_perspective]];
+                bool sharpemu_front_facing [[front_facing]];
+            };
+            fragment Gen5PsOut gen5_ps(Gen5PsIn sharpemu_in [[stage_in]])
+            """;
+        var stub = MetalStaticPrecompile.StubVertexSource(fragment);
+        Assert.NotNull(stub);
+        Assert.Contains("float4 sharpemu_frag_coord [[position]];", stub);
+        Assert.Contains("float4 attr0 [[user(locn0)]];", stub);
+        Assert.Contains("float4 attr1 [[user(locn3)]];", stub);
+        Assert.DoesNotContain("barycentric", stub);
+        Assert.DoesNotContain("front_facing", stub);
+        Assert.Null(MetalStaticPrecompile.StubVertexSource("kernel void gen5_cs() {}"));
+    }
+
+    private static long Store(MetalBinaryArchive archive, string source, string entry, Gen5MslStage stage, UInt128 key)
+    {
+        var bytes = MetalStaticPrecompile.Store(archive, Device.Value, new Gen5MslShader(source, entry, stage, 1), key, out var error);
+        Assert.True(error is null, error);
+        return bytes;
     }
 
     private void WriteComputeLibrary(nint device, UInt128 key)

@@ -152,6 +152,18 @@ internal static class Program
                 $"translate: wall_ms={translateWall:F0} sum_ms={rows.Sum(r => r.TranslateMs):F0} tworkers={tworkers} " +
                 $"alloc_mb={rows.Sum(r => r.TranslateBytes) / 1048576.0:F1} gc0={GC.CollectionCount(0)} gc1={GC.CollectionCount(1)} gc2={GC.CollectionCount(2)} gc_pause_ms={GC.GetTotalPauseDuration().TotalMilliseconds:F0} failed={rows.Count(r => r.Error is not null)} msl_mb={rows.Sum(r => (long)r.Source.Length) / 1048576.0:F1}"));
         }
+        else if (mode == "static")
+        {
+            return Derivation.Static(dir, Arg);
+        }
+        else if (mode == "computematch")
+        {
+            return Derivation.ComputeMatch(dir, Arg);
+        }
+        else if (mode == "graphics")
+        {
+            return GraphicsMatch(dir);
+        }
         else if (mode == "libraries")
         {
             var file = Arg("libfile", "");
@@ -200,6 +212,146 @@ internal static class Program
             }
 
             File.WriteAllText(csv, text.ToString());
+        }
+
+        return 0;
+    }
+
+    // mode=graphics: translates every recorded graphics program as the graphics prewarm does
+    // and looks its library key up in a library list (libfile=), which holds the sources the
+    // runtime compiled, with the last session that used each. A prewarm translation that
+    // matches what the runtime asked for is a key the list has and a later session used.
+    private static int GraphicsMatch(string dir)
+    {
+        MetalGpuBackend.Register();
+        var compiler = SharpEmu.Libs.Gpu.GuestGpu.Current;
+        // The runtime turns mip statistics on with its command stream (MetalRenderHost.LodStatistics).
+        SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.RecordMipStatistics = Arg("mipstats", "1") == "1";
+        if (Arg("loads", "") is { Length: > 0 } loads)
+        {
+            var learned = MetalDeviceDataLoadsStore.Load(Path.Combine(dir, loads), out _);
+            foreach (var (hash, indices) in learned)
+            {
+                SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Seed(hash, indices);
+            }
+
+            Console.Error.WriteLine($"seeded device data loads: shaders={learned.Count}");
+        }
+
+        using var list = GraphicsPrewarmList.Open(dir) ?? throw new InvalidOperationException("no graphics list");
+        var items = list.Loaded();
+        var keys = new Dictionary<ulong, int>();
+        int failed = 0, unstable = 0;
+        var errors = new Dictionary<string, int>();
+        foreach (var item in items)
+        {
+            if (!ShaderPrewarmCompiler.TryCompileGraphicsPrewarm(item, compiler, out var compiled, out var error) ||
+                compiled is not MetalCompiledGuestShader metal)
+            {
+                failed++;
+                var shortError = error.Length > 80 ? error[..80] : error;
+                errors[shortError] = errors.GetValueOrDefault(shortError) + 1;
+                continue;
+            }
+
+            var key = MetalLibraryPrewarm.Key(metal.Shader.Source, metal.Shader.UsesPerVertexInputs);
+            if (ShaderPrewarmCompiler.TryCompileGraphicsPrewarm(item, compiler, out var again, out _) &&
+                again is MetalCompiledGuestShader second &&
+                MetalLibraryPrewarm.Key(second.Shader.Source, second.Shader.UsesPerVertexInputs) != key)
+            {
+                unstable++;
+            }
+
+            keys[key] = keys.GetValueOrDefault(key) + 1;
+            if (Arg("dumpmsl", "") is { Length: > 0 } prewarmDump)
+            {
+                Directory.CreateDirectory(Path.Combine(prewarmDump, "prewarm"));
+                var decoded = GraphicsPrewarmList.Decode(item);
+                File.WriteAllText(Path.Combine(prewarmDump, "prewarm", $"{decoded.Stage}-{decoded.Hash:X16}-{key:X16}.metal"), metal.Shader.Source);
+            }
+        }
+
+        Console.WriteLine($"graphics: items={items.Count} failed={failed} unstable={unstable} distinct_msl={keys.Count}");
+        foreach (var (error, count) in errors.OrderByDescending(pair => pair.Value).Take(8))
+        {
+            Console.WriteLine($"  failed x{count}: {error}");
+        }
+
+        // How many programs repeat with another specialization, and how many of those differ
+        // only in buffer strides and formats (what portable buffer words read at run time).
+        var records = items.Select(item => GraphicsPrewarmList.Decode(item)).ToList();
+        var byProgram = records.GroupBy(record => (record.Stage, record.Hash)).ToList();
+        var bufferOnly = 0;
+        var strideOnly = 0;
+        foreach (var group in byProgram)
+        {
+            string Shape(SharpEmu.Libs.Gpu.Pipelines.ShaderCorpusRecord record, bool strides, bool formats)
+            {
+                var specialization = record.Specialization;
+                var rest = System.Text.Json.JsonSerializer.Serialize(record with { Specialization = null, UserData = [], Registered = null! });
+                if (specialization is null)
+                {
+                    return rest;
+                }
+
+                return rest + "|" + specialization.BaseBufferCount + "|" +
+                    string.Join(';', specialization.Images.Select(image => image.ToString())) + "|" +
+                    string.Join(';', specialization.BufferCandidateTables.Select(table => table.ToString())) + "|" +
+                    string.Join(';', specialization.Buffers.Select(buffer =>
+                        $"{(strides ? buffer.PackedStride : 0)}/{(formats ? buffer.DescriptorFormat : 0)}/{(formats ? buffer.DescriptorSwizzle : 0)}"));
+            }
+
+            var all = group.Select(record => Shape(record, true, true)).Distinct().Count();
+            strideOnly += all - group.Select(record => Shape(record, false, true)).Distinct().Count();
+            bufferOnly += all - group.Select(record => Shape(record, false, false)).Distinct().Count();
+        }
+
+        Console.WriteLine(
+            $"programs={byProgram.Count} permutations={records.Count} collapse_without_strides={strideOnly} collapse_without_buffer_words={bufferOnly}");
+        var imageShapes = records.Where(record => record.Specialization is not null)
+            .SelectMany(record => record.Specialization!.Images.Select(image =>
+                $"{record.Stage} {image.NumericClass} {image.Dimension} mips={image.MipCount} conv={image.ConversionFormat} packed={image.PackedFormat} cube={image.Cube} cmp={image.EmulatedCompareFunction}"))
+            .GroupBy(text => text).OrderByDescending(group => group.Count()).Take(int.Parse(Arg("imagetop", "0"), CultureInfo.InvariantCulture));
+        foreach (var shape in imageShapes)
+        {
+            Console.WriteLine($"  image x{shape.Count()}: {shape.Key}");
+        }
+
+        Console.WriteLine($"records_without_images={records.Count(record => record.Specialization is { Images.Count: 0 })} " +
+            $"pixel_without_images={records.Count(record => record.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel && record.Specialization is { Images.Count: 0 })} " +
+            $"pixel={records.Count(record => record.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel)} " +
+            $"vertex_ngg={records.Count(record => record.Options?.PrimitiveShader is not null)} vertex={records.Count(record => record.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Vertex)}");
+
+        var file = Arg("libfile", "");
+        if (file.Length == 0)
+        {
+            return 0;
+        }
+
+        var (entries, sessions) = MetalLibraryPrewarm.Load(Path.Combine(dir, file), out _);
+        var bySession = new SortedDictionary<int, (int Listed, int Matched)>();
+        var lastSession = entries.ToDictionary(entry => entry.Key, entry => entry.LastSession);
+        foreach (var entry in entries)
+        {
+            var (listed, matched) = bySession.GetValueOrDefault(entry.LastSession);
+            bySession[entry.LastSession] = (listed + 1, matched + (keys.ContainsKey(entry.Key) ? 1 : 0));
+        }
+
+        if (Arg("dumpmsl", "") is { Length: > 0 } listDump)
+        {
+            Directory.CreateDirectory(Path.Combine(listDump, "list"));
+            foreach (var entry in entries.Where(entry => !keys.ContainsKey(entry.Key)))
+            {
+                File.WriteAllText(Path.Combine(listDump, "list", $"s{entry.LastSession}-{entry.Key:X16}.metal"),
+                    MetalLibraryPrewarm.Decompress(entry.Compressed));
+            }
+        }
+
+        var inList = keys.Keys.Count(lastSession.ContainsKey);
+        Console.WriteLine($"library list {file}: sessions={sessions} sources={entries.Count} prewarm_keys_in_list={inList}/{keys.Count}");
+        foreach (var (session, (listed, matched)) in bySession)
+        {
+            Console.WriteLine($"  last used in session {session}: sources={listed} from_prewarm={matched}");
         }
 
         return 0;

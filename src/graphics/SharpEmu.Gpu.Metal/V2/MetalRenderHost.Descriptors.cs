@@ -327,6 +327,20 @@ internal sealed partial class MetalRenderHost
             shaderData[layout.ShaderBaseDword + 1] = (uint)(stage.ShaderBase >> 32);
         }
 
+        if (layout.BufferWordCount != 0)
+        {
+            // Portable buffers: the stride and word 3 of each V#, which the program reads
+            // instead of a specialization (PortableBufferWord).
+            var count = Math.Min(snapshot.Buffers.Length, (int)layout.MemoryOffsetCount);
+            for (var index = 0; index < count; index++)
+            {
+                var (stride, word3) = PortableBufferWord.Pack(snapshot.Buffers[index]);
+                var at = (int)layout.FirstBufferWordDword() + index * PortableBufferWord.DwordCount;
+                shaderData[at] = stride;
+                shaderData[at + 1] = word3;
+            }
+        }
+
         if (layout.MipStatisticsCount != 0)
         {
             MipStatistics.WriteImageFields(shaderData, layout, info, snapshot.Images);

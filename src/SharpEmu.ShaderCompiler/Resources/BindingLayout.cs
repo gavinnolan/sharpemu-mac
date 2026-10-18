@@ -340,12 +340,18 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint ShaderBaseDword { get; init; } = NoShaderBase;
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
+    // The run-time stride and word 3 of each buffer (PortableBufferWord), when portable, from
+    // FirstBufferWordDword(). A field, not a property: GraphicsPrewarmList's schema
+    // fingerprint walks the properties of every type a record reaches, a stage's runtime
+    // bindings among them, and a new property there would orphan every recorded list
+    // though no record keeps a layout.
+    public uint BufferWordCount;
     public bool UsesDispatchThreadLimits { get; init; }
     public bool UsesMeshDrawParameters { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
-    public uint DispatchThreadLimitsDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
+    public uint DispatchThreadLimitsDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4 + BufferWordCount;
 
     public uint MipStatisticsCount { get; init; }
 
@@ -362,6 +368,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint ShaderDataDwordCount => MeshDrawParametersDword + (UsesMeshDrawParameters ? 6u : 0u);
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
+
+    public uint FirstBufferWordDword() => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
 
     public bool UsesShaderBase => ShaderBaseDword != NoShaderBase;
 
@@ -598,18 +606,20 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesShaderBase,
         uint pushDataStartDword = 0,
         bool usesDispatchThreadLimits = false,
-        bool usesMeshDrawParameters = false)
+        bool usesMeshDrawParameters = false,
+        bool? portableBuffers = null)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
         var memoryOffsetCount = (uint)info.Buffers.Count;
+        var bufferWordCount = (portableBuffers ?? PortableBufferWord.Enabled) ? memoryOffsetCount * PortableBufferWord.DwordCount : 0u;
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
         var bindlessImageTableCount = info.Images
             .Where(static image => image.BindlessSlot != DescriptorConstants.NoIndex)
             .Select(static image => image.BindlessSlot + 1)
             .DefaultIfEmpty(0u)
             .Max();
-        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 +
+        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + bufferWordCount +
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u);
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
@@ -694,6 +704,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             ShaderBaseDword = shaderBaseDword,
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
+            BufferWordCount = bufferWordCount,
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
             MipStatisticsCount = mipStatisticsCount,
             BindlessImageTableCount = bindlessImageTableCount,
@@ -716,6 +727,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             ShaderBaseDword != other.ShaderBaseDword ||
             MemoryOffsetDword != other.MemoryOffsetDword ||
             MemoryOffsetCount != other.MemoryOffsetCount ||
+            BufferWordCount != other.BufferWordCount ||
             UsesDispatchThreadLimits != other.UsesDispatchThreadLimits ||
             MipStatisticsCount != other.MipStatisticsCount ||
             BindlessImageTableCount != other.BindlessImageTableCount ||
@@ -770,7 +782,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public override bool Equals(object? obj) => Equals(obj as BindingLayout);
 
     public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount,
-        Descriptors.Count, UsesDispatchThreadLimits, UsesMeshDrawParameters);
+        BufferWordCount, Descriptors.Count, UsesDispatchThreadLimits, UsesMeshDrawParameters);
 }
 
 // Recomputes the layout an emitter was given from the same inputs and the same push
@@ -799,7 +811,8 @@ public static class BindingLayoutValidator
 
         var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare,
             usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
-            layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters);
+            layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters,
+            portableBuffers: layout.BufferWordCount != 0);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(
@@ -810,6 +823,7 @@ public static class BindingLayoutValidator
 
     private static string Describe(BindingLayout layout) =>
         $"push={layout.PushDataStartDword} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} " +
+        $"words={layout.BufferWordCount} " +
         $"user=[{string.Join(",", layout.UserDataRegisters)}] " +
         string.Join(" ", layout.Descriptors.Select(binding => $"{binding.Kind}:{string.Join(",", binding.Resources)}"));
 }

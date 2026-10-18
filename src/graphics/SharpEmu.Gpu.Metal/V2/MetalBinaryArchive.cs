@@ -108,6 +108,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private readonly Thread _writer;
     private readonly ManualResetEventSlim _loaded = new(false);
     private readonly object _archivesLock = new();
+    private readonly object _trimLock = new();
     private nint _pipelineArchives;
     private int _disposed;
 
@@ -126,6 +127,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private int _pipelineMisses;
     private int _pipelinesAdded;
     private int _loadedSegments;
+    private int _librariesStored;
+    private long _libraryBytesStored;
     private long _loadedSegmentBytes;
 
     private MetalBinaryArchive(nint device, string root, string translatorStamp, long budget)
@@ -160,6 +163,25 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         (Volatile.Read(ref _libraryHits), Volatile.Read(ref _libraryMisses), Volatile.Read(ref _rejected),
             Volatile.Read(ref _librariesWritten), Volatile.Read(ref _pipelineHits), Volatile.Read(ref _pipelineMisses),
             Volatile.Read(ref _pipelinesAdded), Volatile.Read(ref _loadedSegments));
+
+    /// <summary>The library files <see cref="StoreLibrary"/> wrote and their bytes on disk.</summary>
+    public (int Libraries, long Bytes) Stored => (Volatile.Read(ref _librariesStored), Interlocked.Read(ref _libraryBytesStored));
+
+    /// <summary>The budget the archive keeps its files under, in bytes.</summary>
+    public long Budget => _budget;
+
+    /// <summary>What the archive's files take on disk now, in bytes.</summary>
+    public long DiskBytes()
+    {
+        try
+        {
+            return new DirectoryInfo(_directory).EnumerateFiles("*" + Extension, SearchOption.AllDirectories).Sum(static file => file.Length);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return 0;
+        }
+    }
 
     /// <summary>
     /// Opens the title's archive for the process before the shader prewarm starts, so the
@@ -341,6 +363,63 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
+    /// <summary>Whether the library file of <paramref name="key"/> is on disk (or being written).</summary>
+    public bool HasLibrary(UInt128 key) => key != default && (_known.ContainsKey(key) || _pending.ContainsKey(key));
+
+    /// <summary>
+    /// Stores the library file of <paramref name="key"/> from a pipeline that is never made:
+    /// the functions of <paramref name="descriptor"/> added to an archive of their own and
+    /// written, on the caller's thread (which waits for the driver's back end). For the
+    /// static precompile, which compiles programs the game has not drawn yet and keeps none
+    /// of them; the runtime's <see cref="TryLoadLibrary"/> then opens the file as the
+    /// library. The bytes written, or -1 when the file was there already or failed.
+    /// </summary>
+    public long StoreLibrary(UInt128 key, PipelineKind kind, nint descriptor)
+    {
+        if (descriptor == 0 || !NeedsLibrary(key) || !_pending.TryAdd(key, 0))
+        {
+            return -1;
+        }
+
+        var pool = MetalNative.objc_autoreleasePoolPush();
+        var archive = NewArchive(null);
+        try
+        {
+            if (archive == 0 || !Add(archive, kind, descriptor))
+            {
+                return -1;
+            }
+
+            var bytes = Serialize(archive, LibraryPath(key));
+            if (bytes < 0)
+            {
+                return -1;
+            }
+
+            _known.TryAdd(key, 0);
+            Interlocked.Increment(ref _librariesWritten);
+            Interlocked.Increment(ref _librariesStored);
+            Interlocked.Add(ref _libraryBytesStored, bytes);
+            NoteWritten(bytes);
+            return bytes;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[METAL-V2][ARCHIVE][WARN] {exception.Message}");
+            return -1;
+        }
+        finally
+        {
+            if (archive != 0)
+            {
+                MetalNative.SendVoid(archive, SelRelease);
+            }
+
+            MetalNative.objc_autoreleasePoolPop(pool);
+            Forget(key);
+        }
+    }
+
     /// <summary>
     /// Takes a render or mesh pipeline just created from <paramref name="descriptor"/>:
     /// added to the current segment when no loaded archive had it, and written as the
@@ -501,7 +580,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             using (MetalAutoreleasePool.Enter())
             {
                 LoadSegments();
-                Trim();
+                lock (_trimLock)
+                {
+                    Trim();
+                }
             }
         }
         catch (Exception exception)
@@ -783,13 +865,21 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             $"segment_mb={resident / 1048576.0:F1}");
     }
 
+    // The writer's and the static precompile's threads (StoreLibrary).
     private void NoteWritten(long bytes)
     {
-        _writtenSinceTrim += bytes;
-        if (_writtenSinceTrim >= _budget / 16)
+        if (Interlocked.Add(ref _writtenSinceTrim, bytes) < _budget / 16)
         {
-            _writtenSinceTrim = 0;
-            Trim();
+            return;
+        }
+
+        lock (_trimLock)
+        {
+            if (Interlocked.Read(ref _writtenSinceTrim) >= _budget / 16)
+            {
+                Interlocked.Exchange(ref _writtenSinceTrim, 0);
+                Trim();
+            }
         }
     }
 

@@ -1289,10 +1289,11 @@ public static partial class ResourceMaterializer
             }
 
             var formatted = info.Buffers[index].Formatted;
-            buffers.Add(new BufferSpecialization(
+            var specialized = new BufferSpecialization(
                 packedStride,
                 formatted ? (words[3] >> 12) & 0x7F : DescriptorConstants.InvalidFormat,
-                formatted ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect));
+                formatted ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect);
+            buffers.Add(PortableBufferWord.Enabled ? PortableBufferWord.Normalize(specialized, info.Buffers[index]) : specialized);
         }
 
         for (var index = 0; index < images.Count; index++)
@@ -1599,7 +1600,8 @@ public static partial class ResourceMaterializer
                     packedStride &= ~(3u << 16);
                 }
 
-                buffers.Add(new BufferSpecialization(packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF));
+                var specialized = new BufferSpecialization(packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF);
+                buffers.Add(PortableBufferWord.Enabled ? PortableBufferWord.Normalize(specialized, null) : specialized);
             }
 
             var mappingOffset = (uint)mappingCursor;
@@ -1888,17 +1890,23 @@ public static partial class ResourceMaterializer
         }
 
         var info = source.Clone();
+        // A record made before portable buffers, or without them, still names its strides
+        // and read formats: what portable buffers read at run time is left out here too.
+        var portable = PortableBufferWord.Enabled;
         for (var index = 0; index < info.Buffers.Count; index++)
         {
-            info.Buffers[index].PackedStride = specialization.Buffers[index].PackedStride;
-            info.Buffers[index].DescriptorFormat = specialization.Buffers[index].DescriptorFormat;
-            info.Buffers[index].DescriptorSwizzle = specialization.Buffers[index].DescriptorSwizzle;
+            var specialized = portable
+                ? PortableBufferWord.Normalize(specialization.Buffers[index], source.Buffers[index])
+                : specialization.Buffers[index];
+            info.Buffers[index].PackedStride = specialized.PackedStride;
+            info.Buffers[index].DescriptorFormat = specialized.DescriptorFormat;
+            info.Buffers[index].DescriptorSwizzle = specialized.DescriptorSwizzle;
         }
 
         // Candidate buffers follow the plan's buffers, one native binding each.
         for (var index = source.Buffers.Count; index < specialization.Buffers.Count; index++)
         {
-            var specialized = specialization.Buffers[index];
+            var specialized = portable ? PortableBufferWord.Normalize(specialization.Buffers[index], null) : specialization.Buffers[index];
             info.Buffers.Add(new BufferResource
             {
                 Source = DescriptorConstants.NoIndex,
