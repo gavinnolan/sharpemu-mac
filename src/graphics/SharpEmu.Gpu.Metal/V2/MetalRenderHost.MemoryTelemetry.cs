@@ -11,9 +11,9 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelRecommendedMaxWorkingSetSize = MetalNative.Selector("recommendedMaxWorkingSetSize");
     private static readonly nint SelDeviceCurrentAllocatedSize = MetalNative.Selector("currentAllocatedSize");
 
-    // Windows an encoder named only because a device-address program may reach them, for the
-    // command buffer being recorded; folded into the per-command-buffer census at commit.
-    private ulong _commandBufferReachWindows;
+    // Windows an encoder named because a device-address program may reach them, for
+    // the command buffer being recorded; folded into the per-command-buffer census at commit.
+    private readonly MetalWindowSet _commandBufferReachWindows = new();
 
     // SHARPEMU_LOG_MEMORY=1: the "metal", "windows" and "gpu-refs" sections of the [MEM] lines.
     private void RegisterMemoryTelemetry()
@@ -47,6 +47,6 @@ internal sealed partial class MetalRenderHost
         }
 
         MetalMemoryTelemetry.NoteCommit(_guestMemory, _commandBufferReachWindows);
-        _commandBufferReachWindows = 0;
+        _commandBufferReachWindows.Clear();
     }
 }

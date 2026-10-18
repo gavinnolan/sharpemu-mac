@@ -2231,9 +2231,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // are not one window-resident span - most often a large image that crosses the edge
     // between two windows. Each run is the longest prefix one window covers, pulled back
     // to a boundary no subresource straddles, and the transfer is restricted to it. A run
-    // is at most MaxTransferPieceBytes, and one that starts in a window always fits it
-    // whole, because adjacent windows overlap by the seam; so every backed byte reaches
-    // the texture through a window. The ring only stages what no window holds.
+    // is at most MaxTransferPieceBytes; asking for it moves the window edge inside it out of
+    // the way when the command buffer has not used the windows beside that edge yet, so a
+    // backed byte reaches the texture through a window, and the ring stages only what no
+    // window holds now.
     private bool UploadInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
     {
         ref readonly var description = ref image.Description;
@@ -2327,8 +2328,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 continue;
             }
 
-            // A hole in the guest mapping, or a window edge without the seam: stage up to
-            // the first cut past what the window holds, and at least past one page.
+            // A hole in the guest mapping, or a window edge that cannot move in this
+            // command buffer: stage up to the first cut past what the window holds, and at
+            // least past one page.
             var cut = transfer.AlignRunStart(in description, offset + Math.Max(resident, HoleStepBytes));
             end = transfer.AlignRunEnd(in description, offset, Math.Min(Math.Min(cut, size), offset + remaining));
             if (end <= offset)

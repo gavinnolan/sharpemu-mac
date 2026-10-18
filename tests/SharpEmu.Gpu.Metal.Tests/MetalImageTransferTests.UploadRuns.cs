@@ -19,7 +19,7 @@ public sealed partial class MetalImageTransferTests
 {
     private const ulong MaxUploadRunBytes = 32UL * 1024 * 1024;
 
-    // The measured layout: a 16.4375 GiB backing in 4 GiB windows overlapping by the seam.
+    // A fixture layout: a 16.4375 GiB backing in 4 GiB windows overlapping by a 64 MiB seam.
     private const ulong SeamAliasSize = 0x41C000000;
     private const ulong FourGib = 4UL * 1024 * 1024 * 1024;
 
@@ -98,19 +98,24 @@ public sealed partial class MetalImageTransferTests
     public void AnImageAcrossAWindowEdgeUploadsEveryByteThroughTheWindows()
     {
         if (!RequireDevice()) return;
-        using var backing = new MetalGuestWindowSeamTests.Backing();
+        using var backing = new MetalGuestWindowGranuleTests.Backing();
         using var harness = new MetalTransferHarness(Device.Value);
         using var memory = new MetalGuestMemory(
-            Device.Value, backing, new MetalGuestWindowSeamTests.BackingMemory(backing),
-            MetalGuestWindowSeamTests.WindowBytes, MetalGuestWindowSeamTests.SeamBytes,
-            MetalGuestWindowSeamTests.Budget);
+            Device.Value, backing, new MetalGuestWindowGranuleTests.BackingMemory(backing),
+            MetalGuestWindowGranuleTests.GranuleBytes, maxWindowBytes: MetalGuestWindowGranuleTests.GranuleBytes);
         // 128x1024 RGBA8 in 64 KiB tiles: eight 64 KiB block rows, 0x40000 bytes of them
         // on either side of window 0's end.
         var description = Color2D(
             GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, 128, 1024, 1, 1, GuestTileMode.Standard64KB);
         Assert.Equal(0x80000UL, description.Data.Size);
-        var address = MetalGuestWindowSeamTests.GuestBase + MetalGuestWindowSeamTests.WindowBytes - 0x40000;
+        var address = MetalGuestWindowGranuleTests.GuestBase + MetalGuestWindowGranuleTests.GranuleBytes - 0x40000;
         description.Data = new GuestSpan(address, description.Data.Size);
+        // This command buffer already used the windows on both sides of the edge, so the edge
+        // cannot move out of the image before the next one and the planner has to cut the
+        // image where the window ends.
+        memory.BeginSubmission(1, 0);
+        Assert.True(memory.ResolveWritable(address, 0x100).IsValid);
+        Assert.True(memory.ResolveWritable(address + 0x40000, 0x100).IsValid);
         Assert.False(memory.ResolveWritable(address, description.Data.Size).IsValid);
         var guest = BuildGuest(description, 0x6B);
         Assert.True(backing.TryWriteBacking(address, guest));
@@ -152,9 +157,11 @@ public sealed partial class MetalImageTransferTests
     private void AssertWindowRunsCoverTheImage(
         MetalImageTransfer transfer, in ImageDescription description, ulong windowOffset, string name)
     {
-        var (stride, count, _) = MetalGuestMemory.ChooseWindowLayout(SeamAliasSize, FourGib, 18186UL * 1024 * 1024);
-        Assert.Equal(0x4000000UL, MetalGuestMemory.SeamOverlapBytes);
-        Assert.Equal(0xFC000000UL, stride);
+        // The planner only sees where the resolver's prefix ends; the old 4 GiB layout with a
+        // 64 MiB seam is a fixture of prefixes that end mid-image (a non-contiguous backing or
+        // the largest-window cap ends prefixes the same way under granule windows).
+        const ulong stride = FourGib - 0x4000000UL;
+        var count = (int)((SeamAliasSize - FourGib + stride - 1) / stride) + 1;
         // The precondition: the image does not fit the window its first byte selects.
         var (firstBase, firstEnd) = WindowAt(windowOffset, stride, count);
         Assert.True(windowOffset >= firstBase && windowOffset + description.Data.Size > firstEnd,

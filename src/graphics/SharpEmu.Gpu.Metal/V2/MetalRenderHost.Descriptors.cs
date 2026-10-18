@@ -1029,7 +1029,6 @@ internal sealed partial class MetalRenderHost
         _ => throw Fatal($"The argument layout has a word field of an unknown kind: kind={kind}."),
     };
 
-    private const int AddressRangeEntryBytes = 24;
     private const int MaxAddressRanges = (int)Gen5MslTranslator.MaxAddressRangeCount;
     private long _deviceAddressSpanVersion = long.MinValue;
 
@@ -1041,13 +1040,13 @@ internal sealed partial class MetalRenderHost
     private ulong _deviceAddressTable;
     private uint _deviceAddressEntryCount;
     private ulong _deviceAddressTableSerial;
-    private readonly List<(ulong FirstPage, ulong PageCount, ulong Base)> _deviceAddressEntries = new();
+    private readonly MetalDeviceAddressTable _deviceAddressTableBuilder = new();
 
     /// <summary>
-    /// The sorted range table the shader binary-searches: one entry per mapped guest
-    /// span, each giving the window address its first page lives at. The shader then
-    /// computes base + (page - firstPage) * pageSize + pageOffset, which is exact
-    /// because a span is contiguous in the backing as well as in guest space.
+    /// The sorted range table the shader binary-searches (<see cref="MetalDeviceAddressTable"/>),
+    /// written once per submission: its runs change only when the mapped spans do, its
+    /// entries when the windows are cut differently, its reach flags with the submission's
+    /// named windows.
     /// </summary>
     private ulong UploadDeviceAddressTable()
     {
@@ -1067,158 +1066,55 @@ internal sealed partial class MetalRenderHost
             RebuildDeviceAddressEntries(gpuMemory);
             _deviceAddressSpanVersion = spanVersion;
         }
-
-        if (DeviceAddressReachEnabled)
+        else if (_deviceAddressTableBuilder.PartitionVersion != _guestMemory.PartitionVersion)
         {
-            BeginDeviceAddressReach();
+            _deviceAddressTableBuilder.Recut(_guestMemory);
         }
 
-        // The granule index follows the entries; the shader finds it at ranges[count].
-        var granuleIndex = _deviceAddressIndex;
-        var entryBytes = _deviceAddressEntries.Count * AddressRangeEntryBytes;
-        var bytes = Math.Max(entryBytes + granuleIndex.Length * sizeof(uint), AddressRangeEntryBytes);
-        var range = _guestMemory.Allocate((ulong)bytes, 256, out var span);
-        span.Clear();
-        for (var index = 0; index < _deviceAddressEntries.Count; index++)
-        {
-            var (firstPage, pageCount, address) = _deviceAddressEntries[index];
-            var entry = span[(index * AddressRangeEntryBytes)..];
-            BinaryPrimitives.WriteUInt64LittleEndian(entry, firstPage);
-            BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], ReachPageCount(pageCount, _deviceAddressEntryWindows[index]));
-            BinaryPrimitives.WriteUInt64LittleEndian(entry[16..], address);
-        }
-
-        System.Runtime.InteropServices.MemoryMarshal.AsBytes(granuleIndex.AsSpan()).CopyTo(span[entryBytes..]);
-
+        BeginDeviceAddressReach();
+        var table = _deviceAddressTableBuilder;
+        var range = _guestMemory.Allocate((ulong)table.ByteSize, 256, out var span);
+        table.Write(span, DeviceAddressReachEnabled ? _deviceAddressNamedWindows : null);
         _deviceAddressTable = range.GpuAddress;
-        _deviceAddressEntryCount = (uint)_deviceAddressEntries.Count;
+        _deviceAddressEntryCount = (uint)table.Count;
         _deviceAddressTableSerial = _submissionSerial;
         return _deviceAddressTable;
     }
 
-    private ulong _deviceAddressWindows;
+    private int _deviceAddressGranulesLogged = -1;
 
-    // The window each table entry's run lies in, in table order.
-    private readonly List<int> _deviceAddressEntryWindows = [];
-    private uint[] _deviceAddressIndex = [];
-
-    // Each guest span becomes the fewest window-backed runs that cover it. A span whose
-    // backing is not contiguous (fragmented flexible memory) or crosses a window splits
-    // into several entries; pages with no window are left out, never copied, because a
-    // shader store through a copied page would not reach guest memory.
+    // Each guest span becomes the fewest runs that cover it inside one granule and one
+    // window. A span whose backing is not contiguous (fragmented flexible memory) or crosses
+    // a granule or window edge splits into several entries; pages with no window are left
+    // out, never copied.
     private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory gpuMemory)
     {
-        _deviceAddressEntries.Clear();
-        // Not an exact reference: keep the scan out of the GPU reference census (the table counts as reach only).
-        using var censusSuppressed = MetalGpuReferenceCensus.Suppress();
-        // The scan resolves every mapped span, which marks windows this submission may
-        // not otherwise touch; remember the set the table needs and restore the rest.
-        var touchedBefore = _guestMemory.TouchedWindows;
-        _guestMemory.ClearTouchedWindows();
-        var spanCount = 0;
-        gpuMemory.ForEachSpan((address, size) =>
-        {
-            spanCount++;
-            var page = DeviceAddressPaging.PageSize;
-            var start = (address + page - 1) & ~(page - 1);
-            var end = (address + size) & ~(page - 1);
-            while (start < end)
-            {
-                var remaining = end - start;
-                var run = _guestMemory.ResolveWritable(start, remaining);
-                var length = remaining;
-                if (!run.IsValid)
-                {
-                    // Largest resolvable prefix, in whole pages.
-                    var good = 0UL;
-                    var bad = remaining;
-                    while (bad - good > page)
-                    {
-                        var middle = ((good + bad) / 2) & ~(page - 1);
-                        if (middle == good)
-                        {
-                            break;
-                        }
-
-                        if (_guestMemory.ResolveWritable(start, middle).IsValid)
-                        {
-                            good = middle;
-                        }
-                        else
-                        {
-                            bad = middle;
-                        }
-                    }
-
-                    length = good;
-                    if (length == 0)
-                    {
-                        start += page;
-                        continue;
-                    }
-
-                    run = _guestMemory.ResolveWritable(start, length);
-                }
-
-                AddDeviceAddressEntry(_deviceAddressEntries, (start >> DeviceAddressPaging.PageBits,
-                    length >> DeviceAddressPaging.PageBits, run.GpuAddress), spanCount);
-                start += length;
-            }
-        });
-
-        _deviceAddressWindows = _guestMemory.TouchedWindows;
-        _guestMemory.ClearTouchedWindows();
-        _guestMemory.MarkWindowsTouched(touchedBefore);
-        _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
-        _deviceAddressEntryWindows.Clear();
-        foreach (var (_, _, address) in _deviceAddressEntries)
-        {
-            _deviceAddressEntryWindows.Add(_guestMemory.WindowIndexOfGpuAddress(address));
-        }
-
-        _deviceAddressIndex = MetalDeviceAddressIndex.Build(_deviceAddressEntries);
-        MetalGpuReferenceCensus.SetDeviceAddressSpans(_deviceAddressEntries.Select(entry =>
+        var table = _deviceAddressTableBuilder;
+        table.Rebuild(_guestMemory, gpuMemory.ForEachSpan, MaxAddressRanges);
+        MetalGpuReferenceCensus.SetDeviceAddressSpans(table.Entries.Select(entry =>
             (entry.FirstPage << DeviceAddressPaging.PageBits, entry.PageCount << DeviceAddressPaging.PageBits)));
-        // The windows the table names are what every encoder running a device-address
-        // program asks the driver to keep resident, which it does by wiring them whole;
-        // say when that set changes so a wired-memory jump can be read against it.
-        if (_deviceAddressWindows != _deviceAddressWindowsLogged)
+        // The granules the table spans are what an encoder running a device-address program
+        // would name without the reach set; say when that set grows so a wired-memory jump can
+        // be read against it.
+        var granules = table.Granules.Count;
+        if (granules != _deviceAddressGranulesLogged)
         {
-            _deviceAddressWindowsLogged = _deviceAddressWindows;
-            var spanBytes = 0UL;
-            foreach (var (_, pageCount, _) in _deviceAddressEntries)
-            {
-                spanBytes += pageCount << DeviceAddressPaging.PageBits;
-            }
-
+            _deviceAddressGranulesLogged = granules;
             Console.Error.WriteLine(
-                $"[METAL-V2][INFO] device-address table: spans={spanCount} entries={_deviceAddressEntries.Count} " +
-                $"span_mb={spanBytes / (1024 * 1024)} windows=0x{_deviceAddressWindows:X} " +
-                $"window_count={System.Numerics.BitOperations.PopCount(_deviceAddressWindows)}");
+                $"[METAL-V2][INFO] device-address table: spans={table.SpanCount} entries={table.Count} " +
+                $"span_mb={table.SpanBytes / (1024 * 1024)} granules={granules} " +
+                $"granule_mb={_guestMemory.GranuleBytes >> 20} " +
+                $"granule_span_mb={_guestMemory.GranuleSetBytes(table.Granules) / (1024 * 1024)} " +
+                $"windows={table.Windows.Count} window_span_mb={_guestMemory.WindowSetBytes(table.Windows) / (1024 * 1024)}");
         }
     }
 
-    private ulong _deviceAddressWindowsLogged;
-
-    /// <summary>
-    /// Adds one run to the table. A span the table has no room for resolves to null in
-    /// every shader, so its loads read zero and its stores are dropped without a word;
-    /// a full table therefore ends the run instead of truncating.
-    /// </summary>
+    /// <summary>Adds one run to a table; see <see cref="MetalDeviceAddressTable.AddEntry"/>.</summary>
     internal static void AddDeviceAddressEntry(
         List<(ulong FirstPage, ulong PageCount, ulong Base)> entries,
         (ulong FirstPage, ulong PageCount, ulong Base) entry,
-        int spanCount)
-    {
-        if (entries.Count >= MaxAddressRanges)
-        {
-            throw GpuFatal.Fatal(
-                $"The device-address table is full and later guest spans are not addressable: " +
-                $"limit={MaxAddressRanges} spans_so_far={spanCount} page=0x{entry.FirstPage:X}.");
-        }
-
-        entries.Add(entry);
-    }
+        int spanCount) =>
+        MetalDeviceAddressTable.AddEntry(entries, entry, spanCount, MaxAddressRanges);
 
     private ulong UploadDwords(ReadOnlySpan<uint> words)
     {
@@ -1308,15 +1204,7 @@ internal sealed partial class MetalRenderHost
                 : Mtl.RenderStageVertex | Mtl.RenderStageFragment;
             BindStageBuffers(_renderEncoder, StageVertex, meshStage ? SelSetMeshBuffer : SelSetVertexBuffer);
             BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
-            foreach (var window in _guestMemory.ResidentBuffers)
-            {
-                if (TryNoteResident(window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages))
-                {
-                    MetalNative.SendUseResource(
-                        _renderEncoder, SelUseResourceStages, window,
-                        Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages);
-                }
-            }
+            NameResidentBuffers(_renderEncoder, _guestMemory.ResidentBuffers, stages);
 
             for (var index = 0; index < _usedResourceCount; index++)
             {
@@ -1337,14 +1225,7 @@ internal sealed partial class MetalRenderHost
         }
 
         BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
-        foreach (var window in _guestMemory.ResidentBuffers)
-        {
-            if (TryNoteResident(window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages: 0))
-            {
-                MetalNative.SendUseResourceUsage(
-                    _computeEncoder, SelUseResourceUsage, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
-            }
-        }
+        NameResidentBuffers(_computeEncoder, _guestMemory.ResidentBuffers, stages: 0);
 
         for (var index = 0; index < _usedResourceCount; index++)
         {
@@ -1389,29 +1270,76 @@ internal sealed partial class MetalRenderHost
 
     // A device-address program can dereference any mapped guest page, so the encoder that
     // runs one names the windows the address table spans, whether or not anything resolved
-    // a range through them - or, with the reach profile, those of them the title's programs
-    // are known to reach. Only that encoder: the rest of the submission names the windows
-    // its own bindings resolved.
+    // a range through them - or, with the reach profile, those holding the granules the
+    // title's programs are known to reach. Only that encoder: the rest of the submission
+    // names the windows its own bindings resolved.
     private void NameDeviceAddressWindows(nint encoder, nuint stages)
     {
-        _commandBufferReachWindows |= DeviceAddressNamedWindows();
-        for (var windows = DeviceAddressNamedWindows(); windows != 0; windows &= windows - 1)
+        // The named windows are settled with the submission's table; a program bound
+        // without one (nothing read the table field) still names this submission's set.
+        if (_deviceAddressTableSerial != _submissionSerial)
         {
-            var window = _guestMemory.WindowBuffer(System.Numerics.BitOperations.TrailingZeroCount(windows));
-            if (!TryNoteResident(window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages))
+            UploadDeviceAddressTable();
+        }
+
+        var named = DeviceAddressNamedWindows();
+        if (SharpEmu.Logging.MemoryTelemetry.Enabled)
+        {
+            _commandBufferReachWindows.UnionWith(named);
+        }
+
+        _deviceAddressBuffers.Clear();
+        foreach (var id in named)
+        {
+            var window = _guestMemory.WindowBuffer(id);
+            if (window != 0)
+            {
+                _deviceAddressBuffers.Add(window);
+            }
+        }
+
+        NameResidentBuffers(encoder, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deviceAddressBuffers), stages);
+    }
+
+    private readonly List<nint> _deviceAddressBuffers = new();
+    private nint[] _useResourcesScratch = new nint[64];
+
+    // Names guest windows and resident shared buffers read-write on an encoder, those it has
+    // not named yet in one -useResources: message: with granule-sized windows an encoder can name
+    // a few hundred buffers, and one message per buffer was most of what that cost.
+    private unsafe void NameResidentBuffers(nint encoder, ReadOnlySpan<nint> buffers, nuint stages)
+    {
+        const nuint usage = Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite;
+        var count = 0;
+        foreach (var buffer in buffers)
+        {
+            if (!TryNoteResident(buffer, usage, stages))
             {
                 continue;
             }
 
+            if (count == _useResourcesScratch.Length)
+            {
+                Array.Resize(ref _useResourcesScratch, count * 2);
+            }
+
+            _useResourcesScratch[count++] = buffer;
+        }
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        fixed (nint* resources = _useResourcesScratch)
+        {
             if (stages == 0)
             {
-                MetalNative.SendUseResourceUsage(
-                    encoder, SelUseResourceUsage, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
+                MetalNative.SendUseResources(encoder, SelUseResourcesUsage, resources, (nuint)count, usage);
             }
             else
             {
-                MetalNative.SendUseResource(
-                    encoder, SelUseResourceStages, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages);
+                MetalNative.SendUseResourcesStages(encoder, SelUseResourcesStages, resources, (nuint)count, usage, stages);
             }
         }
     }

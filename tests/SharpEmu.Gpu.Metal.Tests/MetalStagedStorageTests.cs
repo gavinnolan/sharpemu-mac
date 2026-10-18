@@ -25,8 +25,7 @@ public sealed unsafe class MetalStagedStorageTests(ITestOutputHelper output)
     private const ulong MappingBytes = 1024 * 1024;
     private const ulong SecondMappingBacking = 3 * MappingBytes;
     private const ulong WindowBytes = 1024 * 1024;
-    private const ulong SeamBytes = 64 * 1024;
-    private const ulong Budget = BackingSize + (BackingSize / 8);
+    private const ulong MaxWindowBytes = 4 * WindowBytes;
 
     private const ulong Address = GuestBase + MappingBytes - (32 * 1024);
     private const ulong Size = 64 * 1024;
@@ -132,7 +131,7 @@ public sealed unsafe class MetalStagedStorageTests(ITestOutputHelper output)
 
         using var backing = new ScatteredBacking();
         using var memory = new MetalGuestMemory(
-            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, SeamBytes, Budget);
+            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, MaxWindowBytes);
 
         Assert.False(memory.TryResolveInPlace(Address, Size, out _));
         Assert.True(memory.TryResolveInPlace(Address, Size / 2, out _));
@@ -151,7 +150,7 @@ public sealed unsafe class MetalStagedStorageTests(ITestOutputHelper output)
         using var backing = new ScatteredBacking();
         using var harness = new MetalTransferHarness(Device.Value);
         using var memory = new MetalGuestMemory(
-            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, SeamBytes, Budget);
+            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, MaxWindowBytes);
         var staged = new MetalStagedStorage(memory);
 
         harness.Begin();
@@ -195,7 +194,7 @@ public sealed unsafe class MetalStagedStorageTests(ITestOutputHelper output)
         using var backing = new ScatteredBacking();
         using var harness = new MetalTransferHarness(Device.Value);
         using var memory = new MetalGuestMemory(
-            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, SeamBytes, Budget);
+            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, MaxWindowBytes);
         var staged = new MetalStagedStorage(memory);
         backing.TryWriteBacking(Address, Enumerable.Repeat((byte)0x11, (int)Size).ToArray());
 
@@ -239,7 +238,7 @@ public sealed unsafe class MetalStagedStorageTests(ITestOutputHelper output)
         using var backing = new ScatteredBacking();
         using var harness = new MetalTransferHarness(Device.Value);
         using var memory = new MetalGuestMemory(
-            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, SeamBytes, Budget);
+            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, MaxWindowBytes);
         var staged = new MetalStagedStorage(memory);
         backing.TryWriteBacking(Address, Enumerable.Repeat((byte)0x11, (int)Size).ToArray());
 

@@ -10,159 +10,202 @@ namespace SharpEmu.Gpu.Metal.V2;
 // Which guest memory windows an encoder that runs a device-address program names resident.
 //
 // Such a program can dereference any mapped guest page, so the safe answer is every window
-// the address table spans - for Demon's Souls ten to twelve 1 GiB windows, named by nearly
-// every command buffer. The driver wires every page of a named window, touched or not, and
-// that much on top of the image cache did not fit under the machine's wire limit: it paged
-// windows in between the encoders of each command buffer (30-40 ms of driver time each),
-// and a world frame spent ~415 ms of its ~675 ms of GPU time idle while it did. The
-// programs reach far less: six of those windows over a whole session.
+// the address table spans - 11 GiB in Demon's Souls in-world. The driver wires every page of
+// a named window, touched or not, and that much on top of the image cache does not fit under
+// the machine's wire limit. The programs reach far less.
 //
-// So the encoder names the windows the title's programs have been seen to reach, kept per
-// title next to the shader cache. Every table entry in a window outside that set carries
-// the window in its page count's top byte; a lookup that lands in one reports the window
-// in a small feedback buffer, and the host names that window from the next submission on
-// and adds the backing it owns to the title's profile. The access itself still goes
-// through: the window's pages stay mapped for the life of the buffer, so performing it
-// keeps the result the guest expects, where a deterministic zero would return wrong data
-// on every first touch. A cold Demon's Souls run missed only while it learned (none after
-// ~280 s, no failed submission); with the profile warm it missed none at all. Misses are
-// counted in the PERF line (da_misses).
-// SHARPEMU_METAL_V2_DA_REACH=0 names every window the table spans instead.
+// So the encoder names the windows holding the granules the title's programs have been seen
+// to reach, kept per title next to the shader cache. Every table entry in a window outside
+// that set carries its granule in its page count's upper half; a lookup that lands in one
+// reports the granule in a feedback bitmap, and the host names the windows holding that
+// granule from the next submission on and adds it to the title's profile. The access itself
+// still goes through: the window's pages stay mapped for the life of the buffer (a window a
+// cut replaced is kept until the submission that replaced it completes), so performing it
+// keeps the result the guest expects, where a deterministic zero would return wrong data on
+// every first touch. With 1 GiB windows a cold Demon's Souls run missed only while it learned
+// (none after ~280 s); the learning is now per granule (32 MiB by default), so a reach that
+// touches a few pages of a gigabyte no longer names the whole gigabyte. The profile is kept
+// in granules rather than windows because windows move. Misses are counted in the PERF line
+// (da_misses). SHARPEMU_METAL_V2_DA_REACH=0 names every window the table spans instead.
 internal sealed partial class MetalRenderHost
 {
     private static readonly bool DeviceAddressReachEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DA_REACH") != "0";
 
-    // Words 0..3 hold one bit per window reached outside the named set, word 4 counts
-    // such lookups. See sharpemu_resolve_device_address.
-    private const int ReachFeedbackWords = 8;
-    private const int ReachMissCountWord = 4;
-    private const ulong ReachUnnamedFlag = 1UL << 63;
-    private const int ReachWindowShift = 56;
+    private MetalDeviceAddressReach? _reach;
 
-    private nint _reachFeedbackBuffer;
-    private nint _reachFeedbackContents;
-    private ulong _reachFeedbackAddress;
-    private MetalDeviceAddressReachProfile? _reachProfile;
+    // The granules an encoder running a device-address program reaches this submission: the
+    // table's granules, narrowed to the reach set when it is on; and the windows it names,
+    // those the table's entries in those granules lie in. The table's flags were written
+    // against the same windows.
+    private readonly MetalWindowSet _deviceAddressNamed = new();
+    private readonly MetalWindowSet _deviceAddressNamedWindows = new();
 
-    // Windows the title's device-address programs are known to reach, and the set the
-    // current submission's table was written against.
-    private ulong _reachWindows;
-    private ulong _reachWindowsThisSubmission;
-    private long _reachMisses;
-    private long _reachWindowsLearned;
+    private MetalDeviceAddressReach Reach => _reach ??= OpenReach();
 
-    /// <summary>The feedback buffer a device-address program reports misses into.</summary>
-    private ulong ReachFeedbackAddress()
+    private MetalDeviceAddressReach OpenReach()
     {
-        EnsureReachFeedback();
-        return _reachFeedbackAddress;
-    }
-
-    private void EnsureReachFeedback()
-    {
-        if (_reachFeedbackBuffer != 0)
-        {
-            return;
-        }
-
-        _reachFeedbackBuffer = _guestMemory.CreateResidentSharedBuffer(
-            ReachFeedbackWords * sizeof(uint), "device-address.reach", out _reachFeedbackContents, out _reachFeedbackAddress);
-        unsafe
-        {
-            new Span<uint>((void*)_reachFeedbackContents, ReachFeedbackWords).Clear();
-        }
-
-        _reachProfile = MetalDeviceAddressReachProfile.Open(
+        var profile = MetalDeviceAddressReachProfile.Open(
             SharpEmuPaths.UserPath(
                 "pipeline_cache",
                 MetalShaderPrewarm.SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()),
-                "metal-v2"));
-        if (_reachProfile is not null)
+                "metal-v2"),
+            _guestMemory.GranuleBytes);
+        var reach = new MetalDeviceAddressReach(_guestMemory, profile);
+        if (profile is not null)
         {
-            foreach (var granule in _reachProfile.Granules)
-            {
-                _reachWindows |= 1UL << _guestMemory.WindowOwningBacking(granule << MetalDeviceAddressReachProfile.GranuleBits);
-            }
-
             Console.Error.WriteLine(
-                $"[METAL-V2][INFO] device-address reach seeded: granules={_reachProfile.Granules.Count} " +
-                $"windows=0x{_reachWindows:X}");
+                $"[METAL-V2][INFO] device-address reach seeded: granules={reach.Reached.Count} " +
+                $"granule_mb={_guestMemory.GranuleBytes >> 20} reach_mb={_guestMemory.GranuleSetBytes(reach.Reached) >> 20}");
         }
+
+        return reach;
     }
+
+    /// <summary>The feedback buffer a device-address program reports misses into.</summary>
+    private ulong ReachFeedbackAddress() => Reach.FeedbackAddress;
 
     /// <summary>
-    /// Takes the windows completed or running submissions reported reaching outside their
-    /// named set and names them from now on. Called once per submission, as its table is
+    /// Takes the granules completed or running submissions reported reaching outside their
+    /// named set, names them from now on, and settles the windows this submission names,
+    /// whose cuts then stay until it ends. Called once per submission, as its table is
     /// written, so the table's flags and the windows its encoders name agree.
     /// </summary>
-    private unsafe void BeginDeviceAddressReach()
+    private void BeginDeviceAddressReach()
     {
-        EnsureReachFeedback();
-        var words = (int*)_reachFeedbackContents;
-        ulong reported = 0;
-        for (var word = 0; word < 2; word++)
+        var table = _deviceAddressTableBuilder;
+        if (DeviceAddressReachEnabled)
         {
-            reported |= (ulong)(uint)Interlocked.Exchange(ref words[word], 0) << (word * 32);
+            Reach.TakeFeedback();
+            _deviceAddressNamed.SetIntersection(table.Granules, Reach.Reached);
+            _deviceAddressNamedWindows.Clear();
+            table.AddWindowsOfGranules(_deviceAddressNamed, _deviceAddressNamedWindows);
+        }
+        else
+        {
+            _deviceAddressNamed.CopyFrom(table.Granules);
+            _deviceAddressNamedWindows.CopyFrom(table.Windows);
         }
 
-        Interlocked.Add(ref _reachMisses, (uint)Interlocked.Exchange(ref words[ReachMissCountWord], 0));
-        var learned = reported & ~_reachWindows;
-        if (learned != 0)
-        {
-            _reachWindows |= learned;
-            Interlocked.Add(ref _reachWindowsLearned, System.Numerics.BitOperations.PopCount(learned));
-            var granules = new List<ulong>();
-            for (var bits = learned; bits != 0; bits &= bits - 1)
-            {
-                var (offset, size) = _guestMemory.WindowOwnedBacking(System.Numerics.BitOperations.TrailingZeroCount(bits));
-                for (var granule = offset >> MetalDeviceAddressReachProfile.GranuleBits;
-                     granule << MetalDeviceAddressReachProfile.GranuleBits < offset + size;
-                     granule++)
-                {
-                    granules.Add(granule);
-                }
-            }
-
-            _reachProfile?.Learn(granules);
-        }
-
-        _reachWindowsThisSubmission = _reachWindows;
-    }
-
-    /// <summary>The page count a table entry carries: flagged when its window is not named.</summary>
-    private ulong ReachPageCount(ulong pageCount, int window)
-    {
-        if (!DeviceAddressReachEnabled || window < 0 || (_reachWindowsThisSubmission & (1UL << window)) != 0)
-        {
-            return pageCount;
-        }
-
-        return pageCount | ReachUnnamedFlag | ((ulong)window << ReachWindowShift);
+        _guestMemory.PinWindows(_deviceAddressNamedWindows);
     }
 
     /// <summary>The windows an encoder that runs a device-address program names.</summary>
-    private ulong DeviceAddressNamedWindows() =>
-        DeviceAddressReachEnabled ? _deviceAddressWindows & _reachWindowsThisSubmission : _deviceAddressWindows;
+    private MetalWindowSet DeviceAddressNamedWindows() => _deviceAddressNamedWindows;
 
-    private string TakeDeviceAddressReachCounters() =>
-        string.Create(
+    private string TakeDeviceAddressReachCounters()
+    {
+        var (misses, learned) = _reach?.TakeCounters() ?? (0, 0);
+        return string.Create(
             CultureInfo.InvariantCulture,
-            $" da_misses={Interlocked.Exchange(ref _reachMisses, 0)} " +
-            $"da_learned={Interlocked.Exchange(ref _reachWindowsLearned, 0)} " +
-            $"da_named=0x{_reachWindowsThisSubmission:X}");
+            $" da_misses={misses} da_learned={learned} da_named={_deviceAddressNamedWindows.Count} " +
+            $"da_named_mb={_guestMemory.WindowSetBytes(_deviceAddressNamedWindows) >> 20}");
+    }
 }
 
 /// <summary>
-/// A title's device-address reach: the 64 MiB granules of the guest backing its programs
-/// were seen to reach, one line of hexadecimal granule numbers per learn, appended as they
-/// are learned and read back as a union. A granule the layout of a later start no longer
-/// maps there only names a window more; one it misses is learned again on first touch.
+/// The device-address reach of a title: the granules its programs were seen to reach, and
+/// the feedback bitmap the programs report misses into (resource_prelude.msl): word 0 counts
+/// lookups that landed outside the named set, then one bit per granule.
+/// </summary>
+internal sealed class MetalDeviceAddressReach
+{
+    internal const int MissCountWord = 0;
+    internal const int HeaderWords = 1;
+
+    private readonly MetalGuestMemory _memory;
+    private readonly MetalDeviceAddressReachProfile? _profile;
+    private readonly nint _contents;
+    private readonly int _bitmapWords;
+    private readonly List<ulong> _learnedGranules = new();
+    private long _misses;
+    private long _learned;
+
+    public MetalDeviceAddressReach(MetalGuestMemory memory, MetalDeviceAddressReachProfile? profile)
+    {
+        _memory = memory;
+        _profile = profile;
+        _bitmapWords = (memory.GranuleCount + 31) / 32;
+        var words = HeaderWords + _bitmapWords;
+        Buffer = memory.CreateResidentSharedBuffer(
+            (ulong)words * sizeof(uint), "device-address.reach", out _contents, out var address);
+        FeedbackAddress = address;
+        unsafe
+        {
+            new Span<uint>((void*)_contents, words).Clear();
+        }
+
+        if (profile is not null)
+        {
+            foreach (var granule in profile.Granules)
+            {
+                if (granule < (ulong)memory.GranuleCount)
+                {
+                    Reached.Add((int)granule);
+                }
+            }
+        }
+    }
+
+    public nint Buffer { get; }
+
+    public ulong FeedbackAddress { get; }
+
+    /// <summary>The granules the title's device-address programs are known to reach.</summary>
+    public MetalWindowSet Reached { get; } = new();
+
+    /// <summary>Reads and clears the feedback; returns how many granules it added.</summary>
+    public unsafe int TakeFeedback()
+    {
+        var words = (int*)_contents;
+        Interlocked.Add(ref _misses, (uint)Interlocked.Exchange(ref words[MissCountWord], 0));
+        var added = 0;
+        for (var word = 0; word < _bitmapWords; word++)
+        {
+            if (Volatile.Read(ref words[HeaderWords + word]) == 0)
+            {
+                continue;
+            }
+
+            for (var bits = (uint)Interlocked.Exchange(ref words[HeaderWords + word], 0); bits != 0; bits &= bits - 1)
+            {
+                var granule = (word * 32) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                if (granule < _memory.GranuleCount && Reached.Add(granule))
+                {
+                    added++;
+                    _learnedGranules.Add((ulong)granule);
+                }
+            }
+        }
+
+        if (added != 0)
+        {
+            Interlocked.Add(ref _learned, added);
+            _profile?.Learn(_learnedGranules);
+            _learnedGranules.Clear();
+        }
+
+        return added;
+    }
+
+    public (long Misses, long Learned) TakeCounters() =>
+        (Interlocked.Exchange(ref _misses, 0), Interlocked.Exchange(ref _learned, 0));
+}
+
+/// <summary>
+/// A title's device-address reach, persisted: the granules of the guest backing its programs
+/// were seen to reach. The first line names the granule size (<c>granule_bits=N</c>); every
+/// later line is the hexadecimal granule numbers of one learn, appended as they are learned and
+/// read back as a union. A profile written at another granule size is converted on open (a
+/// coarser granule becomes all the finer ones it holds, a finer one the coarser one holding it)
+/// and rewritten. The v2 profile of the 1 GiB layout is not read: it learned whole windows, so
+/// it would name gigabytes the programs never reached. A granule the layout of a later start no
+/// longer maps there only names a window more; one it misses is learned again on first touch.
 /// </summary>
 internal sealed class MetalDeviceAddressReachProfile
 {
-    internal const int GranuleBits = 26;
-    internal const string FileName = "device-address-reach-v2.txt";
+    internal const string FileName = "device-address-reach-v3.txt";
+    private const string Header = "granule_bits=";
 
     private readonly string _path;
 
@@ -174,13 +217,21 @@ internal sealed class MetalDeviceAddressReachProfile
 
     public HashSet<ulong> Granules { get; }
 
-    public static MetalDeviceAddressReachProfile? Open(string directory)
+    public static MetalDeviceAddressReachProfile? Open(string directory, ulong granuleBytes)
     {
         try
         {
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, FileName);
-            return new MetalDeviceAddressReachProfile(path, Load(path));
+            var bits = System.Numerics.BitOperations.TrailingZeroCount(granuleBytes);
+            var (storedBits, stored) = Load(path);
+            var granules = Convert(stored, storedBits ?? bits, bits);
+            if (storedBits != bits)
+            {
+                File.WriteAllText(path, HeaderLine(bits) + "\n" + (granules.Count != 0 ? Line(granules) + "\n" : string.Empty));
+            }
+
+            return new MetalDeviceAddressReachProfile(path, granules);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -189,16 +240,32 @@ internal sealed class MetalDeviceAddressReachProfile
         }
     }
 
-    internal static HashSet<ulong> Load(string path)
+    internal static string HeaderLine(int granuleBits) =>
+        Header + granuleBits.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>The granule bits the file was written at (null when it has no header) and its granules.</summary>
+    internal static (int? GranuleBits, HashSet<ulong> Granules) Load(string path)
     {
         var granules = new HashSet<ulong>();
+        int? bits = null;
         if (!File.Exists(path))
         {
-            return granules;
+            return (bits, granules);
         }
 
         foreach (var line in File.ReadLines(path))
         {
+            if (line.StartsWith(Header, StringComparison.Ordinal))
+            {
+                if (int.TryParse(line.AsSpan(Header.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) &&
+                    parsed is >= 14 and < 40)
+                {
+                    bits = parsed;
+                }
+
+                continue;
+            }
+
             foreach (var text in line.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
                 if (ulong.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var granule))
@@ -208,7 +275,36 @@ internal sealed class MetalDeviceAddressReachProfile
             }
         }
 
-        return granules;
+        // Granules without a header have no known size; they are dropped rather than guessed.
+        return bits is null ? (null, new HashSet<ulong>()) : (bits, granules);
+    }
+
+    /// <summary>The same backing reach expressed in granules of another size.</summary>
+    internal static HashSet<ulong> Convert(HashSet<ulong> granules, int fromBits, int toBits)
+    {
+        if (fromBits == toBits)
+        {
+            return granules;
+        }
+
+        var converted = new HashSet<ulong>();
+        foreach (var granule in granules)
+        {
+            if (fromBits > toBits)
+            {
+                var per = 1UL << (fromBits - toBits);
+                for (var fine = 0UL; fine < per; fine++)
+                {
+                    converted.Add((granule << (fromBits - toBits)) + fine);
+                }
+            }
+            else
+            {
+                converted.Add(granule >> (toBits - fromBits));
+            }
+        }
+
+        return converted;
     }
 
     internal static string Line(IEnumerable<ulong> granules) =>
