@@ -134,6 +134,25 @@ internal sealed partial class MetalRenderHost
     /// (run 20261018-203322-ds-ds-memopt-check; 725 of 769 with it on).</summary>
     internal static void EnableLodStatistics() => ResourceMaterializer.RecordMipStatistics = GpuLodStatistics;
 
+    /// <summary>
+    /// Portable buffers (PortableBufferWord): every program reads its buffers' strides and
+    /// read formats at run time, so a translation does not depend on the draw's vertex
+    /// layout and a shader precompile can make the library a draw asks for.
+    /// SHARPEMU_METAL_V2_PORTABLE_BUFFERS=0 bakes them in again.
+    /// </summary>
+    internal static readonly bool PortableBuffers =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PORTABLE_BUFFERS") != "0";
+
+    /// <summary>
+    /// The process-wide translation switches, set by the command stream and by the shader
+    /// prewarm before either translates anything, so both make the same MSL.
+    /// </summary>
+    internal static void ApplyTranslationSwitches()
+    {
+        EnableLodStatistics();
+        PortableBufferWord.Enabled = PortableBuffers;
+    }
+
     /// <summary>GET_LOD_STATS reports this host packed on the GPU.</summary>
     internal long LodStatisticsReports => Interlocked.Read(ref _lodStatsReports);
 

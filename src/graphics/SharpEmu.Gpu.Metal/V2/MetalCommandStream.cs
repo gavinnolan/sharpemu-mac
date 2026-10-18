@@ -44,7 +44,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void InitializeCommandStream(IMetalFlipTarget flipTarget)
     {
         _flipTarget = flipTarget;
-        EnableLodStatistics();
+        ApplyTranslationSwitches();
         _commandStream = new CommandStreamQueue(this);
         _translation = AgcBackendServices.CreateCommandStreamTranslation(_memory, this);
         _lastProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();

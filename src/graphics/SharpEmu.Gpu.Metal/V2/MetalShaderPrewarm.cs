@@ -254,9 +254,9 @@ internal static class MetalShaderPrewarm
     /// <summary>
     /// Sets the process-wide translation switches the command stream sets, before the
     /// prewarm translates anything: what the prewarm makes must be what the game's draws
-    /// ask for (the pixel programs' mip-statistics recording).
+    /// ask for (the pixel programs' mip-statistics recording, portable buffers).
     /// </summary>
-    internal static void TranslateAsTheGameDoes() => MetalRenderHost.EnableLodStatistics();
+    internal static void TranslateAsTheGameDoes() => MetalRenderHost.ApplyTranslationSwitches();
 
     private static bool StartCore(nint device)
     {
