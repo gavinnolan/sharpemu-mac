@@ -7,13 +7,14 @@ using SharpEmu.Core.Memory;
 namespace SharpEmu.Core.Loader;
 
 /// <summary>
-/// Per-title rewrites of compiled display sizes. Some titles never ask sceVideoOut what the
-/// display is: they register 3840x2160 output buffers, size their UI canvas to it and keep
-/// their internal render size in a mode table, all as immediates and read-only data. Telling
-/// such a title that the display is 1080p changes nothing, so when the host advertises a
-/// display below the compiled size, this rewrites the compiled constants to the advertised
-/// size. Every site is verified against the bytes the known build carries before anything is
-/// written; a different build leaves the title untouched.
+/// Per-title rewrites of compiled display sizes. Opt-in (<see cref="EnvironmentVariable"/>=1)
+/// and not PS5 behaviour: a title that registers 3840x2160 output buffers whatever the
+/// television is relies on the system to scale them to the display, which is what the host
+/// presenter does. Rewriting its sizes to a smaller advertised display breaks every layout
+/// that is authored in output pixels. Demon's Souls draws its HUD at 1:1 texels on a
+/// 3840x2160 canvas, so a 1920x1080 rewrite doubles the HUD's share of the frame and hides
+/// the item icons. Every site is verified against the bytes the known build carries before
+/// anything is written; a different build is left untouched.
 /// </summary>
 internal static class TitleDisplayPatches
 {
@@ -42,8 +43,9 @@ internal static class TitleDisplayPatches
 
     internal readonly record struct Site(ulong Offset, Slot Slot, uint OldWidth, uint OldHeight, Role Role);
 
+    // Off unless asked for: the title's own sizes are what a PS5 runs it with.
     internal static bool IsEnabled =>
-        !string.Equals(Environment.GetEnvironmentVariable(EnvironmentVariable), "0", StringComparison.Ordinal);
+        string.Equals(Environment.GetEnvironmentVariable(EnvironmentVariable), "1", StringComparison.Ordinal);
 
     // Demon's Souls (PPSA01342, v01.004.000). The video-out setup creates its "DisplayBuffer"
     // textures and registers them at 3840x2160 (immediates at the call sites and in the two
@@ -140,7 +142,7 @@ internal static class TitleDisplayPatches
         GuestBytePatcher.Apply(memory, programHeaders, imageBase, patches);
         Console.Error.WriteLine(
             $"[LOADER][INFO] {titleId}: compiled display sizes rewritten to {width}x{height} at {patches.Count} sites " +
-            $"(set {EnvironmentVariable}=0 to keep the title's own).");
+            $"({EnvironmentVariable}=1; UI laid out in output pixels will be oversized).");
         return true;
     }
 

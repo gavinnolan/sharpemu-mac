@@ -90,6 +90,52 @@ public sealed class TitleDisplayPatchesTests
         Assert.False(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", 1920, 1080));
     }
 
+    // A PS5 runs Demon's Souls with its own 3840x2160 display buffers and UI canvas whatever
+    // the television is, and scales the output; rewriting them doubles the HUD at 1080p.
+    [Theory]
+    [InlineData(1280u, 720u)]
+    [InlineData(1920u, 1080u)]
+    [InlineData(2560u, 1440u)]
+    public void TheTitlesOwnDisplaySizesAreKeptUnlessThePatchIsRequested(uint width, uint height)
+    {
+        var sites = TitleDisplayPatches.SitesFor("PPSA01342")!;
+        var imageSize = (sites.Max(site => site.Offset) + 0x10000) & ~0xFFFFUL;
+        using var memory = new SharpEmu.Core.Memory.PhysicalVirtualMemory();
+        Assert.True(memory.TryAllocateAtOrAbove(0x200000000UL, imageSize, executable: false, 0x4000, out var imageBase));
+        ProgramHeader[] headers = [CreateLoad(0, imageSize)];
+        foreach (var site in sites)
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
+        }
+
+        var previous = Environment.GetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, null);
+            Assert.False(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", width, height));
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, "0");
+            Assert.False(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", width, height));
+            foreach (var site in sites)
+            {
+                var expected = Encode(site, site.OldWidth, site.OldHeight);
+                var actual = new byte[expected.Length];
+                Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+                Assert.Equal(expected, actual);
+            }
+
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, "1");
+            Assert.True(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", width, height));
+            var canvas = sites.First(site => site.Slot == TitleDisplayPatches.Slot.WidthF32);
+            var rewritten = new byte[4];
+            Assert.True(memory.TryRead(imageBase + canvas.Offset, rewritten));
+            Assert.Equal(F32(width), rewritten);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, previous);
+        }
+    }
+
     private static byte[] Encode(TitleDisplayPatches.Site site, uint width, uint height) =>
         site.Slot switch
         {
