@@ -223,19 +223,6 @@ public static partial class AjmExports
             split: true);
 
     [SysAbiExport(
-        Nid = "81HsnXFbWS4",
-        ExportName = "sceAjmBatchJobSetResampleParameters",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceAjm")]
-    public static int AjmBatchJobSetResampleParameters(CpuContext ctx)
-    {
-        // (info, instance, float ratio, uint32_t flags, result); ratio arrives in xmm0.
-        ctx.GetXmmRegister(0, out var ratioBits, out _);
-        var ratio = BitConverter.Int32BitsToSingle(unchecked((int)(uint)ratioBits));
-        return AppendSetResampleJob(ctx, ratio, 0.0f, ctx[CpuRegister.Rcx]);
-    }
-
-    [SysAbiExport(
         Nid = "5ldnD16rYZw",
         ExportName = "sceAjmBatchJobSetResampleParametersEx",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -245,75 +232,34 @@ public static partial class AjmExports
         // (info, instance, float ratioStart, float ratioChangePerSample, uint32_t flags, result).
         ctx.GetXmmRegister(0, out var startBits, out _);
         ctx.GetXmmRegister(1, out var changeBits, out _);
-        return AppendSetResampleJob(
-            ctx,
-            BitConverter.Int32BitsToSingle(unchecked((int)(uint)startBits)),
-            BitConverter.Int32BitsToSingle(unchecked((int)(uint)changeBits)),
-            ctx[CpuRegister.Rcx]);
-    }
-
-    /// <summary>
-    /// The ratio is validated up front (a non-finite or non-positive ratio is an
-    /// INVALID_PARAMETER call error). The decoders here have no resampler, so a
-    /// job asking for anything but a constant 1.0 ratio completes with
-    /// AJM_RESULT_INVALID_PARAMETER in its sideband instead of being accepted and
-    /// ignored.
-    /// </summary>
-    private static int AppendSetResampleJob(CpuContext ctx, float ratio, float change, ulong resultAddress)
-    {
         var infoAddress = ctx[CpuRegister.Rdi];
         var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
-        if (!float.IsFinite(ratio) || ratio <= 0.0f || !float.IsFinite(change))
+        var flags = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var resultAddress = ctx[CpuRegister.Rcx];
+        var ratio = BitConverter.Int32BitsToSingle(unchecked((int)(uint)startBits));
+        var change = BitConverter.Int32BitsToSingle(unchecked((int)(uint)changeBits));
+        if (infoAddress == 0)
         {
             return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
 
-        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobControlSize))
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobSetResampleParametersSize))
         {
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
 
-        var status = !TryGetInstance(instanceId, out _) || ratio != 1.0f || change != 0.0f
-            ? Atrac9DecodeState.ResultInvalidParameter
-            : 0;
+        // Same checks as sceAjmBatchJobSetResampleParameters. The Opus resampler holds a
+        // constant ratio, so a per-sample ramp completes with INVALID_PARAMETER.
+        const uint ignoreRatio = 1u << 3;
+        var validRatio = (flags & ignoreRatio) != 0
+            || (float.IsFinite(ratio) && ratio is >= 0 and <= 4 && change == 0.0f);
+        var status = TryGetInstance(instanceId, out var instance) && validRatio
+            ? 0
+            : Atrac9DecodeState.ResultInvalidParameter;
+        if (status == 0)
+            instance.Opus?.SetResampleParameters(ratio, flags);
         WriteBasicResult(ctx, resultAddress, status);
-        Trace($"batch_job_set_resample instance=0x{instanceId:X8} ratio={ratio:R} change={change:R} status=0x{status:X8}");
-        return ctx.SetReturn(0);
-    }
-
-    [SysAbiExport(
-        Nid = "JkdNCocpu1M",
-        ExportName = "sceAjmBatchJobGetResampleInfo",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceAjm")]
-    public static int AjmBatchJobGetResampleInfo(CpuContext ctx)
-    {
-        var infoAddress = ctx[CpuRegister.Rdi];
-        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
-        var resultAddress = ctx[CpuRegister.Rdx];
-        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobControlSize))
-        {
-            return ctx.SetReturn(OrbisAjmErrorJobCreation);
-        }
-
-        if (resultAddress != 0)
-        {
-            // Result, then SceAjmSidebandResampleInfo: the ratio is always 1.0 and
-            // no input samples are ever held back, since there is no resampler.
-            Span<byte> sideband = stackalloc byte[AjmSidebandResultBytes + AjmSidebandResampleInfoBytes];
-            sideband.Clear();
-            var found = TryGetInstance(instanceId, out _);
-            BinaryPrimitives.WriteInt32LittleEndian(
-                sideband,
-                found ? 0 : Atrac9DecodeState.ResultInvalidParameter);
-            if (found)
-            {
-                BinaryPrimitives.WriteSingleLittleEndian(sideband[AjmSidebandResultBytes..], 1.0f);
-            }
-
-            _ = ctx.Memory.TryWrite(resultAddress, sideband);
-        }
-
+        Trace($"batch_job_set_resample_parameters_ex instance=0x{instanceId:X8} ratio={ratio:R} change={change:R} flags=0x{flags:X8} status=0x{status:X8}");
         return ctx.SetReturn(0);
     }
 

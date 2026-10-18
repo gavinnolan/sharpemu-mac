@@ -118,35 +118,6 @@ public sealed class AjmBatchJobExportsTests : IDisposable
     }
 
     [Fact]
-    public void ResampleParametersValidateTheRatioAndRejectUnsupportedResampling()
-    {
-        var instance = CreateInstance(codec: 1, flags: 0x401);
-        InitializeBatch();
-
-        Assert.Equal(InvalidParameter, SetResample(instance, float.NaN));
-        Assert.Equal(InvalidParameter, SetResample(instance, 0.0f));
-        Assert.Equal(InvalidParameter, SetResample(instance, -1.0f));
-        Assert.Equal(0UL, ReadUInt64(BatchInfoAddress + 8));
-
-        Fill(ResultAddress, 8, 0xCC);
-        Assert.Equal(0, SetResample(instance, 1.0f));
-        Assert.Equal(0, ReadInt32(ResultAddress));
-
-        Assert.Equal(0, SetResample(instance, 2.0f));
-        Assert.Equal(ResultInvalidParameter, ReadInt32(ResultAddress));
-
-        Fill(ResultAddress, 0x40, 0xCC);
-        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
-        _ctx[CpuRegister.Rsi] = instance;
-        _ctx[CpuRegister.Rdx] = ResultAddress;
-        Assert.Equal(0, AjmExports.AjmBatchJobGetResampleInfo(_ctx));
-        Assert.Equal(0, ReadInt32(ResultAddress));
-        Assert.Equal(1.0f, BitConverter.Int32BitsToSingle(ReadInt32(ResultAddress + 8)));
-        Assert.Equal(0, ReadInt32(ResultAddress + 12));
-        Assert.Equal(0xCCu, ReadByte(ResultAddress + 48));
-    }
-
-    [Fact]
     public void EncodeCompletesWithAnInvalidParameterResultAndNothingProduced()
     {
         var instance = CreateInstance(codec: 1, flags: 0x401);
@@ -272,16 +243,6 @@ public sealed class AjmBatchJobExportsTests : IDisposable
         }
 
         return export(_ctx);
-    }
-
-    private int SetResample(uint instance, float ratio)
-    {
-        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
-        _ctx[CpuRegister.Rsi] = instance;
-        _ctx[CpuRegister.Rdx] = 0;
-        _ctx[CpuRegister.Rcx] = ResultAddress;
-        _ctx.SetXmmRegister(0, unchecked((uint)BitConverter.SingleToInt32Bits(ratio)), 0);
-        return AjmExports.AjmBatchJobSetResampleParameters(_ctx);
     }
 
     private void WriteStackArg(int index, ulong value)

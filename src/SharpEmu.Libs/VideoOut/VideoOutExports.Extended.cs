@@ -438,22 +438,6 @@ public static partial class VideoOutExports
         }
     }
 
-    [SysAbiExport(
-        Nid = "w7Ipp9Xl7hg",
-        ExportName = "sceVideoOutAllowOutputResolutionWqhdDetection",
-        Target = Generation.Gen5,
-        LibraryName = "libSceVideoOut")]
-    public static int VideoOutAllowOutputResolutionWqhdDetection(CpuContext ctx)
-    {
-        // Permits the system to report a 2560x1440 output. The reported resolution class
-        // comes from the host display policy, which already decides it, so the permission
-        // changes nothing further here.
-        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return TryGetPort(handle, out _)
-            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : OrbisVideoOutErrorInvalidHandle;
-    }
-
     // int sceVideoOutColorSettingsSetGamma(SceVideoOutColorSettings* settings, float gamma):
     // the sized variant without its size argument; same registers, same checks.
     // SceVideoOutColorSettings: f32 gamma @0x00, u32 reserved[3] @0x04 — 16 bytes.
