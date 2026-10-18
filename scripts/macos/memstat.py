@@ -39,6 +39,16 @@ VM_STAT_KEYS = {
 }
 
 
+
+def _launcher():
+    """memstat is signed with com.apple.security.cs.debugger, so it reads a get-task-allow target
+    without root; passwordless sudo is used when present (targets without get-task-allow)."""
+    try:
+        ok = subprocess.run(["sudo", "-n", "true"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    return ["sudo", "-n"] if ok else []
+
 def read_memstat(path):
     """Rows of memstat.log as dicts, oldest first; torn or empty lines are skipped."""
     rows = []
@@ -143,7 +153,7 @@ def run_sample(pid, every, out, binary, zero_at=()):
         zero = bool(zero_at) and began - started >= zero_at[0]
         if zero:
             zero_at.pop(0)
-        proc = subprocess.run(["sudo", "-n", binary, str(pid)] + (["--zero-scan"] if zero else []),
+        proc = subprocess.run(_launcher() + [binary, str(pid)] + (["--zero-scan"] if zero else []),
                               capture_output=True, text=True, timeout=300 if zero else 60)
         if proc.returncode == 0 and proc.stdout.strip().startswith("{"):
             with out.open("a") as handle:
@@ -156,7 +166,7 @@ def run_sample(pid, every, out, binary, zero_at=()):
 
 def run_zero(pid, out, binary):
     """One memstat --zero-scan sample, written to out (a single JSON line)."""
-    proc = subprocess.run(["sudo", "-n", binary, str(pid), "--zero-scan"], capture_output=True, text=True, timeout=300)
+    proc = subprocess.run(_launcher() + [binary, str(pid), "--zero-scan"], capture_output=True, text=True, timeout=300)
     if proc.returncode != 0 or not proc.stdout.strip().startswith("{"):
         sys.stderr.write(proc.stderr)
         return proc.returncode or 1

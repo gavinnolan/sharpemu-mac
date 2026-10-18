@@ -36,7 +36,7 @@
 #                   (scripts/macos/memstat.c, built on demand): resident / dirty / compressed bytes with each VM
 #                   object counted once (footprint charges every mapping of the guest's shared backing object),
 #                   by category, next to the kernel's phys_footprint. Needs task_for_pid: runs through
-#                   passwordless `sudo -n` (skipped with a note in memstat.err when sudo asks for a password).
+#                   memstat (signed cs.debugger; the app needs get-task-allow, SHARPEMU_MAC_GET_TASK_ALLOW=1), or passwordless `sudo -n` when present.
 #   memstat-zero-<t>.json  SHARPEMU_MEMSTAT_ZERO_AT="60,120": at the first sample at or after each second, one
 #                   memstat --zero-scan line (how many resident guest_shm pages are entirely zero, plus a
 #                   per-32-MiB-granule histogram); same sudo requirement, independent of SHARPEMU_MEMSTAT.
@@ -276,7 +276,7 @@ python3 "$REPO_ROOT/scripts/macos/memstat.py" sysmem --pid "$GPID" --every "$(se
   --out "$OUT/system-mem.log" > /dev/null 2>&1 &
 SAMPLER_PIDS+=($!)
 if [[ "$(setting SHARPEMU_MEMSTAT 0)" == 1 ]]; then
-  if MEMSTAT_BIN="$("$REPO_ROOT/scripts/macos/build-memstat.sh" 2>"$OUT/memstat.err")" && sudo -n true 2>>"$OUT/memstat.err"; then
+  if MEMSTAT_BIN="$("$REPO_ROOT/scripts/macos/build-memstat.sh" 2>"$OUT/memstat.err")"; then
     python3 "$REPO_ROOT/scripts/macos/memstat.py" sample --pid "$GPID" --every "$(setting SHARPEMU_MEMSTAT_EVERY 15)" \
       --out "$OUT/memstat.log" --bin "$MEMSTAT_BIN" >> "$OUT/memstat.err" 2>&1 &
     SAMPLER_PIDS+=($!)
@@ -286,7 +286,7 @@ if [[ "$(setting SHARPEMU_MEMSTAT 0)" == 1 ]]; then
 fi
 zero_at=()
 if [[ -n "${SHARPEMU_MEMSTAT_ZERO_AT:-}" ]]; then
-  if ZERO_BIN="$("$REPO_ROOT/scripts/macos/build-memstat.sh" 2>>"$OUT/memstat.err")" && sudo -n true 2>>"$OUT/memstat.err"; then
+  if ZERO_BIN="$("$REPO_ROOT/scripts/macos/build-memstat.sh" 2>>"$OUT/memstat.err")"; then
     IFS=, read -r -a zero_at <<< "$SHARPEMU_MEMSTAT_ZERO_AT"
   else
     echo "memstat zero scans disabled: could not build memstat or passwordless sudo is unavailable (see memstat.err)" >&2
