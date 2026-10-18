@@ -90,6 +90,146 @@ public sealed class TitleDisplayPatchesTests
         Assert.False(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", 1920, 1080));
     }
 
+    // A PS5 runs Demon's Souls with its own 3840x2160 display buffers and UI canvas whatever
+    // the television is, and scales the output; rewriting them doubles the HUD at 1080p.
+    [Theory]
+    [InlineData(1280u, 720u)]
+    [InlineData(1920u, 1080u)]
+    [InlineData(2560u, 1440u)]
+    public void TheTitlesOwnDisplaySizesAreKeptUnlessThePatchIsRequested(uint width, uint height)
+    {
+        var sites = TitleDisplayPatches.SitesFor("PPSA01342")!;
+        var imageSize = (sites.Max(site => site.Offset) + 0x10000) & ~0xFFFFUL;
+        using var memory = new SharpEmu.Core.Memory.PhysicalVirtualMemory();
+        Assert.True(memory.TryAllocateAtOrAbove(0x200000000UL, imageSize, executable: false, 0x4000, out var imageBase));
+        ProgramHeader[] headers = [CreateLoad(0, imageSize)];
+        foreach (var site in sites)
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
+        }
+
+        var previous = Environment.GetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, null);
+            Assert.False(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", width, height));
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, "0");
+            Assert.False(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", width, height));
+            foreach (var site in sites)
+            {
+                var expected = Encode(site, site.OldWidth, site.OldHeight);
+                var actual = new byte[expected.Length];
+                Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+                Assert.Equal(expected, actual);
+            }
+
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, "1");
+            Assert.True(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", width, height));
+            var canvas = sites.First(site => site.Slot == TitleDisplayPatches.Slot.WidthF32);
+            var rewritten = new byte[4];
+            Assert.True(memory.TryRead(imageBase + canvas.Offset, rewritten));
+            Assert.Equal(F32(width), rewritten);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, previous);
+        }
+    }
+
+    [Theory]
+    [InlineData(1920u, 1080u, 2u)]
+    [InlineData(2560u, 1440u, 2u)]
+    [InlineData(1280u, 720u, 1u)]
+    public void TheDisplayModeStrategyPicksTheTitlesOwnHdModeAndOnlyShrinksItsInternalSize(
+        uint width, uint height, uint expectedMode)
+    {
+        var profile = TitleDisplayPatches.DisplayModeFor("PPSA01342")!;
+        Assert.Null(TitleDisplayPatches.DisplayModeFor("PPSA00000"));
+        Assert.Equal(expectedMode, profile.ModeFor(width, height));
+
+        var patches = TitleDisplayPatches.BuildDisplayModePatches(profile, width, height);
+        foreach (var offset in profile.DefaultModeSites)
+        {
+            var patch = Assert.Single(patches, patch => patch.Offset == offset);
+            Assert.Equal(Le32(3), patch.Old);
+            Assert.Equal(Le32(expectedMode), patch.New);
+        }
+
+        var internalPatches = patches.Where(patch => !profile.DefaultModeSites.Contains(patch.Offset)).ToList();
+        if (expectedMode == profile.HdMode)
+        {
+            Assert.Empty(internalPatches);
+        }
+        else
+        {
+            Assert.Equal(2, internalPatches.Count);
+            Assert.Equal(Le32(width), internalPatches.Single(patch => patch.Old.SequenceEqual(Le32(1600))).New);
+            Assert.Equal(Le32(height), internalPatches.Single(patch => patch.Old.SequenceEqual(Le32(900))).New);
+        }
+
+        // Nothing the 4K mode owns is touched: the UI canvas and display sizes stay the title's.
+        var allSiteOffsets = TitleDisplayPatches.SitesFor("PPSA01342")!.Select(site => site.Offset).ToHashSet();
+        Assert.DoesNotContain(patches, patch => allSiteOffsets.Contains(patch.Offset));
+    }
+
+    [Fact]
+    public void A4KDisplayKeepsTheTitlesOwnMode()
+    {
+        var profile = TitleDisplayPatches.DisplayModeFor("PPSA01342")!;
+        Assert.Null(profile.ModeFor(3840, 2160));
+        Assert.Empty(TitleDisplayPatches.BuildDisplayModePatches(profile, 3840, 2160));
+    }
+
+    [Fact]
+    public void ApplyInDisplayModeRewritesOnlyTheModeDefaultsAndLeavesTheUiCanvasAt4K()
+    {
+        var profile = TitleDisplayPatches.DisplayModeFor("PPSA01342")!;
+        var sites = TitleDisplayPatches.SitesFor("PPSA01342")!;
+        var imageSize = (sites.Max(site => site.Offset) + 0x10000) & ~0xFFFFUL;
+        using var memory = new SharpEmu.Core.Memory.PhysicalVirtualMemory();
+        Assert.True(memory.TryAllocateAtOrAbove(0x200000000UL, imageSize, executable: false, 0x4000, out var imageBase));
+        ProgramHeader[] headers = [CreateLoad(0, imageSize)];
+        foreach (var site in sites.Concat(profile.ReducedModeInternalSites))
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
+        }
+
+        foreach (var offset in profile.DefaultModeSites)
+        {
+            Assert.True(memory.TryWrite(imageBase + offset, Le32(3)));
+        }
+
+        var previous = Environment.GetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, "mode");
+            Assert.True(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", 1280, 720));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, previous);
+        }
+
+        var value = new byte[4];
+        foreach (var offset in profile.DefaultModeSites)
+        {
+            Assert.True(memory.TryRead(imageBase + offset, value));
+            Assert.Equal(Le32(1), value);
+        }
+
+        Assert.True(memory.TryRead(imageBase + profile.ReducedModeInternalSites[0].Offset, value));
+        Assert.Equal(Le32(1280), value);
+        Assert.True(memory.TryRead(imageBase + profile.ReducedModeInternalSites[1].Offset, value));
+        Assert.Equal(Le32(720), value);
+        foreach (var site in sites)
+        {
+            var expected = Encode(site, site.OldWidth, site.OldHeight);
+            var actual = new byte[expected.Length];
+            Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+            Assert.Equal(expected, actual);
+        }
+    }
+
     private static byte[] Encode(TitleDisplayPatches.Site site, uint width, uint height) =>
         site.Slot switch
         {
