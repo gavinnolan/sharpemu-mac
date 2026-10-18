@@ -63,7 +63,8 @@ internal sealed class CompiledResourceTransaction
 
     internal static CompiledResourceTransaction? Build(ShaderResourcePlan plan, bool tableOnly = false)
     {
-        if (!RuntimeFeature.IsDynamicCodeSupported || Environment.GetEnvironmentVariable("SHARPEMU_SRT_NATIVE") == "0") return null;
+        if (!ResourceMaterializer.CompiledTransactions || !RuntimeFeature.IsDynamicCodeSupported ||
+            Environment.GetEnvironmentVariable("SHARPEMU_SRT_NATIVE") == "0") return null;
         if (!tableOnly && RuntimeValueEvaluator.HasResourceStructure(plan))
         {
             ResourceMaterializationCache.RecordTransactionBuild(plan, tableOnly, "structured_plan");

@@ -112,7 +112,7 @@ public static partial class ResourceMaterializer
             materialized.FlattenedTable[offset + 2] = (uint)Math.Min(range.Size, uint.MaxValue);
         }
 
-        var guard = Volatile.Read(ref plan.SpecializationGuard);
+        var guard = SpecializationGuards ? Volatile.Read(ref plan.SpecializationGuard) : null;
         MaterializedSnapshot nextSnapshot;
         ResourceSpecialization nextSpecialization;
         if (guard is not null && MatchesGuard(plan, materialized, guard))
@@ -128,7 +128,7 @@ public static partial class ResourceMaterializer
             var originalSamplers = materialized.Samplers;
             if (!BuildSpecialization(plan, materialized, out nextSnapshot, out nextSpecialization, out failure, captureIndirectImageFailure))
                 return false;
-            if (candidate is not null && MatchesGuard(plan, materialized, candidate, checkSamplers: false))
+            if (SpecializationGuards && candidate is not null && MatchesGuard(plan, materialized, candidate, checkSamplers: false))
             {
                 candidate.SamplerSources = materialized.Samplers.Select(words => Array.FindIndex(originalSamplers,
                     original => ReferenceEquals(original, words))).ToArray();
@@ -1878,6 +1878,19 @@ public static partial class ResourceMaterializer
     // Applies a specialization to the plan's tables: buffer strides and formats, image
     // classes and indirect candidates, point samplers and the sampler each access uses.
     public static bool RecordMipStatistics { get; set; }
+
+    /// <summary>
+    /// Process-wide: plans evaluate through compiled resource transactions
+    /// (CompiledResourceTransaction). The Metal backend turns it off and keeps the
+    /// evaluator, whose table reads also learn GPU-written data words (DeviceDataLoads).
+    /// </summary>
+    public static bool CompiledTransactions { get; set; } = true;
+
+    /// <summary>
+    /// Process-wide: a materialisation whose descriptors match the plan's published guard
+    /// reuses its specialization instead of building one. The Metal backend turns it off.
+    /// </summary>
+    public static bool SpecializationGuards { get; set; } = true;
 
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {

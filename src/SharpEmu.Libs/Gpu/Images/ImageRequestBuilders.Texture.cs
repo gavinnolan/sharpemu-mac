@@ -330,7 +330,7 @@ public static partial class ImageRequestBuilders
 
         var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers,
             shaderHash, imageIndex);
-        if (!shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
+        if (NativeColorClearMetadata && !shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
             tile == GuestTileMode.RenderTarget && levels == 1 && samples == 1 &&
             type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&
             NativeColorClear.TryDecode(0x40, viewFormat, !descriptor.DccAlphaOnMostSignificantBits, out _))

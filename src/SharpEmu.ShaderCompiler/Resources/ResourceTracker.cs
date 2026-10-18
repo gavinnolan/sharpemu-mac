@@ -10,6 +10,13 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // and patches each access with its index. A failure names hash, stage and pc.
 public sealed partial class ResourceTracker
 {
+    /// <summary>
+    /// Process-wide: an address word the plan cannot validate at run time counts as a
+    /// scalar memory word, so what depends on it is a device descriptor. The Metal backend
+    /// turns it off and keeps such words host-evaluated.
+    /// </summary>
+    public static bool UnvalidatedAddressWordsAreMemory { get; set; } = true;
+
     private const uint SamplerBorderClampMask = (1u << 2) | (1u << 5) | (1u << 8);
     private const uint SamplerDword3ReservedMask = 0x3FFF_F000u;
 
@@ -480,7 +487,8 @@ public sealed partial class ResourceTracker
             }
 
             if (current.Kind == ScalarValueKind.ScalarBufferWord ||
-                current.Kind == ScalarValueKind.ScalarAddressWord && !_plan.ValidateRuntimeValue(current))
+                UnvalidatedAddressWordsAreMemory && current.Kind == ScalarValueKind.ScalarAddressWord &&
+                !_plan.ValidateRuntimeValue(current))
             {
                 return true;
             }

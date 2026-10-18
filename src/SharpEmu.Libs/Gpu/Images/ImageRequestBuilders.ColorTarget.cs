@@ -41,6 +41,14 @@ public static partial class ImageRequestBuilders
 {
     private static long _normalizedSliceRanges;
 
+    /// <summary>
+    /// Whether colour targets and textures carry the native colour-clear metadata: the
+    /// DCC flags of a native clear and a CMASK description for a fast-cleared target.
+    /// Process-wide. The Metal backend turns it off: it implements neither and keeps its
+    /// own DCC clear tracking (see MetalGpuBackend.ConfigureSharedGpuCode).
+    /// </summary>
+    public static bool NativeColorClearMetadata { get; set; } = true;
+
     public static uint SampleCount(uint encodedLog2) => encodedLog2 <= 3 ? 1u << (int)encodedLog2 : 0;
 
     private static bool DccAlphaOnMsb(in ColorTargetWords words)
@@ -429,7 +437,7 @@ public static partial class ImageRequestBuilders
             targetFormat.HostFormat, viewType, GpuImageAspect.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, GpuImageUsage.ColorAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
         var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
-        if (hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
+        if (NativeColorClearMetadata && hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
             !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget)
         {
             var sliceSize = NativeColorClear.SliceSize(width, height, bytesPerElement);
@@ -449,7 +457,7 @@ public static partial class ImageRequestBuilders
             }
         }
         // DCC takes precedence. CMASK register clears apply only to single-sample color targets.
-        if (!words.DccEnabled && words.FastClear && words.CmaskAddress != 0 &&
+        if (NativeColorClearMetadata && !words.DccEnabled && words.FastClear && words.CmaskAddress != 0 &&
             !words.FmaskCompression && !words.WriteVrsRateHintToCmask &&
             !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget &&
             PackedClearValue.TryDecodeColor(targetFormat.HostFormat, words.ClearWord0, out var cmaskClear))
