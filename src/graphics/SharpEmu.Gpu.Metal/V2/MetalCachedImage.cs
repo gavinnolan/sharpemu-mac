@@ -112,9 +112,25 @@ internal sealed class MetalCachedImage : IDisposable
 
     public void NoteContentChanged()
     {
+        // The texture is about to hold something else: chunks whose guest copy it holds get
+        // their bytes back from it first (single-copy textures).
+        SingleCopyRecord?.Owner.OnContentChanging(this);
+        BumpContentVersion();
+    }
+
+    private void BumpContentVersion()
+    {
         ContentVersion = Interlocked.Increment(ref _contentCounter);
         DepthPlaneVersion = ContentVersion;
     }
+
+    /// <summary>The single-copy record of the chunks this texture holds the guest copy of, or null.</summary>
+    internal MetalSingleCopy.Record? SingleCopyRecord;
+
+    /// <summary>The content version the single-copy scan last saw, and the timestamp it first saw it at.</summary>
+    internal long SingleCopySeenVersion;
+
+    internal long SingleCopySeenAt;
 
     /// <summary>
     /// The version of the depth plane alone: every change moves it with
@@ -452,7 +468,9 @@ internal sealed class MetalCachedImage : IDisposable
             return;
         }
 
-        NoteContentChanged();
+        // Guest memory got newer bytes; the texture itself is unchanged until the upload, so
+        // released chunks stay restorable from it (the upload's read restores what it covers).
+        BumpContentVersion();
         if (!_cpuDirty)
         {
             DirtyCause = cause;

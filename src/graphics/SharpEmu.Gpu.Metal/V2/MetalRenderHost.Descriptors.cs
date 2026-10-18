@@ -163,6 +163,14 @@ internal sealed partial class MetalRenderHost
         // Acquire the decoded frame before any stage selects its movie planes.
         PumpHostMovieFrame();
 
+        // A chunk restored from a single-copy texture lies under a window this command
+        // buffer already used, which still maps the GPU alias hole there: the next command
+        // buffer renews it, so a draw that reaches it by address reads its bytes.
+        if (_singleCopy is not null && _commandBuffer != 0 && _guestMemory.HasStaleSingleCopyWindows)
+        {
+            FlushCommandBuffer(MetalFlushCause.Other);
+        }
+
         // Keep each submission's command buffer bounded so completions and flips are
         // not stuck behind a frame's worth of recording, and so the rings and staging
         // a draw's uploads borrowed return before the next draw borrows more.
@@ -605,6 +613,9 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
+            // The program reaches these bytes by address, past every window resolve: chunks a
+            // texture holds the guest copy of get their bytes and their GPU alias pages back now.
+            _singleCopy?.RestoreAddressRange(range.Base, size);
             OrderAfterDeferredCopies(range.Base, size);
             OrderAfterStagedStores(range.Base, size);
             FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor);

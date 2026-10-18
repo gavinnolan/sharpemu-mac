@@ -228,7 +228,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         ICpuMemory memory,
         ulong granuleBytes,
         ulong maxWindowBytes,
-        ulong maxUploadBytes = MaxUploadBytes)
+        ulong maxUploadBytes = MaxUploadBytes,
+        bool? singleCopy = null)
     {
         _device = device;
         _maxUploadBytes = maxUploadBytes;
@@ -266,6 +267,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         _touchedWindows = new MetalWindowSet(_partition.IdLimit + 64);
         _pinnedWindows = new MetalWindowSet(_partition.IdLimit + 64);
 
+        InitializeSingleCopyWindows(backing, singleCopy);
         _residencySet = UseResidencySet ? CreateResidencySet(device) : 0;
         _gdsBuffer = CreateSharedBuffer(GdsBytes, "guest.gds", out _, out _);
         _nullBuffer = CreateSharedBuffer(256, "guest.null", out _nullContents, out _);
@@ -282,7 +284,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         Console.Error.WriteLine(
             $"[METAL-V2][INFO] guest memory windows: granule=0x{granuleBytes:X} granules={_granuleCount} " +
             $"max_window=0x{_maxWindowBytes:X} backing_chunk=0x{chunkBytes:X} alias=0x{aliasBase:X16}+0x{aliasSize:X} " +
-            $"residency_set={(_residencySet != 0 ? 1 : 0)} (windows are created on first use)");
+            $"residency_set={(_residencySet != 0 ? 1 : 0)} gpu_alias={(_gpuAlias is { } gpuAlias ? $"0x{gpuAlias.Base:X16}" : "none")} " +
+            "(windows are created on first use)");
     }
 
     /// <summary>
@@ -409,9 +412,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                 _partition.Normalize(_completedSerial - IdleWindowSerials, _pinnedWindows, _retiredScratch);
             }
 
+            ApplySingleCopyHolesLocked();
             RetireReplaced();
         }
 
+        DropSingleCopyGuestViews();
         BeginGuestViewSubmission();
     }
 
@@ -890,7 +895,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             return window.Buffer;
         }
 
-        var pointer = _aliasBase + window.Start;
+        // Over the GPU alias when single-copy textures are on: released chunks are holes there.
+        var pointer = _windowBase + window.Start;
         var buffer = MetalV2Native.SendNewBufferNoCopy(
             _device,
             SelNewBufferNoCopy,
@@ -1027,9 +1033,12 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         var offset = alias - _aliasBase;
+        // A released chunk gets its bytes back before any window names it (single-copy textures).
+        RestoreSingleCopyRange(offset, size);
         MetalWindowPartition.Window window;
         lock (_windowLock)
         {
+            FillSingleCopyHolesLocked(offset, size);
             switch (_partition.Place(offset, offset + size, _pinnedWindows, _retiredScratch, out window))
             {
                 case MetalWindowPartition.Placement.Moved:
@@ -1062,6 +1071,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                     }
 
                     return false;
+            }
+
+            if (!TryUseSingleCopyWindowLocked(ref window, offset, size))
+            {
+                return false;
             }
 
             EnsureBuffer(window);
@@ -1679,6 +1693,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
             _retired.Clear();
             _windowBuffers.Clear();
+            _gpuAlias?.Dispose();
         }
 
         DisposeGuestViews();

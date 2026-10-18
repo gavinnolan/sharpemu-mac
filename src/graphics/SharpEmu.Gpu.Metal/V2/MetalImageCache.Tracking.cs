@@ -32,6 +32,8 @@ internal sealed partial class MetalImageCache
         // Counted before anything can find the image or arm its watch: a CPU write that
         // reads no owner without the lock must never have an image over its bytes.
         _pageOwners.Add(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
+        // Chunks another texture holds the guest copy of are no longer that texture's alone.
+        SingleCopy?.OnImageRegistered(image.Description.Data.Address, image.Description.Data.Size);
         if (image.Description.HasStencil)
         {
             _stencilOwners.Add(imageIdentifier);
@@ -87,6 +89,8 @@ internal sealed partial class MetalImageCache
 
         Interlocked.Increment(ref _imageSetVersion);
         NoteReleasedForTelemetry(image, cause);
+        // Chunks whose guest copy the texture holds get their bytes back before it goes.
+        SingleCopy?.OnImageReleased(image, cause);
 
         ForgetDeferredRefreshesLocked(image);
 
@@ -425,6 +429,7 @@ internal sealed partial class MetalImageCache
 
         StagedRanges?.OnUnmap(address, size);
         _guestMemory.OnGuestUnmap(address, size);
+        SingleCopy?.OnGuestUnmap(address, size);
         using var held = _lock.Hold();
         var end = address + size;
         var stale = new List<ulong>();
@@ -463,6 +468,7 @@ internal sealed partial class MetalImageCache
     public void StopWatching()
     {
         StagedRanges?.StopWatching();
+        SingleCopy?.StopWatching();
         using var held = _lock.Hold();
         _watchingStopped = true;
         foreach (var (watchBegin, watchSize) in _metadataWatches)
@@ -509,6 +515,7 @@ internal sealed partial class MetalImageCache
         MaybeEvaluateBudgetLocked(now);
         HousekeepLocked(now);
         CollectIfOverBudget(now);
+        SingleCopy?.Tick(this, now);
     }
 
     private void CollectIfOverBudget() => CollectIfOverBudget(_clock());
