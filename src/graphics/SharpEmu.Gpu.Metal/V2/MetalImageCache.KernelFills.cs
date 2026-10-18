@@ -282,6 +282,7 @@ internal sealed partial class MetalImageCache
     private bool TakeKernelWriteOwnershipLocked(ResourceSlotIdentifier imageIdentifier, MetalCachedImage image)
     {
         PromoteLinearView(image);
+        EnsureSparseBacked(image);
         if (image.Texture == 0)
         {
             return false;

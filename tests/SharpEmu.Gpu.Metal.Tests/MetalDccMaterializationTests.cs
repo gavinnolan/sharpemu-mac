@@ -138,7 +138,12 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
             Owner = new Owner(Harness);
             _pages = new PageGuard(_space);
             _memory = new MetalGuestMemory(device, Backing, new NoMemory());
-            Cache = new MetalImageCache(Owner, Harness.Transfer, _memory, _pages, Backing);
+            Cache = new MetalImageCache(Owner, Harness.Transfer, _memory, _pages, Backing)
+            {
+                // The depth alias cases drive the hand-off between two textures; a sampled
+                // twin binding the depth texture itself is MetalDepthTwinTests'.
+                DepthTwins = false,
+            };
             // Not a clear code, so the target lookups in a test do not materialize.
             FillMetadata(0x55);
         }

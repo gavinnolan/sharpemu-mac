@@ -128,6 +128,11 @@ internal interface IMetalImageTransfer
         in ImageDescription sourceDescription, nint sourceTexture,
         in ImageDescription targetDescription, nint targetTexture);
 
+    // Whether the depth image's texture, sampled in its own format, reads what a texture of
+    // the colour description over the same guest bytes would (MetalImageTransfer). False
+    // keeps the two as separate textures.
+    bool SamplesAsDepthTwin(in ImageDescription depthDescription, in ImageDescription colorDescription) => false;
+
     // Copies every slice and level of one texture into another of the same shape, on the
     // device. The two may differ in usage only.
     void EncodeWholeTextureCopy(IMetalSubmissionContext context, nint sourceTexture, nint targetTexture);

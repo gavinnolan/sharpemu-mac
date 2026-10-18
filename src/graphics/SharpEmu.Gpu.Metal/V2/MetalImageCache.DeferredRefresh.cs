@@ -50,6 +50,9 @@ internal sealed partial class MetalImageCache
     // run at most (RefreshFromGuest), and its texture is the truth everywhere else.
     private static bool CanDeferRefresh(MetalCachedImage image) =>
         MetalV2Diagnostics.SkipOverwrittenRefresh && image.IsCpuDirty && !image.IsGpuModified &&
+        // An array is never skipped (CoversWholeImage), and a sparse one maps its layers in the
+        // upload, which has to happen before its views are handed out.
+        SparseOf(image) is null &&
         image.Texture != 0 && !ImageDescription.IsEmptyRange(image.Description.Data);
 
     // Caller holds the lock.
