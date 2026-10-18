@@ -283,11 +283,14 @@ while :; do
   fi
   if [[ "${SHARPEMU_HUD_WATCH:-0}" == 1 ]] && (( ! hud_seen )) && (( now - hud_probe_at >= 2 )); then
     hud_probe_at=$now
-    shot "$OUT/.hud-probe.png"
-    if python3 "$REPO_ROOT/scripts/macos/hud-detect.py" "$OUT/.hud-probe.png" > "$OUT/.hud-probe.txt" 2>/dev/null; then
+    shot "$OUT/hud-probe.png"
+    hud_rc=0
+    python3 "$REPO_ROOT/scripts/macos/hud-detect.py" "$OUT/hud-probe.png" > "$OUT/hud-probe.txt" 2> "$OUT/hud-probe.err" || hud_rc=$?
+    # Every probe is logged (second, exit code, bar coverages or the error) so a missing marker can be diagnosed.
+    echo "$now rc=$hud_rc $(cat "$OUT/hud-probe.txt" "$OUT/hud-probe.err" 2>/dev/null | tr '\n' ' ')" >> "$OUT/hud-detect.log"
+    if (( hud_rc == 0 )); then
       hud_seen=1
       printf '%s\thud\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> "$OUT/markers.tsv"
-      echo "$now $(cat "$OUT/.hud-probe.txt")" >> "$OUT/hud-detect.log"
     fi
   fi
   if (( now >= next_shot )); then shot "$OUT/shot-$(printf %04d "$now").png"; next_shot=$(( now + shot_every )); fi
@@ -309,7 +312,7 @@ if [[ -n "$GPID" ]]; then
     sample "$GPID" 3 -file "$OUT/sample.txt" >/dev/null 2>&1 || true
   fi
 fi
-rm -f "$OUT/.hud-probe.png" "$OUT/.hud-probe.txt"
+rm -f "$OUT/hud-probe.png" "$OUT/hud-probe.txt" "$OUT/hud-probe.err"
 echo "$status" > "$OUT/result.txt"
 echo "peak_footprint_mb=$peak_fp_mb" >> "$OUT/result.txt"
 echo "peak_rss_mb=$peak_mb" >> "$OUT/result.txt"

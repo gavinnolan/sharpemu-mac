@@ -21,7 +21,8 @@ the game):
                             screen, a second or two before the character answers the pad, and are
                             never on a loading screen, movie or menu. Without a `hud` marker the
                             first game-log line matching --gameplay-regex is used when given.
-                            Null when neither happened: the run never reached gameplay.
+                            Failing both, the first interval screenshot (shot-NNNN.png, N seconds since launch) in which
+                            hud-detect.py finds the HUD; null when none does: the run never reached gameplay.
   segments                  a marker starts a segment that lasts until the next marker; `end` closes
                             the last one; time before the first marker is `boot`.
   fps_avg                   flips in the segment divided by its duration, so stalls count against it.
@@ -231,6 +232,24 @@ def screenshots(run, segments):
     return fixed, by_segment
 
 
+def hud_from_screenshots(run):
+    """Seconds since launch of the first shot-NNNN.png with the HUD on screen, else None."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hud_detect", Path(__file__).with_name("hud-detect.py"))
+        detector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(detector)
+    except Exception:
+        return None
+    for shot in sorted(run.glob("shot-[0-9]*.png")):
+        try:
+            if detector.present(detector.measure(str(shot))):
+                return float(shot.stem.split("-")[1])
+        except Exception:
+            continue
+    return None
+
+
 def summarise(run, gameplay_regex):
     env = read_env(run / "run.env")
     launch = float(env.get("launch_epoch", 0) or 0)
@@ -263,6 +282,10 @@ def summarise(run, gameplay_regex):
     if gameplay is None and gameplay_regex:
         gameplay = first_after(gameplay_regex, mark_time.get("continue", 0.0))
     gameplay_note = None
+    if gameplay is None:
+        gameplay = hud_from_screenshots(run)
+        if gameplay is not None:
+            gameplay_note = "no `hud` marker was written; the first interval screenshot showing the HUD is used (resolution = the screenshot interval)"
     if gameplay is None:
         gameplay_note = "no in-world HUD was seen on screen (no `hud` marker): the run did not reach gameplay"
     shots, shots_by_segment = screenshots(run, segments)
