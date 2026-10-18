@@ -11,7 +11,7 @@ namespace SharpEmu.Core.Loader;
 
 // Protect the guest red zone from host exception writes on Windows and macOS.
 // Split unaligned vector stores when Rosetta requires smaller memory accesses.
-internal static class GuestRedZonePatcher
+internal static partial class GuestRedZonePatcher
 {
     private const int GuestRedZoneBytes = 128;
     private const int MinimumJumpBytes = 5;

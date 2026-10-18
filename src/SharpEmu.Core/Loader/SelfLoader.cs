@@ -337,6 +337,7 @@ public sealed class SelfLoader : ISelfLoader
                 programHeaders,
                 imageBase,
                 totalImageSize);
+            ApplySpinLoopNap(virtualMemory, patchableMemory, programHeaders, imageBase, totalImageSize, applicationInfo.Title);
         }
 
         _ = GuestVaHolePatcher.Patch(virtualMemory, programHeaders, imageBase);
@@ -603,6 +604,44 @@ public sealed class SelfLoader : ISelfLoader
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             Console.Error.WriteLine($"[LOADER][WARN] title display size patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Redirects the main executable's spin-wait <c>pause</c> sites through the generic
+    /// spin-nap trampoline so a thread that polls for longer than the idle threshold sleeps instead
+    /// of burning a core; see <see cref="SpinNapRuntime"/>. Title-agnostic, off with
+    /// <c>SHARPEMU_SPIN_NAP=0</c>.</summary>
+    private static void ApplySpinLoopNap(
+        IVirtualMemory virtualMemory,
+        PhysicalVirtualMemory physicalMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        ulong imageSize,
+        string? title)
+    {
+        if (!SpinNapRuntime.IsEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var probe = SpinNapRuntime.EnsureProbeBytes(SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency);
+            if (probe.Length == 0)
+            {
+                return;
+            }
+
+            var lockedProbe = SpinNapRuntime.LockedEnabled
+                ? SpinNapRuntime.EnsureLockedProbeBytes(SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency)
+                : [];
+            _ = GuestRedZonePatcher.PatchSpinLoops(
+                virtualMemory, physicalMemory, programHeaders, imageBase, imageSize, probe,
+                string.IsNullOrEmpty(title) ? "guest" : title, lockedProbe);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] spin-nap patch failed: {exception.Message}");
         }
     }
 

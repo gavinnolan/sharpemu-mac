@@ -283,6 +283,8 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe ulong DispatchImportCore(int importIndex, nint argPackPtr)
 	{
+		// Any HLE entry ends this thread's polling streak in the spin-nap locked-op probe.
+		SharpEmu.Core.Loader.SpinNapRuntime.NoteHleEntry(argPackPtr);
 		long num = NextImportDispatchIndex();
 		if ((num & 0x3F) == 0)
 		{
@@ -303,7 +305,7 @@ public sealed partial class DirectExecutionBackend
 		// nothing here mutates, and copying it was pure cost on every guest call.
 		ref readonly ImportStubEntry importStubEntry = ref _importEntries[importIndex];
 		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
-		Volatile.Read(ref _activeImportSessionCounters)?.Record(importStubEntry.Nid);
+		Volatile.Read(ref _activeImportSessionCounters)?.Record(importIndex, importStubEntry.Nid);
 		if (_perfHleHistogram)
 		{
 			try { RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid); }

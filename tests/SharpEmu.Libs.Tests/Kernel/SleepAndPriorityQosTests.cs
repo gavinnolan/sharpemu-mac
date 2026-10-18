@@ -55,6 +55,31 @@ public sealed class SleepAndPriorityQosTests
     }
 
     [Fact]
+    public void YieldStreakNapsOnlyAfterSustainedPollingAndRestartsOnAGap()
+    {
+        const long gap = 2_000; // ticks between yields that still count as one streak
+        const long after = 500; // streak age at which yields start napping
+        long start = 0;
+        long last = 0;
+
+        // The first yield of a streak never naps; neither does one within the window.
+        Assert.False(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 1_000, gap, after));
+        Assert.False(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 1_400, gap, after));
+
+        // Continuous yielding past the window naps, and keeps napping while the streak holds.
+        Assert.True(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 1_500, gap, after));
+        Assert.True(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 3_000, gap, after));
+
+        // A pause longer than the gap ends the streak: the next yield does not nap.
+        Assert.False(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 3_000 + gap + 1, gap, after));
+        Assert.False(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 3_000 + gap + 100, gap, after));
+        Assert.True(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 3_000 + gap + 600, gap, after));
+    }
+
+    private static bool KernelRuntimeCompatExports_YieldNap(ref long start, ref long last, long now, long gap, long after) =>
+        KernelPthreadCompatExports.YieldNapPolicy(ref start, ref last, now, gap, after);
+
+    [Fact]
     public void ShortUsleepNeverReturnsBeforeTheRequestedTime()
     {
         Thread.Sleep(5); // a fresh streak, so this call does not nap
