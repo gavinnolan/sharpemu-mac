@@ -87,7 +87,7 @@ public sealed class ApplicationSettings
 
     // What the guest is told the display is, which is what decides how much pixel work a
     // title does. Not the window size: see GuestDisplayResolution.
-    public string GuestDisplayResolution { get; set; } = "720p";
+    public string GuestDisplayResolution { get; set; } = "1080p";
 
     public bool OverlayEnabled { get; set; } = true;
     public string OverlayCorner { get; set; } = "TopRight";
