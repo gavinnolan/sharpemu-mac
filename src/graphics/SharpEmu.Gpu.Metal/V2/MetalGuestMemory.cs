@@ -84,6 +84,13 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // range stays where it is across ~10 s of the range not being used.
     internal const ulong IdleWindowSerials = 1024;
 
+    // Over a chunked backing (SHARPEMU_GUEST_BACKING=chunked) every 64 KiB chunk is its own VM
+    // map entry, and creating a no-copy buffer costs about the square of the entries it spans:
+    // measured on an M4 under Rosetta, 1.9 ms for 512 entries (32 MiB), 31 ms for 2048, 149 ms
+    // for 4096 and 678 ms for 8192 (artifacts/memopt/single-copy-textures.md §4). Windows stop
+    // growing at this many entries there, which at 64 KiB is the 32 MiB granule itself.
+    internal const ulong MaxChunkedWindowEntries = 512;
+
     private static ulong ResolveGranuleBytes() =>
         ResolveGranuleBytes(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRANULE_MB"));
 
@@ -247,6 +254,12 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         _granuleCount = checked((int)((aliasSize + granuleBytes - 1) >> _granuleBits));
         var maxBufferLength = (ulong)MetalV2Native.SendValue(device, SelMaxBufferLength);
         var cap = maxBufferLength == 0 ? maxWindowBytes : Math.Min(maxWindowBytes, maxBufferLength);
+        var chunkBytes = backing.BackingChunkBytes;
+        if (chunkBytes != 0 && MaxChunkedWindowEntries <= ulong.MaxValue / chunkBytes)
+        {
+            cap = Math.Min(cap, MaxChunkedWindowEntries * chunkBytes);
+        }
+
         // Whole granules, and never less than one.
         _maxWindowBytes = Math.Max(granuleBytes, cap & ~(granuleBytes - 1));
         _partition = new MetalWindowPartition(aliasSize, granuleBytes, _maxWindowBytes, PairLockPageBytes);
@@ -268,7 +281,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         CommitResidency();
         Console.Error.WriteLine(
             $"[METAL-V2][INFO] guest memory windows: granule=0x{granuleBytes:X} granules={_granuleCount} " +
-            $"max_window=0x{_maxWindowBytes:X} alias=0x{aliasBase:X16}+0x{aliasSize:X} " +
+            $"max_window=0x{_maxWindowBytes:X} backing_chunk=0x{chunkBytes:X} alias=0x{aliasBase:X16}+0x{aliasSize:X} " +
             $"residency_set={(_residencySet != 0 ? 1 : 0)} (windows are created on first use)");
     }
 

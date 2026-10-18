@@ -60,6 +60,23 @@ public sealed class HostBackingObject : IDisposable
     public int Descriptor { get; init; } = -1;
 
     /// <summary>
+    /// Bytes per separately releasable chunk when the backend built the backing from many
+    /// purgeable objects instead of one (macOS <c>SHARPEMU_GUEST_BACKING=chunked</c>);
+    /// 0 for a single object, whose pages no in-process call can give back.
+    /// </summary>
+    /// <remarks>Host-package contract; written by the owning backend.</remarks>
+    public ulong ChunkBytes { get; init; }
+
+    /// <summary>
+    /// The backend's release of whole chunks, set together with <see cref="ChunkBytes"/>.
+    /// Arguments are the backing, a chunk-aligned offset and a size that is a multiple of
+    /// <see cref="ChunkBytes"/> or ends at <see cref="Size"/>. Afterwards every byte of the
+    /// range reads zero through the alias and every view. The caller holds alias access.
+    /// </summary>
+    /// <remarks>Host-package contract; written by the owning backend.</remarks>
+    public Func<HostBackingObject, ulong, ulong, HostBackingDiscard>? DiscardChunks { get; init; }
+
+    /// <summary>
     /// Creates a backing object for storage the caller has already reserved at
     /// <paramref name="aliasBase"/>.
     /// </summary>
@@ -261,3 +278,10 @@ public sealed class HostBackingObject : IDisposable
         finally { lock (Gate) _releaseInProgress = false; }
     }
 }
+
+/// <summary>
+/// What a <see cref="HostBackingObject.DiscardChunks"/> call did: the chunks it emptied
+/// (their pages went back to the OS) and the bytes it had to zero-fill instead, because
+/// their pages stayed resident (wired by a GPU command buffer, or touched while it ran).
+/// </summary>
+public readonly record struct HostBackingDiscard(ulong EmptiedBytes, ulong EmptiedChunks, ulong ZeroFilledBytes);

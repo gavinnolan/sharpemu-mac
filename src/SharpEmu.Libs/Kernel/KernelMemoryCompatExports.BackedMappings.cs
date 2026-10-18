@@ -269,21 +269,63 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
-    private static void CommitReplacedLocked(MappedRegion[] replaced)
+    private static void CommitReplacedLocked(MappedRegion[] replaced, bool releaseToHost = true)
     {
         foreach (var region in replaced)
-            ReleaseBackingOwnershipLocked(region);
+            ReleaseBackingOwnershipLocked(region, releaseToHost);
     }
 
-    // Unmapped pages hand their backing back to whoever lent it.
-    private static void ReleaseBackingOwnershipLocked(MappedRegion region)
+    // After a replacement that gave up its old backing before the new mapping stood
+    // (releaseToHost: false, so a failure could still restore the old bytes): the old flexible
+    // bytes the new mapping did not take go to the host now.
+    private static void ReleaseReplacedFlexibleLocked(MappedRegion[] replaced)
+    {
+        foreach (var region in replaced)
+            if (region.IsFlexible && !region.IsReserved)
+                ReleaseFreedBackingLocked(region.BackingOffset, region.Length,
+                    _flexibleBacking.FreeRangeContaining(region.BackingOffset));
+    }
+
+    // Unmapped pages hand their backing back to whoever lent it, and the host gets the whole
+    // chunks of it that are now free (a chunked guest backing; nothing otherwise).
+    private static void ReleaseBackingOwnershipLocked(MappedRegion region, bool releaseToHost = true)
     {
         if (region.IsReserved)
             return;
         if (region.IsFlexible)
-            _flexibleBacking.Release(region.Address, region.Length);
+        {
+            foreach (var (offset, size) in _flexibleBacking.Release(region.Address, region.Length))
+                if (releaseToHost)
+                    ReleaseFreedBackingLocked(offset, size, _flexibleBacking.FreeRangeContaining(offset));
+        }
         else if (region.IsPooled)
+        {
             ReturnPoolPagesLocked(region.BackingOffset, region.Length);
+            if (releaseToHost)
+                ReleaseFreedBackingLocked(region.BackingOffset, region.Length,
+                    PoolFreeRangeContainingLocked(region.BackingOffset));
+        }
+    }
+
+    // [start, start + length) just became free inside freeRun, the whole free range holding it.
+    // Every chunk of the backing that the freed bytes touch and that lies wholly inside the free
+    // range goes back to the host, so a chunk only partly freed now is released by whichever
+    // later free completes it. The PS5 leaves released memory's contents undefined (a fresh
+    // allocation is not promised zero: docs/macos/ps5-internals.md §6 points 3-4 and the open
+    // question on dmem zeroing), and a released chunk reads zero, which is one such value.
+    private static void ReleaseFreedBackingLocked(ulong start, ulong length, (ulong Start, ulong Length) freeRun)
+    {
+        if (_backingOwner is not { } space || length == 0 || freeRun.Length == 0)
+            return;
+        var chunk = space.BackingChunkBytes;
+        if (chunk == 0)
+            return;
+        var first = Math.Max(freeRun.Start, start - start % chunk);
+        var last = Math.Min(freeRun.Start + freeRun.Length, AlignUp(start + length, chunk));
+        first = AlignUp(first, chunk);
+        last -= last % chunk;
+        if (first < last)
+            _ = space.TryReleaseBacking(first, last - first);
     }
 
     // Undoes TryReplaceWithHole after the new mapping failed: the views, GPU registration,
@@ -654,6 +696,7 @@ public static partial class KernelMemoryCompatExports
             RemoveMappingLocked(alias.Address, alias.Length);
         }
         _directAllocations.ReleaseRange(start, length);
+        ReleaseFreedBackingLocked(start, length, _directAllocations.FreeRangeContaining(start));
         return true;
     }
 

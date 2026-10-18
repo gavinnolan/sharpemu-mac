@@ -104,6 +104,12 @@ static bool is_graphics_tag(uint32_t tag) {
          tag == VM_MEMORY_COREGRAPHICS || tag == VM_MEMORY_CGIMAGE || tag == VM_MEMORY_COREIMAGE || tag == 87 /* IOSURFACE alt */;
 }
 
+// User tag of SharpEmu's chunked guest backing (SHARPEMU_GUEST_BACKING=chunked): every 64 KiB chunk
+// is its own purgeable VM object, mapped by the alias and by however many views; one the guest has
+// not mapped has only the alias mapping, so the multi-view rule below would call it anonymous.
+// MacHostViews.GuestChunkTag (VM_MEMORY_APPLICATION_SPECIFIC_11).
+#define SHARPEMU_GUEST_CHUNK_TAG 250
+
 static int categorise(const Region *r, bool file_backed, bool multi_view) {
   uint32_t t = r->tag;
   if (r->submap_depth > 0) return CAT_MAPPED_FILE;  // dyld shared cache and other nested submaps
@@ -335,14 +341,17 @@ int main(int argc, char **argv) {
     size_t views = last - first;
     // Category of the object: its largest region decides; a file probe only for plain untagged objects.
     const Region *lead = &regions[first];
-    for (size_t i = first + 1; i < last; i++)
+    bool guest_chunk = lead->tag == SHARPEMU_GUEST_CHUNK_TAG;
+    for (size_t i = first + 1; i < last; i++) {
       if (regions[i].size > lead->size) lead = &regions[i];
+      guest_chunk |= regions[i].tag == SHARPEMU_GUEST_CHUNK_TAG;
+    }
     bool file_backed = false;
     if (lead->tag == 0 && lead->submap_depth == 0 && lead->share_mode != SM_EMPTY) {
       file_backed = is_file_backed(pid, lead->address);
       file_probes++;
     }
-    int category = categorise(lead, file_backed, views > 1);
+    int category = guest_chunk ? CAT_GUEST_SHM : categorise(lead, file_backed, views > 1);
 
     uint64_t covered_end = 0, res = 0, dirty = 0, swp = 0, vsize = 0;
     bool any = false;

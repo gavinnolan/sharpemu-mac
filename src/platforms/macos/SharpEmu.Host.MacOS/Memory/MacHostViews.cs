@@ -188,6 +188,11 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         {
             if (MacMappedCopyState.Ledger is { } copyLedger && !copyLedger.CanMakeAnonymousPlacement()) return false;
             MacMappedCopyState.Ledger?.PreflightBackingPublication();
+            if (UseChunkedBacking)
+            {
+                return TryCreateChunkedBackingLocked(size, out backing, out failure);
+            }
+
             // Darwin has no memfd_create; shm_open plus an immediate shm_unlink
             // gives the same anonymous, descriptor-only backing object.
             var descriptor = OpenSharedObject();
@@ -472,6 +477,11 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
                 return false;
             }
 
+            if (backing.ChunkBytes != 0)
+            {
+                return TryMapChunkedViewCore(backing, address, offset, size, protection, out failure);
+            }
+
             var ptr = mmap((nint)address, (nuint)size, GetNativeProtection(protection), MAP_SHARED | MAP_FIXED, backing.Descriptor, (long)offset);
             if (ptr == MAP_FAILED)
             {
@@ -645,7 +655,8 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             // the descriptor while alias ownership remains uncertain.
             return new(HostBackingReleaseStatus.AliasOutcomeUnknown, error);
         }
-        if (close(backing.Descriptor) != 0)
+        // A chunked backing has no descriptor: its chunks die with their last mapping.
+        if (backing.Descriptor >= 0 && close(backing.Descriptor) != 0)
         {
             var error = Marshal.GetLastPInvokeError();
             // Retrying close can destroy an unrelated reused fd (including EINTR).

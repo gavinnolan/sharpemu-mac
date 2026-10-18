@@ -3855,7 +3855,7 @@ public static partial class KernelMemoryCompatExports
         // failure can restore them intact; only a pool too full for both gives them up first.
         var ownershipReleased = length > _flexibleBacking.Available;
         if (ownershipReleased)
-            CommitReplacedLocked(replaced);
+            CommitReplacedLocked(replaced, releaseToHost: false);
         if (!_flexibleBacking.TryMap(space, address, length, mode, out var blocks))
         {
             RestoreReplacedLocked(space, address, length, replaced, ownershipReleased);
@@ -3871,6 +3871,8 @@ public static partial class KernelMemoryCompatExports
         }
         if (!ownershipReleased)
             CommitReplacedLocked(replaced);
+        else
+            ReleaseReplacedFlexibleLocked(replaced);
         foreach (var block in blocks)
             ReplaceMappedRegionRangeLocked(new MappedRegion(block.Address, block.Size, protection,
                 true, false, 0, block.Offset, Name: name, Traits: TraitsFromMapFlags(flags) | extraTraits));

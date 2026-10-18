@@ -45,6 +45,22 @@ internal static class HostBackendUnderTest
     }
 
     /// <summary>
+    /// Picks the guest backing for backings this thread creates: true the chunked purgeable
+    /// backing, false the single object, null whatever SHARPEMU_GUEST_BACKING says. Only macOS
+    /// has a chunked backing; false when the host has none.
+    /// </summary>
+    public static bool SetChunkedBacking(bool? chunked)
+    {
+#if SHARPEMU_HOST_MACOS
+        SharpEmu.Host.MacOS.MacHostViews.ChunkedBackingForTests = chunked;
+        return true;
+#else
+        _ = chunked;
+        return false;
+#endif
+    }
+
+    /// <summary>
     /// Forces the placeholder protection step to fail. Windows-only: the
     /// POSIX backends have no separate protect step inside TryMapView.
     /// </summary>
