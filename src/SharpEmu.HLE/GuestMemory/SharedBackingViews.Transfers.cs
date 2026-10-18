@@ -36,6 +36,12 @@ public sealed unsafe partial class SharedBackingViews
                 destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
                 if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size)) return false;
                 if (WaitForCopyConflict(sourceOffset, size, destinationOffset, size)) continue;
+                // A released single-copy chunk is restored by the locked path's hooks; this one
+                // runs none. The mark and a reservation are both taken under the lock, and
+                // neither is taken over the other (TryMarkSingleCopyReleased), so a reserved
+                // range never holds a released chunk.
+                if (_singleCopy is { } singleCopy &&
+                    (singleCopy.AnyReleased(sourceOffset, size) || singleCopy.AnyReleased(destinationOffset, size))) return false;
                 if (!TryEnterLifetimeAccess()) return false;
 
                 _copyReservations ??= new CopyReservation[4];
@@ -100,6 +106,18 @@ public sealed unsafe partial class SharedBackingViews
                 return true;
             }
         }
+        return false;
+    }
+
+    // Under the lock: whether an unlocked copy has reserved any of [offset, offset + size).
+    private bool OverlapsCopyReservation(ulong offset, ulong size)
+    {
+        if (_activeCopies == 0) return false;
+        foreach (var reservation in _copyReservations!)
+        {
+            if (reservation.Overlaps(offset, size)) return true;
+        }
+
         return false;
     }
 

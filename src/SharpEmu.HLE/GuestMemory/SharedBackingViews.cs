@@ -47,6 +47,9 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // a chunk some guest address still maps. Changed under _lock (SetViewLocked/RemoveViewAtLocked).
     private readonly int[]? _chunkViews;
 
+    // Chunked backing only: which chunks a texture holds instead of the alias (GuestSingleCopy).
+    private readonly GuestSingleCopy? _singleCopy;
+
     // Single-view accesses in flight; Dispose waits for them before releasing the alias.
     // A copy reservation also waits for these: they touch the alias without checking it.
     private int _activeAccesses;
@@ -66,6 +69,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         if (_backing is { ChunkBytes: > 0, DiscardChunks: not null } chunked)
         {
             _chunkViews = new int[(chunked.Size + chunked.ChunkBytes - 1) / chunked.ChunkBytes];
+            _singleCopy = new GuestSingleCopy(this, chunked.ChunkBytes, chunked.Size);
             GuestBackingTelemetry.NoteChunkedBacking(chunked.ChunkBytes, chunked.Size);
         }
         // Outside the provider gate and before this wrapper is published: all
@@ -491,6 +495,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // incomplete ledger never prevents the legacy write or authorizes content.
     private void ClearCanonicalAlias(ulong offset, ulong count)
     {
+        _singleCopy?.BeforeWrite(offset, count);
         var interval = _backing!.BeginManagedWrite(offset, count); var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try { NativeMemory.Clear((void*)(AliasBase + offset), (nuint)count); succeeded = true; }
@@ -518,6 +523,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     private HostBackingDiscard DiscardCanonicalAlias(ulong offset, ulong count)
     {
+        _singleCopy?.BeforeDiscard(offset, count);
         var interval = _backing!.BeginManagedWrite(offset, count); var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try
@@ -531,6 +537,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     private void CopyToCanonicalAlias(ulong destination, ReadOnlySpan<byte> source)
     {
+        _singleCopy?.BeforeWrite(destination - AliasBase, (ulong)source.Length);
         var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)source.Length);
         var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
@@ -545,6 +552,8 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     private void CopyCanonicalAliasChunk(ulong source, ulong destination, int bytes)
     {
+        _singleCopy?.BeforeRead(source - AliasBase, (ulong)bytes);
+        _singleCopy?.BeforeWrite(destination - AliasBase, (ulong)bytes);
         var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)bytes);
         var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
@@ -562,6 +571,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
         try
         {
+            _singleCopy?.BeforeRead(source - AliasBase, (ulong)data.Length);
             new ReadOnlySpan<byte>((void*)source, data.Length).CopyTo(data);
             return true;
         }
@@ -680,19 +690,27 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     private int FillCanonicalAlias<TState>(ulong destination, int length, TState state, GuestSpanFill<TState> fill)
     {
-        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)length);
-        var succeeded = false;
-        if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
+        // A fill may stop short (a file read at its end): released chunks it covers whole get
+        // back only the bytes it did not reach, once it says how far it got.
+        var overwrite = _singleCopy?.BeforeFill(destination - AliasBase, (ulong)length);
+        var produced = 0;
         try
         {
-            _beforeCanonicalAliasCopyForControl?.Invoke(destination, length);
-            var produced = fill(state, new Span<byte>((void*)destination, length));
-            if ((uint)produced > (uint)length)
-                throw new InvalidOperationException($"In-place fill reported {produced} bytes for a {length}-byte range.");
-            succeeded = true;
-            return produced;
+            var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)length);
+            var succeeded = false;
+            if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
+            try
+            {
+                _beforeCanonicalAliasCopyForControl?.Invoke(destination, length);
+                produced = fill(state, new Span<byte>((void*)destination, length));
+                if ((uint)produced > (uint)length)
+                    throw new InvalidOperationException($"In-place fill reported {produced} bytes for a {length}-byte range.");
+                succeeded = true;
+                return produced;
+            }
+            finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
         }
-        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+        finally { _singleCopy?.AfterFill(overwrite, destination - AliasBase, (ulong)Math.Clamp(produced, 0, length)); }
     }
 
     public bool TryReadBacking(ulong address, Span<byte> data)
@@ -701,6 +719,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         {
             try
             {
+                _singleCopy?.BeforeRead(source - AliasBase, (ulong)data.Length);
                 new ReadOnlySpan<byte>((void*)source, data.Length).CopyTo(data);
                 return true;
             }
@@ -724,7 +743,11 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
                     if (_activeCopies != 0 && WaitForBufferCopyConflict(offset, data)) continue;
                     if (!TryEnterLifetimeAccess()) return false;
-                    try { new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data); }
+                    try
+                    {
+                        _singleCopy?.BeforeRead(offset, (ulong)data.Length);
+                        new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data);
+                    }
                     finally { ExitLifetimeAccess(); }
                     return true;
                 }
@@ -740,6 +763,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
                 {
                     foreach (var (backing, dataOffset, bytes) in pieces)
                     {
+                        _singleCopy?.BeforeRead(backing - AliasBase, (ulong)bytes);
                         new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(data.Slice(dataOffset, bytes));
                     }
                 }
@@ -797,6 +821,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
                     // Use the backing alias so CopyTo can detect overlap between different guest views.
                     try
                     {
+                        _singleCopy?.BeforeRead(sourceOffset, size);
                         CopyToCanonicalAlias(AliasBase + destinationOffset,
                             new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size));
                     }
@@ -827,6 +852,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
                     var staging = new byte[size];
                     foreach (var (backing, dataOffset, bytes) in from)
                     {
+                        _singleCopy?.BeforeRead(backing - AliasBase, (ulong)bytes);
                         new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(staging.AsSpan(dataOffset, bytes));
                     }
 
@@ -930,6 +956,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         failure = HostViewFailure.BackingUnavailable;
         if (!TryBeginViewOperation(wasRestored)) return false;
         Exception? primary = null;
+        var singleCopyMap = false;
         try
         {
             if (_backing is null || _backing.IsClosing || _backing.IsDisposed || !IsWithinBacking(offset, size))
@@ -944,7 +971,16 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
                 // bytes, and whichever writes second rewrites the other's data with no
                 // fault at the time and no way, later, to say who did it.
                 WarnOnOverlappingView(address, size, offset);
+                if (_singleCopy is { Handler: not null })
+                {
+                    // No chunk is released between here and the view record (TryMarkSingleCopyReleased).
+                    _singleCopy.MapsInFlight++;
+                    singleCopyMap = true;
+                }
             }
+
+            // A new address over a released chunk would read it straight from the backing.
+            _singleCopy?.BeforeMap(offset, size);
             bool mapped;
             try { mapped = _host.TryMapView(_backing, address, offset, size, protection, out failure); }
             catch (Exception error)
@@ -988,7 +1024,15 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             failure = HostViewFailure.BackingUnavailable; return false;
         }
         catch (Exception error) { primary = error; throw; }
-        finally { EndViewOperation(primary); }
+        finally
+        {
+            if (singleCopyMap)
+            {
+                lock (_lock) _singleCopy!.MapsInFlight--;
+            }
+
+            EndViewOperation(primary);
+        }
     }
 
     public bool Unmap(ulong address, ulong size, out bool holePreserved)
@@ -1685,6 +1729,144 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     /// <summary>Bytes per separately releasable chunk of the backing; 0 when it is one object.</summary>
     public ulong ChunkBytes => _chunkViews is null ? 0 : _backing!.ChunkBytes;
+
+    /// <summary>The released-chunk state of a chunked backing (single-copy textures); null for one object.</summary>
+    public GuestSingleCopy? SingleCopy => _singleCopy;
+
+    internal int ChunkViewCount(int chunk) =>
+        _chunkViews is { } views && (uint)chunk < (uint)views.Length ? Volatile.Read(ref views[chunk]) : 0;
+
+    // Under _lock, so a mapping cannot add a second address for the chunk between the check
+    // and the mark: exactly one view maps the chunk, whole, at this address. A chunk an
+    // unlocked copy has reserved is not marked: that copy runs no single-copy hook.
+    internal bool TryMarkSingleCopyReleased(GuestSingleCopy state, int chunk, ulong address)
+    {
+        if (_chunkViews is not { } views || (uint)chunk >= (uint)views.Length)
+        {
+            return false;
+        }
+
+        var chunkBytes = _backing!.ChunkBytes;
+        var offset = (ulong)chunk * chunkBytes;
+        var length = Math.Min(chunkBytes, Size - offset);
+        lock (_lock)
+        {
+            return IsAvailable && state.MapsInFlight == 0 && views[chunk] == 1 && !OverlapsCopyReservation(offset, length) &&
+                   TryFindRecord(address, length, out var record) && record.Offset + (address - record.Address) == offset &&
+                   state.MarkReleasedLocked(chunk);
+        }
+    }
+
+    // The single-copy manager's own accesses to the canonical alias: no hook, a lifetime pin,
+    // and the managed-write bookkeeping every alias write takes. The pin is not refused by an
+    // unlocked copy's reservation, and need not be: no reserved range holds a released chunk
+    // (TryReserveCopy, TryMarkSingleCopyReleased), and these touch released chunks only.
+    internal void WriteSingleCopyBytes(ulong offset, ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty)
+        {
+            return;
+        }
+
+        var write = BeginSingleCopyWrite(offset, (ulong)bytes.Length);
+        var succeeded = false;
+        try
+        {
+            bytes.CopyTo(new Span<byte>((void*)(AliasBase + offset), bytes.Length));
+            succeeded = true;
+        }
+        finally { EndSingleCopyWrite(write, succeeded); }
+    }
+
+    internal void FillSingleCopyBytes(ulong offset, ulong size, byte value)
+    {
+        var write = BeginSingleCopyWrite(offset, size);
+        var succeeded = false;
+        try
+        {
+            new Span<byte>((void*)(AliasBase + offset), checked((int)size)).Fill(value);
+            succeeded = true;
+        }
+        finally { EndSingleCopyWrite(write, succeeded); }
+    }
+
+    internal HostBackingDiscard EmptySingleCopyChunks(ulong offset, ulong size)
+    {
+        var write = BeginSingleCopyWrite(offset, size);
+        var succeeded = false;
+        try
+        {
+            var result = _backing!.DiscardChunks!(_backing, offset, size);
+            succeeded = true;
+            return result;
+        }
+        finally { EndSingleCopyWrite(write, succeeded); }
+    }
+
+    private readonly record struct SingleCopyWrite(HostManagedWriteIntervals.Token Operation, HostManagedWriteIntervals.Token Interval);
+
+    // The alias pin, then the operation and the interval every alias write takes. A
+    // publication holds the backing exclusively for a moment; the bytes must land, so a
+    // refused admission waits for it rather than failing.
+    private SingleCopyWrite BeginSingleCopyWrite(ulong offset, ulong size)
+    {
+        if (_backing is null || !IsWithinBacking(offset, size) || size > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset), $"0x{offset:X}+0x{size:X} is not inside the backing.");
+        }
+
+        if (!TryEnterLifetimeAccess())
+        {
+            throw new InvalidOperationException("The guest backing is closing; a released chunk cannot be written.");
+        }
+
+        var operation = _backing.BeginManagedWriteOperation();
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (!HostManagedWriteIntervals.AllowsBytes(operation))
+        {
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started) > TimeSpan.FromSeconds(10))
+            {
+                OnFatal($"A released guest chunk at 0x{offset:X} could not be written: the backing stayed busy.");
+            }
+
+            Thread.Sleep(1);
+            operation = _backing.BeginManagedWriteOperation();
+        }
+
+        var interval = _backing.BeginManagedWrite(offset, size);
+        if (!HostManagedWriteIntervals.AllowsBytes(interval))
+        {
+            HostBackingObject.EndManagedWrite(operation, false);
+            ExitLifetimeAccess();
+            throw new InvalidOperationException("Participating write lost admission.");
+        }
+
+        return new SingleCopyWrite(operation, interval);
+    }
+
+    private void EndSingleCopyWrite(SingleCopyWrite write, bool succeeded)
+    {
+        try
+        {
+            HostBackingObject.EndManagedWrite(write.Interval, succeeded);
+            HostBackingObject.EndManagedWrite(write.Operation, succeeded);
+        }
+        finally { ExitLifetimeAccess(); }
+    }
+
+    internal bool CanonicalBytesEqual(ulong offset, ReadOnlySpan<byte> bytes)
+    {
+        if (!IsWithinBacking(offset, (ulong)bytes.Length) || !TryEnterLifetimeAccess())
+        {
+            return false;
+        }
+
+        try { return new ReadOnlySpan<byte>((void*)(AliasBase + offset), bytes.Length).SequenceEqual(bytes); }
+        finally { ExitLifetimeAccess(); }
+    }
+
+    internal IHostBackingGpuAlias? CreateGpuAlias() =>
+        _backing is { CreateGpuAlias: { } create } backing && IsAvailable ? create(backing) : null;
 
     /// <summary>
     /// The guest gave [offset, offset + size) back (direct memory released, flexible memory or

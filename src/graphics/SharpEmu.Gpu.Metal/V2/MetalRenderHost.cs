@@ -56,6 +56,7 @@ internal sealed partial class MetalRenderHost :
     private readonly IGuestBackedSpace _backing;
     private readonly MetalGuestMemory _guestMemory;
     private readonly MetalImageCache _imageCache;
+    private readonly MetalSingleCopy? _singleCopy;
     private readonly IMetalImageTransfer _transfer;
     private readonly MetalGpuWorkerRelay _relay;
     private readonly MetalCompletionQueue _completions;
@@ -150,6 +151,11 @@ internal sealed partial class MetalRenderHost :
         _guestMemory.AttachToQueue(queue);
         _transfer = new MetalImageTransfer(device);
         _imageCache = new MetalImageCache(this, _transfer, _guestMemory, pages, backing);
+        if (MetalSingleCopy.Enabled && MetalSingleCopy.CanServe(_guestMemory, backing))
+        {
+            _singleCopy = new MetalSingleCopy(device, _guestMemory, backing, pages, () => CompletedSerial);
+            _imageCache.SingleCopy = _singleCopy;
+        }
         if (MetalStagedRangeCache.Enabled)
         {
             _stagedRanges = new MetalStagedRangeCache(
@@ -2368,6 +2374,9 @@ internal sealed partial class MetalRenderHost :
         DisposeBindlessImages();
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();
+        // The guest has gone: released chunks are not restored on the way out.
+        _imageCache.SingleCopy = null;
+        _singleCopy?.Dispose();
         _imageCache.Dispose();
         _stagedRanges?.Dispose();
         _guestMemory.Dispose();

@@ -264,6 +264,12 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
+        if ((vertexInput.Stage.Program?.UsesDeviceAddresses ?? false) ||
+            (state.PixelActive && (pixelInput.Stage.Program?.UsesDeviceAddresses ?? false)))
+        {
+            _host.BeforeDeviceAddressPreparation();
+        }
+
         using var preparation = _host.BeginPreparation();
         using var indirectMesh = meshInput is not null && emission.IndirectArgumentsAddress != 0
             ? _host.PrepareIndirectMeshDraw(new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,

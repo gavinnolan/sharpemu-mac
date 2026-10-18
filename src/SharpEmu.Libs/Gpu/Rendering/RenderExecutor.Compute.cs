@@ -146,6 +146,11 @@ public sealed partial class RenderExecutor
 
         ReleaseFragmentWrites();
         _host.EndRendering();
+        if (program.UsesDeviceAddresses)
+        {
+            _host.BeforeDeviceAddressPreparation();
+        }
+
         using (_host.BeginPreparation())
         {
             // The host may compile this program off the command-stream thread and report that

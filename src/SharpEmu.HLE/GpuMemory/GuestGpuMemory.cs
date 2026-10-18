@@ -85,6 +85,14 @@ public sealed class GuestGpuMemory : IDisposable
             return false;
         }
 
+        // A chunk whose guest copy a texture holds (single-copy textures) is restored before
+        // anything else sees the access; its read watch is what faulted.
+        if (AddressSpace is IGuestBackedSpace { SingleCopy.Handler: { } singleCopy } && singleCopy.TryResolveFault(address, kind is FaultKind.Write or FaultKind.Unknown))
+        {
+            TraceFault("single-copy-restored");
+            return true;
+        }
+
         var buffers = Buffers;
         var images = Images;
         bool handled;
