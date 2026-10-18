@@ -22,8 +22,8 @@ internal enum MetalMemoryPressure
 /// file-backed pages, the sum XNU's memorystatus itself compares against its pressure
 /// thresholds (vm_page_free_count + vm_page_pageable_external_count; purgeable pages are left
 /// out when the compressor is on). <see cref="ProcessFootprintBytes"/> is the process's
-/// phys_footprint, the number the kernel charges this process with: guest memory it touched,
-/// the image cache's textures, every other Metal allocation and the .NET heap.
+/// phys_footprint, reported for telemetry only: the budget does not use it (see
+/// MetalImageBudgetSettings).
 /// </summary>
 internal readonly record struct MetalHostMemorySample(
     ulong PhysicalBytes,
@@ -38,16 +38,30 @@ internal readonly record struct MetalHostMemorySample(
 /// (Demon's Souls streams textures until ~300 MiB of its direct memory is free), so the image
 /// cache has to live in whatever the host has left, not in a fixed fraction of RAM:
 ///
-///   resident = physical - (footprint - cache) - headroom     what the host can give the cache once
-///                                                           the rest of this process and macOS are in
-///   grow     = cache + available - reserve                  how far the cache may grow before the
-///                                                           kernel starts compressing (shrinks when
-///                                                           available is below the reserve)
-///   budget   = clamp(min(resident, grow), floor, ceiling)
-///   pressure WARN: budget = min(budget, cache / 2); CRITICAL: budget = floor
+///   budget   = clamp(cache + available - reserve, floor, ceiling)
+///                         how far the cache may grow before the kernel starts compressing
+///                         (shrinks by the shortfall when available is below the reserve)
+///   pressure WARN:     budget = max(min(budget, in_use + in_use/8), in_use)
+///   pressure CRITICAL: budget = floor
 ///
-/// Eviction keeps its working-set guards whatever the budget says (see MetalImageCache), so a
-/// budget below the working set runs over rather than thrashing.
+/// The inputs are the cache's own allocated bytes and system-wide page counts, not this
+/// process's phys_footprint. The footprint charges a shared-memory page once per mapping
+/// that faulted it (one 512 MB touch through three views of one shm object reads 1.5 GB,
+/// artifacts/phase1/host-heaps.md section 3), and SharpEmu maps guest memory through a
+/// canonical alias and per-range views; it also counts the process's compressed pages,
+/// so a footprint-based term reads worst exactly when the kernel is compressing guest
+/// memory. task_vm_info's internal/compressed split has the same per-mapping charge.
+/// host_statistics64 counts each physical page once, leaves compressed pages out by
+/// construction, and is already read for <c>available</c>: no extra cost.
+///
+/// in_use is the bytes of the images used in the last
+/// <see cref="MetalImageRetirementSettings.InUseFrames"/> presented frames, measured at each
+/// evaluation, rising at once and falling by a quarter of the gap per evaluation. Under
+/// WARN the cache sheds everything outside that set and no more: halving relative to the
+/// cache itself was a ratchet a cache whose every image is used each frame could never meet.
+///
+/// Eviction keeps its working-set and in-use guards whatever the budget says (see
+/// MetalImageCache), so a budget below the in-use set runs over rather than thrashing.
 /// </summary>
 internal sealed record MetalImageBudgetSettings
 {
@@ -63,9 +77,6 @@ internal sealed record MetalImageBudgetSettings
     /// <summary>The budget never exceeds this, however much memory is free.</summary>
     public ulong Ceiling { get; init; }
 
-    /// <summary>What macOS and other processes are assumed to need on top of this process.</summary>
-    public ulong Headroom { get; init; }
-
     /// <summary>The available memory the cache leaves alone; below it the cache shrinks.</summary>
     public ulong Reserve { get; init; }
 
@@ -75,10 +86,10 @@ internal sealed record MetalImageBudgetSettings
     /// <summary>
     /// Defaults for a machine of this much physical memory. Floor 1 GiB (a 1080p frame's
     /// render targets plus a few hundred MB of textures). Ceiling a quarter of RAM up to 8 GiB,
-    /// the old fixed budget's upper end. Headroom a quarter of RAM, at least 3 GiB, for macOS
-    /// (kernel, WindowServer, wired memory) and whatever else runs. Reserve a sixteenth of RAM,
-    /// at least 1 GiB: the free plus file-backed pages left before the compressor would start
-    /// on anonymous memory (guest memory included).
+    /// the old fixed budget's upper end. Reserve a sixteenth of RAM, at least 1 GiB: the free
+    /// plus file-backed pages left before the compressor would start on anonymous memory
+    /// (guest memory included). What macOS and other processes hold is already outside
+    /// <c>available</c>, so it needs no headroom of its own.
     /// </summary>
     public static MetalImageBudgetSettings Defaults(ulong physicalBytes)
     {
@@ -87,7 +98,6 @@ internal sealed record MetalImageBudgetSettings
         {
             Floor = floor,
             Ceiling = Math.Clamp(physicalBytes / 4, floor, 8 * GiB),
-            Headroom = Math.Max(physicalBytes / 4, 3 * GiB),
             Reserve = Math.Max(physicalBytes / 16, 1 * GiB),
         };
     }
@@ -102,8 +112,12 @@ internal sealed record MetalImageBudgetSettings
             : settings;
     }
 
-    /// <summary>The budget for a cache holding <paramref name="cacheBytes"/> of textures, given this host reading.</summary>
-    public ulong Compute(in MetalHostMemorySample sample, ulong cacheBytes)
+    /// <summary>
+    /// The budget for a cache holding <paramref name="cacheBytes"/> of textures, of which
+    /// <paramref name="inUseBytes"/> were used in the last few presented frames, given this
+    /// host reading.
+    /// </summary>
+    public ulong Compute(in MetalHostMemorySample sample, ulong cacheBytes, ulong inUseBytes)
     {
         if (FixedBudget is { } fixedBudget)
         {
@@ -117,27 +131,24 @@ internal sealed record MetalImageBudgetSettings
             return ceiling;
         }
 
-        var rest = sample.ProcessFootprintBytes > cacheBytes ? sample.ProcessFootprintBytes - cacheBytes : 0;
-        var claimed = rest + Headroom;
-        var resident = sample.PhysicalBytes > claimed ? sample.PhysicalBytes - claimed : 0;
-
-        ulong grow;
+        ulong budget;
         if (sample.AvailableBytes >= Reserve)
         {
             var spare = sample.AvailableBytes - Reserve;
-            grow = cacheBytes > ulong.MaxValue - spare ? ulong.MaxValue : cacheBytes + spare;
+            budget = cacheBytes > ulong.MaxValue - spare ? ulong.MaxValue : cacheBytes + spare;
         }
         else
         {
             var shortfall = Reserve - sample.AvailableBytes;
-            grow = cacheBytes > shortfall ? cacheBytes - shortfall : 0;
+            budget = cacheBytes > shortfall ? cacheBytes - shortfall : 0;
         }
 
-        var budget = Math.Min(resident, grow);
         budget = sample.Pressure switch
         {
             MetalMemoryPressure.Critical => 0,
-            MetalMemoryPressure.Warn => Math.Min(budget, cacheBytes / 2),
+            // Shed what is outside the in-use set, with an eighth of slack so the images the
+            // title brings in next do not trigger a pass each; never below the set itself.
+            MetalMemoryPressure.Warn => Math.Max(Math.Min(budget, inUseBytes + inUseBytes / 8), inUseBytes),
             _ => budget,
         };
 
@@ -154,7 +165,11 @@ internal sealed record MetalImageBudgetSettings
 /// working set of a title that presents once every few seconds. Budget eviction separately
 /// requires <see cref="BudgetMinimumIdleSeconds"/> of idleness (except under critical
 /// pressure), so an image used every few frames, a shadow cascade or a probe updated
-/// round-robin, is not dropped and re-uploaded on each pass.
+/// round-robin, is not dropped and re-uploaded on each pass. Outside critical pressure it
+/// also requires the image to be outside the in-use set, the images used in the last
+/// <see cref="InUseFrames"/> presented frames: counted in frames, because a title presenting
+/// twice a second (Demon's Souls in-world) cycles through its textures over a few seconds,
+/// and a 2 s idle rule evicted images that came back within 30 s 62% of the time.
 /// </summary>
 internal sealed record MetalImageRetirementSettings
 {
@@ -164,11 +179,14 @@ internal sealed record MetalImageRetirementSettings
 
     public double BudgetMinimumIdleSeconds { get; init; } = 2;
 
+    public uint InUseFrames { get; init; } = 30;
+
     public bool Enabled => Frames != 0 && Seconds > 0;
 
     /// <summary>
     /// SHARPEMU_METAL_V2_IMAGE_RETIRE_FRAMES and SHARPEMU_METAL_V2_IMAGE_RETIRE_SECONDS (either 0
-    /// turns retirement off), SHARPEMU_METAL_V2_IMAGE_EVICT_MIN_IDLE_SECONDS.
+    /// turns retirement off), SHARPEMU_METAL_V2_IMAGE_EVICT_MIN_IDLE_SECONDS,
+    /// SHARPEMU_METAL_V2_IMAGE_INUSE_FRAMES.
     /// </summary>
     public static MetalImageRetirementSettings FromEnvironment()
     {
@@ -190,6 +208,11 @@ internal sealed record MetalImageRetirementSettings
             idle >= 0)
         {
             settings = settings with { BudgetMinimumIdleSeconds = idle };
+        }
+
+        if (uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IMAGE_INUSE_FRAMES"), out var inUseFrames))
+        {
+            settings = settings with { InUseFrames = inUseFrames };
         }
 
         return settings;

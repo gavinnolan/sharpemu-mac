@@ -1547,7 +1547,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var image = new MetalCachedImage(in admitted, in shape, texture)
         {
             LastAccessTick = _collectionTick,
-            FirstLevelUseTick = _collectionTick,
+            NeededWindowFrame = _idleClock.Frames,
+            LevelsChangedFrame = _idleClock.Frames,
         };
         if (windowView)
         {

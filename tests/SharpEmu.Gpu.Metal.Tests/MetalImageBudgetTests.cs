@@ -40,7 +40,6 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         var settings = Settings24;
         Assert.Equal(1 * GiB, settings.Floor);
         Assert.Equal(6 * GiB, settings.Ceiling);
-        Assert.Equal(6 * GiB, settings.Headroom);
         Assert.Equal(1536 * MiB, settings.Reserve);
         Assert.Null(settings.FixedBudget);
 
@@ -54,17 +53,21 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
     public void AnIdleHostGivesTheCeiling()
     {
         var sample = new MetalHostMemorySample(24 * GiB, 16 * GiB, 2 * GiB, MetalMemoryPressure.Normal);
-        Assert.Equal(6 * GiB, Settings24.Compute(in sample, 0));
+        Assert.Equal(6 * GiB, Settings24.Compute(in sample, 0, 0));
     }
 
-    // Demon's Souls in-world on 24 GiB: 17 GiB footprint, 4.25 GiB of it the cache. The rest of
-    // the process plus the headroom leaves 24 - 12.75 - 6 = 5.25 GiB.
+    // The budget is the cache's own bytes against system-wide available memory. The process
+    // footprint, which counts compressed pages and charges a shared guest page once per
+    // mapping, has no say: Demon's Souls read 17-18 GiB of footprint on a 24 GiB Mac with
+    // gigabytes of it compressed or aliased.
     [Fact]
-    public void TheRestOfTheProcessAndHeadroomBoundTheBudget()
+    public void TheBudgetIsTheCacheAgainstAvailableMemoryNotTheFootprint()
     {
-        var cache = 4352 * MiB;
-        var sample = new MetalHostMemorySample(24 * GiB, 8 * GiB, 17 * GiB, MetalMemoryPressure.Normal);
-        Assert.Equal(24 * GiB - (17 * GiB - cache) - 6 * GiB, Settings24.Compute(in sample, cache));
+        var cache = 3 * GiB;
+        var lean = new MetalHostMemorySample(24 * GiB, 4 * GiB, 8 * GiB, MetalMemoryPressure.Normal);
+        var inflated = lean with { ProcessFootprintBytes = 30 * GiB };
+        Assert.Equal(cache + 4 * GiB - 1536 * MiB, Settings24.Compute(in lean, cache, cache));
+        Assert.Equal(Settings24.Compute(in lean, cache, cache), Settings24.Compute(in inflated, cache, cache));
     }
 
     [Fact]
@@ -73,34 +76,46 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         var cache = 4 * GiB;
         // 1 GiB available against a 1.5 GiB reserve: give back 512 MiB.
         var sample = new MetalHostMemorySample(24 * GiB, 1 * GiB, 10 * GiB, MetalMemoryPressure.Normal);
-        Assert.Equal(cache - 512 * MiB, Settings24.Compute(in sample, cache));
+        Assert.Equal(cache - 512 * MiB, Settings24.Compute(in sample, cache, cache));
 
         // 2 GiB available: grow by 512 MiB at most.
         sample = sample with { AvailableBytes = 2 * GiB };
-        Assert.Equal(cache + 512 * MiB, Settings24.Compute(in sample, cache));
+        Assert.Equal(cache + 512 * MiB, Settings24.Compute(in sample, cache, cache));
     }
 
+    // Under WARN the cache sheds what is outside its in-use set and no more. Halving the cache
+    // was a ratchet: Demon's Souls uses every image each frame, so "used=1726MB budget=1123MB"
+    // could never be met and the cache only churned.
     [Fact]
-    public void PressureShrinksAggressivelyButNeverBelowTheFloor()
+    public void WarnFloorsTheBudgetAtTheInUseSet()
     {
-        var cache = 4 * GiB;
-        var warn = new MetalHostMemorySample(24 * GiB, 8 * GiB, 10 * GiB, MetalMemoryPressure.Warn);
-        Assert.Equal(2 * GiB, Settings24.Compute(in warn, cache));
+        var cache = 3 * GiB;
+        var inUse = 2 * GiB;
+        var warn = new MetalHostMemorySample(24 * GiB, 8 * GiB, 17 * GiB, MetalMemoryPressure.Warn);
+        // Plenty available: down to the set plus an eighth of slack.
+        Assert.Equal(inUse + inUse / 8, Settings24.Compute(in warn, cache, inUse));
 
+        // Nothing available: the host budget (cache - 1.5 GiB shortfall) is under the set; the set holds.
+        var tight = warn with { AvailableBytes = 0 };
+        Assert.Equal(inUse, Settings24.Compute(in tight, cache, inUse));
+
+        // A cache whose every image is in use keeps a budget it can meet.
+        Assert.True(Settings24.Compute(in warn, cache, cache) >= cache);
+        Assert.True(Settings24.Compute(in tight, cache, cache) >= cache);
+
+        // Critical pressure still drops to the floor, and so does a guest that fills the machine.
         var critical = warn with { Pressure = MetalMemoryPressure.Critical };
-        Assert.Equal(1 * GiB, Settings24.Compute(in critical, cache));
-
-        // A guest that fills the machine on its own leaves the floor, not zero.
+        Assert.Equal(1 * GiB, Settings24.Compute(in critical, cache, inUse));
         var full = new MetalHostMemorySample(16 * GiB, 0, 15 * GiB, MetalMemoryPressure.Normal);
-        Assert.Equal(1 * GiB, MetalImageBudgetSettings.Defaults(16 * GiB).Compute(in full, 512 * MiB));
+        Assert.Equal(1 * GiB, MetalImageBudgetSettings.Defaults(16 * GiB).Compute(in full, 512 * MiB, 512 * MiB));
     }
 
     [Fact]
     public void AFixedBudgetIgnoresTheHostAndNoReadingGivesTheCeiling()
     {
         var critical = new MetalHostMemorySample(24 * GiB, 0, 23 * GiB, MetalMemoryPressure.Critical);
-        Assert.Equal(3 * GiB, (Settings24 with { FixedBudget = 3 * GiB }).Compute(in critical, 5 * GiB));
-        Assert.Equal(6 * GiB, Settings24.Compute(default, 5 * GiB));
+        Assert.Equal(3 * GiB, (Settings24 with { FixedBudget = 3 * GiB }).Compute(in critical, 5 * GiB, 5 * GiB));
+        Assert.Equal(6 * GiB, Settings24.Compute(default, 5 * GiB, 5 * GiB));
     }
 
     // ---- Idle clock --------------------------------------------------------------------
@@ -286,6 +301,55 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         Assert.True(rig.Cache.TryGetImage(current, out _));
     }
 
+    // Outside critical pressure an image used in the last InUseFrames presented frames is never
+    // evicted, even outside the frame guard and idle past the minimum: here one used every
+    // third frame of a title presenting once a second. Under WARN the budget sits at the
+    // in-use set, so only what is outside it is over.
+    [Fact]
+    public void BudgetEvictionTakesOnlyImagesOutsideTheInUseSet()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Configure(retireFrames: 0, retireSeconds: 0, budget: Settings24 with { FixedBudget = 1 }, inUseFrames: 4);
+        var once = rig.Acquire(GuestBase, ImageRole.Texture);
+        var every = rig.Acquire(GuestBase + 0x10000, ImageRole.Texture);
+        var third = rig.Acquire(GuestBase + 0x20000, ImageRole.Texture);
+        for (var frame = 0; frame < 12; frame++)
+        {
+            if (frame % 3 == 0)
+            {
+                rig.Acquire(GuestBase + 0x20000, ImageRole.Texture);
+            }
+
+            rig.Frame(seconds: 1, touch: GuestBase + 0x10000);
+        }
+
+        Assert.False(rig.Cache.TryGetImage(once, out _));
+        Assert.True(rig.Cache.TryGetImage(every, out _));
+        Assert.True(rig.Cache.TryGetImage(third, out _));
+        Assert.Equal(1, rig.Cache.Counters.Evictions);
+        var inUse = rig.Cache.GetImage(every).CountedBytes + rig.Cache.GetImage(third).CountedBytes;
+        Assert.Equal(inUse, rig.Cache.InUseBytes);
+
+        // WARN: the budget is the in-use set plus an eighth, not half the cache.
+        rig.Configure(retireFrames: 0, retireSeconds: 0, budget: Settings24 with { Floor = 1 },
+            sample: () => new MetalHostMemorySample(24 * GiB, 8 * GiB, 10 * GiB, MetalMemoryPressure.Warn), inUseFrames: 4);
+        Assert.Equal(inUse + inUse / 8, rig.Cache.MemoryBudgetBytes);
+        for (var frame = 0; frame < 6; frame++)
+        {
+            if (frame % 3 == 0)
+            {
+                rig.Acquire(GuestBase + 0x20000, ImageRole.Texture);
+            }
+
+            rig.Frame(seconds: 1, touch: GuestBase + 0x10000);
+        }
+
+        Assert.True(rig.Cache.TryGetImage(every, out _));
+        Assert.True(rig.Cache.TryGetImage(third, out _));
+        Assert.Equal(1, rig.Cache.Counters.Evictions);
+    }
+
     [Fact]
     public void ARecreatedEvictedImageCountsAsARefault()
     {
@@ -412,16 +476,17 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public MetalTransferHarness Harness { get; }
         public MetalImageCache Cache { get; }
 
+        // inUseFrames 0 leaves budget eviction to the frame guard and the idle minimum.
         public void Configure(
             uint retireFrames, double retireSeconds,
-            MetalImageBudgetSettings? budget = null, Func<MetalHostMemorySample>? sample = null)
+            MetalImageBudgetSettings? budget = null, Func<MetalHostMemorySample>? sample = null, uint inUseFrames = 0)
         {
             budget ??= sample is null
                 ? MetalImageBudgetSettings.Defaults(24 * GiB) with { FixedBudget = 64 * GiB }
                 : MetalImageBudgetSettings.Defaults(24 * GiB);
             Cache.ConfigureMemoryPolicy(
                 budget,
-                new MetalImageRetirementSettings { Frames = retireFrames, Seconds = retireSeconds },
+                new MetalImageRetirementSettings { Frames = retireFrames, Seconds = retireSeconds, InUseFrames = inUseFrames },
                 sample ?? (() => default),
                 () => _now,
                 () => 0);

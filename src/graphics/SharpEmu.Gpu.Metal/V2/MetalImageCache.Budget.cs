@@ -31,9 +31,16 @@ internal sealed partial class MetalImageCache
     private long _retiredImages;
     private long _retiredBytes;
     private long _refaults;
+    // Bytes of the images used in the last InUseFrames presented frames: as measured at the
+    // last evaluation, and held (rises at once, falls by a quarter of the gap per evaluation).
+    private ulong _inUseBytes;
+    private ulong _inUseHeldBytes;
     private readonly Dictionary<(ulong Address, ulong Size), long> _recentlyDropped = new();
 
     public ulong MemoryBudgetBytes => Volatile.Read(ref _memoryBudgetBytes);
+
+    /// <summary>Bytes of the in-use set at the last budget evaluation, before hysteresis.</summary>
+    public ulong InUseBytes => Volatile.Read(ref _inUseBytes);
 
     /// <summary>Images and allocated bytes released for age since the cache was made.</summary>
     public (long Images, long Bytes) RetiredTotals => (Volatile.Read(ref _retiredImages), Volatile.Read(ref _retiredBytes));
@@ -60,7 +67,9 @@ internal sealed partial class MetalImageCache
         _pressureEvents = pressureEvents;
         var sampleInterval = Math.Max(Stopwatch.Frequency / 4, 1);
         _idleClock = new MetalImageIdleClock(
-            retirement.Frames, Math.Max(retirement.Seconds, retirement.BudgetMinimumIdleSeconds), sampleInterval);
+            Math.Max(retirement.Frames, retirement.InUseFrames),
+            Math.Max(retirement.Seconds, retirement.BudgetMinimumIdleSeconds), sampleInterval);
+        _inUseHeldBytes = 0;
         var now = clock();
         _idleClock.Sample(now, _collectionTick);
         _nextHousekeeping = now + Stopwatch.Frequency;
@@ -71,6 +80,7 @@ internal sealed partial class MetalImageCache
     {
         _seenPressureEvents = _pressureEvents();
         _nextBudgetEvaluation = now + _budgetSettings.EvaluationInterval;
+        MeasureInUseLocked();
         if (_budgetSettings.FixedBudget is { } fixedBudget)
         {
             Volatile.Write(ref _memoryBudgetBytes, fixedBudget);
@@ -78,9 +88,30 @@ internal sealed partial class MetalImageCache
         }
 
         _hostSample = _sampleHost();
-        Volatile.Write(ref _memoryBudgetBytes, _budgetSettings.Compute(in _hostSample, _totalUsedMemory));
+        Volatile.Write(ref _memoryBudgetBytes, _budgetSettings.Compute(in _hostSample, _totalUsedMemory, _inUseHeldBytes));
         _budgetEvaluations++;
     }
+
+    // One pass over the images, once per evaluation: the bytes of the in-use set, and the
+    // held value the WARN budget floors at. Caller holds the lock.
+    private void MeasureInUseLocked()
+    {
+        var bytes = 0UL;
+        _slots.ForEach((_, image) =>
+        {
+            if (image.Registered && IsInUseLocked(image))
+            {
+                bytes += image.CountedBytes;
+            }
+        });
+        Volatile.Write(ref _inUseBytes, bytes);
+        _inUseHeldBytes = bytes >= _inUseHeldBytes ? bytes : _inUseHeldBytes - (_inUseHeldBytes - bytes) / 4;
+    }
+
+    // The in-use set: an image used in the last InUseFrames presented frames, or in the frame
+    // guard's working set. Before that many frames were presented every image is in it.
+    private bool IsInUseLocked(MetalCachedImage image) =>
+        !IsOutsideWorkingSet(image) || image.LastAccessTick >= _idleClock.TickFramesAgo(_retirement.InUseFrames);
 
     // Re-reads the host once per evaluation interval, and at once when the kernel's pressure
     // level changed. Caller holds the lock.
@@ -128,12 +159,20 @@ internal sealed partial class MetalImageCache
 
         // Under critical pressure only the frame guard holds: compression and swap cost more
         // than re-uploading an image used a few frames ago.
-        if (_hostSample.Pressure == MetalMemoryPressure.Critical || _retirement.BudgetMinimumIdleSeconds <= 0)
+        if (_hostSample.Pressure == MetalMemoryPressure.Critical)
         {
             return true;
         }
 
-        return image.LastAccessTick < TickIdleFor(now, _retirement.BudgetMinimumIdleSeconds);
+        // Otherwise only an image outside the in-use set goes, and only once it has been idle
+        // for the minimum time as well.
+        if (IsInUseLocked(image))
+        {
+            return false;
+        }
+
+        return _retirement.BudgetMinimumIdleSeconds <= 0 ||
+            image.LastAccessTick < TickIdleFor(now, _retirement.BudgetMinimumIdleSeconds);
     }
 
     // Once a second: release the images past the retirement age and forget old drops.

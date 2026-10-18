@@ -149,7 +149,8 @@ internal sealed partial class MetalImageCache
         var policy = _budgetSettings.FixedBudget is null ? "host" : "fixed";
         return string.Create(culture,
             $"images={images} allocated_mb={totalAllocated / Mb:F0} accounted_mb={accounted / Mb:F0} " +
-            $"counted_mb={counted / Mb:F0} budget_mb={MemoryBudgetBytes / Mb:F0} budget_policy={policy} " +
+            $"counted_mb={counted / Mb:F0} budget_mb={MemoryBudgetBytes / Mb:F0} in_use_mb={InUseBytes / Mb:F0} " +
+            $"budget_policy={policy} " +
             $"budget_evaluations={evaluations} pressure={PressureName(host.Pressure)} " +
             $"pressure_events={MetalHostMemory.PressureEvents} host_available_mb={host.AvailableBytes / Mb:F0} " +
             $"process_footprint_mb={host.ProcessFootprintBytes / Mb:F0} " +

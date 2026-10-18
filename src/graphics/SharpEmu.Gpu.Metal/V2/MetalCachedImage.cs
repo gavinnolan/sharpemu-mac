@@ -178,12 +178,30 @@ internal sealed class MetalCachedImage : IDisposable
 
     public ulong ResidentEnd { get; private set; }
 
+    /// <summary>No sampled binding needed any level in the window.</summary>
+    public const uint NoNeededLevel = uint.MaxValue;
+
     /// <summary>
-    /// The collection tick of the newest texture binding that needed the texture's first
-    /// level, so a texture is cut down to a coarser BASE_LEVEL only once nothing in the
-    /// working set still samples the finer one.
+    /// The finest guest level a sampled binding needed (its BASE_LEVEL as the texture would
+    /// be cut for it) in the current window of presented frames, begun at
+    /// <see cref="NeededWindowFrame"/>, and in the window before it. Together they hold every
+    /// binding of at least the last window, so a texture is cut down only to a level nothing
+    /// bound in that time needed finer than (MetalImageCache.BaseLevel.cs).
     /// </summary>
-    public ulong FirstLevelUseTick;
+    public uint NeededLevel = NoNeededLevel;
+
+    public uint NeededLevelBefore = NoNeededLevel;
+
+    public long NeededWindowFrame;
+
+    /// <summary>The presented frame the texture's levels were last set at: made, grown or shrunk.</summary>
+    public long LevelsChangedFrame;
+
+    /// <summary>Whether that change was a shrink, so a grow soon after it is a reversal.</summary>
+    public bool LevelsLastShrunk;
+
+    /// <summary>Doublings of the shrink window, one per shrink a binding soon reversed.</summary>
+    public byte ShrinkBackoff;
 
     /// <summary>Records which guest levels a newly made texture holds and the bytes they read.</summary>
     public void SetResidentLevels(uint firstLevel, ulong start, ulong end)

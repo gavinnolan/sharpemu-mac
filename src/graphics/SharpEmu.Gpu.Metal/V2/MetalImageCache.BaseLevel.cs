@@ -29,21 +29,35 @@ namespace SharpEmu.Gpu.Metal.V2;
 //  - a binding that needs a finer level gets a texture with it at once, filled from guest
 //    memory (the streamer only lowers BASE_LEVEL after the level is resident);
 //  - a binding that needs only coarser levels keeps the texture through a view until no
-//    binding in this frame or the one before needed the finer ones - the same working-set
-//    rule the budget evicts by, so two descriptors of one texture with different
-//    BASE_LEVELs do not trade reallocations every frame - and then shrinks it, because
-//    every level dropped gives back about three quarters of what is left and the coarser
-//    levels that are uploaded again are only a third of the level above them; a texture
-//    whose finer levels hold less than ShrinkMinimumBytes is not worth the reallocation;
+//    binding for a whole window of presented frames (ShrinkWindowFrames) needed the finer
+//    ones, and then shrinks it to the finest level any binding in that window needed -
+//    not to the level of the binding that happens to look - because every level dropped
+//    gives back about three quarters of what is left and the coarser levels that are
+//    uploaded again are only a third of the level above them. The window is per image and
+//    per level: two descriptors of one texture with different BASE_LEVELs keep it at the
+//    finer one, and a texture that had to grow back soon after a shrink doubles its window
+//    (up to 2^MaxShrinkBackoff), so a descriptor that comes back every so often cannot make
+//    it trade reallocations. Frames, not seconds or submissions, because a title presenting
+//    twice a second still binds its textures once per frame. A texture whose finer levels
+//    hold less than ShrinkMinimumBytes is not worth the reallocation;
 //  - anything that writes the image (render target, storage, clear, copy, kernel fill)
 //    gets the whole chain first (PromoteLinearView), so a cut texture is never written
 //    back and write-back and retiling of GPU-written images are as they were.
+//
+// Only a binding tells the cache a texture's BASE_LEVEL (the T# lives in guest memory), so a
+// texture the title coarsens and stops binding keeps its levels until age retirement or the
+// budget takes the whole image.
 //
 // SHARPEMU_METAL_V2_BASE_LEVEL=0 allocates every texture with its whole chain again.
 internal sealed partial class MetalImageCache
 {
     // Finer levels that hold less than this are kept through a view rather than reallocated.
     private const ulong ShrinkMinimumBytes = 256 * 1024;
+
+    // Presented frames the finer levels must go unneeded before the texture is cut down, and
+    // how many times a reversed shrink may double that (8 << 5 = 256 frames at most).
+    private const long ShrinkWindowFrames = 8;
+    private const int MaxShrinkBackoff = 5;
 
     /// <summary>Whether sampled textures are allocated from their BASE_LEVEL; tests switch it.</summary>
     internal static bool BaseLevelAllocation { get; set; } =
@@ -53,6 +67,8 @@ internal sealed partial class MetalImageCache
     private long _baseLevelGrows;
     private long _baseLevelShrinks;
     private long _baseLevelPromotions;
+    private long _baseLevelRegrows;
+    private long _baseLevelRegrowsReported;
     private (long Created, long Grows, long Shrinks, long Promotions) _baseLevelReported;
 
     /// <summary>Texture reshapes since the cache was made: created cut, grown, shrunk, given the whole chain.</summary>
@@ -123,8 +139,9 @@ internal sealed partial class MetalImageCache
 
     /// <summary>
     /// Fits the texture of a sampled image to a binding's BASE_LEVEL before the binding takes
-    /// its view: a finer level than the texture holds grows it at once; a coarser one shrinks
-    /// it once the finer levels have left the working set. Caller holds the lock.
+    /// its view: a finer level than the texture holds grows it at once; once no binding for a
+    /// window of presented frames needed its finer levels, it shrinks to the finest level they
+    /// did need. Caller holds the lock.
     /// </summary>
     private void FitResidentLevelsLocked(MetalCachedImage image, in ImageViewDescription view)
     {
@@ -133,31 +150,54 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        var frame = _idleClock.Frames;
+        var window = ShrinkWindowFrames << image.ShrinkBackoff;
         var desired = DesiredFirstLevel(image, view.BaseLevel);
+        NoteNeededLevel(image, desired, frame, window);
         if (desired < image.FirstLevel)
         {
+            if (image.LevelsLastShrunk && frame - image.LevelsChangedFrame < ShrinkWindowFrames << MaxShrinkBackoff)
+            {
+                // The shrink was premature: wait longer before the next one.
+                image.ShrinkBackoff = (byte)Math.Min(image.ShrinkBackoff + 1, MaxShrinkBackoff);
+                _baseLevelRegrows++;
+            }
+
             ReshapeLevelsLocked(image, desired);
             _baseLevelGrows++;
-            image.FirstLevelUseTick = _collectionTick;
+            image.LevelsChangedFrame = frame;
+            image.LevelsLastShrunk = false;
             return;
         }
 
-        if (desired == image.FirstLevel)
-        {
-            image.FirstLevelUseTick = _collectionTick;
-            return;
-        }
-
-        var stillUsed = image.FirstLevelUseTick >= _previousFrameStartTick ||
-            _collectionTick - Math.Min(_collectionTick, image.FirstLevelUseTick) <= TicksBeforeRemoval;
-        if (stillUsed || LevelBytesBetween(in image.Description, image.FirstLevel, desired) < ShrinkMinimumBytes)
+        var needed = Math.Min(image.NeededLevel, image.NeededLevelBefore);
+        if (needed <= image.FirstLevel || frame - image.LevelsChangedFrame < window ||
+            LevelBytesBetween(in image.Description, image.FirstLevel, needed) < ShrinkMinimumBytes)
         {
             return;
         }
 
-        ReshapeLevelsLocked(image, desired);
+        ReshapeLevelsLocked(image, needed);
         _baseLevelShrinks++;
-        image.FirstLevelUseTick = _collectionTick;
+        image.LevelsChangedFrame = frame;
+        image.LevelsLastShrunk = true;
+    }
+
+    // Folds one binding's level into the image's two windows. A window's bindings all fall
+    // in its first `window` frames (a later one starts the next window), so a window dropped
+    // two windows on holds nothing from the last `window` frames, and the two kept hold at
+    // least that span. The window only ever widens, which keeps that true across a backoff.
+    private static void NoteNeededLevel(MetalCachedImage image, uint level, long frame, long window)
+    {
+        var age = frame - image.NeededWindowFrame;
+        if (age >= window)
+        {
+            image.NeededLevelBefore = age < 2 * window ? image.NeededLevel : MetalCachedImage.NoNeededLevel;
+            image.NeededLevel = MetalCachedImage.NoNeededLevel;
+            image.NeededWindowFrame = frame;
+        }
+
+        image.NeededLevel = Math.Min(image.NeededLevel, level);
     }
 
     /// <summary>
@@ -199,12 +239,16 @@ internal sealed partial class MetalImageCache
         var current = BaseLevelCounters;
         var last = _baseLevelReported;
         _baseLevelReported = current;
+        var regrows = Volatile.Read(ref _baseLevelRegrows);
+        var lastRegrows = _baseLevelRegrowsReported;
+        _baseLevelRegrowsReported = regrows;
         return string.Create(CultureInfo.InvariantCulture,
             $"base_level_images={images} base_level_allocated_mb={allocated / Mb:F0} " +
             $"base_level_dropped_mb={dropped / Mb:F0} " +
             $"base_level_created={current.Created}(+{current.Created - last.Created}) " +
             $"base_level_grows={current.Grows}(+{current.Grows - last.Grows}) " +
             $"base_level_shrinks={current.Shrinks}(+{current.Shrinks - last.Shrinks}) " +
+            $"base_level_regrows={regrows}(+{regrows - lastRegrows}) " +
             $"base_level_promotions={current.Promotions}(+{current.Promotions - last.Promotions})");
     }
 }

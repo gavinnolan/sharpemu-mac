@@ -14,7 +14,9 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// Sampled textures held from their T# BASE_LEVEL, through the real request builder and the
 /// real cache: what is allocated and counted, which texture level a binding samples, and how
 /// the texture follows BASE_LEVEL going down (grown at once) and up (kept through a view while
-/// the finer level is in the working set, then shrunk), and that a write gets the whole chain.
+/// a binding in the last window of presented frames needed the finer level, then shrunk), that
+/// descriptors with different BASE_LEVELs do not make it trade reallocations, and that a write
+/// gets the whole chain.
 /// </summary>
 public sealed unsafe partial class MetalImageBudgetTests
 {
@@ -148,13 +150,18 @@ public sealed unsafe partial class MetalImageBudgetTests
         Assert.Equal(0u, reference.FirstLevel);
         var fullBytes = reference.AllocatedBytes;
 
-        // ...and gives levels 0 and 1 back once a whole frame went by without them. A use
-        // counts until the start of the previous frame; level 0 was last used at the first
-        // frame's start tick, so it takes three marks for the previous frame to begin after it.
-        rig.Frame(seconds: 0.1);
-        rig.Frame(seconds: 0.1);
-        rig.Frame(seconds: 0.1);
-        var (shrunkId, shrunkView) = AcquireMipped(rig, FullAddress, baseLevel: 2, seed: 0x47);
+        // ...and gives levels 0 and 1 back once no binding needed them for a whole window of
+        // eight presented frames. Level 0 was bound in frame 0's window: frames 8-15 still
+        // see it in the window before, frame 16 sees two windows without it.
+        for (var frame = 1; frame < 16; frame++)
+        {
+            rig.Frame(seconds: 0.1, submit: false);
+            AcquireMipped(rig, FullAddress, baseLevel: 2, seed: 0x47, write: false);
+            Assert.Equal(0u, reference.FirstLevel);
+        }
+
+        rig.Frame(seconds: 0.1, submit: false);
+        var (shrunkId, shrunkView) = AcquireMipped(rig, FullAddress, baseLevel: 2, seed: 0x47, write: false);
         Assert.Equal(fullId, shrunkId);
         Assert.Equal(2u, reference.FirstLevel);
         Assert.Equal(1, rig.Cache.BaseLevelCounters.Shrinks);
@@ -162,6 +169,75 @@ public sealed unsafe partial class MetalImageBudgetTests
         Assert.Equal(image.AllocatedBytes + reference.AllocatedBytes, rig.Cache.TotalUsedMemory);
         Assert.Equal(expected[2], ReadLevel(rig, shrunkView, 0));
         Assert.Equal(expected[3], ReadLevel(rig, shrunkView, 1));
+    }
+
+    // The streamer's cycle: a texture made cut, streamed finer one level at a time (each a grow),
+    // then coarsened past where it started. The texture follows down and gives the memory back.
+    [Fact]
+    public void ATextureTheTitleCoarsensShrinksAndReleasesItsFinerLevels()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (id, _) = AcquireMipped(rig, CutAddress, baseLevel: 2, seed: 0x6D);
+        var image = rig.Cache.GetImage(id);
+        rig.Frame(seconds: 0.5, submit: false);
+        AcquireMipped(rig, CutAddress, baseLevel: 1, seed: 0x6D, write: false);
+        rig.Frame(seconds: 0.5, submit: false);
+        AcquireMipped(rig, CutAddress, baseLevel: 0, seed: 0x6D, write: false);
+        Assert.Equal(0u, image.FirstLevel);
+        Assert.Equal(2, rig.Cache.BaseLevelCounters.Grows);
+        var wholeBytes = rig.Cache.TotalUsedMemory;
+
+        for (var frame = 0; frame < 16 && image.FirstLevel == 0; frame++)
+        {
+            rig.Frame(seconds: 0.5, submit: false);
+            AcquireMipped(rig, CutAddress, baseLevel: 3, seed: 0x6D, write: false);
+        }
+
+        Assert.Equal(3u, image.FirstLevel);
+        Assert.Equal(1, rig.Cache.BaseLevelCounters.Shrinks);
+        Assert.True(rig.Cache.TotalUsedMemory * 8 < wholeBytes);
+    }
+
+    // Two descriptors of one texture with different BASE_LEVELs bound in alternate frames keep
+    // it at the finer one and never reallocate it. One that comes back only every 20 frames,
+    // past the eight-frame window, reverses the first shrink or two; each reversal doubles
+    // the image's window, and once that spans the period the texture stays.
+    [Fact]
+    public void AlternatingBaseLevelsDoNotTradeReallocations()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (id, _) = AcquireMipped(rig, FullAddress, baseLevel: 0, seed: 0x71);
+        var image = rig.Cache.GetImage(id);
+        var texture = image.Texture;
+        for (var frame = 1; frame <= 48; frame++)
+        {
+            rig.Frame(seconds: 0.1, submit: false);
+            AcquireMipped(rig, FullAddress, baseLevel: frame % 2 == 0 ? 0u : 2u, seed: 0x71, write: false);
+        }
+
+        Assert.Equal(0u, image.FirstLevel);
+        Assert.Equal(texture, image.Texture);
+        Assert.Equal(0, rig.Cache.BaseLevelCounters.Shrinks);
+        Assert.Equal(0, rig.Cache.BaseLevelCounters.Grows);
+
+        long settled = 0;
+        for (var frame = 0; frame < 240; frame++)
+        {
+            rig.Frame(seconds: 0.1, submit: false);
+            AcquireMipped(rig, FullAddress, baseLevel: frame % 20 == 0 ? 0u : 2u, seed: 0x71, write: false);
+            if (frame == 120)
+            {
+                settled = rig.Cache.BaseLevelCounters.Shrinks;
+            }
+        }
+
+        var counters = rig.Cache.BaseLevelCounters;
+        output.WriteLine($"shrinks={counters.Shrinks} grows={counters.Grows}");
+        Assert.InRange(settled, 1, 3);
+        Assert.Equal(settled, counters.Shrinks);
+        Assert.Equal(counters.Shrinks, counters.Grows);
     }
 
     // Anything that writes the image gets the whole chain first, and a written image stays
@@ -183,11 +259,13 @@ public sealed unsafe partial class MetalImageBudgetTests
         Assert.True(image.IsGpuModified);
         Assert.Equal(1, rig.Cache.BaseLevelCounters.Promotions);
 
-        // As many frames as the shrink test needs, so only the write keeps it whole.
-        rig.Frame(seconds: 0.1);
-        rig.Frame(seconds: 0.1);
-        rig.Frame(seconds: 0.1);
-        AcquireMipped(rig, CutAddress, baseLevel: 2, seed: 0x5B, write: false);
+        // More frames than the shrink test needs, so only the write keeps it whole.
+        for (var frame = 0; frame < 20; frame++)
+        {
+            rig.Frame(seconds: 0.1, submit: false);
+            AcquireMipped(rig, CutAddress, baseLevel: 2, seed: 0x5B, write: false);
+        }
+
         Assert.Equal(0u, image.FirstLevel);
         Assert.Equal(0, rig.Cache.BaseLevelCounters.Shrinks);
     }
