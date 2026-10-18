@@ -68,6 +68,15 @@ public sealed class HostBackingObject : IDisposable
     public ulong ChunkBytes { get; init; }
 
     /// <summary>
+    /// Bytes per purgeable object behind the chunks, a multiple of <see cref="ChunkBytes"/>
+    /// (the last object may be short); 0 when <see cref="ChunkBytes"/> is 0. A no-copy GPU
+    /// buffer costs about the square of the objects it spans under Rosetta, so windows over
+    /// the backing are sized in objects, not chunks.
+    /// </summary>
+    /// <remarks>Host-package contract; written by the owning backend.</remarks>
+    public ulong ObjectBytes { get; init; }
+
+    /// <summary>
     /// The backend's release of whole chunks, set together with <see cref="ChunkBytes"/>.
     /// Arguments are the backing, a chunk-aligned offset and a size that is a multiple of
     /// <see cref="ChunkBytes"/> or ends at <see cref="Size"/>. Afterwards every byte of the

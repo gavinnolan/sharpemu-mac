@@ -1730,6 +1730,9 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     /// <summary>Bytes per separately releasable chunk of the backing; 0 when it is one object.</summary>
     public ulong ChunkBytes => _chunkViews is null ? 0 : _backing!.ChunkBytes;
 
+    /// <summary>Bytes per purgeable object behind the chunks (one chunk when the backend says nothing); 0 for one object.</summary>
+    public ulong ObjectBytes => _chunkViews is null ? 0 : Math.Max(_backing!.ObjectBytes, _backing.ChunkBytes);
+
     /// <summary>The released-chunk state of a chunked backing (single-copy textures); null for one object.</summary>
     public GuestSingleCopy? SingleCopy => _singleCopy;
 

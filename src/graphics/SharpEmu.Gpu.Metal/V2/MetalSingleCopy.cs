@@ -722,6 +722,10 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
             var staging = Retile(record, out var contents);
             try
             {
+                // Chunks next to each other in the backing are emptied in one call: the backing's
+                // purgeable objects hold several chunks, and an object emptied whole is one EMPTY
+                // where one emptied a chunk at a time is wired and unwired again for every chunk.
+                var run = new List<Chunk>();
                 foreach (var chunk in eligible)
                 {
                     var expected = new ReadOnlySpan<byte>((byte*)contents + chunk.RunOffset, (int)_chunkBytes);
@@ -729,22 +733,28 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
                     {
                         rejected = true;
                         chunk.State = ChunkState.Pending;
+                        emptiedCount += EmptyRun(run, now);
                         continue;
                     }
 
                     if (SentinelMode)
                     {
                         _state.Fill(chunk.Offset, _chunkBytes, ReleasedSentinel);
-                    }
-                    else if (_state.Empty(chunk.Offset, _chunkBytes).ZeroFilledBytes != 0)
-                    {
-                        chunk.NeedsReEmpty = true;
+                        chunk.EmptiedAt = now;
+                        chunk.State = ChunkState.Emptied;
+                        emptiedCount++;
+                        continue;
                     }
 
-                    chunk.EmptiedAt = now;
-                    chunk.State = ChunkState.Emptied;
-                    emptiedCount++;
+                    if (run.Count != 0 && run[^1].Offset + _chunkBytes != chunk.Offset)
+                    {
+                        emptiedCount += EmptyRun(run, now);
+                    }
+
+                    run.Add(chunk);
                 }
+
+                emptiedCount += EmptyRun(run, now);
             }
             finally
             {
@@ -767,6 +777,29 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
             Interlocked.Increment(ref _verifyRejects);
             RestoreRecord(record, GuestSingleCopyAccess.Teardown, penalize: true, count: false);
         }
+    }
+
+    // Empties verified chunks that follow each other in the backing with one call and clears
+    // the list; the chunks emptied. Some bytes zero-filled instead (a GPU use still wired them)
+    // marks every chunk of the run for a later re-empty: which one they were is not reported.
+    private int EmptyRun(List<Chunk> run, long now)
+    {
+        if (run.Count == 0)
+        {
+            return 0;
+        }
+
+        var reEmpty = _state.Empty(run[0].Offset, (ulong)run.Count * _chunkBytes).ZeroFilledBytes != 0;
+        foreach (var chunk in run)
+        {
+            chunk.NeedsReEmpty |= reEmpty;
+            chunk.EmptiedAt = now;
+            chunk.State = ChunkState.Emptied;
+        }
+
+        var count = run.Count;
+        run.Clear();
+        return count;
     }
 
     // A chunk that was still resident when it was emptied got zero-filled instead (it was
