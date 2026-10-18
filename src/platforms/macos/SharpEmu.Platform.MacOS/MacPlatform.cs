@@ -33,7 +33,7 @@ public static class MacPlatform
         MacProcessActivity.Begin();
 
         HostDisplayCatalog.RegisterProvider("CoreGraphics", MacDisplayCatalog.TryQuery);
-        LauncherGamepad.RegisterProvider(MacGameControllerLauncherGamepadProvider.Instance);
+        LauncherGamepad.RegisterProvider(MacLauncherGamepadProvider.Instance);
         HostImageCodec.RegisterProvider("ImageIO", MacImageIOCodec.Instance);
     }
 }
