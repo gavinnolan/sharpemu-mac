@@ -472,6 +472,11 @@ public sealed partial class GpuCommandInterpreter
             case 0x1A:
             case 0x1B:
                 break;
+            case 0x38 or 0x3A when _host.PublishesSyntheticOcclusionDumps:
+                break;
+            case 0x39 when _host.PublishesSyntheticOcclusionDumps:
+                WriteSyntheticOcclusionDump(eventIndex, eventAddress);
+                break;
             case 0x38:
             {
                 var counterId = (eventAddress >> 3) & 0x3Fu;
@@ -545,6 +550,29 @@ public sealed partial class GpuCommandInterpreter
 
             default:
                 throw FatalUnknownEvent(eventType, eventIndex);
+        }
+    }
+
+    // See ICommandStreamHost.PublishesSyntheticOcclusionDumps. The per-queue counter bank,
+    // the select's block mask and stride, and the reset model the hardware counters a host
+    // reads. With no such counter behind them, Demon's Souls on Metal drew hard-edged black
+    // areas in the Outpost Passage, which the synthetic pairs below never did.
+    private void WriteSyntheticOcclusionDump(uint eventIndex, ulong eventAddress)
+    {
+        if (eventIndex != 1 || eventAddress == 0 || (eventAddress & 0x7u) != 0)
+        {
+            throw _host.Fatal($"The occlusion-counter dump is invalid: index=0x{eventIndex:X8} address=0x{eventAddress:X16}.");
+        }
+
+        const ulong readyBit = 1UL << 63;
+        var result = readyBit | ((ulong)Interlocked.Increment(ref _hostlessOcclusionCounter) & (readyBit - 1));
+        // The DB writes the counters when the pipeline reaches the event, so they land in
+        // order with the command-processor stores recorded before it: UE4 zeroes each
+        // query block with a WRITE_DATA right before its begin dump, and dumps written as
+        // parsed were wiped when that deferred clear landed, so every query read occluded.
+        for (var depthBlock = 0u; depthBlock < 16u; depthBlock++)
+        {
+            WriteCommandProcessorQword(eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong)), result, "ZPASS_DUMP");
         }
     }
 

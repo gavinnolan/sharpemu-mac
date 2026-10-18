@@ -202,6 +202,9 @@ public sealed partial class GpuCommandInterpreter
     // samples. CommandStreamQueue shares one bank across its interpreters; a lone one owns its own.
     private readonly ulong[] _syntheticOcclusionCounters = new ulong[4];
 
+    // The counter of a host with no occlusion counter: one for every interpreter, never reset.
+    private static long _hostlessOcclusionCounter;
+
     internal ulong[] SyntheticOcclusionCounterBank
     {
         init => _syntheticOcclusionCounters = value.Length == 4

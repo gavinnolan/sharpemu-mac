@@ -195,6 +195,9 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
 
     public override bool DefersEndOfPipeLabels => true;
 
+    // Metal has no occlusion counter.
+    public override bool PublishesSyntheticOcclusionDumps => true;
+
     // One scalar payload owns label+acknowledgement at its logical queue position.
     public override void RecordEndOfPipe(in EndOfPipeWrite write)
     {

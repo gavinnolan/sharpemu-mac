@@ -205,6 +205,12 @@ public interface ICommandStreamHost
     /// </remarks>
     bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersEndOfPipeLabels;
 
+    // A host that counts no occlusion samples (Metal). Its ZPASS_DUMP pairs are the
+    // always-visible ones: every dump writes one value from a counter that only grows to
+    // 16 depth blocks, and the counter select and reset events are ignored, so an end dump
+    // always reads later than its begin, whichever queue, select or reset came between.
+    bool PublishesSyntheticOcclusionDumps => false;
+
     // Return completed samples for counter zero. False keeps the legacy fallback.
     bool TryReadOcclusionCounter(int queueId, out ulong value)
     {

@@ -177,6 +177,8 @@ public class ManagedCommandStreamHost : ICommandStreamHost
 
     public virtual bool DefersEndOfPipeLabels => false;
 
+    public virtual bool PublishesSyntheticOcclusionDumps => false;
+
     // Without a GPU tick every completion is due as soon as it is recorded.
     public virtual void RecordEndOfPipe(in EndOfPipeWrite write)
     {
