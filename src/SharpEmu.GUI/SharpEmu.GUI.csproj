@@ -30,9 +30,28 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <PackageReference Include="Avalonia" />
-    <PackageReference Include="Avalonia.Desktop" />
     <PackageReference Include="Avalonia.Fonts.Inter" />
     <PackageReference Include="Avalonia.Themes.Fluent" />
+  </ItemGroup>
+
+  <!-- Same host-OS selection as SharpEmu.CLI.csproj. -->
+  <PropertyGroup>
+    <_SharpEmuGuiMac Condition="$(RuntimeIdentifier.StartsWith('osx'))">true</_SharpEmuGuiMac>
+    <_SharpEmuGuiMac Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">true</_SharpEmuGuiMac>
+  </PropertyGroup>
+
+  <!-- macOS needs only Avalonia's native (AppKit) backend, Skia and HarfBuzz.
+       Avalonia.Desktop would also ship the Win32 and X11 backends. -->
+  <PropertyGroup Condition="'$(_SharpEmuGuiMac)' == 'true'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_GUI_MACOS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(_SharpEmuGuiMac)' == 'true'">
+    <PackageReference Include="Avalonia.Native" />
+    <PackageReference Include="Avalonia.Skia" />
+    <PackageReference Include="Avalonia.HarfBuzz" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuGuiMac)' != 'true'">
+    <PackageReference Include="Avalonia.Desktop" />
     <PackageReference Include="Tmds.DBus.Protocol" />
   </ItemGroup>
 
