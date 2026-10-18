@@ -1327,10 +1327,6 @@ public static class ResourceMaterializer
             }
 
             var storage = baseImage.ResourceClass == ImageResourceClass.Storage;
-            image = image with
-            {
-                MipStatistics = RecordMipStatistics && plan.Stage == ShaderStage.Pixel && !storage && ((descriptor[5] >> 25) & 1) != 0,
-            };
             var conversionFormat = ImageConversionFormat(format);
             var shaderSwizzle = storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
             // A sampled view applies the T# DST_SEL, which would permute a _PCK access's raw
@@ -1916,9 +1912,13 @@ public static class ResourceMaterializer
             image.IndirectSearchIterations = specialized.IndirectSearchIterations;
             image.Cube = specialized.Cube;
             image.EmulatedCompareFunction = specialized.EmulatedCompareFunction;
-            image.MipStatistics = specialized.MipStatistics;
             image.PackedFormat = specialized.PackedFormat;
             image.BindlessSlot = specialized.BindlessSlot;
+            // Eligibility only, from the plan: whether a sample records is the bound T#'s
+            // MIP_STATS_ENABLE, which the shader reads at run time from the image's field
+            // (MipStatistics.ImageField), so it is not part of the specialization.
+            image.MipStatistics = RecordMipStatistics && plan.Stage == ShaderStage.Pixel &&
+                image.ResourceClass != ImageResourceClass.Storage && image.BindlessSlot == DescriptorConstants.NoIndex;
             if (specialized.EmulatedCompareFunction >= 0)
             {
                 // The shader compares instead; the host keeps a color view and a plain sampler.

@@ -125,8 +125,8 @@ internal sealed partial class MetalRenderHost
     private nint _lodStatsPipeline;
     private long _lodStatsReports;
 
-    /// <summary>The materializer specializes pixel programs on MIP_STATS_ENABLE, so their
-    /// samples record, unless SHARPEMU_LOD_STATS=fallback.</summary>
+    /// <summary>Pixel programs carry the recording at every sampled-image site, guarded at
+    /// run time by the bound T#'s MIP_STATS_ENABLE, unless SHARPEMU_LOD_STATS=fallback.</summary>
     private static void EnableLodStatistics() => ResourceMaterializer.RecordMipStatistics = GpuLodStatistics;
 
     /// <summary>GET_LOD_STATS reports this host packed on the GPU.</summary>
