@@ -52,7 +52,16 @@ public sealed class CommandStreamWorkerTests
         host.WriteDword(Label, 0);
 
         Enqueue(host, queue, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(6));
-        Thread.Sleep(50);
+        // Store only once the worker has parked on the label and re-read it: a worker that
+        // starts late on a loaded runner would otherwise find the label already written and
+        // complete the head without ever waking it.
+        var parked = System.Diagnostics.Stopwatch.StartNew();
+        while (queue.WatchRechecks == 0 && parked.Elapsed < TimeSpan.FromSeconds(30))
+        {
+            Thread.Sleep(1);
+        }
+
+        Assert.True(queue.WatchRechecks > 0, "the worker never parked on the label");
         host.WriteDword(Label, 1);
 
         Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());

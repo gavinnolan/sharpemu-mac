@@ -74,6 +74,14 @@ public sealed class SleepAndPriorityQosTests
             return; // disabled by the environment
         }
 
+        // On a host without the precise clock a usleep(1) is a ~1 us spin, so the 500 polls
+        // finish inside the 500 us streak window on a warm fast core and nothing ever naps; the
+        // budget this test models belongs to the mach_wait_until hosts.
+        if (!HostPreciseClock.IsPrecise)
+        {
+            return;
+        }
+
         // The guest pattern: "for (n = 500; n; n--) { if (*label) break; usleep(1); }
         // fatal('GPU hanged')". The label is written by the GPU some milliseconds later.
         // When usleep(1) only yielded, the 500 polls finished in well under the nap
