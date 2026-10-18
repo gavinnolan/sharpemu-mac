@@ -195,6 +195,61 @@ public sealed unsafe class ChunkedBackingTests : IDisposable
         }
     }
 
+    // A chunk released out of a 2 MiB object while another thread keeps writing the rest of
+    // the object: the chunk is emptied (its pages go back, it reads zero) and no write to the
+    // rest is lost, because the rest stays wired through the EMPTY. A release of a whole
+    // object empties all of it.
+    [Fact]
+    public void ReleaseOutOfAnObjectKeepsConcurrentWritesToTheRest()
+    {
+        if (!_chunked) return;
+        const ulong objectBytes = 32 * Chunk;
+        using var store = new SharedBackingViews(HostViewMemory.Create(), 2 * objectBytes);
+        Fill(store, 0, 2 * objectBytes, 0x5A);
+        var slots = (int)(objectBytes / 2 / 0x1000);
+        var last = new uint[slots];
+        var stop = 0;
+        var writer = new Thread(() =>
+        {
+            // Chunks 16-31 of object 0, one 4 KiB slot at a time.
+            var basePointer = store.AliasBase + objectBytes / 2;
+            for (uint sequence = 1; Volatile.Read(ref stop) == 0; sequence++)
+            {
+                var slot = (int)(sequence * 2654435761u % (uint)slots);
+                *(uint*)(basePointer + (ulong)slot * 0x1000) = sequence;
+                last[slot] = sequence;
+            }
+        });
+        writer.Start();
+        try
+        {
+            for (var round = 0; round < 32; round++)
+            {
+                for (ulong chunk = 0; chunk < 16; chunk++)
+                {
+                    Fill(store, chunk * Chunk, Chunk, 0xEE);
+                    Assert.Equal(Chunk, store.Release(chunk * Chunk, Chunk));
+                    Assert.True(AllEqual(store.AliasBase + chunk * Chunk, Chunk, 0));
+                }
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref stop, 1);
+            writer.Join();
+        }
+
+        for (var slot = 0; slot < slots; slot++)
+        {
+            var slotAddress = store.AliasBase + objectBytes / 2 + (ulong)slot * 0x1000;
+            Assert.Equal(last[slot] != 0 ? last[slot] : 0x5A5A5A5Au, *(uint*)slotAddress);
+            Assert.True(AllEqual(slotAddress + 4, 0x1000 - 4, 0x5A));
+        }
+
+        Assert.Equal(objectBytes, store.Release(objectBytes, objectBytes));
+        Assert.True(AllEqual(store.AliasBase + objectBytes, objectBytes, 0));
+    }
+
     [Fact]
     public void SingleObjectBackingReleasesNothing()
     {
