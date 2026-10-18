@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
+using PortableBufferWord = SharpEmu.ShaderCompiler.Resources.PortableBufferWord;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -148,7 +149,7 @@ public sealed partial class RenderExecutor
         _host.EndRendering();
         if (program.UsesDeviceAddresses)
         {
-            _host.BeforeDeviceAddressPreparation();
+            _host.BeforeDeviceAddressPreparation([input.Stage]);
         }
 
         using (_host.BeginPreparation())
@@ -395,6 +396,10 @@ public sealed partial class RenderExecutor
         return new ComputeImageClear(descriptor, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(value), size);
     }
 
+    // A portable program (PortableBufferWord) keeps only the stride's flags; it reads the stride.
+    private static bool SameStride(uint specialized, uint descriptor) =>
+        specialized == (PortableBufferWord.Enabled ? descriptor & ~PortableBufferWord.StrideMask : descriptor);
+
     private ComputeImageClear? TryDecodeUserDataFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {
         var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
@@ -415,7 +420,7 @@ public sealed partial class RenderExecutor
         var descriptor = BufferDescriptorWords.From(words);
         if (!resource.Formatted || !resource.Written || resource.Read || resource.Atomic || resource.Scalar || resource.MaxByteExtent != ImageClearStride ||
             descriptor.Stride != ImageClearStride || descriptor.Format != BufferDescriptorWords.Format32x4UInt || descriptor.SwizzleEnabled ||
-            descriptor.IndexStride != 0 || descriptor.AddThreadId || resource.PackedStride != descriptor.PackedStride ||
+            descriptor.IndexStride != 0 || descriptor.AddThreadId || !SameStride(resource.PackedStride, descriptor.PackedStride) ||
             program.UserDataBase != 0 || resources.UserData.Length != ImageClearUserDataCount)
         {
             return null;

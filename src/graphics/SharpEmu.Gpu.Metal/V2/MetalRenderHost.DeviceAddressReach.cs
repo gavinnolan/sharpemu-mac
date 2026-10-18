@@ -4,6 +4,7 @@
 using System.Globalization;
 using SharpEmu.Logging;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -43,14 +44,16 @@ internal sealed partial class MetalRenderHost
 
     private MetalDeviceAddressReach Reach => _reach ??= OpenReach();
 
+    // The title's directory next to its shader cache: the reach profile and the single-copy kill switch.
+    private static string TitleProfileDirectory() =>
+        SharpEmuPaths.UserPath(
+            "pipeline_cache",
+            MetalShaderPrewarm.SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()),
+            "metal-v2");
+
     private MetalDeviceAddressReach OpenReach()
     {
-        var profile = MetalDeviceAddressReachProfile.Open(
-            SharpEmuPaths.UserPath(
-                "pipeline_cache",
-                MetalShaderPrewarm.SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()),
-                "metal-v2"),
-            _guestMemory.GranuleBytes);
+        var profile = MetalDeviceAddressReachProfile.Open(TitleProfileDirectory(), _guestMemory.GranuleBytes);
         var reach = new MetalDeviceAddressReach(_guestMemory, profile);
         if (profile is not null)
         {
@@ -101,38 +104,72 @@ internal sealed partial class MetalRenderHost
             $" da_misses={misses} da_learned={learned} da_named={_deviceAddressNamedWindows.Count} " +
             $"da_named_mb={_guestMemory.WindowSetBytes(_deviceAddressNamedWindows) >> 20}");
     }
+
+    // The device-address side of the [MEM] singlecopy section: the table's trap entries and the
+    // stages that store with no evaluated range.
+    private string DescribeSingleCopyDeviceAddresses()
+    {
+        var table = _deviceAddressTableBuilder;
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $" device_address_writes={DeviceAddressWrites} da_table_entries={table.Count} da_trap_entries={table.TrapEntryCount} " +
+            $"da_trap_mb={table.TrapBytes >> 20} da_trap_unflagged={table.TrapUnflagged} " +
+            $"da_trap_overflowed={(table.TrapOverflowed ? 1 : 0)}");
+    }
 }
 
 /// <summary>
 /// The device-address reach of a title: the granules its programs were seen to reach, and
-/// the feedback bitmap the programs report misses into (resource_prelude.msl): word 0 counts
-/// lookups that landed outside the named set, then one bit per granule.
+/// the feedback words the programs report into (resource_prelude.msl): word 0 counts lookups
+/// that landed outside the named set; word 1 counts accesses to single-copy trap entries
+/// (MetalDeviceAddressTable.TrapFlag), words 2 and 3 locate the bitmap of backing pages they
+/// reached (first word, word count) and word 4 is set in the shadow mode, where such an
+/// access goes through; from word 8 one bit per granule, then the trap bitmap.
 /// </summary>
 internal sealed class MetalDeviceAddressReach
 {
     internal const int MissCountWord = 0;
-    internal const int HeaderWords = 1;
+    internal const int TrapCountWord = 1;
+    internal const int TrapBitmapWord = 2;
+    internal const int TrapBitmapCountWord = 3;
+    internal const int TrapShadowWord = 4;
+    internal const int HeaderWords = 8;
+
+    // Submissions whose trap bitmap words may land after their count was taken: the bitmap is
+    // scanned for that many more takes after a count.
+    private const int TrapRescans = 8;
 
     private readonly MetalGuestMemory _memory;
     private readonly MetalDeviceAddressReachProfile? _profile;
     private readonly nint _contents;
     private readonly int _bitmapWords;
+    private readonly int _trapFirstWord;
+    private readonly int _trapWords;
     private readonly List<ulong> _learnedGranules = new();
     private long _misses;
     private long _learned;
+    private int _trapRescans;
 
     public MetalDeviceAddressReach(MetalGuestMemory memory, MetalDeviceAddressReachProfile? profile)
     {
         _memory = memory;
         _profile = profile;
         _bitmapWords = (memory.GranuleCount + 31) / 32;
-        var words = HeaderWords + _bitmapWords;
+        // One bit per 16 KiB page of the backing, when single-copy chunks can be trapped.
+        var trapPages = memory.TrapChunkBytes == 0 ? 0UL : (memory.AliasBytes + DeviceAddressPaging.PageSize - 1) >> DeviceAddressPaging.PageBits;
+        _trapFirstWord = HeaderWords + _bitmapWords;
+        _trapWords = (int)((trapPages + 31) / 32);
+        var words = _trapFirstWord + _trapWords;
         Buffer = memory.CreateResidentSharedBuffer(
             (ulong)words * sizeof(uint), "device-address.reach", out _contents, out var address);
         FeedbackAddress = address;
         unsafe
         {
-            new Span<uint>((void*)_contents, words).Clear();
+            var span = new Span<uint>((void*)_contents, words);
+            span.Clear();
+            span[TrapBitmapWord] = (uint)_trapFirstWord;
+            span[TrapBitmapCountWord] = (uint)_trapWords;
+            span[TrapShadowWord] = memory.IsSingleCopyShadow ? 1u : 0u;
         }
 
         if (profile is not null)
@@ -190,6 +227,54 @@ internal sealed class MetalDeviceAddressReach
 
     public (long Misses, long Learned) TakeCounters() =>
         (Interlocked.Exchange(ref _misses, 0), Interlocked.Exchange(ref _learned, 0));
+
+    /// <summary>
+    /// Takes the trap hits submissions reported: how many accesses reached a trap entry, and
+    /// the backing pages they reached (added to <paramref name="pages"/>). The bitmap is only
+    /// scanned after a count, and for a few takes more, since a bit may land after its count.
+    /// </summary>
+    public unsafe long TakeTrapHits(List<ulong> pages)
+    {
+        if (_trapWords == 0)
+        {
+            return 0;
+        }
+
+        var words = (int*)_contents;
+        var hits = (long)(uint)Interlocked.Exchange(ref words[TrapCountWord], 0);
+        if (hits != 0)
+        {
+            _trapRescans = TrapRescans;
+        }
+        else if (_trapRescans == 0)
+        {
+            return 0;
+        }
+        else
+        {
+            _trapRescans--;
+        }
+
+        var bitmap = new ReadOnlySpan<int>(words + _trapFirstWord, _trapWords);
+        for (var start = 0; start < bitmap.Length;)
+        {
+            var found = bitmap[start..].IndexOfAnyExcept(0);
+            if (found < 0)
+            {
+                break;
+            }
+
+            var word = start + found;
+            for (var bits = (uint)Interlocked.Exchange(ref words[_trapFirstWord + word], 0); bits != 0; bits &= bits - 1)
+            {
+                pages.Add(((ulong)word * 32) + (ulong)System.Numerics.BitOperations.TrailingZeroCount(bits));
+            }
+
+            start = word + 1;
+        }
+
+        return hits;
+    }
 }
 
 /// <summary>

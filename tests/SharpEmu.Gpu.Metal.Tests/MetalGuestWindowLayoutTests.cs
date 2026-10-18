@@ -221,6 +221,66 @@ public sealed class MetalGuestWindowLayoutTests(ITestOutputHelper output)
         return (spans.Count, table);
     }
 
+    // Released single-copy chunks cut the runs at their edges into trap entries: bit 62 and the
+    // entry's first backing page instead of a granule, never the unnamed flag, the rest of the run
+    // untouched. A table with no room for the cuts flags nothing and says so.
+    [Fact]
+    public void TrapChunksAreCutIntoFlaggedEntries()
+    {
+        const ulong Chunk = 64 * 1024;
+        var layout = new FakeLayout(granuleBits: 25);
+        // 4 MiB contiguous from backing 20 MiB: one granule, one window.
+        layout.Map(0x10_0000_0000, 4 * Mib, 20 * Mib);
+        layout.Trap = new byte[(int)(64 * Mib / Chunk)];
+        var first = (int)((20 * Mib + Mib) / Chunk);
+        layout.Trap[first] = 1;
+        layout.Trap[first + 1] = 1;
+        layout.Trap[first + 5] = 1;
+        var table = new MetalDeviceAddressTable();
+        table.Rebuild(layout, visit => visit(0x10_0000_0000, 4 * Mib), (int)Gen5MslTranslator.MaxAddressRangeCount);
+
+        var bytes = table.Entries.Select(entry => entry.PageCount << DeviceAddressPaging.PageBits).ToArray();
+        Assert.Equal([Mib, 2 * Chunk, 3 * Chunk, Chunk, 4 * Mib - Mib - 6 * Chunk], bytes);
+        Assert.Equal(
+            [-1L, (long)((20 * Mib + Mib) >> DeviceAddressPaging.PageBits), -1L,
+                (long)((20 * Mib + Mib + 5 * Chunk) >> DeviceAddressPaging.PageBits), -1L],
+            table.EntryTrapPages.ToArray());
+        Assert.Equal(2, table.TrapEntryCount);
+        Assert.Equal(3 * Chunk, table.TrapBytes);
+        Assert.Equal(table.Entries[0].Base + Mib, table.Entries[1].Base);
+
+        // Written with no window named: the trap entries carry their page, the rest the unnamed flag.
+        var span = new byte[table.ByteSize];
+        table.Write(span, new MetalWindowSet());
+        var count = BitConverter.ToUInt64(span, MetalDeviceAddressTable.EntryBytes + 8);
+        Assert.Equal(MetalDeviceAddressTable.TrapFlag, count & (MetalDeviceAddressTable.TrapFlag | MetalDeviceAddressTable.UnnamedFlag));
+        Assert.Equal((20 * Mib + Mib) >> DeviceAddressPaging.PageBits,
+            (count >> MetalDeviceAddressTable.GranuleShift) & MetalDeviceAddressTable.MaxTrapPage);
+        Assert.Equal(2 * Chunk >> DeviceAddressPaging.PageBits, count & MetalDeviceAddressTable.PageCountMask);
+        Assert.NotEqual(0UL, BitConverter.ToUInt64(span, 8) & MetalDeviceAddressTable.UnnamedFlag);
+
+        // The chunks given back: the next cut has one entry again.
+        Array.Clear(layout.Trap);
+        layout.TrapVersionValue++;
+        Assert.NotEqual(layout.TrapVersion, table.TrapVersion);
+        table.Recut(layout);
+        Assert.Equal(1, table.Count);
+        Assert.Equal(0, table.TrapEntryCount);
+
+        // Too many cuts for the table: nothing is flagged, and the overflow is reported.
+        for (var chunk = first; chunk < first + 40; chunk += 2)
+        {
+            layout.Trap[chunk] = 1;
+        }
+
+        var small = new MetalDeviceAddressTable();
+        small.Rebuild(layout, visit => visit(0x10_0000_0000, 4 * Mib), maxEntries: 8);
+        Assert.True(small.TrapOverflowed);
+        Assert.Equal(1, small.Count);
+        Assert.Equal(0, small.TrapEntryCount);
+        Assert.Equal(20, small.TrapUnflagged);
+    }
+
     // Guest mappings onto a backing, as the registry and the alias would report them, and the
     // backing cut into windows; a window's GPU addresses sit at a distinct base per window id.
     private sealed class FakeLayout(int granuleBits) : IMetalGranuleRuns
@@ -230,6 +290,23 @@ public sealed class MetalGuestWindowLayoutTests(ITestOutputHelper output)
             new(18 * Gib, 1UL << granuleBits, Math.Max(Gib, 1UL << granuleBits), DeviceAddressPaging.PageSize);
 
         public void Map(ulong guest, ulong size, ulong backing) => _mappings.Add(guest, (size, backing));
+
+        // The trap map: one byte per 64 KiB backing chunk.
+        public byte[] Trap = [];
+
+        public long TrapVersionValue;
+
+        public ulong TrapChunkBytes => Trap.Length == 0 ? 0UL : 64UL * 1024;
+
+        public int TrapChunkCount => Trap.Length;
+
+        public long TrapVersion => TrapVersionValue;
+
+        public int CopyTrapChunks(Span<byte> chunks)
+        {
+            Trap.AsSpan(0, Math.Min(Trap.Length, chunks.Length)).CopyTo(chunks);
+            return Trap.Count(static value => value != 0);
+        }
 
         public MetalWindowPartition.Placement Place(ulong start, ulong end) =>
             _partition.Place(start, end, new MetalWindowSet(), new List<MetalWindowPartition.Window>(), out _);

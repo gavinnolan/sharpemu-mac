@@ -1172,6 +1172,47 @@ internal sealed class ShaderProgramCache
         }
     }
 
+    /// <summary>
+    /// The specialization the record's plan has before any draw binds its resources: what a
+    /// precompile of a program the game has not used yet compiles against.
+    /// </summary>
+    internal static bool TryPredictSpecialization(ShaderCorpusRecord record, out ResourceSpecialization? specialization, out string error)
+    {
+        specialization = TryPlanResources(record, out var info, out error) ? ResourceSpecialization.Default(info!) : null;
+        return specialization is not null;
+    }
+
+    /// <summary>The resource tables of the record's plan.</summary>
+    internal static bool TryPlanResources(ShaderCorpusRecord record, out ShaderResourceInfo? info, out string error)
+    {
+        info = null;
+        error = string.Empty;
+        var previousThrowOnFatal = GpuFatal.ThrowOnFatal;
+        GpuFatal.ThrowOnFatal = true;
+        try
+        {
+            if (record.Options is not { } options)
+            {
+                error = "the record has no stage inputs";
+                return false;
+            }
+
+            var cache = new ShaderProgramCache(record.Code.CreateContext(), null!, new CorpusReplayHost(record.Host));
+            info = cache.CreateEntry(record.CreateSource(), options).Plan.Info;
+            return true;
+        }
+        catch (Exception exception) when (exception is ShaderProgramRejectedException or GpuFatal.AbandonedWorkException or
+                                              ResourcePlanException or InvalidOperationException or ArgumentException)
+        {
+            error = exception.Message;
+            return false;
+        }
+        finally
+        {
+            GpuFatal.ThrowOnFatal = previousThrowOnFatal;
+        }
+    }
+
     // Answers the host queries a request is built from with what the capturing host answered.
     private sealed class CorpusReplayHost(ShaderCorpusHostFlags flags) : IShaderPipelineHost
     {

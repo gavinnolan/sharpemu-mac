@@ -28,7 +28,7 @@ internal sealed partial class MetalRenderHost
         MemoryTelemetry.Register("gpu-refs", MetalGpuReferenceCensus.TakeReport);
         if (_singleCopy is { } singleCopy)
         {
-            MemoryTelemetry.Register("singlecopy", singleCopy.Describe);
+            MemoryTelemetry.Register("singlecopy", () => singleCopy.Describe() + DescribeSingleCopyDeviceAddresses());
         }
     }
 

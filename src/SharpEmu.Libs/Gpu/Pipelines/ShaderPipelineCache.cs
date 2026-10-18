@@ -70,13 +70,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private Gen5NggStageInfo? PrimitiveShaderStageInfo(
         VertexStageRegisters vertex,
         ShaderInterfaceRegisters shaderInterface,
+        uint shaderStages) =>
+        PrimitiveShaderStageInfo(SupportsPrimitiveShaderMeshPipelines, vertex, shaderInterface, shaderStages);
+
+    internal static Gen5NggStageInfo? PrimitiveShaderStageInfo(
+        bool supportsPrimitiveShaderMeshPipelines,
+        VertexStageRegisters vertex,
+        ShaderInterfaceRegisters shaderInterface,
         uint shaderStages)
     {
         // Exactly the draws the executor admits as mesh draws, or a program would be
         // compiled as the merged ES/GS stage with no mesh pipeline to run it - and an
         // ordinary vertex program that happens to touch LDS would have its workgroup sized
         // from geometry-engine registers the draw never programmed.
-        if (!SupportsPrimitiveShaderMeshPipelines || !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
+        if (!supportsPrimitiveShaderMeshPipelines || !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
         {
             return null;
         }
@@ -514,7 +521,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // was rebuilt with LINQ on every draw.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, uint[]> InterpolatedAttributeCache = new();
 
-    internal uint[] GetPixelAttributes(Gen5ShaderProgram program) =>
+    internal uint[] GetPixelAttributes(Gen5ShaderProgram program) => InterpolatedAttributesOf(program);
+
+    internal static uint[] InterpolatedAttributesOf(Gen5ShaderProgram program) =>
         InterpolatedAttributeCache.GetValue(program, static program => program.Instructions
             .Select(static instruction => instruction.Control)
             .OfType<Gen5InterpolationControl>()
@@ -551,6 +560,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return highest + 1;
     }
 
+    // The attribute list is ascending, so its last entry is the highest.
+    internal static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
+    {
+        var attributes = InterpolatedAttributesOf(program);
+        return attributes.Length == 0 ? 0 : attributes[^1] + 1;
+    }
 
     // The bound colour slots in order; each output mode names the kind the pixel program exports.
     // With a depth target bound, a slot the draw never writes is dropped here and from the

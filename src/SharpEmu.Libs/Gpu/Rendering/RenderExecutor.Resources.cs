@@ -264,10 +264,13 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
-        if ((vertexInput.Stage.Program?.UsesDeviceAddresses ?? false) ||
-            (state.PixelActive && (pixelInput.Stage.Program?.UsesDeviceAddresses ?? false)))
+        if (state.PixelActive && (pixelInput.Stage.Program?.UsesDeviceAddresses ?? false))
         {
-            _host.BeforeDeviceAddressPreparation();
+            _host.BeforeDeviceAddressPreparation([vertexInput.Stage, pixelInput.Stage]);
+        }
+        else if (vertexInput.Stage.Program?.UsesDeviceAddresses ?? false)
+        {
+            _host.BeforeDeviceAddressPreparation([vertexInput.Stage]);
         }
 
         using var preparation = _host.BeginPreparation();

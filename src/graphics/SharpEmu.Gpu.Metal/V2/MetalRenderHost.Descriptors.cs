@@ -327,6 +327,20 @@ internal sealed partial class MetalRenderHost
             shaderData[layout.ShaderBaseDword + 1] = (uint)(stage.ShaderBase >> 32);
         }
 
+        if (layout.BufferWordCount != 0)
+        {
+            // Portable buffers: the stride and word 3 of each V#, which the program reads
+            // instead of a specialization (PortableBufferWord).
+            var count = Math.Min(snapshot.Buffers.Length, (int)layout.MemoryOffsetCount);
+            for (var index = 0; index < count; index++)
+            {
+                var (stride, word3) = PortableBufferWord.Pack(snapshot.Buffers[index]);
+                var at = (int)layout.FirstBufferWordDword() + index * PortableBufferWord.DwordCount;
+                shaderData[at] = stride;
+                shaderData[at + 1] = word3;
+            }
+        }
+
         if (layout.MipStatisticsCount != 0)
         {
             MipStatistics.WriteImageFields(shaderData, layout, info, snapshot.Images);
@@ -463,29 +477,84 @@ internal sealed partial class MetalRenderHost
     {
         // Guest memory is the GPU's memory, so a device-address program needs no page
         // table upload: the pointers the shader reads already address the windows.
-        // BeforeDeviceAddressPreparation has already given single-copy chunks back; this
-        // only counts a program that reached here without it.
-        _singleCopy?.NoteDeviceAddressUse(late: true);
+        // BeforeDeviceAddressPreparation has already given single-copy chunks back; under the
+        // global fallback this only counts a program that reached here without it (the
+        // evaluated ranges are checked again as they are bound, BindDeviceAddressRanges).
+        if (_singleCopy is { DeviceAddressSeen: true } singleCopy)
+        {
+            singleCopy.NoteDeviceAddressUse(late: true);
+        }
     }
+
+    private Func<ulong, ulong, ulong>? _mappedDeviceAddressBytes;
+    private ulong _singleCopyDeviceAddressSerial;
+
+    // The mapped bytes of a device-address range from its base, 0 when its first byte is not.
+    private ulong MappedDeviceAddressBytes(ulong address, ulong size) =>
+        address == 0 || size == 0 || size > ulong.MaxValue - address || !_memory.CanRead(address, 1)
+            ? 0
+            : ClampMappedSize(address, size);
+
+    private static long DeviceAddressMappingVersion() =>
+        SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current?.SpanVersion ?? 0;
 
     /// <summary>
     /// A device-address program can reach any mapped guest page through the page table, past
-    /// every window resolve, so it may never run while the GPU alias has a hole: from the first
-    /// one on, single-copy textures stop releasing, every released chunk gets its bytes back
-    /// and its pages mapped again, and a command buffer whose windows still map a hole over
-    /// restored bytes ends here, between preparations, so the program runs in the next one.
+    /// every window resolve. Before one is prepared, single-copy textures pin and give back
+    /// every chunk the ranges evaluated for its handles cover (MetalSingleCopy.BeforeDeviceAddressProgram),
+    /// a program whose reach cannot be bounded takes the global fallback (every released chunk
+    /// back, nothing released from then on), and the trap hits reported so far are taken. A
+    /// command buffer whose windows still map a hole over restored bytes ends here, between
+    /// preparations, so the program runs in the next one and reads the guest's bytes.
     /// </summary>
-    void IRenderHost.BeforeDeviceAddressPreparation()
+    void IRenderHost.BeforeDeviceAddressPreparation(ReadOnlySpan<ShaderStageResources> stages)
     {
-        if (_singleCopy is null || _preparation is not null)
+        if (_singleCopy is not { } singleCopy)
         {
             return;
         }
 
-        _singleCopy.NoteDeviceAddressUse(late: false);
-        if (_commandBuffer != 0 && _guestMemory.HasStaleSingleCopyWindows)
+        singleCopy.KillSwitch ??= MetalSingleCopyKillSwitch.Open(TitleProfileDirectory());
+        if (_singleCopyDeviceAddressSerial != _submissionSerial)
+        {
+            _singleCopyDeviceAddressSerial = _submissionSerial;
+            singleCopy.NoteDeviceAddressSubmission();
+        }
+
+        TakeSingleCopyTrapHits();
+        var mappingVersion = DeviceAddressMappingVersion();
+        _mappedDeviceAddressBytes ??= MappedDeviceAddressBytes;
+        foreach (var stage in stages)
+        {
+            if (stage.Program is { UsesDeviceAddresses: true } program)
+            {
+                singleCopy.BeforeDeviceAddressProgram(
+                    program.WritesDeviceAddresses, stage.Resources.DeviceAddressRanges, mappingVersion,
+                    _mappedDeviceAddressBytes, late: _preparation is not null);
+            }
+        }
+
+        if (_preparation is null && _commandBuffer != 0 && _guestMemory.HasStaleSingleCopyWindows)
         {
             FlushCommandBuffer(MetalFlushCause.Other);
+        }
+    }
+
+    private readonly List<ulong> _singleCopyTrapPages = new();
+
+    // The trap hits submissions reported (resource_prelude.msl): their chunks back and pinned.
+    private void TakeSingleCopyTrapHits()
+    {
+        if (_singleCopy is not { } singleCopy || _reach is not { } reach)
+        {
+            return;
+        }
+
+        _singleCopyTrapPages.Clear();
+        var hits = reach.TakeTrapHits(_singleCopyTrapPages);
+        if (hits != 0 || _singleCopyTrapPages.Count != 0)
+        {
+            singleCopy.OnTrapHits(hits, _singleCopyTrapPages);
         }
     }
 
@@ -610,10 +679,14 @@ internal sealed partial class MetalRenderHost
     {
         var unplanned = false;
         var declaredWrite = false;
-        if (snapshot.DeviceAddressRanges.Length != 0)
+        if (snapshot.DeviceAddressRanges.Length != 0 && _singleCopy is { } singleCopy)
         {
-            // Counted, and given back, only if the program got past BeforeDeviceAddressPreparation.
-            _singleCopy?.NoteDeviceAddressUse(late: true);
+            // Counted, and given back, only if the program got past BeforeDeviceAddressPreparation:
+            // ranges it pinned are known and cost a lookup each.
+            _mappedDeviceAddressBytes ??= MappedDeviceAddressBytes;
+            singleCopy.BeforeDeviceAddressProgram(
+                info.WritesDeviceAddresses, snapshot.DeviceAddressRanges, DeviceAddressMappingVersion(),
+                _mappedDeviceAddressBytes, late: true);
         }
 
         foreach (var range in snapshot.DeviceAddressRanges)
@@ -1033,8 +1106,8 @@ internal sealed partial class MetalRenderHost
                 return UploadDeviceAddressTable();
             case DescriptorBindingKind.FaultBuffer:
                 // The fault-bitmap words stay at zero (WordFieldValue); the buffer takes the
-                // reach feedback instead.
-                return DeviceAddressReachEnabled
+                // reach feedback instead, which also takes the single-copy trap's reports.
+                return DeviceAddressReachEnabled || _singleCopy is not null
                     ? ReachFeedbackAddress()
                     : MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
             case DescriptorBindingKind.FlattenedResourceTable:
@@ -1096,13 +1169,24 @@ internal sealed partial class MetalRenderHost
             RebuildDeviceAddressEntries(gpuMemory);
             _deviceAddressSpanVersion = spanVersion;
         }
-        else if (_deviceAddressTableBuilder.PartitionVersion != _guestMemory.PartitionVersion)
+        else if (_deviceAddressTableBuilder.PartitionVersion != _guestMemory.PartitionVersion ||
+            _deviceAddressTableBuilder.TrapVersion != _guestMemory.TrapVersion)
         {
             _deviceAddressTableBuilder.Recut(_guestMemory);
         }
 
         BeginDeviceAddressReach();
         var table = _deviceAddressTableBuilder;
+        if (_singleCopy is { } singleCopy)
+        {
+            // Trap cuts take entries: arming waits while a quarter of the table is all that is left.
+            singleCopy.ArmingPaused = table.Count >= MaxAddressRanges - (MaxAddressRanges / 4);
+            if (table.TrapOverflowed)
+            {
+                // No entry could be flagged: nothing released may stay a hole.
+                singleCopy.NoteDeviceAddressUse(late: true, "the device-address table has no room for the trap cuts");
+            }
+        }
         var range = _guestMemory.Allocate((ulong)table.ByteSize, 256, out var span);
         table.Write(span, DeviceAddressReachEnabled ? _deviceAddressNamedWindows : null);
         _deviceAddressTable = range.GpuAddress;

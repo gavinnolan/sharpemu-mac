@@ -49,9 +49,14 @@ internal sealed partial class MetalGuestMemory
     private ulong _windowBase;
     private ulong _chunkBytes;
 
-    // Under _windowLock: chunks the GPU alias maps the dummy over.
+    // Under _windowLock: chunks the GPU alias maps the dummy over. In the shadow mode
+    // (MetalSingleCopy.ShadowMode) the chunks it would map the dummy over: nothing is punched.
     private byte[]? _holes;
     private int _holeCount;
+    private bool _singleCopyShadow;
+
+    // Under _windowLock: changes whenever the holes or the stale windows do (the trap map).
+    private long _trapVersion;
     private readonly List<(int Chunk, ulong Address)> _pendingPunches = new();
     private readonly List<ulong> _punchedViewAddresses = new();
 
@@ -120,6 +125,65 @@ internal sealed partial class MetalGuestMemory
         _singleCopy = state;
         _chunkBytes = state.ChunkBytes;
         _holes = new byte[state.ChunkCount];
+        _singleCopyShadow = MetalSingleCopy.ShadowMode;
+    }
+
+    /// <summary>Whether the holes are only recorded, never punched (the shadow mode).</summary>
+    internal bool IsSingleCopyShadow => _singleCopyShadow;
+
+    // The trap map of the device-address table (IMetalGranuleRuns): the holes, and the chunks
+    // under a window that still maps the dummy over bytes that hold data again.
+
+    public ulong TrapChunkBytes => _holes is null ? 0 : _chunkBytes;
+
+    public int TrapChunkCount => _holes?.Length ?? 0;
+
+    public long TrapVersion
+    {
+        get
+        {
+            if (_holes is null)
+            {
+                return 0;
+            }
+
+            lock (_windowLock)
+            {
+                return _trapVersion;
+            }
+        }
+    }
+
+    public int CopyTrapChunks(Span<byte> chunks)
+    {
+        if (_holes is not { } holes)
+        {
+            return 0;
+        }
+
+        lock (_windowLock)
+        {
+            var count = Math.Min(chunks.Length, holes.Length);
+            holes.AsSpan(0, count).CopyTo(chunks);
+            chunks[count..].Clear();
+            var set = _holeCount;
+            foreach (var ranges in _staleWindows.Values)
+            {
+                foreach (var (start, end) in ranges)
+                {
+                    for (var chunk = start / _chunkBytes; chunk < (ulong)count && chunk * _chunkBytes < end; chunk++)
+                    {
+                        if (chunks[(int)chunk] == 0)
+                        {
+                            chunks[(int)chunk] = 1;
+                            set++;
+                        }
+                    }
+                }
+            }
+
+            return set;
+        }
     }
 
     /// <summary>Punches a released chunk out of the GPU alias as the next submission begins.</summary>
@@ -256,7 +320,7 @@ internal sealed partial class MetalGuestMemory
             if (holes[chunk] == 0)
             {
                 var (offset, length) = ChunkRange(chunk);
-                if (!_gpuAlias!.TryPunch(offset, length))
+                if (!_singleCopyShadow && !_gpuAlias!.TryPunch(offset, length))
                 {
                     throw GpuFatal.Fatal($"A released guest chunk could not be punched out of the GPU alias: offset=0x{offset:X}.");
                 }
@@ -264,7 +328,12 @@ internal sealed partial class MetalGuestMemory
                 holes[chunk] = 1;
                 _holeCount++;
                 _holePunches++;
-                RenewWindowsOverLocked(offset, offset + length, refill: false);
+                _trapVersion++;
+                if (!_singleCopyShadow)
+                {
+                    RenewWindowsOverLocked(offset, offset + length, refill: false);
+                }
+
                 if (!_singleCopy.IsReleased(chunk))
                 {
                     // Restored while it was being punched; its fill may already have been drained.
@@ -273,13 +342,18 @@ internal sealed partial class MetalGuestMemory
                 }
             }
 
-            _punchedViewAddresses.Add(address);
+            if (!_singleCopyShadow)
+            {
+                _punchedViewAddresses.Add(address);
+            }
+
             _punched.Enqueue((chunk, _submissionSerial));
         }
 
         _pendingPunches.Clear();
         if (_staleWindows.Count != 0)
         {
+            _trapVersion++;
             foreach (var window in _staleWindows.Keys.ToArray())
             {
                 if (ReferenceEquals(_partition.ById(window.Id), window))
@@ -325,7 +399,7 @@ internal sealed partial class MetalGuestMemory
     private void FillHoleLocked(int chunk)
     {
         var (offset, length) = ChunkRange(chunk);
-        if (!_gpuAlias!.TryFill(offset, length))
+        if (!_singleCopyShadow && !_gpuAlias!.TryFill(offset, length))
         {
             throw GpuFatal.Fatal($"A restored guest chunk could not be mapped back into the GPU alias: offset=0x{offset:X}.");
         }
@@ -333,7 +407,11 @@ internal sealed partial class MetalGuestMemory
         _holes![chunk] = 0;
         _holeCount--;
         _holeFills++;
-        RenewWindowsOverLocked(offset, offset + length, refill: true);
+        _trapVersion++;
+        if (!_singleCopyShadow)
+        {
+            RenewWindowsOverLocked(offset, offset + length, refill: true);
+        }
     }
 
     private (ulong Offset, ulong Length) ChunkRange(int chunk)
@@ -371,6 +449,7 @@ internal sealed partial class MetalGuestMemory
                 }
 
                 ranges.Add((Math.Max(start, window.Start), Math.Min(end, window.End)));
+                _trapVersion++;
             }
         }
     }
@@ -378,7 +457,11 @@ internal sealed partial class MetalGuestMemory
     // Caller holds _windowLock; the caller retires _retiredScratch.
     private MetalWindowPartition.Window RenewLocked(MetalWindowPartition.Window window)
     {
-        _staleWindows.Remove(window);
+        if (_staleWindows.Remove(window))
+        {
+            _trapVersion++;
+        }
+
         _windowRenewals++;
         return _partition.Renew(window, _retiredScratch);
     }

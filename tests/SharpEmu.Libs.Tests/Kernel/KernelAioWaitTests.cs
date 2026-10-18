@@ -183,6 +183,19 @@ public sealed class KernelAioWaitTests : IDisposable
     [Fact]
     public void CancelAbortsQueuedRequestsAndReportsOthers()
     {
+        // A cancel that lands while the worker is already reading the request lets it complete, so
+        // on a loaded machine the batch is resubmitted until the cancel catches it still queued.
+        var aborted = false;
+        for (var attempt = 0; attempt < 20 && !aborted; attempt++)
+        {
+            aborted = CancelLastOfBatch();
+        }
+
+        Assert.True(aborted);
+    }
+
+    private bool CancelLastOfBatch()
+    {
         // A large batch on one priority keeps later submissions queued long enough to cancel.
         var ids = new List<int>();
         for (var i = 0; i < 64; i++)
@@ -196,11 +209,12 @@ public sealed class KernelAioWaitTests : IDisposable
         _context[CpuRegister.Rsi] = StateAddress;
         Assert.Equal(0, KernelMemoryCompatExports.KernelAioCancelRequest(_context));
         var cancelState = ReadUInt32(StateAddress);
-        Assert.Contains(cancelState, new[] { Processing, Aborted });
+        Assert.Contains(cancelState, new[] { Processing, Completed, Aborted });
 
         Assert.Equal(0, WaitMany(ids.ToArray()[..32], mode: 1, timeoutUsec: null));
         Assert.Equal(0, WaitOne(last, timeout: null));
-        Assert.Equal(Aborted, ReadUInt32(StateAddress));
+        var finalState = ReadUInt32(StateAddress);
+        Assert.Contains(finalState, new[] { Completed, Aborted });
 
         _context[CpuRegister.Rdi] = 0;
         _context[CpuRegister.Rsi] = StateAddress;
@@ -212,6 +226,8 @@ public sealed class KernelAioWaitTests : IDisposable
             Assert.Equal(0, WaitMany(chunk, mode: 1, timeoutUsec: null));
             Assert.Equal(0, DeleteMany(chunk));
         }
+
+        return finalState == Aborted;
     }
 
     [Fact]
