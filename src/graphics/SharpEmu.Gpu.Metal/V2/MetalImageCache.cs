@@ -93,6 +93,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private static readonly nint SelSetSampleCount = MetalNative.Selector("setSampleCount:");
     private static readonly nint SelSetUsage = MetalNative.Selector("setUsage:");
     private static readonly nint SelSetStorageMode = MetalNative.Selector("setStorageMode:");
+    private static readonly nint SelSetCompressionType = MetalNative.Selector("setCompressionType:");
     private static readonly nint SelNewBufferTexture = MetalNative.Selector("newTextureWithDescriptor:offset:bytesPerRow:");
     private static readonly nint SelMinimumLinearAlignment =
         MetalNative.Selector("minimumLinearTextureAlignmentForPixelFormat:");
@@ -148,6 +149,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         MetalBlockCubeDump.Peek ??= guestMemory.TryPeek;
         _pages = pages;
         _backing = backing;
+        InitializeLossy();
         ConfigureMemoryPolicy(
             MetalImageBudgetSettings.FromEnvironment(MetalHostMemory.Physical),
             MetalImageRetirementSettings.FromEnvironment(),
@@ -281,7 +283,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var sampledOnly = request.Role == ImageRole.Texture;
             result = InsertImage(
                 request.Description, sampledOnly, request.Role,
-                sampledOnly ? DesiredFirstLevel(in request.Description, request.View.BaseLevel) : 0);
+                sampledOnly ? DesiredFirstLevel(in request.Description, request.View.BaseLevel) : 0,
+                lossyAllowed: sampledOnly && ViewKeepsLossy(in request));
         }
 
         var image = _slots[result];
@@ -1054,7 +1057,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// </summary>
     public void PrepareImageWrite(MetalCachedImage image)
     {
-        if (!image.IsWindowLinearView && image.FirstLevel == 0)
+        if (!image.IsWindowLinearView && image.FirstLevel == 0 && !image.Shape.Lossy)
         {
             return;
         }
@@ -1534,12 +1537,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // (MetalImageCache.BaseLevel.cs).
     private ResourceSlotIdentifier InsertImage(
         in ImageDescription description, bool sampledOnly = false, ImageRole role = ImageRole.Texture,
-        uint firstLevel = 0)
+        uint firstLevel = 0, bool lossyAllowed = false)
     {
         var admitted = Admit(in description);
         var shape = firstLevel != 0 ? _transfer.ShapeFor(in admitted, firstLevel) : CreationShape(in admitted, role);
         nint viewTexture = 0;
         var windowView = sampledOnly && firstLevel == 0 && TryCreateLinearView(in admitted, ref shape, out viewTexture);
+        if (!windowView && sampledOnly && lossyAllowed)
+        {
+            shape = LossyShapeFor(in admitted, shape);
+        }
+
         var texture = windowView ? viewTexture : CreateTexture(in shape, in admitted);
         // Stamped before the collection below runs: an image that has never been used
         // reads as the oldest one in the cache, so an over-budget collection evicted the
@@ -1664,8 +1672,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     {
         if (image.FirstLevel != 0)
         {
-            ReshapeLevelsLocked(image, 0);
+            ReshapeLevelsLocked(image, 0, dropLossy: true);
             _baseLevelPromotions++;
+            return;
+        }
+
+        // A lossy texture is sampled-only; whatever else is about to use the image needs a
+        // texture that can be written and kept exactly.
+        if (image.Shape.Lossy)
+        {
+            ReshapeLevelsLocked(image, 0, dropLossy: true);
             return;
         }
 
@@ -1725,6 +1741,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             MetalV2Native.SendVoidValue(descriptor, SelSetSampleCount, Math.Max(shape.SampleCount, 1));
             MetalV2Native.SendVoidValue(descriptor, SelSetUsage, (nuint)shape.Usage);
             MetalV2Native.SendVoidValue(descriptor, SelSetStorageMode, Mtl.StorageModePrivate);
+            // Metal asserts on a lossy descriptor with a usage that cannot be compressed, so
+            // the usage decides here whatever the shape asks for.
+            if (shape.Lossy && (shape.Usage & CompressionBreakingUsage) == 0)
+            {
+                MetalV2Native.SendVoidValue(descriptor, SelSetCompressionType, CompressionTypeLossy);
+            }
+
             var texture = MetalNative.Send(_owner.Device, SelNewTexture, descriptor);
             if (texture == 0)
             {

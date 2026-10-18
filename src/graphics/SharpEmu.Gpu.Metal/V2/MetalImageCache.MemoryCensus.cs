@@ -79,6 +79,8 @@ internal sealed partial class MetalImageCache
         ulong cutAllocated = 0;
         ulong cutDropped = 0;
         string baseLevels;
+        long lossyImages = 0;
+        ulong lossyAllocated = 0;
         using (var held = _lock.Hold())
         {
             images = _slots.Count;
@@ -92,6 +94,12 @@ internal sealed partial class MetalImageCache
                 count[kind, age]++;
                 allocated[kind, age] += image.AllocatedBytes;
                 accounted += image.AccountedSize;
+                if (image.Shape.Lossy && image.Texture != 0)
+                {
+                    lossyImages++;
+                    lossyAllocated += image.AllocatedBytes;
+                }
+
                 CountResidentLevels(image, ref cutImages, ref cutAllocated, ref cutDropped);
             });
             baseLevels = DescribeBaseLevels(cutImages, cutAllocated, cutDropped);
@@ -163,6 +171,7 @@ internal sealed partial class MetalImageCache
             $"evicted_allocated_mb={current.Item3 / Mb:F0}(+{(current.Item3 - last.EvictedAllocated) / Mb:F0}) " +
             $"released={current.Item4}(+{current.Item4 - last.Released}) " +
             $"released_accounted_mb={current.Item5 / Mb:F0}(+{(current.Item5 - last.ReleasedBytes) / Mb:F0}) " +
+            $"lossy={lossyImages}/{lossyAllocated / Mb:F0} lossy_promotions={Volatile.Read(ref _lossyPromotions)} " +
             $"{baseLevels}");
     }
 }

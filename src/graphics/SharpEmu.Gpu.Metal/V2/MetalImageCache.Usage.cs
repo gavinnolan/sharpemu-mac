@@ -86,6 +86,13 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        if (image.Shape.Lossy)
+        {
+            // Lossy textures hold ShaderRead alone: any usage they lack means a lossless one.
+            ReshapeLevelsLocked(image, image.FirstLevel, dropLossy: true);
+            return;
+        }
+
         var full = _transfer.ShapeFor(image.Description);
         var shape = image.Shape with { Usage = image.Shape.Usage | full.Usage };
         if ((shape.Usage & needed) != needed || shape.Usage == image.Shape.Usage)
