@@ -49,23 +49,24 @@ public sealed unsafe class MetalLossyTextureTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void ASampledImageIsCreatedLossyOnlyWithTheFlagOn()
+    public void ASampledImageIsCreatedLossyByDefaultAndExactWithTheFlagOff()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
-        var off = rig.Find(ImageAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
-        var offImage = rig.Cache.GetImage(off);
-        Assert.False(offImage.Shape.Lossy);
-        Assert.Equal(Breaking, offImage.Shape.Usage & Breaking);
-        Assert.Equal(0, CompressionOf(offImage.Texture));
-        Assert.Contains("lossy=0/", rig.Cache.DescribeMemoryCensus());
-
-        rig.Cache.LossyTextures = true;
+        // On by default (SHARPEMU_METAL_V2_LOSSY_TEXTURES=0 turns it off).
+        Assert.True(rig.Cache.LossyTextures);
         var on = rig.Find(ImageAddress + 0x40000, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
         var onImage = rig.Cache.GetImage(on);
         Assert.True(onImage.Shape.Lossy);
         Assert.Equal(Mtl.TextureUsageShaderRead, onImage.Shape.Usage);
         Assert.Equal(1, CompressionOf(onImage.Texture));
+
+        rig.Cache.LossyTextures = false;
+        var off = rig.Find(ImageAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
+        var offImage = rig.Cache.GetImage(off);
+        Assert.False(offImage.Shape.Lossy);
+        Assert.Equal(Breaking, offImage.Shape.Usage & Breaking);
+        Assert.Equal(0, CompressionOf(offImage.Texture));
         // Over the same shape the device holds less.
         output.WriteLine($"allocated lossless={offImage.AllocatedBytes} lossy={onImage.AllocatedBytes}");
         Assert.True(onImage.AllocatedBytes < offImage.AllocatedBytes);

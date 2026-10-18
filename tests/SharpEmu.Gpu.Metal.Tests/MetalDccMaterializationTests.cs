@@ -144,6 +144,8 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
                 // twin binding the depth texture itself is MetalDepthTwinTests'.
                 DepthTwins = false,
             };
+            // Exact textures: lossy compression is not this suite's subject.
+            Cache.LossyTextures = false;
             // Not a clear code, so the target lookups in a test do not materialize.
             FillMetadata(0x55);
         }
