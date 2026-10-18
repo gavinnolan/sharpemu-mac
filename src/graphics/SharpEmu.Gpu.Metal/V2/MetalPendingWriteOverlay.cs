@@ -23,6 +23,8 @@ internal sealed class MetalPendingWriteOverlay
     // An entry is published under the lock; reads may come from a prefetch thread.
     private readonly object _gate = new();
     private readonly Dictionary<ulong, List<Entry>> _pages = new();
+    private const int MaxSpareLists = 256;
+    private readonly Stack<List<Entry>> _spareLists = new();
     private readonly Queue<Entry> _order = new();
     private ulong _sequence;
     private int _count;
@@ -82,7 +84,7 @@ internal sealed class MetalPendingWriteOverlay
             {
                 if (!_pages.TryGetValue(page, out var list))
                 {
-                    _pages[page] = list = new List<Entry>(2);
+                    _pages[page] = list = _spareLists.Count != 0 ? _spareLists.Pop() : new List<Entry>(2);
                 }
 
                 list.Add(entry);
@@ -422,6 +424,11 @@ internal sealed class MetalPendingWriteOverlay
                 if (list.Count == 0)
                 {
                     _pages.Remove(page);
+                    // Reused by the next write's page: one list per page per write was garbage.
+                    if (_spareLists.Count < MaxSpareLists)
+                    {
+                        _spareLists.Push(list);
+                    }
                 }
             }
 
