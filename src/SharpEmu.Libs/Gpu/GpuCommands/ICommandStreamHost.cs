@@ -95,6 +95,15 @@ public interface ICommandStreamHost
 
     bool TryRecordLodStatistics(ulong destination, uint size) => false;
 
+    /// <summary>
+    /// GET_LOD_STATS measured on the GPU: the host writes the counter bank into the guest
+    /// buffer after the work recorded before the packet, and clears the bank when
+    /// <paramref name="resetCounters"/> is set. False leaves the packet to the interpreter's
+    /// bound-slot fallback.
+    /// </summary>
+    bool TryRecordLodStatistics(ulong destination, uint size, bool resetCounters) =>
+        TryRecordLodStatistics(destination, size);
+
     // Reads guest memory the GPU may have written; the host synchronizes GPU-owned pages first.
     bool TryReadGuest(ulong address, Span<byte> destination);
 

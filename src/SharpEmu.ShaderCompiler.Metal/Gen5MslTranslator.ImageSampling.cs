@@ -241,6 +241,45 @@ public static partial class Gen5MslTranslator
         // An S# LOD_BIAS (signed 6.8 fixed point) as an exact float expression.
         private static string SamplerLodBiasLiteral(int bias) => $"({bias}.0f / 256.0f)";
 
+        // A pixel-stage sample of a T# whose MIP_STATS_ENABLE bit the materializer saw (the
+        // program is specialized on it) counts into the GET_LOD_STATS bank. Storage,
+        // multisampled and cube views are left out, as the SPIR-V backend leaves them.
+        private bool RecordsMipStatistics(int resourceIndex, MslImageClass imageClass) =>
+            _hasMipStatistics && _stage == Gen5MslStage.Pixel &&
+            resourceIndex >= 0 && resourceIndex < _request.Resources.Info.Images.Count &&
+            _request.Resources.Info.Images[resourceIndex].MipStatistics &&
+            !imageClass.IsStorage && !imageClass.Multisampled && !imageClass.Cube;
+
+        // The requested LOD, relative to the view, goes to the counter of the image's field
+        // (MipStatistics.ImageField, which the host writes into the shader data). Only lanes
+        // in EXEC that are not helper threads count (Templates/mip_stats_prelude.msl).
+        private void RecordMipStatistics(int resourceIndex, string requestedLod)
+        {
+            _usesMipStatistics = true;
+            var field = Temp("uint", ShaderDataDword(_request.Bindings.MipStatisticsDword + (uint)resourceIndex));
+            Line($"sharpemu_mip_stats({ResourcesName}.{Gen5MslArgumentLayout.MipStatisticsName}, {field}, {requestedLod}, " +
+                 $"{ExecCondition("!simd_is_helper_thread()")});");
+        }
+
+        // The isotropic LOD of explicit derivatives: log2 of the longer screen-axis footprint
+        // in texels of the view's first level.
+        private string GradientLod(string texture, MslImageClass imageClass, string gradientX, string gradientY)
+        {
+            var scalar = imageClass.SpatialComponents == 1;
+            var type = scalar ? "float" : imageClass.FloatCoordinateType;
+            var size = imageClass.SpatialComponents switch
+            {
+                1 => $"(float){texture}.get_width()",
+                2 => $"float2({texture}.get_width(), {texture}.get_height())",
+                _ => $"float3({texture}.get_width(), {texture}.get_height(), {texture}.get_depth())",
+            };
+            var x = Temp(type, $"{gradientX} * {size}");
+            var y = Temp(type, $"{gradientY} * {size}");
+            return scalar
+                ? Temp("float", $"0.5f * log2(max({x} * {x}, {y} * {y}))")
+                : Temp("float", $"0.5f * log2(max(dot({x}, {x}), dot({y}, {y})))");
+        }
+
         private string NearestMip(string level, string texture) =>
             Temp("uint", $"min((uint)max(rint({level}), 0.0f), {texture}.get_num_mip_levels() - 1u)");
 
@@ -280,6 +319,7 @@ public static partial class Gen5MslTranslator
             MslImageClass imageClass,
             int compareFunction,
             SamplerResource? samplerInfo,
+            int resourceIndex,
             out string sampled,
             out string error)
         {
@@ -372,6 +412,8 @@ public static partial class Gen5MslTranslator
                     : explicitLod
                         ? "0.0f"
                         : bias;
+            // The LOD the instruction asks for, before the _CL clamp raises it.
+            var givenLod = hasZeroLod || unorm || hasLod ? lod : null;
             string? clamp = null;
             if (hasClamp)
             {
@@ -380,6 +422,15 @@ public static partial class Gen5MslTranslator
                 {
                     lod = Temp("float", $"max({lod}, {clamp})");
                 }
+            }
+
+            if (RecordsMipStatistics(resourceIndex, imageClass))
+            {
+                var planar = spatialComponents == 1 ? $"float2({coordinates}, 0.5f)" : coordinates;
+                var requestedLod = givenLod ?? (useGradients
+                    ? GradientLod(texture, imageClass, gradientX, gradientY)
+                    : Temp("float", $"{texture}.calculate_unclamped_lod({samplerName}, {planar}) + {bias}"));
+                RecordMipStatistics(resourceIndex, requestedLod);
             }
 
             if (unorm)

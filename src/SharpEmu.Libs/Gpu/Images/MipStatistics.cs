@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -12,7 +13,13 @@ public sealed class MipStatistics
     public const int ReportBytes = (int)FirstCounterOffset + SlotCount * CounterBytes;
     public const uint NoMipSampled = 15;
     public const uint CounterWords = 257;
-    public const ulong CounterBufferBytes = 2 * CounterWords * sizeof(uint);
+
+    /// <summary>
+    /// The counter bank a shader records into: three arrays of <see cref="CounterWords"/>
+    /// words - the finest level each counter id saw, its clamped samples, and its unclamped
+    /// samples of the tracked mip (<see cref="PackReport"/>).
+    /// </summary>
+    public const ulong CounterBufferBytes = 3 * CounterWords * sizeof(uint);
     public const uint NoCounterField = 0x8000;
     public const uint ReportWithoutCounters = 1;
 
@@ -27,6 +34,9 @@ public sealed class MipStatistics
 
     /// <summary>Slots a draw has bound since the last report (diagnostic; racy by design).</summary>
     public int BoundSlotCount => _bindingsBySlot.Count(static bindings => bindings != 0);
+
+    /// <summary>A report the host measured on the GPU starts a new window here too.</summary>
+    public void ClearBoundSlots() => Array.Clear(_bindingsBySlot);
 
     public void NoteSampled(in TextureDescriptorWords texture)
     {
@@ -50,6 +60,29 @@ public sealed class MipStatistics
         return counter | (baseLevel << 8) | (minLod << 16);
     }
 
+    /// <summary>
+    /// The shader-data fields of a program that records mip statistics, one per image
+    /// (<see cref="BindingLayout.MipStatisticsDword"/>): <see cref="ImageField"/> of the bound
+    /// T# when the program records that image, otherwise <see cref="NoCounterField"/>.
+    /// </summary>
+    public static void WriteImageFields(Span<uint> shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images)
+    {
+        for (var index = 0; index < layout.MipStatisticsCount; index++)
+        {
+            var image = index < info.Images.Count ? info.Images[index] : null;
+            var words = index < images.Length ? images[index] : null;
+            shaderData[(int)(layout.MipStatisticsDword + (uint)index)] = image is { MipStatistics: true } && words is { Length: >= 8 }
+                ? ImageField(words)
+                : NoCounterField;
+        }
+    }
+
+    /// <summary>
+    /// The guest MipStatsBuffer from the counter bank: the header (the byte offset of the
+    /// first slot, which is also the non-zero completion label) and per slot
+    /// {clamped:24, slot:8} {unclamped:24, finestMip:4}. A bank of two arrays has no
+    /// unclamped counts and reports none.
+    /// </summary>
     public static void PackReport(ReadOnlySpan<uint> words, Span<byte> report)
     {
         report.Clear();
@@ -68,10 +101,13 @@ public sealed class MipStatistics
 
             var finest = words[slot];
             var count = Math.Min(words[(int)CounterWords + slot], MaxSamples);
+            var unclamped = words.Length >= 3 * (int)CounterWords
+                ? Math.Min(words[2 * (int)CounterWords + slot], MaxSamples)
+                : 0u;
             var level = finest == uint.MaxValue ? NoMipSampled : Math.Min(finest, 14u);
             var counter = report.Slice(start, CounterBytes);
             BinaryPrimitives.WriteUInt32LittleEndian(counter, count | ((uint)slot << 24));
-            BinaryPrimitives.WriteUInt32LittleEndian(counter[sizeof(uint)..], level << 24);
+            BinaryPrimitives.WriteUInt32LittleEndian(counter[sizeof(uint)..], unclamped | (level << 24));
         }
     }
 

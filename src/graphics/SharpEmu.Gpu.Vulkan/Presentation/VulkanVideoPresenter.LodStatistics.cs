@@ -106,17 +106,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void WriteMipStatisticsFields(uint[] shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images)
-        {
-            for (var index = 0; index < layout.MipStatisticsCount; index++)
-            {
-                var image = index < info.Images.Count ? info.Images[index] : null;
-                var words = index < images.Length ? images[index] : null;
-                shaderData[layout.MipStatisticsDword + (uint)index] = image is { MipStatistics: true } && words is { Length: >= 8 }
-                    ? MipStatistics.ImageField(words)
-                    : MipStatistics.NoCounterField;
-            }
-        }
+        private static void WriteMipStatisticsFields(uint[] shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images) =>
+            MipStatistics.WriteImageFields(shaderData, layout, info, images);
 
         private DescriptorBufferInfo MipStatisticsDescriptor()
         {
@@ -149,7 +140,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public void Reset()
         {
             Counters.Fill(0, MipStatistics.CounterWords * sizeof(uint), uint.MaxValue);
-            Counters.Fill(MipStatistics.CounterWords * sizeof(uint), MipStatistics.CounterWords * sizeof(uint), 0);
+            // Both sample-count arrays; the shader records clamped samples only.
+            Counters.Fill(MipStatistics.CounterWords * sizeof(uint), 2 * MipStatistics.CounterWords * sizeof(uint), 0);
             _initialized = true;
         }
 

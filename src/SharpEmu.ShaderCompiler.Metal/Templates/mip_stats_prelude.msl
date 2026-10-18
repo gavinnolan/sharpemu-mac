@@ -1,0 +1,57 @@
+// GPU mip statistics (sceAgcDcbGetLodStats / getMipStats). The texture unit of a PS5 keeps
+// 256 counters; a T# with MIP_STATS_ENABLE (dword5 bit 25) accumulates every fetch into
+// counter MipStatsCounterId (dword6 [7:0]): the finest mip requested, the samples whose
+// requested LOD was below MinLodClamp ("clamped"), and the samples that came from the
+// tracked mip max(BASE_LEVEL, MinLodClamp) unclamped. The host binds the bank as three
+// arrays of 257 words (MipStatistics.CounterWords): finest level, clamped count,
+// unclamped count, and packs them into the guest MipStatsBuffer when the stream reaches
+// the GET_LOD_STATS packet.
+//
+// field is MipStatistics.ImageField: counter id [7:0], BASE_LEVEL [11:8], bit 15 set when
+// the bound T# has no counter, MIN_LOD (unsigned 4.8) [27:16]. lod is the requested LOD
+// relative to the view, whose level 0 is BASE_LEVEL, before any clamp.
+//
+// The counter id is read from per-draw shader data at an index the translator fixes, so
+// it is the same in every lane of the simdgroup: one lane does the atomics for all of
+// them. That lane must not be a helper thread (their atomics have no effect), and
+// helpers and lanes outside EXEC (active false) contribute nothing.
+constant uint sharpemu_mip_stats_entries = 257u;
+
+static inline void sharpemu_mip_stats(device atomic_uint* stats, uint field, float lod, bool active)
+{
+    active = active && (field & 0x8000u) == 0u;
+    float base = (float)((field >> 8) & 0xFu);
+    float requested = lod + base;
+    // The finest mip is never below BASE_LEVEL: a magnified sample reads the base level.
+    // max() returns base for a NaN LOD.
+    uint level = (uint)min(max(requested, base), 14.0f);
+    float minLod = (float)((field >> 16) & 0xFFFu) * (1.0f / 256.0f);
+    bool clamped = requested < minLod;
+    bool unclamped = !clamped && level == max((uint)base, (uint)minLod);
+    uint finest = simd_min(active ? level : 0xFFFFFFFFu);
+    uint clampedCount = simd_sum(active && clamped ? 1u : 0u);
+    uint unclampedCount = simd_sum(active && unclamped ? 1u : 0u);
+    uint before = simd_prefix_exclusive_sum(active ? 1u : 0u);
+    if (!active || before != 0u)
+    {
+        return;
+    }
+
+    device atomic_uint* counter = stats + (field & 0xFFu);
+    // Most fetches only confirm the minimum already held; reading first keeps them off
+    // the read-modify-write every simdgroup on screen would otherwise contend for.
+    if (atomic_load_explicit(counter, memory_order_relaxed) > finest)
+    {
+        atomic_fetch_min_explicit(counter, finest, memory_order_relaxed);
+    }
+
+    if (clampedCount != 0u)
+    {
+        atomic_fetch_add_explicit(counter + sharpemu_mip_stats_entries, clampedCount, memory_order_relaxed);
+    }
+
+    if (unclampedCount != 0u)
+    {
+        atomic_fetch_add_explicit(counter + 2u * sharpemu_mip_stats_entries, unclampedCount, memory_order_relaxed);
+    }
+}

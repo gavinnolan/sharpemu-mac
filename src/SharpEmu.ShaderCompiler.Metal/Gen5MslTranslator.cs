@@ -20,7 +20,8 @@ internal enum Gen5MslPreludes
     PairLocks = 1 << 4,
     Float64 = 1 << 5,
     Bvh = 1 << 6,
-    All = (1 << 7) - 1,
+    MipStatistics = 1 << 7,
+    All = (1 << 8) - 1,
 }
 
 // Compiles shader requests into Metal source with argument-buffer bindings.
@@ -1054,6 +1055,11 @@ public static partial class Gen5MslTranslator
                 preludes |= Gen5MslPreludes.Bvh;
             }
 
+            if (_usesMipStatistics)
+            {
+                preludes |= Gen5MslPreludes.MipStatistics;
+            }
+
             return preludes;
         }
 
@@ -1101,6 +1107,11 @@ public static partial class Gen5MslTranslator
             if ((preludes & Gen5MslPreludes.Bvh) != 0)
             {
                 source.Append(MslTemplates.Render("bvh_prelude"));
+            }
+
+            if ((preludes & Gen5MslPreludes.MipStatistics) != 0)
+            {
+                source.Append(MslTemplates.Render("mip_stats_prelude"));
             }
         }
 

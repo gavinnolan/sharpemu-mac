@@ -26,6 +26,11 @@ public static class LodStatsTelemetry
     private static long _getSizeCalls;
     private static long _emits;
     private static int _maxSlotsBound;
+    private static long _hostRecorded;
+    private static long _reports;
+    private static int _lastSampledSlots;
+    private static int _lastCoarseSlots;
+    private static int _maxCoarseSlots;
     private static int _registered;
 
     public static bool Enabled => MemoryTelemetry.Enabled;
@@ -50,6 +55,11 @@ public static class LodStatsTelemetry
                 _withCounters++;
             }
 
+            if (hostRecorded)
+            {
+                _hostRecorded++;
+            }
+
             BufferSizes[bufferSize] = BufferSizes.GetValueOrDefault(bufferSize) + 1;
             _maxSlotsBound = Math.Max(_maxSlotsBound, slotsBound);
             if (First.Count < 8)
@@ -58,6 +68,54 @@ public static class LodStatsTelemetry
                     $"size={bufferSize} dst=0x{destination:X} counters_written={withCounters} slots_bound={slotsBound}"));
             }
         }
+    }
+
+    /// <summary>
+    /// What one report told the title: the slots that saw any sample (finest mip below 15)
+    /// and the slots whose finest mip was coarser than 0. Bound-slot fallback reports only
+    /// ever say mip 0 or nothing, so a run whose reports never name a coarser mip is not
+    /// measuring.
+    /// </summary>
+    public static void NoteReportSlots(int sampledSlots, int coarseSlots)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        Register();
+        lock (Gate)
+        {
+            _reports++;
+            _lastSampledSlots = sampledSlots;
+            _lastCoarseSlots = coarseSlots;
+            _maxCoarseSlots = Math.Max(_maxCoarseSlots, coarseSlots);
+        }
+    }
+
+    /// <summary><see cref="NoteReportSlots"/> of a report as written to the guest.</summary>
+    public static void NoteReport(ReadOnlySpan<byte> report)
+    {
+        if (!Enabled || report.Length < MipStatistics.ReportBytes)
+        {
+            return;
+        }
+
+        var sampled = 0;
+        var coarse = 0;
+        for (var slot = 0; slot < MipStatistics.SlotCount; slot++)
+        {
+            var high = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                report[((int)MipStatistics.FirstCounterOffset + slot * 8 + sizeof(uint))..]);
+            var finest = (high >> 24) & 0xF;
+            if (finest != MipStatistics.NoMipSampled)
+            {
+                sampled++;
+                coarse += finest != 0 ? 1 : 0;
+            }
+        }
+
+        NoteReportSlots(sampled, coarse);
     }
 
     /// <summary>sceAgcDcbGetLodStatsGetSize(counterCount) and what it answered.</summary>
@@ -110,7 +168,9 @@ public static class LodStatsTelemetry
             var text = new StringBuilder(string.Create(CultureInfo.InvariantCulture,
                 $"report_bytes_needed={MipStatistics.ReportBytes} emits={_emits} packets={_packets} " +
                 $"counters_written={_withCounters} without_counters={_packets - _withCounters} " +
-                $"get_size_calls={_getSizeCalls} max_slots_bound={_maxSlotsBound}"));
+                $"get_size_calls={_getSizeCalls} max_slots_bound={_maxSlotsBound} gpu_reports={_hostRecorded} " +
+                $"reports_seen={_reports} slots_sampled={_lastSampledSlots} slots_mip_gt0={_lastCoarseSlots} " +
+                $"max_slots_mip_gt0={_maxCoarseSlots}"));
             text.Append(" buffer_sizes={")
                 .Append(string.Join(',', BufferSizes.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}")))
                 .Append("} get_size={")

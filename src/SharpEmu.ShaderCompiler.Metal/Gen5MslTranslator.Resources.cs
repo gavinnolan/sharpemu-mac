@@ -87,6 +87,11 @@ public static partial class Gen5MslTranslator
         private bool _hasDeviceAddressTable;
         private bool _hasFlattenedTable;
         private bool _hasSamplers;
+        // The layout binds the mip-statistics counters (BindingLayout.MipStatisticsCount):
+        // some image of this program has its T# MIP_STATS_ENABLE bit set.
+        private bool _hasMipStatistics;
+        // A sample records into them, so the module carries mip_stats_prelude.
+        private bool _usesMipStatistics;
 
         private readonly record struct MslImageClass(
             string Field,
@@ -227,6 +232,9 @@ public static partial class Gen5MslTranslator
                         _hasFlattenedTable = true;
                         break;
                     case DescriptorBindingKind.ShaderData:
+                        break;
+                    case DescriptorBindingKind.MipStatistics:
+                        _hasMipStatistics = true;
                         break;
                     default:
                         DeclareImageClass(binding, info);
@@ -391,6 +399,7 @@ public static partial class Gen5MslTranslator
             DescriptorBindingKind.DeviceAddressPageTable => "device const Gen5AddressRange*",
             DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData =>
                 _options.UniformTablesInConstantSpace ? "constant uint*" : "device const uint*",
+            DescriptorBindingKind.MipStatistics => "device atomic_uint*",
             _ => "device uint*",
         };
 
@@ -1944,9 +1953,11 @@ public static partial class Gen5MslTranslator
             out uint packedFormat,
             out SamplerResource? samplerInfo,
             out string error,
+            out int resourceIndex,
             (uint Resource, uint Element)? fixedElement = null)
         {
             error = string.Empty;
+            resourceIndex = -1;
             compareFunction = -1;
             samplerInfo = null;
             packedFormat = DescriptorConstants.InvalidFormat;
@@ -1970,7 +1981,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var resourceIndex = (int)(fixedElement?.Resource ?? entry.Resource);
+            resourceIndex = (int)(fixedElement?.Resource ?? entry.Resource);
             var imageInfo = info.Images[resourceIndex];
             var bindingKind = ImageDescriptorBinding.ForImage(imageInfo);
             if (bindingKind is null || !_imageClasses.TryGetValue(bindingKind.Value, out var imageClass))
