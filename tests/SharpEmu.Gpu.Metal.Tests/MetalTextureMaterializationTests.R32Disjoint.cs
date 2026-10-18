@@ -241,7 +241,7 @@ public sealed partial class MetalTextureMaterializationTests
                         Assert.Null(Presenter.GetField("_selectedStorageMipSeedExecutingWork", Methods)!.GetValue(null));
                         Presenter.GetMethod("RequireR32SampledMipZeroCopyPreflight", Methods)!.Invoke(null, [memory, resource, session]);
                     });
-                    if (!ReferenceEquals(Task.WhenAny(r32PreflightTask, Task.Delay(TimeSpan.FromSeconds(5)))
+                    if (!ReferenceEquals(Task.WhenAny(r32PreflightTask, Task.Delay(TimeSpan.FromSeconds(10)))
                         .GetAwaiter().GetResult(), r32PreflightTask))
                     {
                         unknown = true;

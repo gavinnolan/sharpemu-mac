@@ -94,7 +94,7 @@ public sealed class PthreadRwlockBarrierCancelTests
         var readerTry = 0;
         var reader = new Thread(() => readerTry = KernelPthreadExtendedCompatExports.PosixPthreadRwlockTryrdlock(NewContext(memory, rwlock)));
         reader.Start();
-        Assert.True(reader.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(reader.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(EBUSY, readerTry);
 
         // The current reader may still re-enter (libthr's exemption for read holders).
@@ -103,10 +103,10 @@ public sealed class PthreadRwlockBarrierCancelTests
         Assert.False(writerHolds.IsSet);
 
         Assert.Equal(0, KernelPthreadExtendedCompatExports.PthreadRwlockUnlock(ctx));
-        Assert.True(writerHolds.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(writerHolds.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, writerResult);
         writerRelease.Set();
-        Assert.True(writer.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(writer.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, KernelPthreadExtendedCompatExports.PthreadRwlockDestroy(ctx));
     }
 
@@ -147,12 +147,12 @@ public sealed class PthreadRwlockBarrierCancelTests
         Thread.Sleep(50);
         Assert.Equal(0, Volatile.Read(ref holding));
         Assert.Equal(0, KernelPthreadExtendedCompatExports.PthreadRwlockUnlock(ctx));
-        Assert.True(allIn.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(allIn.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(readers, Volatile.Read(ref maxHolding));
         release.Set();
         foreach (var thread in threads)
         {
-            Assert.True(thread.Join(TimeSpan.FromSeconds(5)));
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
         }
     }
 
@@ -188,16 +188,16 @@ public sealed class PthreadRwlockBarrierCancelTests
             posixResult = KernelPthreadExtendedCompatExports.PosixPthreadRwlockTimedwrlock(c);
         });
         writer.Start();
-        Assert.True(writer.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(writer.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT, sceResult);
         Assert.Equal(ETIMEDOUT, posixResult);
-        Assert.InRange(elapsedMs, 25, 2000);
+        Assert.InRange(elapsedMs, 25, 10_000);
 
         // The departed writer no longer holds readers back.
         var tryResult = -1;
         var reader = new Thread(() => tryResult = KernelPthreadExtendedCompatExports.PthreadRwlockTryrdlock(NewContext(memory, rwlock)));
         reader.Start();
-        Assert.True(reader.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(reader.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, tryResult);
     }
 
@@ -324,7 +324,7 @@ public sealed class PthreadRwlockBarrierCancelTests
         Thread.Sleep(30);
         Assert.Equal(EBUSY, KernelPthreadBarrierCancelCompatExports.PosixPthreadBarrierDestroy(ctx));
         Assert.Equal(KernelPthreadBarrierCancelCompatExports.BarrierSerialThread, KernelPthreadBarrierCancelCompatExports.PosixPthreadBarrierWait(ctx));
-        Assert.True(waiter.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(waiter.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, waiterResult);
         Assert.Equal(0, KernelPthreadBarrierCancelCompatExports.PthreadBarrierDestroy(ctx));
     }

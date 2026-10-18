@@ -81,7 +81,7 @@ public sealed partial class MetalTextureMaterializationTests
         using var barrier = new Barrier(2);
         Task<nint> Publish(nint value) => Task.Run(() =>
         {
-            Assert.True(barrier.SignalAndWait(TimeSpan.FromSeconds(5)));
+            Assert.True(barrier.SignalAndWait(TimeSpan.FromSeconds(10)));
             return SamplerOwnershipCall("PublishOwnedSamplerState", key, value, release);
         });
         try

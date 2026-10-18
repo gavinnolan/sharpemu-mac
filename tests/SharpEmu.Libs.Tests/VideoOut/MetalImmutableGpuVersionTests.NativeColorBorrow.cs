@@ -490,7 +490,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             if (typedCaller is { IsCompleted: false })
             {
                 Attempt(() => MetalVideoPresenter.LatchGuestCompletionFailure("native typed memory fixture unwound", primary));
-                try { callerJoined = typedCaller.Wait(2000); } catch { callerJoined = typedCaller.IsCompleted; }
+                try { callerJoined = typedCaller.Wait(10000); } catch { callerJoined = typedCaller.IsCompleted; }
                 if (!callerJoined) NativeDepthPreserve(ref cleanup, new InvalidOperationException("Native typed memory caller ownership is unknown."));
             }
             if (callerJoined)

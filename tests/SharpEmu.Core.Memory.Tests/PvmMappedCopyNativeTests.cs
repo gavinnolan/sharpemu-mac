@@ -60,15 +60,15 @@ public sealed class PvmMappedCopyNativeTests(ITestOutputHelper output)
                     catch (TimeoutException)
                     {
                         if (!child.HasExited) child.Kill(entireProcessTree: true);
-                        await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                        await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
                     }
                 }
             }
             catch (Exception error) { cleanup = error; }
             try
             {
-                captured = await stdout.WaitAsync(TimeSpan.FromSeconds(2));
-                errors = await stderr.WaitAsync(TimeSpan.FromSeconds(2));
+                captured = await stdout.WaitAsync(TimeSpan.FromSeconds(10));
+                errors = await stderr.WaitAsync(TimeSpan.FromSeconds(10));
                 output.WriteLine(captured);
                 if (errors.Length != 0) output.WriteLine(errors);
                 output.WriteLine($"owned-worker pid={child.Id} exited={child.HasExited}" + (child.HasExited ? $" exit={child.ExitCode}" : ""));

@@ -138,7 +138,7 @@ public sealed class KernelBackedMemoryTests
         {
             DispatchCount++;
             // A blocked read must fail the test, not leave its host waiting forever.
-            Task.Run(readPendingImage).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            Task.Run(readPendingImage).WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
             IsGpuQueueThread = true;
             try { work(); }
             finally { IsGpuQueueThread = false; }

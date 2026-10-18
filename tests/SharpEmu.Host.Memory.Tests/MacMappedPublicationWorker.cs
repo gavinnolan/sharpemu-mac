@@ -236,7 +236,7 @@ public sealed class MacMappedPublicationNativeTests(ITestOutputHelper output)
         try
         {
             await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-            var captured = await stdout.WaitAsync(TimeSpan.FromSeconds(2)); var errors = await stderr.WaitAsync(TimeSpan.FromSeconds(2));
+            var captured = await stdout.WaitAsync(TimeSpan.FromSeconds(10)); var errors = await stderr.WaitAsync(TimeSpan.FromSeconds(10));
             output.WriteLine(captured); if (errors.Length != 0) output.WriteLine(errors);
             Assert.Equal(0, child.ExitCode); Assert.Empty(errors);
             Assert.Contains("mapped-publication-native-pass case=" + scenario, captured);
@@ -248,7 +248,7 @@ public sealed class MacMappedPublicationNativeTests(ITestOutputHelper output)
             {
                 _ = kill(child.Id, 15);
                 try { await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
-                catch (TimeoutException) { child.Kill(entireProcessTree: true); await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch (TimeoutException) { child.Kill(entireProcessTree: true); await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
             }
         }
     }

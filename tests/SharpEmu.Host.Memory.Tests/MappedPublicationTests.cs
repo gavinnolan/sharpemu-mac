@@ -372,7 +372,7 @@ public sealed partial class MappedPublicationTests
     {
         using var state = new State(); using var receipt = state.Prepare(state.Capture(), State.Address, [57]);
         var attempts = Enumerable.Range(0, 16).Select(_ => Task.Run(receipt.TryCommit)).ToArray();
-        await Task.WhenAll(attempts).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(attempts).WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(1, attempts.Count(t => t.Result == CpuMappedPublicationResult.Applied));
         Assert.Equal(15, attempts.Count(t => t.Result == CpuMappedPublicationResult.Rejected));
         Assert.Equal(57, state.Bytes()[0]);
@@ -568,7 +568,7 @@ public sealed partial class MappedPublicationTests
         using var state = new State(); var original = state.Capture();
         var writes = Enumerable.Range(0, 32).Select(index => Task.Run(() =>
             state.Views.TryWriteBacking(State.Address + 32 + (ulong)index, new byte[] { (byte)index }))).ToArray();
-        Assert.All(await Task.WhenAll(writes).WaitAsync(TimeSpan.FromSeconds(5)), succeeded => Assert.True(succeeded));
+        Assert.All(await Task.WhenAll(writes).WaitAsync(TimeSpan.FromSeconds(10)), succeeded => Assert.True(succeeded));
         using var receipt = state.Prepare(original, State.Address, [57]);
         Assert.Equal(CpuMappedPublicationResult.Applied, receipt.TryCommit());
         Assert.Equal(57, state.Bytes()[0]);

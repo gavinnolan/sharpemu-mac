@@ -68,8 +68,10 @@ public sealed class AudioOutExportsTests : IDisposable
         var stream = Assert.Single(_streams);
         AudioOutExports.ShutdownAllPorts();
 
-        Assert.Equal(0, SubmitSingle(handle, sourceAddress: 0));
+        // Started before the first submit: pacing runs from that submit, so a late start would
+        // leave scheduling delay out of the elapsed time on a loaded runner.
         var timer = Stopwatch.StartNew();
+        Assert.Equal(0, SubmitSingle(handle, sourceAddress: 0));
         var result = SubmitSingle(handle, sourceAddress: 0);
 
         Assert.Equal(0, result);

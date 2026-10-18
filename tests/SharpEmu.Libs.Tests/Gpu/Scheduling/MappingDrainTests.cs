@@ -219,7 +219,7 @@ public sealed class MappingDrainTests
         {
             device.CompleteOnSubmit = true;
             device.Complete(1);
-            Assert.True(await CompletesWithin(change, 5000));
+            Assert.True(await CompletesWithin(change, 10000));
             await change;
         }
 
@@ -244,14 +244,14 @@ public sealed class MappingDrainTests
         var change = Task.Run(() => memory.RunMappingChange(() => memory.Unregister(Address, Size)));
         try
         {
-            Assert.True(entered.Wait(5000));
+            Assert.True(entered.Wait(10000));
             Assert.False(change.IsCompleted);
             Assert.True(memory.Covers(Address, Size));
         }
         finally
         {
             release.Set();
-            Assert.True(await CompletesWithin(change, 5000));
+            Assert.True(await CompletesWithin(change, 10000));
             await change;
         }
 

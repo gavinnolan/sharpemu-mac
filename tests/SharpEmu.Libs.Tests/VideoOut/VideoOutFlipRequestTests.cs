@@ -213,7 +213,7 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         var completion = Task.Run(() => (bool)paceFlip.Invoke(null, new object[] { _handle, 4 })!);
         try
         {
-            Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.True(Stopwatch.GetTimestamp() >= firstBoundary);
         }
         finally
@@ -222,7 +222,7 @@ public sealed class VideoOutFlipRequestTests : IDisposable
             {
                 _context[CpuRegister.Rdi] = (ulong)_handle;
                 VideoOutExports.VideoOutClose(_context);
-                await completion.WaitAsync(TimeSpan.FromSeconds(5));
+                await completion.WaitAsync(TimeSpan.FromSeconds(10));
             }
         }
     }

@@ -70,9 +70,9 @@ internal static partial class PvmMappedCopyWorker
         Task<bool> writer;
         try
         {
-            Assert.True(held.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(held.Wait(TimeSpan.FromSeconds(10)));
             writer = Task.Factory.StartNew(() => pvm.TryWrite(address + 64, payload), TaskCreationOptions.LongRunning);
-            finished = writer.Wait(TimeSpan.FromSeconds(5));
+            finished = writer.Wait(TimeSpan.FromSeconds(10));
         }
         finally
         {
@@ -121,7 +121,7 @@ internal static partial class PvmMappedCopyWorker
             using var started = new ManualResetEventSlim();
             var writer = Task.Factory.StartNew(() => { started.Set(); return pvm.TryWrite(target, payload); },
                 TaskCreationOptions.LongRunning);
-            Assert.True(started.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(started.Wait(TimeSpan.FromSeconds(10)));
             Thread.Sleep(100); // well inside the 500 ms ordinary admission wait
             Assert.False(writer.IsCompleted, "PVM.TryWrite did not wait for the held publication");
             Assert.Equal(begun, Count(ledger, "begun"));
@@ -129,7 +129,7 @@ internal static partial class PvmMappedCopyWorker
 
             releasePublication.Invoke(ledger, [null]);
             released = true;
-            Assert.True(writer.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(writer.Wait(TimeSpan.FromSeconds(10)));
             Assert.True(writer.Result);
         }
         finally

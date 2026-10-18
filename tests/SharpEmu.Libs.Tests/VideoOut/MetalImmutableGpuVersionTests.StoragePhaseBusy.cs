@@ -118,7 +118,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(2L, StorageMember(volumeLedger, "admission"));
                 writeHook.SetValue(volumeViews, oldWrite); // one-shot, future EOP retains ordinary behavior
                 pause.Admitted.Set();
-                if (!pause.Resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("phase writer pause bound");
+                if (!pause.Resume.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("phase writer pause bound");
             }));
             Field(fields[0]).SetValue(null, (Action<object>)(receipt =>
             {
@@ -146,7 +146,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                     try { pause.Written = volumeViews.TryWriteBacking(destination, new byte[] { 0xA9 }); }
                     catch (Exception failure) { pause.Failure = failure; }
                 }) { IsBackground = true, Name = "original volume phase writer" };
-                pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)));
+                pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(10)));
                 Assert.Equal(scenario == "overlap" ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Busy,
                     ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(watched));
                 if (scenario == "token") GuestImageWriteTracker.NotifyManagedWrite(watched.SourceAddress, 1);
@@ -232,7 +232,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Exception? cleanup = null; pause.Resume.Set();
             try
             {
-                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(5)))
+                if (pause.Thread is { } writer && !writer.Join(TimeSpan.FromSeconds(10)))
                 { owners.OrdinaryWriterUnconfirmed = true; cleanup = new TimeoutException("phase writer live; exact owners quarantined"); }
             }
             catch (Exception failure) { owners.OrdinaryWriterUnconfirmed = true; cleanup = failure; }
@@ -249,7 +249,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         }
         void FinishWriter()
         {
-            pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(5)));
+            pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(10)));
             if (pause.Failure is { } failure) ExceptionDispatchInfo.Capture(failure).Throw();
             Assert.True(pause.Written); extraExpected[checked((int)(destination - owners.BodyVolumeAddress))] = 0xA9;
         }

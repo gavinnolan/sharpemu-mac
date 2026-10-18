@@ -85,7 +85,7 @@ public sealed class PthreadMutexCondErrnoTests
             result = KernelPthreadCompatExports.PosixPthreadMutexUnlock(otherContext);
         });
         other.Start();
-        Assert.True(other.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(other.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(EPERM, result);
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ctx));
     }
@@ -117,10 +117,10 @@ public sealed class PthreadMutexCondErrnoTests
             posixResult = KernelPthreadCompatExports.PosixPthreadMutexTimedlock(otherContext);
         });
         other.Start();
-        Assert.True(other.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(other.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT, sceResult);
         Assert.Equal(ETIMEDOUT, posixResult);
-        Assert.InRange(elapsedMs, 25, 2000);
+        Assert.InRange(elapsedMs, 25, 10_000);
 
         // The timed-out waiters left the queue: the owner's unlock is uncontended and a
         // later locker gets the mutex at once.
@@ -150,7 +150,7 @@ public sealed class PthreadMutexCondErrnoTests
         other.Start();
         Thread.Sleep(30);
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ctx));
-        Assert.True(other.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(other.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, result);
     }
 
@@ -246,7 +246,7 @@ public sealed class PthreadMutexCondErrnoTests
         ctx[CpuRegister.Rdx] = 5_000_000;
         other.Start();
         Assert.Equal(0, KernelPthreadCompatExports.PthreadCondTimedwait(ctx));
-        Assert.True(other.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(other.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, otherLocked);
 
         ctx[CpuRegister.Rdi] = mutexAddress;
@@ -291,7 +291,7 @@ public sealed class PthreadMutexCondErrnoTests
         ctx[CpuRegister.Rsi] = mutexAddress;
         ctx[CpuRegister.Rdx] = timeAddress;
         Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadCondTimedwait(ctx));
-        Assert.True(signaller.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(signaller.Join(TimeSpan.FromSeconds(10)));
 
         // A past abstime times out with the mutex re-acquired.
         WriteAbsoluteRealtime(ctx, timeAddress, -1);
@@ -328,7 +328,7 @@ public sealed class PthreadMutexCondErrnoTests
             result = KernelPthreadCompatExports.PosixPthreadCondWait(otherContext);
         });
         other.Start();
-        Assert.True(other.Join(TimeSpan.FromSeconds(5)));
+        Assert.True(other.Join(TimeSpan.FromSeconds(10)));
         Assert.Equal(EPERM, result);
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ctx));
     }

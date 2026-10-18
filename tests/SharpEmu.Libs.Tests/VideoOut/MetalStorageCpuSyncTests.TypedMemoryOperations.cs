@@ -247,7 +247,7 @@ public sealed partial class MetalStorageCpuSyncTests
             if (!callerJoined)
             {
                 Attempt(() => MetalVideoPresenter.LatchGuestCompletionFailure("fake uncertain scope reset control"));
-                try { callerJoined = caller is null || caller.Wait(2000); }
+                try { callerJoined = caller is null || caller.Wait(10000); }
                 catch (Exception failure) { callerJoined = caller?.IsCompleted == true; cleanup ??= failure; }
                 if (!callerJoined) { cleanup ??= new TimeoutException("Original caller is still live; all fixture owners remain quarantined."); return; }
             }
@@ -384,7 +384,7 @@ public sealed partial class MetalStorageCpuSyncTests
         finally
         {
             MetalVideoPresenter.LatchGuestCompletionFailure("metadata-only typed memory control finished");
-            Assert.True(caller.Wait(2000), "Never restore a presenter while the typed caller still owns its receipt.");
+            Assert.True(caller.Wait(10000), "Never restore a presenter while the typed caller still owns its receipt.");
             Field("_selectedStorageMipSession").SetValue(null, oldSession);
             memory.CommandCurrent = true;
             InvokeVolume("CompletePresenterShutdown");

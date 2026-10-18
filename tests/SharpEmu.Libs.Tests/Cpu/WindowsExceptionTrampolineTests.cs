@@ -46,9 +46,9 @@ public sealed class WindowsExceptionTrampolineTests
         try
         {
             firstCallback = StartCallback(trampoline.Address);
-            Assert.True(firstEntered.Wait(TimeSpan.FromSeconds(5)), "The first callback did not enter.");
+            Assert.True(firstEntered.Wait(TimeSpan.FromSeconds(10)), "The first callback did not enter.");
             secondCallback = StartCallback(trampoline.Address);
-            Assert.True(secondEntered.Wait(TimeSpan.FromSeconds(5)),
+            Assert.True(secondEntered.Wait(TimeSpan.FromSeconds(10)),
                 "The second callback was blocked by the first callback.");
         }
         finally

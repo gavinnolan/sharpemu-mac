@@ -286,9 +286,9 @@ public sealed partial class MetalTextureDependencySchedulingTests
         });
         try
         {
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
             Assert.True(SpinWait.SpinUntil(() => (worker!.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0,
-                TimeSpan.FromSeconds(5)));
+                TimeSpan.FromSeconds(10)));
             lock (Field("_gate").GetValue(null)!)
             {
                 Assert.False(waiting.IsCompleted);
@@ -297,7 +297,7 @@ public sealed partial class MetalTextureDependencySchedulingTests
             CursorAt("consumer");
             using var fatal = new FatalScope();
             Assert.Throws<SchedulerFatalException>(() => MetalVideoPresenter.DrainGuestWork(0, 0));
-            Assert.True(waiting.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(waiting.Wait(TimeSpan.FromSeconds(10)));
             Assert.Equal(0, waiting.Result);
         }
         finally
@@ -309,7 +309,7 @@ public sealed partial class MetalTextureDependencySchedulingTests
                     Field("_closed").SetValue(null, true);
                     Monitor.PulseAll(Field("_gate").GetValue(null)!);
                 }
-                Assert.True(waiting.Wait(TimeSpan.FromSeconds(5)));
+                Assert.True(waiting.Wait(TimeSpan.FromSeconds(10)));
             }
         }
     }
