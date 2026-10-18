@@ -69,8 +69,10 @@ internal static class TitleDisplayPatches
     /// that becomes <see cref="HdMode"/>; <see cref="OverrideSites"/> drop the overrides (a saved
     /// visual-mode option among them) so the mode holds. The HD output stays
     /// <see cref="HdWidth"/> x <see cref="HdHeight"/>: the title composites its UI over the
-    /// scene at that size, so the output, display buffers and UI canvas must agree on it. Below
-    /// it only <see cref="HdInternalSites"/>, the internal scene size, shrink to the display.</summary>
+    /// scene at that size, so the output, display buffers and UI canvas must agree on it.
+    /// <see cref="HdBufferSites"/>, compiled 4K sizes the HD mode still allocates or reports,
+    /// become that size. Below it only <see cref="HdInternalSites"/>, the internal scene size,
+    /// shrink to the display.</summary>
     internal sealed record DisplayModeProfile(
         IReadOnlyList<ulong> DefaultModeSites,
         uint OldDefaultMode,
@@ -78,6 +80,7 @@ internal static class TitleDisplayPatches
         IReadOnlyList<CodeSite> OverrideSites,
         uint HdWidth,
         uint HdHeight,
+        IReadOnlyList<Site> HdBufferSites,
         IReadOnlyList<Site> HdInternalSites)
     {
         /// <summary>The mode for the display; null keeps the title's own 4K mode.</summary>
@@ -160,6 +163,14 @@ internal static class TitleDisplayPatches
     // of the composite. Below 1080p only the internal scene size (table index 1) shrinks, the
     // title upscales it to 1080 as it does from 1600x900 in mode 1, and the presenter scales
     // the 1920x1080 buffer to the window.
+    //
+    // The HD mode still allocates its "DisplayBuffer" textures at 3840x2160 (0x94535B /
+    // 0x94542D) and takes its 1920x1080 views as mip 0 of them; the buffers it registers with
+    // video out are those textures' storage (0x944D4D) under their tiling (0x944CFA). They
+    // become 1920x1080, the size of the view, as the all-sites rewrite makes them the display
+    // size. So does the fixed 3840x2160 ceiling every render config carries (0x944A46 in the
+    // mode set, 0x945002 in its getter, 0x945577 at set-up); its only known reader, 0x953500,
+    // sizes a render target from it (0x953F37) only under a flag the configs leave clear.
     private static readonly byte[] Nop3 = [0x0F, 0x1F, 0x00];
 
     private static readonly DisplayModeProfile DemonsSoulsModes = new(
@@ -176,6 +187,15 @@ internal static class TitleDisplayPatches
         ],
         HdWidth: 1920,
         HdHeight: 1080,
+        [
+            new(0x94535C, Slot.Width, 3840, 2160, Role.Output),
+            new(0x945361, Slot.Height, 3840, 2160, Role.Output),
+            new(0x94542E, Slot.Width, 3840, 2160, Role.Output),
+            new(0x945433, Slot.Height, 3840, 2160, Role.Output),
+            new(0x944A48, Slot.WidthHeight, 3840, 2160, Role.Output),
+            new(0x945004, Slot.WidthHeight, 3840, 2160, Role.Output),
+            new(0x945579, Slot.WidthHeight, 3840, 2160, Role.Output),
+        ],
         [
             new(0x1FFBE24, Slot.Width, 1920, 1080, Role.Internal),
             new(0x1FFD754, Slot.Height, 1920, 1080, Role.Internal),
@@ -257,7 +277,7 @@ internal static class TitleDisplayPatches
 
     /// <summary>The rewrites that hold the title in its HD mode and, below the HD size, shrink
     /// that mode's internal scene size to the display. The output, display buffers and
-    /// everything the UI lays out in keep the HD size.</summary>
+    /// everything the UI lays out in are the HD size.</summary>
     internal static List<GuestBytePatcher.Patch> BuildDisplayModePatches(
         DisplayModeProfile profile, uint width, uint height)
     {
@@ -280,6 +300,8 @@ internal static class TitleDisplayPatches
         {
             patches.Add(CreatePatch(site.Offset, site.Old, site.New));
         }
+
+        patches.AddRange(BuildPatches(profile.HdBufferSites, profile.HdWidth, profile.HdHeight));
 
         // The scene only shrinks: a display between 1080p and 4K keeps the HD size.
         var sceneWidth = Math.Min(width, profile.HdWidth);

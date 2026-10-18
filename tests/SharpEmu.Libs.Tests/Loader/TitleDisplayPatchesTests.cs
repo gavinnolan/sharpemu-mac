@@ -180,9 +180,21 @@ public sealed class TitleDisplayPatchesTests
             Assert.Equal(new byte[] { 0x0F, 0x1F, 0x00 }, patch.New);
         }
 
+        // The display buffers and the render-config ceiling the HD mode still compiles at 4K
+        // become the HD size whatever the display.
+        var bufferOffsets = profile.HdBufferSites.Select(site => site.Offset).ToHashSet();
+        Assert.Equal(7, bufferOffsets.Count);
+        foreach (var site in profile.HdBufferSites)
+        {
+            var patch = Assert.Single(patches, patch => patch.Offset == site.Offset);
+            Assert.Equal(Encode(site, 3840, 2160), patch.Old);
+            Assert.Equal(Encode(site, 1920, 1080), patch.New);
+        }
+
         var sizePatches = patches
             .Where(patch => !profile.DefaultModeSites.Contains(patch.Offset)
-                && profile.OverrideSites.All(site => site.Offset != patch.Offset))
+                && profile.OverrideSites.All(site => site.Offset != patch.Offset)
+                && !bufferOffsets.Contains(patch.Offset))
             .ToList();
         if (height >= 1080)
         {
@@ -204,9 +216,11 @@ public sealed class TitleDisplayPatchesTests
         Assert.DoesNotContain(patches, patch => HdOutputOffsets.Contains(patch.Offset));
 
         // Nothing the UI lays out in is touched: the canvas tables, the 4K literals and the
-        // display-size getters keep the title's values.
+        // display-size getters keep the title's values. Of the all-sites set, only the display
+        // buffers and the ceiling change.
         var allSiteOffsets = TitleDisplayPatches.SitesFor("PPSA01342")!.Select(site => site.Offset).ToHashSet();
-        Assert.DoesNotContain(patches, patch => allSiteOffsets.Contains(patch.Offset));
+        Assert.Subset(allSiteOffsets, bufferOffsets);
+        Assert.DoesNotContain(patches, patch => allSiteOffsets.Contains(patch.Offset) && !bufferOffsets.Contains(patch.Offset));
         Assert.DoesNotContain(patches, patch => patch.Offset is 0x2172C00 or 0x2172A08);
     }
 
@@ -284,7 +298,16 @@ public sealed class TitleDisplayPatchesTests
             Assert.Equal(Le32(expected), value);
         }
 
-        foreach (var site in sites)
+        foreach (var site in profile.HdBufferSites)
+        {
+            var expected = Encode(site, 1920, 1080);
+            var actual = new byte[expected.Length];
+            Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+            Assert.Equal(expected, actual);
+        }
+
+        var bufferOffsets = profile.HdBufferSites.Select(site => site.Offset).ToHashSet();
+        foreach (var site in sites.Where(site => !bufferOffsets.Contains(site.Offset)))
         {
             var expected = Encode(site, site.OldWidth, site.OldHeight);
             var actual = new byte[expected.Length];
