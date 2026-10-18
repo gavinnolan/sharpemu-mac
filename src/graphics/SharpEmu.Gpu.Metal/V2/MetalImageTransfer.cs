@@ -53,7 +53,7 @@ internal enum MtlBlitOption : uint
 //
 // Called from the GPU worker thread only: the selection scratch lists and the plan cache
 // are not synchronised, matching how the Vulkan GuestImageCache records transfers.
-internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
+internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposable
 {
     // Conservative blit alignment. Metal wants a buffer-to-texture offset and row pitch
     // that are multiples of the texel block size; four bytes on top of that keeps the
@@ -496,7 +496,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
     public void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
-        ulong guestBase, ulong pieceSize)
+        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0)
     {
         if (!Ready(context, description, destination, texture, guestBase, pieceSize))
         {
@@ -506,11 +506,18 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var plan = PlanFor(description);
         if (plan.DepthStencil)
         {
+            if (textureFirstLevel != 0)
+            {
+                throw GpuFatal.Fatal(
+                    $"A depth image has no texture from a later level: firstLevel={textureFirstLevel} " +
+                    $"address=0x{description.Data.Address:X16}.");
+            }
+
             EncodeDepthDownload(context, description, plan, range, texture, destination, stencilDestination, guestBase, pieceSize);
             return;
         }
 
-        Select(plan, description, range, guestBase, pieceSize);
+        Select(plan, description, range, guestBase, pieceSize, textureFirstLevel);
         if (_copies.Count == 0)
         {
             return;
@@ -944,7 +951,8 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         foreach (var copy in plan.Copies)
         {
-            if (!Selected(plan, copy, range, lastLevel, lastLayer) || !TryClipToBands(plan, copy, out var clipped))
+            if (!Selected(plan, copy, range, lastLevel, lastLayer) ||
+                !TryClipToBands(plan, copy, textureFirstLevel, out var clipped))
             {
                 continue;
             }
@@ -1174,13 +1182,28 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     // A tiled subresource copy cut down to the block rows the selected bands carry. The
     // bands still hold their offsets in the whole image's linear staging, as the copy
     // does, so the rows of the copy a band overlaps are the rows it carries.
-    private bool TryClipToBands(TransferPlan plan, in MetalSubresourceCopy copy, out MetalSubresourceCopy clipped)
+    //
+    // Only a band of the copy's own subresource counts. A volume's staging interleaves its
+    // levels slice by slice (slice z of every level sits in z's stride), so a band of one
+    // level spans the other levels' slices too: matched by bytes alone, a piece holding
+    // only level 0's tiles took level 1's copies with it and blitted whatever its staging
+    // held there over level 1.
+    private bool TryClipToBands(
+        TransferPlan plan, in MetalSubresourceCopy copy, uint textureFirstLevel, out MetalSubresourceCopy clipped)
     {
         var copyEnd = CopyEnd(plan, copy);
         var from = ulong.MaxValue;
         ulong to = 0;
         foreach (var band in _tiles)
         {
+            if (band.Level + textureFirstLevel != copy.Level ||
+                (plan.Volume
+                    ? copy.OriginZ < band.Slice || copy.OriginZ - band.Slice >= Math.Max(band.Depth, 1u)
+                    : band.Slice != copy.Slice))
+            {
+                continue;
+            }
+
             var pitchBytes = (ulong)band.Pitch * band.BytesPerElement;
             var sliceBytes = band.LinearSliceStride != 0 ? band.LinearSliceStride : pitchBytes * band.Height;
             var bandEnd = band.LinearOffset + (sliceBytes * (Math.Max(band.Depth, 1u) - 1)) + (pitchBytes * band.Height);

@@ -114,10 +114,12 @@ internal interface IMetalImageTransfer
         ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0);
 
     // Retiles/copies every subresource in range from the texture back into guest memory,
-    // with the same piece contract as the upload.
+    // with the same piece contract as the upload, textureFirstLevel included: a texture
+    // held from a later level writes only the guest levels it holds, at their full-chain
+    // offsets, and leaves every other byte of the destination as it was.
     void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
-        ulong guestBase, ulong pieceSize);
+        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0);
 
     // Hands one cached surface's contents to another over the same guest bytes, on the
     // device. False when the pair is not one the transfer can carry, and the caller
