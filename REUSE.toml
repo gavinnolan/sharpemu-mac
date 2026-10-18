@@ -39,7 +39,8 @@ path = [
     "docs/**",
     "src/SharpEmu.Application/Languages/**",
     "tests/SharpEmu.ShaderCompiler.Metal.Tests/Conformance/**",
-    "tests/Fixtures/**"
+    "tests/Fixtures/**",
+    "tools/re/**"
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "SharpEmu Emulator Project"
