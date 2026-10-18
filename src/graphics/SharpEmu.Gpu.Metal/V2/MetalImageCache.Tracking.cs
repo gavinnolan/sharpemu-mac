@@ -82,6 +82,9 @@ internal sealed partial class MetalImageCache
         if (image.IsGpuModified)
         {
             WriteBackToGuest(image, MetalWritebackCause.Release);
+            // The retile reads the texture in the command buffer being recorded: the texture
+            // outlives that submission whatever bound it last.
+            image.NoteUse(_owner.CurrentSerial);
         }
 
         if (image.Description.HasMetadata)
@@ -89,9 +92,42 @@ internal sealed partial class MetalImageCache
             _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
         }
 
+        ForgetImageBookkeepingLocked(imageIdentifier, image);
         RemoveFromIndex(imageIdentifier);
         _slots.Erase(imageIdentifier);
         RetireImage(image);
+    }
+
+    // What the cache keeps about an image outside its slot: claims on its DCC slices, clears
+    // deferred for it, and a pending linear publication. Keyed by the slot identifier, they
+    // would otherwise outlive it until the metadata happened to be rewritten.
+    private void ForgetImageBookkeepingLocked(ResourceSlotIdentifier imageIdentifier, MetalCachedImage image)
+    {
+        _unpublishedLinearWrites.Remove(image);
+        if (_materializedDccSlices.Count != 0)
+        {
+            _materializedDccSlices.RemoveWhere(entry => entry.Image == imageIdentifier);
+        }
+
+        if (_deferredDccSlices.Count != 0)
+        {
+            List<(ResourceSlotIdentifier, ulong)>? stale = null;
+            foreach (var key in _deferredDccSlices.Keys)
+            {
+                if (key.Image == imageIdentifier)
+                {
+                    (stale ??= []).Add(key);
+                }
+            }
+
+            if (stale is not null)
+            {
+                foreach (var key in stale)
+                {
+                    _deferredDccSlices.Remove(key);
+                }
+            }
+        }
     }
 
     // A command buffer names a texture through an argument buffer, which holds a
