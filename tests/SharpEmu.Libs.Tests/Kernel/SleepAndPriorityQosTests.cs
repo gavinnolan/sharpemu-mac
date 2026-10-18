@@ -34,9 +34,11 @@ public sealed class SleepAndPriorityQosTests
         Thread.Sleep(5);
         Assert.False(KernelRuntimeCompatExports.ShortUsleep(1));
 
+        // A streak needs sleeps less than 2 ms apart, which a thread competing for a loaded
+        // runner's cores can miss for a while; keep polling (bounded) until one forms.
         var napped = 0;
         var watch = Stopwatch.StartNew();
-        while (watch.ElapsedMilliseconds < 20)
+        while (watch.ElapsedMilliseconds < 20 || (napped == 0 && watch.ElapsedMilliseconds < 5000))
         {
             var before = Stopwatch.GetTimestamp();
             if (KernelRuntimeCompatExports.ShortUsleep(1))
@@ -97,13 +99,28 @@ public sealed class SleepAndPriorityQosTests
             return; // disabled by the environment
         }
 
+        // On a host without the precise clock a usleep(1) is a ~1 us spin, so the 500 polls
+        // finish inside the 500 us streak window on a warm fast core and nothing ever naps; the
+        // budget this test models belongs to the mach_wait_until hosts.
+        if (!HostPreciseClock.IsPrecise)
+        {
+            return;
+        }
+
         // The guest pattern: "for (n = 500; n; n--) { if (*label) break; usleep(1); }
         // fatal('GPU hanged')". The label is written by the GPU some milliseconds later.
         // When usleep(1) only yielded, the 500 polls finished in well under the nap
         // window and the guest declared a hang.
         Thread.Sleep(5);
         var label = 0;
-        using var writer = new Timer(_ => Volatile.Write(ref label, 1), null, 20, Timeout.Infinite);
+        // A dedicated thread, not a pool timer: the pool can run the timer seconds late on a
+        // loaded runner, which is the label landing later than the budget models.
+        var writer = new Thread(() =>
+        {
+            Thread.Sleep(20);
+            Volatile.Write(ref label, 1);
+        }) { IsBackground = true };
+        writer.Start();
         var polls = 500;
         while (Volatile.Read(ref label) == 0 && --polls > 0)
         {

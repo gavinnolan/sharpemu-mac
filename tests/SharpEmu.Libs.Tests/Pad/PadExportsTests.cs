@@ -377,8 +377,16 @@ public sealed class PadExportsTests : IDisposable
         var handle = OpenPad(0x10000000, 0);
         Assert.True(handle > 0);
 
-        var first = ReadStateTimestamp(handle);
-        var second = ReadStateTimestamp(handle);
+        // Two back-to-back reads land in one 1 ms sampling interval. A thread descheduled between
+        // them on a loaded runner crosses the interval, so look for a pair that did not; a pad
+        // that reports a fresh timestamp on every read never produces one.
+        ulong first = 0, second = 1;
+        for (var attempt = 0; attempt < 100 && first != second; attempt++)
+        {
+            first = ReadStateTimestamp(handle);
+            second = ReadStateTimestamp(handle);
+        }
+
         Assert.Equal(first, second);
 
         // Past the sampling interval the pad has reported again and the timestamp

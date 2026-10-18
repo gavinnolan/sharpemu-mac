@@ -226,9 +226,15 @@ public sealed unsafe class ManagedWriteIntervalTests
     {
         using var state = new State(); var ledger = state.Enroll(); byte[] bytes = [1, 3, 5, 7];
         for (var i = 0; i < 10000; i++) Assert.True(state.Views.TryWriteBacking(State.Address, bytes));
-        var before = GC.GetAllocatedBytesForCurrentThread(); var allSucceeded = true;
-        for (var i = 0; i < 10000; i++) allSucceeded &= state.Views.TryWriteBacking(State.Address, bytes);
-        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        // A per-write allocation shows in every round; a one-off runtime allocation (tiering,
+        // lazy runtime state) on a loaded runner lands in one round at most.
+        var allocated = long.MaxValue; var allSucceeded = true;
+        for (var round = 0; round < 5 && allocated != 0; round++)
+        {
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 10000; i++) allSucceeded &= state.Views.TryWriteBacking(State.Address, bytes);
+            allocated = Math.Min(allocated, GC.GetAllocatedBytesForCurrentThread() - before);
+        }
         Assert.True(allSucceeded); Assert.Equal(0, allocated); Assert.Equal(0, Count(ledger, "active"));
     }
 

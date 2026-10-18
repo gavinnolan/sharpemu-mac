@@ -75,9 +75,11 @@ public sealed class ExtractedPackageContractTests
     {
         var project = XDocument.Load(RepoPath($"{directory}/{assembly}.csproj"));
         // Friends are test assemblies only: the shared Libs suite, or the
-        // package's own dedicated test project (e.g. SharpEmu.Gpu.Metal.Tests).
+        // package's own dedicated test project (e.g. SharpEmu.Gpu.Metal.Tests), plus the
+        // offline shader-compile benchmark, which times internal compiler phases.
         foreach (var friend in project.Descendants("InternalsVisibleTo"))
-            Assert.Contains(friend.Attribute("Include")!.Value, new[] { "SharpEmu.Libs.Tests", $"{assembly}.Tests" });
+            Assert.Contains(friend.Attribute("Include")!.Value,
+                new[] { "SharpEmu.Libs.Tests", $"{assembly}.Tests", "SharpEmu.Tools.ShaderCompileBench" });
     }
 
     [Theory]

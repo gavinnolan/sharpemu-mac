@@ -56,10 +56,22 @@ public sealed class CommandStreamQueueWatchTests
         Enqueue(host, queue, 1, WaitEqual(Label, 1), Instances(5));
         Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
 
-        using var writer = new Timer(_ => host.WriteDword(Label, 1), null, 20, Timeout.Infinite);
-        var started = System.Diagnostics.Stopwatch.StartNew();
-        Assert.True(queue.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds * 10));
-        Assert.True(started.ElapsedMilliseconds < CommandStreamQueue.AllBlockedRetryMilliseconds * 5);
+        // The store comes from its own thread and the latency is taken from the store, not from the
+        // start: a pool timer can fire seconds late on a loaded runner, which is not the watch
+        // being slow. The wait timeout only guards against a watch that never wakes.
+        long storedAt = 0;
+        var writer = new Thread(() =>
+        {
+            Thread.Sleep(20);
+            host.WriteDword(Label, 1);
+            Volatile.Write(ref storedAt, System.Diagnostics.Stopwatch.GetTimestamp());
+        }) { IsBackground = true };
+        writer.Start();
+        Assert.True(queue.WaitForWork(10_000));
+        var woke = System.Diagnostics.Stopwatch.GetTimestamp();
+        writer.Join();
+        var latencyMilliseconds = (woke - Volatile.Read(ref storedAt)) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        Assert.True(latencyMilliseconds < CommandStreamQueue.AllBlockedRetryMilliseconds * 5, $"woke {latencyMilliseconds:F1} ms after the store");
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
     }
 

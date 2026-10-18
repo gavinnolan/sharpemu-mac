@@ -5,7 +5,9 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.Versioning;
 using SharpEmu.HLE.Host;
+#if SHARPEMU_HOST_MACOS
 using SharpEmu.Host.MacOS;
+#endif
 using SharpEmu.Libs.Tests.Gpu.Images;
 using Xunit;
 

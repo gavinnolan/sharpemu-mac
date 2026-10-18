@@ -5,6 +5,9 @@
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- These tests drive the Metal runtime through libobjc, which only exists on macOS;
+         elsewhere the project still builds but `dotnet test` skips it. -->
+    <IsTestProject Condition="!$([MSBuild]::IsOSPlatform('OSX'))">false</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
     <!-- Compile the existing synthetic guest-program and device helpers in this

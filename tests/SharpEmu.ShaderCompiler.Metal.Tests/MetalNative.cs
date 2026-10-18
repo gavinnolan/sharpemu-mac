@@ -104,7 +104,15 @@ internal static partial class MetalNative
     private static readonly Lazy<nint> Device = new(() =>
         OperatingSystem.IsMacOS() ? MTLCreateSystemDefaultDevice() : 0);
 
-    public static bool IsAvailable => Device.Value != 0;
+    // Whether device tests may execute. Hosted CI macOS runners only expose "Apple Paravirtual
+    // device": it compiles MSL, but lacks parts of the Metal API the execution tests drive (its
+    // render encoder has no setMeshBuffer, and calling it kills the test host). That device does
+    // not count as available unless the device gate demands one, in which case it is used and
+    // any gap fails loudly. Compile-only paths keep using Device directly.
+    public static bool IsAvailable { get; } = Device.Value != 0 && (
+        Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1" ||
+        !(Marshal.PtrToStringUTF8(Send(Send(Device.Value, Selector("name")), Selector("UTF8String")))
+            ?.Contains("Paravirtual", StringComparison.OrdinalIgnoreCase) ?? false));
 
     private static nint Selector(string name) => sel_registerName(name);
 

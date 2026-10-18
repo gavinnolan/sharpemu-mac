@@ -121,19 +121,23 @@ public sealed class HostRecoveryOwnerTests
     [Fact]
     public async Task AcquiringRacesClosureWithoutPostCloseCountIncrease()
     {
+        // The acquirer runs on its own thread and the waits below only guard against a hang: a
+        // pool task can start seconds late on a loaded two-core runner, and the barrier would
+        // then time out although the race under test never happened.
+        var guard = TimeSpan.FromSeconds(30);
         for (var i = 0; i < 64; i++)
         {
             var owner = Create(8);
             using var ready = new Barrier(2);
-            var acquire = Task.Run(() =>
+            var acquire = Task.Factory.StartNew(() =>
             {
-                Assert.True(ready.SignalAndWait(TimeSpan.FromSeconds(2)));
+                Assert.True(ready.SignalAndWait(guard));
                 return owner.TryAcquireWritePin(Base, HostRecoveryAccess.Write, 1, 7, out var pin)
                     ? pin : default;
-            });
-            Assert.True(ready.SignalAndWait(TimeSpan.FromSeconds(2)));
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            Assert.True(ready.SignalAndWait(guard));
             owner.Close();
-            var result = await acquire.WaitAsync(TimeSpan.FromSeconds(2));
+            var result = await acquire.WaitAsync(guard);
             Assert.False(owner.TryAcquireWritePin(Base, HostRecoveryAccess.Write, 2, 7, out _));
             if (result.OwnerIdentity != 0)
             {
