@@ -34,6 +34,10 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     // the lock; every change to _views republishes it under the lock.
     private ViewRecord[] _snapshot = [];
 
+    // Chunked backing only: view records reaching into each chunk, so a release never empties
+    // a chunk some guest address still maps. Changed under _lock (SetViewLocked/RemoveViewAtLocked).
+    private readonly int[]? _chunkViews;
+
     // Single-view accesses in flight; Dispose waits for them before releasing the alias.
     private int _activeAccesses;
     // Default-null controlled ordinary-write boundary. The real operation,
@@ -45,6 +49,11 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     {
         _host = host;
         _ = host.TryCreateBacking(size, out _backing, out _);
+        if (_backing is { ChunkBytes: > 0, DiscardChunks: not null } chunked)
+        {
+            _chunkViews = new int[(chunked.Size + chunked.ChunkBytes - 1) / chunked.ChunkBytes];
+            GuestBackingTelemetry.NoteChunkedBacking(chunked.ChunkBytes, chunked.Size);
+        }
         // Outside the provider gate and before this wrapper is published: all
         // of its participating writes have history from the first operation.
         try { if (host is IHostMappedPublicationMemory) _backing?.EnrollManagedWrites(); }
@@ -287,7 +296,8 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                     return false;
                 }
 
-                ClearCanonicalAlias(offset, size);
+                if (_chunkViews is not null) ClearChunked(offset, size);
+                else ClearCanonicalAlias(offset, size);
                 return true;
             }
             finally { ExitAliasAccess(); }
@@ -458,6 +468,38 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         var interval = _backing!.BeginManagedWrite(offset, count); var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try { NativeMemory.Clear((void*)(AliasBase + offset), (nuint)count); succeeded = true; }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
+    // A chunked backing clears whole chunks by emptying them: the same zeros through every
+    // mapping, without faulting in and dirtying pages nothing may ever read. Only the partial
+    // chunks at either end are written.
+    private void ClearChunked(ulong offset, ulong count)
+    {
+        var chunk = _backing!.ChunkBytes;
+        var start = AlignUpTo(offset, chunk);
+        var end = offset + count == Size ? Size : (offset + count) / chunk * chunk;
+        if (end <= start)
+        {
+            ClearCanonicalAlias(offset, count);
+            return;
+        }
+
+        if (start > offset) ClearCanonicalAlias(offset, start - offset);
+        GuestBackingTelemetry.NoteClear(DiscardCanonicalAlias(start, end - start));
+        if (offset + count > end) ClearCanonicalAlias(end, offset + count - end);
+    }
+
+    private HostBackingDiscard DiscardCanonicalAlias(ulong offset, ulong count)
+    {
+        var interval = _backing!.BeginManagedWrite(offset, count); var succeeded = false;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
+        try
+        {
+            var result = _backing.DiscardChunks!(_backing, offset, count);
+            succeeded = true;
+            return result;
+        }
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
 
@@ -856,7 +898,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                 // exact scope as unknown; do not guess whether MAP_FIXED occurred.
                 lock (_lock)
                 {
-                    _views[address] = new ViewRecord(address, size, offset, protection);
+                    SetViewLocked(new ViewRecord(address, size, offset, protection));
                     _cleanupFailure = error;
                     _disposeRequested = true;
                     PublishSnapshot();
@@ -870,7 +912,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                 // transaction. Finish them before requested disposal captures.
                 if (!_disposeRequested || wasRestored)
                 {
-                    _views[address] = new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored };
+                    SetViewLocked(new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored });
                     PublishSnapshot(); failure = HostViewFailure.None; return true;
                 }
             }
@@ -883,7 +925,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
             {
                 lock (_lock)
                 {
-                    _views[address] = new ViewRecord(address, size, offset, protection);
+                    SetViewLocked(new ViewRecord(address, size, offset, protection));
                     _cleanupFailure = error;
                 }
                 throw;
@@ -970,7 +1012,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                 if (address + size <= record.Address + record.Size)
                 {
                     old = record;
-                    _views.RemoveAt(index);
+                    RemoveViewAtLocked(index);
                     PublishSnapshot();
                 }
             }
@@ -987,7 +1029,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         {
             lock (_lock)
             {
-                _views[old.Address] = old; // attempted scope retained, not a physical mapping assertion
+                SetViewLocked(old); // attempted scope retained, not a physical mapping assertion
                 _cleanupFailure = error; _disposeRequested = true; PublishSnapshot();
             }
             throw;
@@ -1215,7 +1257,11 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                         throw new InvalidOperationException($"Backing view cleanup outcome unknown at 0x{view.Address:X16}.");
                 }
                 catch (Exception error) { lock (_lock) _cleanupFailure = error; throw; }
-                lock (_lock) _views.Remove(view.Address);
+                lock (_lock)
+                {
+                    var removedIndex = _views.IndexOfKey(view.Address);
+                    if (removedIndex >= 0) RemoveViewAtLocked(removedIndex);
+                }
             }
             _backing?.Dispose();
             lock (_lock) Volatile.Write(ref _cleanupComplete, true);
@@ -1502,11 +1548,103 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     private bool IsWithinBacking(ulong offset, ulong size) =>
         size != 0 && offset < Size && size <= Size - offset;
 
+    // Every change to _views goes through these two, so a chunked backing always knows how
+    // many view records reach into each chunk. Must be called under _lock.
+    private void SetViewLocked(ViewRecord record)
+    {
+        if (_views.TryGetValue(record.Address, out var replaced)) CountChunkViews(replaced, -1);
+        _views[record.Address] = record;
+        CountChunkViews(record, 1);
+    }
+
+    private void RemoveViewAtLocked(int index)
+    {
+        CountChunkViews(_views.Values[index], -1);
+        _views.RemoveAt(index);
+    }
+
+    private void CountChunkViews(ViewRecord record, int delta)
+    {
+        if (_chunkViews is null || record.Size == 0 || record.Offset >= Size) return;
+        var chunk = _backing!.ChunkBytes;
+        var last = Math.Min((record.Offset + record.Size - 1) / chunk, (ulong)_chunkViews.Length - 1);
+        for (var index = record.Offset / chunk; index <= last; index++) _chunkViews[index] += delta;
+    }
+
+    /// <summary>Bytes per separately releasable chunk of the backing; 0 when it is one object.</summary>
+    public ulong ChunkBytes => _chunkViews is null ? 0 : _backing!.ChunkBytes;
+
+    /// <summary>
+    /// The guest gave [offset, offset + size) back (direct memory released, flexible memory or
+    /// pool pages unmapped). Every whole chunk inside it that no view maps is emptied: its pages
+    /// go back to the OS and it reads zero when it is used again, a valid value for memory whose
+    /// contents the PS5 leaves undefined after a release. Returns the bytes emptied; 0 for a
+    /// single-object backing.
+    /// </summary>
+    public ulong Release(ulong offset, ulong size)
+    {
+        if (_chunkViews is null || size == 0 || !IsWithinBacking(offset, size)) return 0;
+        var chunk = _backing!.ChunkBytes;
+        var start = AlignUpTo(offset, chunk);
+        var end = offset + size == Size ? Size : (offset + size) / chunk * chunk;
+        if (end <= start) return 0;
+        var interval = _backing.BeginManagedWriteOperation();
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) return 0;
+        var succeeded = false;
+        var dsLock = DsLock.EnterMonitor(_lock, 7);
+        try
+        {
+            if (!TryEnterAliasAccess()) return 0;
+            try
+            {
+                if (!IsAvailable) return 0;
+                ulong emptied = 0, emptiedChunks = 0, zeroFilled = 0, skipped = 0;
+                var cursor = start;
+                while (cursor < end)
+                {
+                    var index = cursor / chunk;
+                    var next = Math.Min(end, cursor + chunk);
+                    if (_chunkViews[index] != 0)
+                    {
+                        skipped += next - cursor;
+                        cursor = next;
+                        continue;
+                    }
+
+                    // The longest run of unmapped chunks from here: one call for all of it.
+                    var runEnd = next;
+                    while (runEnd < end && _chunkViews[runEnd / chunk] == 0) runEnd = Math.Min(end, runEnd + chunk);
+                    var result = DiscardCanonicalAlias(cursor, runEnd - cursor);
+                    emptied += result.EmptiedBytes;
+                    emptiedChunks += result.EmptiedChunks;
+                    zeroFilled += result.ZeroFilledBytes;
+                    cursor = runEnd;
+                }
+
+                GuestBackingTelemetry.NoteRelease(new HostBackingDiscard(emptied, emptiedChunks, zeroFilled), skipped);
+                succeeded = true;
+                return emptied;
+            }
+            finally { ExitAliasAccess(); }
+        }
+        finally
+        {
+            DsLock.ExitMonitor(_lock, 7, dsLock);
+            HostBackingObject.EndManagedWrite(interval, succeeded);
+        }
+    }
+
+    private static ulong AlignUpTo(ulong value, ulong alignment)
+    {
+        var remainder = value % alignment;
+        return remainder == 0 ? value : value + (alignment - remainder);
+    }
+
     private void RestoreViewRecord(ViewRecord record)
     {
         lock (_lock)
         {
-            _views[record.Address] = record;
+            SetViewLocked(record);
             PublishSnapshot();
         }
     }

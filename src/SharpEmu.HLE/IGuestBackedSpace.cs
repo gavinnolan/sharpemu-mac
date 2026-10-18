@@ -14,6 +14,16 @@ public interface IGuestBackedSpace
     bool TryMapBacked(ulong address, ulong size, ulong backingOffset, GuestPageProtection protection, out HostViewFailure failure);
     bool TryUnmapBacked(ulong address, ulong size);
     bool TryClearBacking(ulong offset, ulong size);
+
+    // Bytes per separately releasable chunk of the backing, or 0 when the backing is one
+    // object whose pages cannot be given back while it is mapped (the POSIX shm default).
+    ulong BackingChunkBytes => 0;
+
+    // The guest freed these backing bytes (direct memory released, flexible memory or pool
+    // pages unmapped or decommitted): the whole chunks inside the range that no view maps go
+    // back to the OS and read zero when they are used again. True when anything was released.
+    bool TryReleaseBacking(ulong offset, ulong size) => false;
+
     bool IsBackedView(ulong address);
     bool IsBackedRange(ulong address, ulong size);
 

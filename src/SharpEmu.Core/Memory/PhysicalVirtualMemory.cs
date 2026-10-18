@@ -1762,6 +1762,21 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    public ulong BackingChunkBytes => HasBackingOwner() ? _backedSpace!.BackingChunkBytes : 0;
+
+    public bool TryReleaseBacking(ulong offset, ulong size)
+    {
+        _gate.EnterWriteLock();
+        try
+        {
+            return HasBackingOwner() && _backedSpace!.ReleaseBacking(offset, size) != 0;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
     public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
         => TryProtectCore(address, size, protection, null, false);
 

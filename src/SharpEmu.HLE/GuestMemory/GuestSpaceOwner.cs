@@ -182,6 +182,12 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
 
     public bool TryClearBacking(ulong offset, ulong size) => _views.Clear(offset, size);
 
+    /// <summary>Bytes per separately releasable chunk of the backing; 0 when it is one object.</summary>
+    public ulong BackingChunkBytes => _views.ChunkBytes;
+
+    /// <summary>Gives the whole unmapped chunks of freed backing bytes back to the OS; the bytes emptied.</summary>
+    public ulong ReleaseBacking(ulong offset, ulong size) => _disposed ? 0 : _views.Release(offset, size);
+
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data) => _views.TryWriteBacking(address, data);
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data, out OrdinaryBackingWriteReservation? busy)
         => _views.TryWriteBacking(address, data, out busy);
