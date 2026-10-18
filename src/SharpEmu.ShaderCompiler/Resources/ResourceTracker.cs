@@ -770,6 +770,7 @@ public sealed partial class ResourceTracker
             MipMode = mip,
             DepthCompare = depth,
             R128 = memory.ImageR128,
+            CubeAccess = true,
         };
         Merge(added, memory, pc);
         _info.Images.Add(added);
@@ -785,6 +786,7 @@ public sealed partial class ResourceTracker
         image.Written |= write;
         image.Atomic |= atomic;
         image.Packed |= memory.ImagePacked;
+        image.CubeAccess &= memory.ImageCube;
     }
 
     private uint AddSampler(uint source, uint pc)

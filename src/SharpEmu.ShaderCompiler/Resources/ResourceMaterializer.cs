@@ -189,7 +189,7 @@ public static class ResourceMaterializer
                     for (var candidateIndex = 0; candidateIndex < descriptors.Count; candidateIndex++)
                     {
                         var descriptor = descriptors[candidateIndex];
-                        if (!UsableImageCandidate(descriptor.Dwords, image.R128))
+                        if (!UsableTableCandidate(descriptor.Dwords, image))
                             descriptor = DescriptorWords.Empty(8);
                         var existing = directTable.Descriptors.FindIndex(candidate => candidate.SameAs(descriptor));
                         if (existing < 0)
@@ -526,11 +526,13 @@ public static class ResourceMaterializer
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>
         descriptor[0] == 0 && (descriptor[1] & 0xFF) == 0;
 
+    // Word 2 bit 31 is RESOURCE_LEVEL, which the hardware wants set: descriptors a title
+    // builds itself (Demon's Souls' reflection-probe cubes) carry it, the driver's do not.
     private static bool ReservedImageBitsClear(ReadOnlySpan<uint> descriptor)
     {
         ReadOnlySpan<uint> reserved =
         [
-            0x00000000u, 0x20000000u, 0xf0003000u, 0x00000000u,
+            0x00000000u, 0x20000000u, 0x70003000u, 0x00000000u,
             0xe000e000u, 0xf9000000u, 0x00007b00u, 0x00000000u,
         ];
         for (var dword = 0; dword < reserved.Length; dword++)
@@ -583,6 +585,13 @@ public static class ResourceMaterializer
     private static bool UsableImageCandidate(ReadOnlySpan<uint> candidate, bool r128) =>
         !NullImageDescriptor(candidate) && ValidImageDescriptor(candidate, r128) && ReservedImageBitsClear(candidate) &&
         GuestImageFormat.SampledNumericClass(GuestImageFormat.FormatOf(candidate)) != ImageNumericClass.Unsupported;
+
+    // A table candidate an access selects at run time. A DIM_CUBE access addresses a face,
+    // which only a cube has: a table also holding 2D placeholders for unused slots (Demon's
+    // Souls' reflection-probe heap) leaves those unreadable through it, so they bind null.
+    private static bool UsableTableCandidate(ReadOnlySpan<uint> candidate, ImageResource image) =>
+        UsableImageCandidate(candidate, image.R128) &&
+        (!image.CubeAccess || GuestImageFormat.ImageTypeOf(candidate) == GuestImageFormat.ImageTypeCube);
 
     private static ulong ScalarBufferSize(ReadOnlySpan<uint> descriptor)
     {
@@ -693,7 +702,7 @@ public static class ResourceMaterializer
                 }
             }
 
-            if (!UsableImageCandidate(candidate, image.R128))
+            if (!UsableTableCandidate(candidate, image))
             {
                 Array.Clear(candidate);
             }
@@ -746,7 +755,7 @@ public static class ResourceMaterializer
                     return false;
             }
 
-            if (!UsableImageCandidate(candidate, r128))
+            if (!UsableTableCandidate(candidate, image))
                 Array.Clear(candidate);
             probed.Add(candidate);
         }
@@ -909,7 +918,7 @@ public static class ResourceMaterializer
                     return false;
             }
 
-            if (!UsableImageCandidate(candidate, r128))
+            if (!UsableTableCandidate(candidate, image))
                 Array.Clear(candidate);
             probed.Add(candidate);
             offsets.Add(unchecked(indirect.DynamicOffsetBase + (key << 5)));

@@ -77,6 +77,8 @@ public sealed class ImageResource
     // image whose format has no Vulkan depth equivalent; -1 when not emulated.
     public int EmulatedCompareFunction { get; set; } = -1;
     public bool Cube { get; set; }
+    // Every access is a DIM_CUBE instruction: a table candidate that is not a cube cannot be read.
+    public bool CubeAccess { get; set; }
     public bool R128 { get; set; }
     // Some access is a _PCK load or store; the materializer then records the guest
     // format in PackedFormat so the emitter can pack and unpack the texel's raw bits.

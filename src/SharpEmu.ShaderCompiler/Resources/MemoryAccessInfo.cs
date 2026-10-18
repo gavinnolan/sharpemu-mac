@@ -91,6 +91,8 @@ public sealed class MemoryAccessInfo
     public uint NumberFormat { get; init; }
     public ImageSampleFlags ImageSampleFlags { get; init; }
     public ImageDimension ImageDimension { get; init; }
+    // DIM_CUBE: the access addresses faces, which only a cube descriptor has.
+    public bool ImageCube { get; init; }
     public ImageResourceClass ImageClass { get; init; }
     public bool NeedsSampler { get; init; }
     public bool AddressIsFull { get; init; }
@@ -130,7 +132,7 @@ public sealed class MemoryAccessInfo
         Kind == other.Kind && Access == other.Access && Offset == other.Offset && Dmask == other.Dmask &&
         DataDwords == other.DataDwords && DataBits == other.DataBits && ComponentIndex == other.ComponentIndex &&
         ComponentCount == other.ComponentCount && DataFormat == other.DataFormat && NumberFormat == other.NumberFormat &&
-        ImageSampleFlags == other.ImageSampleFlags && ImageDimension == other.ImageDimension &&
+        ImageSampleFlags == other.ImageSampleFlags && ImageDimension == other.ImageDimension && ImageCube == other.ImageCube &&
         ImageClass == other.ImageClass && NeedsSampler == other.NeedsSampler && AddressIsFull == other.AddressIsFull &&
         DataSigned == other.DataSigned && Typed == other.Typed && Formatted == other.Formatted &&
         ImageHasMip == other.ImageHasMip && ImagePacked == other.ImagePacked && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
@@ -334,6 +336,7 @@ public sealed class MemoryAccessTable
             NeedsSampler = sampled,
             Dmask = control.Dmask,
             ImageDimension = DecodeImageDimension(control.Dimension),
+            ImageCube = control.Dimension == 3,
             ImageSampleFlags =
                 (compare ? ImageSampleFlags.Compare : ImageSampleFlags.None) |
                 (adjust ? ImageSampleFlags.Adjust : ImageSampleFlags.None),
