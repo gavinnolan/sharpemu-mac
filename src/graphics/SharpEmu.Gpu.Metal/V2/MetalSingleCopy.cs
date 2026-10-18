@@ -843,9 +843,14 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
 
                     if (_shadow)
                     {
-                        // Verified, and counted as released, but the bytes stay.
+                        // Verified, and counted as released, but the bytes stay: never in a run to empty.
+                        chunk.EmptiedAt = now;
+                        chunk.State = ChunkState.Emptied;
+                        emptiedCount++;
+                        continue;
                     }
-                    else if (SentinelMode)
+
+                    if (SentinelMode)
                     {
                         _state.Fill(chunk.Offset, _chunkBytes, ReleasedSentinel);
                         chunk.EmptiedAt = now;
@@ -897,7 +902,8 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
             return 0;
         }
 
-        var reEmpty = _state.Empty(run[0].Offset, (ulong)run.Count * _chunkBytes).ZeroFilledBytes != 0;
+        // The shadow mode never gives pages back, whatever path a chunk took here.
+        var reEmpty = !_shadow && _state.Empty(run[0].Offset, (ulong)run.Count * _chunkBytes).ZeroFilledBytes != 0;
         foreach (var chunk in run)
         {
             chunk.NeedsReEmpty |= reEmpty;
@@ -927,7 +933,7 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
 
         try
         {
-            chunk.NeedsReEmpty = !SentinelMode && _state.Empty(chunk.Offset, _chunkBytes).ZeroFilledBytes != 0;
+            chunk.NeedsReEmpty = !SentinelMode && !_shadow && _state.Empty(chunk.Offset, _chunkBytes).ZeroFilledBytes != 0;
             chunk.EmptiedAt = now;
         }
         finally
