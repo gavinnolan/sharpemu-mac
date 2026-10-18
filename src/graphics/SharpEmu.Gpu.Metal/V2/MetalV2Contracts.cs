@@ -152,4 +152,5 @@ internal readonly record struct MetalTextureShape(
     uint MipLevels,
     uint ArrayLength,
     uint SampleCount,
-    ulong Usage);           // MTLTextureUsage
+    ulong Usage,            // MTLTextureUsage
+    bool Lossy = false);    // MTLTextureCompressionTypeLossy (MetalImageCache.Lossy.cs)

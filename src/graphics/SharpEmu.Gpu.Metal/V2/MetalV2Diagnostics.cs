@@ -130,6 +130,13 @@ internal static class MetalV2Diagnostics
     public static readonly bool ElideLoads =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ELIDE_LOADS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_LOSSY_TEXTURES=1 creates a sampled-only texture with Apple GPU lossy
+    // compression (about half the memory) where the device and the format allow it. Texels
+    // come back approximated, so this is a memory saver the user chooses, never emulation
+    // behaviour: off unless asked for (MetalImageCache.Lossy.cs).
+    public static readonly bool LossyTextures =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOSSY_TEXTURES"), "1", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_COMPRESSIBLE_TARGETS=0 creates every colour image with the
     // shader-write and pixel-format-view usages, as before. Otherwise an image first asked
     // for as a colour target is created with ShaderRead | RenderTarget only, and gains the

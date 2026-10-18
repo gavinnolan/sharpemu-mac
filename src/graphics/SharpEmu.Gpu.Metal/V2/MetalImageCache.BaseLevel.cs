@@ -205,9 +205,26 @@ internal sealed partial class MetalImageCache
     /// <paramref name="firstLevel"/>, refilled from guest memory on its next use; the old
     /// texture waits for the submissions that bound it. Caller holds the lock.
     /// </summary>
-    private void ReshapeLevelsLocked(MetalCachedImage image, uint firstLevel)
+    private void ReshapeLevelsLocked(MetalCachedImage image, uint firstLevel, bool dropLossy = false)
     {
+        // Without dropLossy a lossy texture stays one; with it the new texture has the full
+        // usage of the format and is lossless, and an image made again over the same bytes
+        // starts that way too. It refills from guest memory, which holds what the lossy
+        // texture was only an approximation of.
         var shape = _transfer.ShapeFor(image.Description, firstLevel) with { Usage = image.Shape.Usage };
+        if (image.Shape.Lossy)
+        {
+            if (dropLossy)
+            {
+                shape = _transfer.ShapeFor(image.Description, firstLevel);
+                ForgetLossy(image);
+            }
+            else
+            {
+                shape = shape with { Lossy = true };
+            }
+        }
+
         var texture = CreateTexture(in shape, image.Description);
         var (start, end) = _transfer.LevelBytes(image.Description, firstLevel);
         RetireImage(image.ReplaceLevels(texture, in shape, firstLevel, start, end));
