@@ -1101,6 +1101,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private ulong _labelBarrierValue;
     private long _labelBarriers;
 
+    // The command buffer the current event belongs to, its serial, and the events of earlier
+    // command buffers, released once those are done.
+    private nint _labelBarrierCommandBuffer;
+    private ulong _labelBarrierSerial;
+    private readonly List<(nint Event, ulong Serial)> _retiredLabelBarrierEvents = [];
+    private static readonly nint SelReleaseLabelEvent = MetalNative.Selector("release");
+
     /// <summary>Barriers encoded ahead of label copies since the last call.</summary>
     internal long TakeLabelBarriers() => Interlocked.Exchange(ref _labelBarriers, 0);
 
@@ -1133,19 +1140,54 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
-        if (_labelBarrierEvent == 0)
+        // One event per command buffer. Command buffers overlap on the GPU, and with one event
+        // across all of them a later buffer's signal of a lower value could land between an
+        // earlier one's signal and its wait, which then waited for a value no one signals
+        // again: Black Myth: Wukong's save load stopped with every guest thread waiting on a
+        // label and the GPU idle. Within one command buffer the barriers run in order.
+        if (_labelBarrierEvent == 0 || commandBuffer != _labelBarrierCommandBuffer)
         {
+            ReleaseCompletedLabelBarrierEvents();
+            if (_labelBarrierEvent != 0)
+            {
+                _retiredLabelBarrierEvents.Add((_labelBarrierEvent, _labelBarrierSerial));
+            }
+
             _labelBarrierEvent = MetalNative.Send(_device, LabelBarrierShared ? SelNewSharedEvent : SelNewEvent);
             if (_labelBarrierEvent == 0)
             {
                 throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order label copies after their work.");
             }
+
+            _labelBarrierCommandBuffer = commandBuffer;
+            _labelBarrierSerial = SubmissionSerial;
+            _labelBarrierValue = 0;
         }
 
         var value = ++_labelBarrierValue;
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeSignalEvent, _labelBarrierEvent, value);
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeWaitForEvent, _labelBarrierEvent, value);
         Interlocked.Increment(ref _labelBarriers);
+    }
+
+    private void ReleaseCompletedLabelBarrierEvents()
+    {
+        if (_retiredLabelBarrierEvents.Count == 0)
+        {
+            return;
+        }
+
+        var completed = CompletedSerial;
+        _retiredLabelBarrierEvents.RemoveAll(retired =>
+        {
+            if (retired.Serial > completed)
+            {
+                return false;
+            }
+
+            MetalNative.SendVoid(retired.Event, SelReleaseLabelEvent);
+            return true;
+        });
     }
 
     private void EncodeLabelCopies(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)

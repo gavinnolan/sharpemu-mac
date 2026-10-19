@@ -2499,6 +2499,12 @@ internal sealed partial class MetalRenderHost :
             Console.Error.WriteLine($"[METAL-V2][WARN] The render host could not drain on shutdown: {exception.Message}");
         }
 
+        foreach (var (retired, _) in _retiredLabelBarrierEvents)
+        {
+            MetalNative.SendVoid(retired, SelRelease);
+        }
+
+        _retiredLabelBarrierEvents.Clear();
         if (_labelBarrierEvent != 0)
         {
             MetalNative.SendVoid(_labelBarrierEvent, SelRelease);
