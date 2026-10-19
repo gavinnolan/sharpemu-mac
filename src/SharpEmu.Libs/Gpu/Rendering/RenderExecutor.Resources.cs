@@ -211,6 +211,113 @@ public sealed partial class RenderExecutor
         return false;
     }
 
+    // Set from the draw packet: predicated, or inside an occlusion query (DrawsMustExecute).
+    private bool _drawMustExecute;
+
+    /// <summary>
+    /// Whether this draw may be left out of the frame while its pipeline compiles, rather than
+    /// the command stream waiting for the compile. Leaving a draw out is only safe when the frame
+    /// it belongs to is the only thing that misses it: the next frame draws it again into
+    /// targets that are rebuilt from nothing every frame. So, when in doubt, it is not:
+    /// <list type="bullet">
+    /// <item>a program that writes memory (storage buffers or images, atomics, device-address
+    /// stores), uses the GDS (ordered counts, append and consume), or writes mip statistics:
+    /// what it writes outlives the frame and later work reads it;</item>
+    /// <item>a predicated draw, or one inside an occlusion query: the guest decides on the
+    /// count it produces (the interpreter's DrawsMustExecute);</item>
+    /// <item>an indirect mesh draw, whose launch was prepared before the pipeline;</item>
+    /// <item>a draw whose attachments carry a clear (a fast clear consumed at their
+    /// acquire, a load clear): leaving it out would lose the clear;</item>
+    /// <item>a draw that writes depth or stencil: the depth target is what the rest of the
+    /// frame tests and samples, and a missing occluder there shows in every later pass;</item>
+    /// <item>and the host's own say on the targets (IRenderHost.MayLeaveOutWhileCompiling),
+    /// which leaves out only draws into targets it saw cleared or overwritten whole in this
+    /// frame and in the frames before it, so a look-up table, a shadow or virtual-texture
+    /// cache, a capture or a history buffer is never one of them.</item>
+    /// </list>
+    /// This executor has no stream-out; a host that adds it treats such a draw as writing memory.
+    /// </summary>
+    private bool MayLeaveOutWhileCompiling(
+        ref DrawState state, ShaderStageResources vertexStage, ShaderStageResources? pixelStage, bool indirectMesh)
+    {
+        if (_drawMustExecute || indirectMesh || !_host.LeavesOutDrawsWhileCompiling)
+        {
+            return false;
+        }
+
+        if (WritesOutsideTargets(vertexStage) || (pixelStage is { } pixel && WritesOutsideTargets(pixel)))
+        {
+            return false;
+        }
+
+        ref readonly var rendering = ref state.Rendering;
+        for (var index = 0; index < rendering.ColorAttachmentCount; index++)
+        {
+            if (rendering.ColorAttachments[index].IsClear)
+            {
+                return false;
+            }
+        }
+
+        if (state.Depth.HasTarget)
+        {
+            var depth = state.Depth.Target;
+            if (state.Depth.LoadClear || depth.State.StencilClearEnabled || rendering.DepthStencilAttachment.DepthClear ||
+                rendering.DepthStencilAttachment.StencilClear || !state.Depth.LoadState.IsReadOnly(depth.Target.Format) ||
+                depth.State.DepthWriteEnabled)
+            {
+                return false;
+            }
+        }
+
+        return _host.MayLeaveOutWhileCompiling(in rendering);
+    }
+
+    // Any write a draw makes other than through its attachments, as the conservative reading of
+    // the program's resource use: a written or atomic buffer whatever its descriptor holds, any
+    // storage image, the GDS, mip statistics and device-address stores.
+    internal static bool WritesOutsideTargets(ShaderStageResources stage)
+    {
+        if (stage.Program is not { } program)
+        {
+            return false;
+        }
+
+        if (program.WritesDeviceAddresses || (program.Bindings?.MipStatisticsCount ?? 0) != 0)
+        {
+            return true;
+        }
+
+        foreach (var buffer in program.Buffers)
+        {
+            if (buffer.Written || buffer.Atomic)
+            {
+                return true;
+            }
+        }
+
+        foreach (var image in program.Images)
+        {
+            if (image.Written || image.Class == ImageResourceClass.Storage)
+            {
+                return true;
+            }
+        }
+
+        if (program.Bindings is { } bindings)
+        {
+            foreach (var descriptor in bindings.Descriptors)
+            {
+                if (descriptor.Kind == SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private void SetDrawDebugPhase(ulong submitId, in DrawCall draw, uint phase) =>
         _host.SetDebugInformation(draw.Operation, submitId, phase, draw.Count, 0, draw.InstanceCount, draw.FirstInstance);
 
@@ -379,19 +486,47 @@ public sealed partial class RenderExecutor
             : default;
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
         state.Rendering = AcquireAttachments(context, ref state);
-        // Nothing after the pipeline touches guest memory.
-        var pipeline = _pipelines.CreateGraphicsPipeline(
-            BoundColors(ref state),
-            in state.Depth,
-            vertexInput,
-            state.PixelActive ? pixelInput : null,
-            context,
-            in state.Rendering,
-            topology,
-            primitiveRestart,
-            state.Programs.DisableBlending,
-            state.Programs.Vertex,
-            state.Programs.Pixel);
+        // Nothing after the pipeline touches guest memory. A draw that may be left out while its
+        // pipeline compiles is left out here, before anything of it is recorded: what came before
+        // only bound state the caller's ResetBindings drops, and uploaded what it reads.
+        PipelineHandle pipeline;
+        if (MayLeaveOutWhileCompiling(ref state, vertexInput.Stage, pixelBindings is not null ? pixelInput.Stage : null,
+                indirectMesh is not null))
+        {
+            if (!_pipelines.TryCreateGraphicsPipeline(
+                    BoundColors(ref state),
+                    in state.Depth,
+                    vertexInput,
+                    state.PixelActive ? pixelInput : null,
+                    context,
+                    in state.Rendering,
+                    topology,
+                    primitiveRestart,
+                    state.Programs.DisableBlending,
+                    state.Programs.Vertex,
+                    state.Programs.Pixel,
+                    out pipeline))
+            {
+                IndexedDrawTrace.Write(indexedTrace, "pipeline-compiling", submitId, packetAddress);
+                return "pipeline-compiling";
+            }
+        }
+        else
+        {
+            pipeline = _pipelines.CreateGraphicsPipeline(
+                BoundColors(ref state),
+                in state.Depth,
+                vertexInput,
+                state.PixelActive ? pixelInput : null,
+                context,
+                in state.Rendering,
+                topology,
+                primitiveRestart,
+                state.Programs.DisableBlending,
+                state.Programs.Vertex,
+                state.Programs.Pixel);
+        }
+
         if (setBindDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x100);

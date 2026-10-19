@@ -135,6 +135,27 @@ public interface IShaderPipelineProvider
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram);
 
+    // False means the host is still compiling this pipeline and the draw may be left out;
+    // asking again returns it once the compile finishes, without starting a second one.
+    bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle)
+    {
+        handle = CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);
+        return true;
+    }
+
     // The dispatch dimensions are groups, or threads when the initiator counts threads.
     ComputeProgram GetComputeProgram(
         ComputeStageRegisters compute,
@@ -143,6 +164,19 @@ public interface IShaderPipelineProvider
         uint dimensionX,
         uint dimensionY,
         uint dimensionZ);
+
+    // The same for a dispatch that may suspend on its pipeline: retry keeps the prepared program
+    // for the attempt that runs it, which takes it back while the guest words it read still
+    // hold (ComputeProgramRetry). A provider that keeps nothing prepares it every time.
+    ComputeProgram GetComputeProgram(
+        ComputeStageRegisters compute,
+        ShaderInterfaceRegisters shaderInterface,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ,
+        Pipelines.ComputeProgramRetry retry) =>
+        GetComputeProgram(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 

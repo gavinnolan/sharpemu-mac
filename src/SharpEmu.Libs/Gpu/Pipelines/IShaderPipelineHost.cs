@@ -118,6 +118,17 @@ public interface IShaderPipelineHost
 
     PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description);
 
+    // Creates the graphics pipeline without blocking the command stream on the host shader
+    // compiler: false means the compile is still running, and carries on, and the caller
+    // leaves the draw out; true hands over the finished pipeline. Asked only for a draw the
+    // executor judged safe to leave out (RenderExecutor.MayLeaveOutWhileCompiling); a
+    // backend that compiles cheaply keeps the blocking behaviour.
+    bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        handle = CreateGraphicsPipeline(description);
+        return true;
+    }
+
     PipelineHandle CreateComputePipeline(ComputePipelineDescription description);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;

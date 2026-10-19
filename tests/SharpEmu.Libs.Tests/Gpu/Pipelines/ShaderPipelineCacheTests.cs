@@ -584,6 +584,115 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(2, cache.GraphicsPipelineCount);
     }
 
+    [Fact]
+    public void TryCreateGraphicsPipeline_CachesNothingWhileTheHostCompiles()
+    {
+        var guest = new PipelineTestGuest();
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var host = new RecordingRenderHost { LeavesOutDrawsWhileCompiling = true };
+        var executor = new RenderExecutor(host, new CachingProvider(cache));
+        guest.Host.PendingGraphicsCompiles = 2;
+
+        executor.DrawAuto(1, Banks(), Auto(3));
+        executor.DrawAuto(2, Banks(), Auto(3));
+        // Left out twice, and nothing kept that a later draw could take for the pipeline.
+        Assert.DoesNotContain(host.Calls, call => call.StartsWith("draw ", StringComparison.Ordinal));
+        Assert.Empty(guest.Host.GraphicsPipelines);
+        Assert.Equal(0, cache.GraphicsPipelineCount);
+
+        executor.DrawAuto(3, Banks(), Auto(3));
+        executor.DrawAuto(4, Banks(), Auto(3));
+        Assert.Equal(2, host.Calls.Count(call => call.StartsWith("draw ", StringComparison.Ordinal)));
+        Assert.Single(guest.Host.GraphicsPipelines);
+        Assert.Equal(1, cache.GraphicsPipelineCount);
+        // The cached pipeline is served without asking the host again.
+        Assert.Equal(3, guest.Host.GraphicsCompileRequests);
+    }
+
+    [Fact]
+    public void ComputeRetry_TakesTheKeptProgramBackOnlyWhileWhatItReadHolds()
+    {
+        const ulong code = PipelineTestGuest.MemoryBase + 0x1000;
+        const ulong header = PipelineTestGuest.MemoryBase + 0x8000;
+        const ulong table = PipelineTestGuest.MemoryBase + 0x9000;
+        var guest = new PipelineTestGuest();
+        guest.Host.ResidentReadsEnabled = true;
+        guest.RegisterProgram(code, header, PipelineTestGuest.EndProgram);
+        guest.WriteWords(table, 0x1234);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var registers = new ComputeStageRegisters { Address = code, ThreadsX = 1, ThreadsY = 1, ThreadsZ = 1, UserScalarCount = 8 };
+        var retry = new ComputeProgramRetry();
+
+        var first = cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1, retry);
+        Assert.False(retry.Reused);
+        Assert.True(retry.Reads.Complete);
+        // What a materialisation reading the table would have logged.
+        retry.Reads.Word(table, read: true, 0x1234);
+
+        Assert.Same(first, cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1, retry));
+        Assert.True(retry.Reused);
+
+        // Other dimensions are another dispatch.
+        Assert.NotSame(first, cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 2, 1, 1, retry));
+        Assert.False(retry.Reused);
+
+        // A word the preparation read changed since: it is prepared again.
+        var again = cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1, retry);
+        retry.Reads.Word(table, read: true, 0x1234);
+        guest.WriteWords(table, 0x5678);
+        Assert.NotSame(again, cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1, retry));
+        Assert.False(retry.Reused);
+
+        // So is one whose read the host cannot answer without waiting.
+        var kept = cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1, retry);
+        Assert.True(retry.Reused);
+        retry.Reads.Word(table, read: true, 0x5678);
+        guest.Host.ResidentReadsEnabled = false;
+        Assert.NotSame(kept, cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1, retry));
+        Assert.False(retry.Reused);
+    }
+
+    [Fact]
+    public void GuestReadLog_HoldsOnlyWhatStillReadsTheSame()
+    {
+        var bytes = new Dictionary<ulong, byte>();
+        bool Read(ulong address, Span<byte> destination, bool clean)
+        {
+            for (var index = 0; index < destination.Length; index++)
+            {
+                if (!bytes.TryGetValue(address + (ulong)index, out destination[index]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        for (var address = 0x100UL; address < 0x110; address++)
+        {
+            bytes[address] = (byte)address;
+        }
+
+        var log = new GuestReadLog();
+        Assert.True(log.Holds(Read));
+        log.Word(0x100, read: true, 0x03020100);
+        log.Bytes(0x104, read: true, [4, 5, 6, 7, 8]);
+        Assert.True(log.Holds(Read));
+        bytes[0x106] = 0xFF;
+        Assert.False(log.Holds(Read));
+        bytes[0x106] = 6;
+        Assert.True(log.Holds(Read));
+
+        // A read that failed, or more than the bound, is never taken as holding.
+        log.Word(0x200, read: false, 0);
+        Assert.False(log.Complete);
+        Assert.False(log.Holds(Read));
+        log.Clear();
+        log.Bytes(0x100, read: true, new byte[64 * 1024 + 1]);
+        Assert.False(log.Holds(Read));
+    }
+
     // Programs from the fixtures, pipelines from the real cache over the fake host.
     private sealed class CachingProvider(ShaderPipelineCache cache) : IShaderPipelineProvider
     {
@@ -593,6 +702,9 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 
         public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, GpuPrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram) =>
             cache.CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);
+
+        public bool TryCreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, GpuPrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram, out PipelineHandle handle) =>
+            cache.TryCreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, out handle);
 
         public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
             throw new InvalidOperationException("The caching provider has no compute program.");

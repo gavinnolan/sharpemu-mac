@@ -729,7 +729,27 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null);
+        }
+    }
+
+    // The same for a dispatch that may suspend on its pipeline: the program the retry kept from
+    // the last attempt at it is handed back while it still holds (ComputeProgramRetry);
+    // otherwise the program is prepared and kept in it for the next attempt.
+    public ComputeProgram GetComputeProgram(
+        ComputeStageRegisters compute,
+        ShaderInterfaceRegisters shaderInterface,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ,
+        ComputeProgramRetry retry)
+    {
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
+        lock (_resolveGate)
+        {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
         }
     }
 
@@ -739,10 +759,24 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dispatchInitiator,
         uint dimensionX,
         uint dimensionY,
-        uint dimensionZ)
+        uint dimensionZ,
+        ComputeProgramRetry? retry)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0, ref _computeUserData);
+        if (retry is not null)
+        {
+            // The source is read again (the code hash and the user data), the rest only checked.
+            if (retry.Matches(source, dispatchInitiator, dimensionX, dimensionY, dimensionZ) &&
+                retry.Reads.Holds(_host.TryReadResidentGuestBytes))
+            {
+                retry.Reused = true;
+                return retry.Program!;
+            }
+
+            retry.Reset();
+        }
+
         var program = _programs.Decode(source);
         if (_skipRayTracing)
         {
@@ -786,19 +820,29 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var computeOptions = _computeOptions;
             computeOptions.ComputeInfo = input;
             computeOptions.ComputeSystemRegisters = systemRegisters;
-            if (!TryPrepareProgram(
-                source,
-                computeOptions,
-                ref pushDataCursor,
-                out handle,
-                out stage))
+            _programs.ReadLog = retry?.Reads;
+            try
             {
-                return new ComputeProgram { Available = false };
+                if (!TryPrepareProgram(
+                    source,
+                    computeOptions,
+                    ref pushDataCursor,
+                    out handle,
+                    out stage))
+                {
+                    return new ComputeProgram { Available = false };
+                }
+            }
+            finally
+            {
+                _programs.ReadLog = null;
             }
         }
 
         input.Stage = stage;
-        return new ComputeProgram { Program = handle, Input = input };
+        var prepared = new ComputeProgram { Program = handle, Input = input };
+        retry?.Keep(prepared, source, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+        return prepared;
     }
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
@@ -860,6 +904,46 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram)
     {
+        _ = CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, wait: true, out var created);
+        return created;
+    }
+
+    // The pipeline of a draw the executor may leave out while it compiles: false while the
+    // host is still building it (the build carries on), and nothing is cached until it is
+    // handed over, so a later draw asks again and finds it then.
+    public bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle) =>
+        CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, wait: false, out handle);
+
+    private bool CreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        bool wait,
+        out PipelineHandle handle)
+    {
+        handle = default;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         // The lookup fills objects this thread reuses for every draw; only a new pipeline gets its own.
         var lookup = _graphicsLookup ??= new GraphicsPipelineKey
@@ -877,9 +961,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
         lock (_pipelineGate)
         {
-            if (_graphicsPipelines.TryGetValue(lookup, out var cached))
+            if (_graphicsPipelines.TryGetValue(lookup, out handle))
             {
-                return cached;
+                return true;
             }
         }
 
@@ -891,9 +975,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_gate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
-            if (_graphicsPipelines.TryGetValue(key, out var cached))
+            if (_graphicsPipelines.TryGetValue(key, out handle))
             {
-                return cached;
+                return true;
             }
 
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -904,14 +988,24 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             }
 
-            var created = _host.CreateGraphicsPipeline(description);
+            PipelineHandle created;
+            if (wait)
+            {
+                created = _host.CreateGraphicsPipeline(description);
+            }
+            else if (!_host.TryCreateGraphicsPipeline(description, out created))
+            {
+                return false;
+            }
+
             lock (_pipelineGate)
             {
                 _graphicsPipelines.Add(key, created);
             }
 
             ShaderCacheCounters.CountGraphicsPipeline();
-            return created;
+            handle = created;
+            return true;
         }
     }
 

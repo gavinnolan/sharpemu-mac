@@ -2116,6 +2116,12 @@ internal sealed partial class MetalRenderHost :
             $"prewarm_inflight={MetalCompileScheduler.Shared.PrewarmInFlight} " +
             $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
+            // Draws left out while their pipeline compiled, pipelines the worker waited for
+            // (a miss it compiled itself, or a draw that could not be left out), and compiles
+            // queued or running on the compiler threads now.
+            $"draws_skipped_compiling={Interlocked.Exchange(ref _drawsSkippedCompiling, 0)} " +
+            $"pipeline_waits_blocking={Interlocked.Exchange(ref _pipelineWaitsBlocking, 0)} " +
+            $"async_compiles_inflight={PipelinesCompiling} " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +

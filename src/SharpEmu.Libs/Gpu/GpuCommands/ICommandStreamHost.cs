@@ -28,7 +28,11 @@ public readonly record struct DrawIndexedArguments(
     ulong IndirectArgumentsAddress = 0,
     // The guest set no index buffer size: IndexCount is only the range seen so far and
     // must not clamp the count read from the arguments.
-    bool UnboundedIndexBuffer = false);
+    bool UnboundedIndexBuffer = false)
+{
+    // Predicated, or inside an occlusion query: never left out while its pipeline compiles.
+    public bool MustExecute { get; init; }
+}
 
 // Arguments of a non-indexed draw as the packet stream describes them.
 public readonly record struct DrawAutoArguments(
@@ -42,7 +46,11 @@ public readonly record struct DrawAutoArguments(
     // Nonzero when the counts are still in guest memory at this address, laid out as
     // (vertexCount, instanceCount, firstVertex, firstInstance). VertexCount is then a
     // placeholder and the other counts are unused.
-    ulong IndirectArgumentsAddress = 0);
+    ulong IndirectArgumentsAddress = 0)
+{
+    // Predicated, or inside an occlusion query: never left out while its pipeline compiles.
+    public bool MustExecute { get; init; }
+}
 
 public enum EndOfPipeWriteKind
 {

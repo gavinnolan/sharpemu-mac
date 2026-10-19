@@ -228,11 +228,36 @@ internal sealed class ShaderProgramCache
         _context = context;
         _compiler = compiler;
         _host = host;
-        _readGuestWord = host.TryReadGuestWord;
-        _readCleanGuestWord = host.TryReadCleanGuestWord;
-        _readResidentGuestBytes = host.TryReadResidentGuestBytes;
+        _readGuestWord = ReadGuestWord;
+        _readCleanGuestWord = ReadCleanGuestWord;
+        _readResidentGuestBytes = ReadResidentGuestBytes;
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
         _dataWritePending = host.DataWritePending;
+    }
+
+    // Where the preparation running now logs what it reads of guest memory, for a dispatch
+    // that may run again without preparing again (ComputeProgramRetry); null logs nothing.
+    internal GuestReadLog? ReadLog { get; set; }
+
+    private bool ReadGuestWord(ulong address, out uint word)
+    {
+        var read = _host.TryReadGuestWord(address, out word);
+        ReadLog?.Word(address, read, word);
+        return read;
+    }
+
+    private bool ReadCleanGuestWord(ulong address, out uint word)
+    {
+        var read = _host.TryReadCleanGuestWord(address, out word);
+        ReadLog?.Word(address, read, word);
+        return read;
+    }
+
+    private bool ReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
+    {
+        var read = _host.TryReadResidentGuestBytes(address, destination, clean);
+        ReadLog?.Bytes(address, read, destination);
+        return read;
     }
 
     private readonly Func<ulong, bool>? _dataWritePending;
@@ -487,7 +512,7 @@ internal sealed class ShaderProgramCache
             try
             {
                 var caller = entry.Program with { Address = source.Address };
-                var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _host.TryReadCleanGuestWord);
+                var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _readCleanGuestWord);
                 var linkedKey = (key ?? throw new InvalidOperationException("The cached shader has no program key."), library.Identity);
                 if (!_linkedPrograms.TryGetValue(linkedKey, out var linked))
                 {

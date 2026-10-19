@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
@@ -63,7 +64,21 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
+        // A dispatch that suspended on its pipeline runs again from its packet; what it prepared
+        // then is taken back while it still holds (ComputeProgramRetry), so the retry neither
+        // prepares the program again nor re-runs the consumers below, which declined it then.
+        var retry = _host.SupportsPipelineSuspend
+            ? TakeSuspendedDispatch(submitId, compute.Address, indirectArgumentsAddress)
+            : null;
+        var computeProgram = retry is null
+            ? _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ)
+            : _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ, retry);
+        var retried = retry?.Reused == true;
+        if (retried)
+        {
+            _computeRetriesReused++;
+        }
+
         if (computeProgram.Consumed)
         {
             return;
@@ -96,31 +111,31 @@ public sealed partial class RenderExecutor
                 $"buffers={program.Buffers.Length} images={program.Images.Length} samplers={program.SamplerCount}");
         }
 
-        if (indirectArgumentsAddress == 0 && TryConsumeMetadataClear(input))
+        if (!retried && indirectArgumentsAddress == 0 && TryConsumeMetadataClear(input))
         {
             _host.ResetBindings();
             return;
         }
 
-        if (indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
+        if (!retried && indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
         {
             _host.ResetBindings();
             return;
         }
 
-        if (indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
+        if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
             _host.ResetBindings();
             return;
         }
 
-        if (indirectArgumentsAddress == 0 && TryConsumeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator))
+        if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
             _host.ResetBindings();
             return;
         }
 
-        if (indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
+        if (!retried && indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
             _host.ResetBindings();
             return;
@@ -168,6 +183,7 @@ public sealed partial class RenderExecutor
                 // before this point has touched the host, so leaving now is clean.
                 if (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
                 {
+                    KeepSuspendedDispatch(submitId, compute.Address, indirectArgumentsAddress, retry);
                     _host.NotePipelineNotReady();
                     return;
                 }
@@ -235,6 +251,51 @@ public sealed partial class RenderExecutor
         }
 
         _host.ResetBindings();
+    }
+
+    // The dispatches suspended on their pipeline, by submission: a submission runs its packets
+    // in order, so the next dispatch it reaches is the one that suspended. The address and the
+    // indirect arguments make sure of it; the retry itself checks everything else it read.
+    private readonly Dictionary<ulong, (ulong Address, ulong IndirectArguments, ComputeProgramRetry Retry)> _suspendedDispatches = [];
+    private ComputeProgramRetry? _spareRetry;
+    private long _computeRetriesReused;
+
+    /// <summary>Suspended dispatches that ran again on the program they prepared before, for tests.</summary>
+    internal long ComputeRetriesReused => _computeRetriesReused;
+
+    // The retry of this dispatch, or an empty one that logs what the preparation reads. The
+    // empty one is reused by every dispatch that does not suspend; one that does keeps it.
+    private ComputeProgramRetry TakeSuspendedDispatch(ulong submitId, ulong address, ulong indirectArguments)
+    {
+        if (_suspendedDispatches.Remove(submitId, out var suspended) &&
+            suspended.Address == address && suspended.IndirectArguments == indirectArguments)
+        {
+            return suspended.Retry;
+        }
+
+        var retry = _spareRetry ??= new ComputeProgramRetry();
+        retry.Reset();
+        return retry;
+    }
+
+    private void KeepSuspendedDispatch(ulong submitId, ulong address, ulong indirectArguments, ComputeProgramRetry? retry)
+    {
+        if (retry is null)
+        {
+            return;
+        }
+
+        if (_suspendedDispatches.Count >= 64)
+        {
+            // Submissions that never came back (a queue torn down mid-wait) are not kept for ever.
+            _suspendedDispatches.Clear();
+        }
+
+        _suspendedDispatches[submitId] = (address, indirectArguments, retry);
+        if (ReferenceEquals(retry, _spareRetry))
+        {
+            _spareRetry = null;
+        }
     }
 
     // The dispatch counts threads; the host counts groups of the shader's thread size.
