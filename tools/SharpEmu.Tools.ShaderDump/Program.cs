@@ -13,6 +13,12 @@ using SharpEmu.ShaderCompiler.Vulkan;
 
 const ulong ProgramAddress = 0x100000;
 
+if (args.Length >= 1 && string.Equals(args[0], "corpus", StringComparison.Ordinal))
+{
+    Environment.ExitCode = CorpusCommand.Run(args[1..]);
+    return;
+}
+
 if (args.Length >= 1 && string.Equals(args[0], "--inspect", StringComparison.Ordinal))
 {
     if (args.Length is < 2 or > 3)

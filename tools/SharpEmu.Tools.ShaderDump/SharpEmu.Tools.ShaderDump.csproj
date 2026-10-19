@@ -12,9 +12,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
   </PropertyGroup>
 
-  <!-- References only the shader-compiler projects: the conformance tool is
-       emulator-independent by design. -->
+  <!-- The synthetic conformance checks reference only the shader-compiler projects and stay
+       emulator-independent; the corpus command alone reads SharpEmu.Libs, to replay the
+       translation inputs a game run captured. -->
   <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
