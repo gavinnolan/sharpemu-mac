@@ -338,9 +338,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // texel of the other. A depth-tiled shadow array over a render-target-tiled 720p
     // transient, or a 4 byte surface over an 8 byte one, shares addresses and nothing
     // else; on the console such a read returns scrambled bytes too.
-    private static bool SameTexelLayout(in ImageDescription a, in ImageDescription b) =>
+    // The row stride is in elements: a block-compressed pitch counts texels, four to a
+    // block, so a BC3 surface and the RGBA32Uint view a compute shader writes its blocks
+    // through (UE5's virtual texture pool) have the same rows at a quarter of the pitch.
+    // Comparing texel pitches skipped every such read, and the pool kept stale tiles.
+    internal static bool SameTexelLayout(in ImageDescription a, in ImageDescription b) =>
         a.TileMode == b.TileMode && a.BytesPerBlock == b.BytesPerBlock &&
-        (ulong)a.Pitch * a.BytesPerBlock == (ulong)b.Pitch * b.BytesPerBlock;
+        (ulong)a.BlockExtent.Width * a.BytesPerBlock == (ulong)b.BlockExtent.Width * b.BytesPerBlock;
 
     /// <summary>
     /// Makes this image the one that agrees with guest memory, against every other
@@ -1277,7 +1281,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // SHARPEMU_METAL_V2_ALIAS_ON_DEVICE=0 sends every alias through guest memory again.
     // The device copy only claims a 32-bit depth plane and an R32 colour alias, and a
     // 16-bit depth plane and an R16 colour alias either way round (switched off alone by
-    // SHARPEMU_METAL_V2_D16_ALIAS_DEVICE=0), with the same tile mode, pitch and footprint
+    // SHARPEMU_METAL_V2_D16_ALIAS_DEVICE=0), and a block-compressed surface and the integer
+    // view of its blocks either way round (SHARPEMU_METAL_V2_BLOCK_ALIAS_DEVICE=0), with the
+    // same tile mode, pitch and footprint
     // (MetalImageTransfer.TryEncodeTextureToTexture): neither transfer converts anything
     // for those pairs, so texel for texel the target gets exactly the bits the round trip
     // would have detiled into it.

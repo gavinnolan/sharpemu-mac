@@ -193,6 +193,13 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         var source = PlanFor(sourceDescription);
         var target = PlanFor(targetDescription);
+        if (BlockAliasOnDevice &&
+            (IsBlockWordAlias(sourceDescription, source, targetDescription, target) ||
+             IsBlockWordAlias(targetDescription, target, sourceDescription, source)))
+        {
+            return TryEncodeBlockWordCopy(context, in sourceDescription, sourceTexture, in targetDescription, targetTexture);
+        }
+
         // One plane of equally sized texels, one mip, the same grid, and no multisampling:
         // anything else is a reinterpretation this cannot claim to preserve.
         // Only the pairs that were measured to matter: a depth target read through a
@@ -343,6 +350,99 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         IsRawSingleChannel16(color.Format) && colorDescription.BytesPerBlock == sizeof(ushort) &&
         !color.Swap && !colorDescription.HasMetadata &&
         depthDescription.TileMode == GuestTileMode.Depth && colorDescription.TileMode == GuestTileMode.Depth;
+
+    // SHARPEMU_METAL_V2_BLOCK_ALIAS_DEVICE=0 sends a block-compressed surface and the
+    // integer view of its blocks through guest memory again.
+    private static readonly bool BlockAliasDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BLOCK_ALIAS_DEVICE") != "0";
+
+    /// <summary>Whether a block-compressed surface and the integer view of its blocks are handed over on the device.</summary>
+    public bool BlockAliasOnDevice { get; set; } = BlockAliasDefault;
+
+    // A block-compressed surface and an integer view of its blocks over the same bytes, either
+    // of them the source: UE5 writes its virtual texture pool's BC blocks through an RGBA32Uint
+    // view (SILENT HILL: a 7800x7800 BC3 pool, 60 MiB, out to guest memory and back in on
+    // every frame that streamed a tile). Block (x, y) of one is texel (x, y) of the other, the
+    // same 8 or 16 bytes untouched on both sides - a BC texture holds the guest's blocks, and
+    // a two- or four-channel 32-bit integer upload converts nothing - so the blocks are copied
+    // across in a linear staging buffer and neither tiler is involved.
+    private static bool IsBlockWordAlias(
+        in ImageDescription blockDescription, TransferPlan block,
+        in ImageDescription wordDescription, TransferPlan word)
+    {
+        var bytes = blockDescription.BytesPerBlock;
+        return blockDescription.IsBlock && !wordDescription.IsBlock &&
+            BlockBytes(block.Format) == bytes && wordDescription.BytesPerBlock == bytes &&
+            WordBytes(word.Format) == bytes &&
+            !block.Swap && !word.Swap && !block.DepthStencil && !word.DepthStencil &&
+            !blockDescription.HasMetadata && !wordDescription.HasMetadata &&
+            blockDescription.Extent.Width == wordDescription.Extent.Width * 4 &&
+            blockDescription.Extent.Height == wordDescription.Extent.Height * 4 &&
+            blockDescription.Extent.Depth == 1 && wordDescription.Extent.Depth == 1 &&
+            blockDescription.TransferLayers == wordDescription.TransferLayers &&
+            blockDescription.Samples == 1 && wordDescription.Samples == 1 &&
+            !blockDescription.IsVolume && !wordDescription.IsVolume &&
+            blockDescription.TileMode == wordDescription.TileMode &&
+            blockDescription.BlockExtent.Width == wordDescription.Pitch &&
+            blockDescription.Data.Size == wordDescription.Data.Size &&
+            blockDescription.Resources.Levels == 1 && wordDescription.Resources.Levels == 1;
+    }
+
+    private static uint BlockBytes(MtlPixelFormat format) => format switch
+    {
+        MtlPixelFormat.Bc1Rgba or MtlPixelFormat.Bc1RgbaSrgb or
+            MtlPixelFormat.Bc4RUnorm or MtlPixelFormat.Bc4RSnorm => 8u,
+        MtlPixelFormat.Bc2Rgba or MtlPixelFormat.Bc2RgbaSrgb or
+            MtlPixelFormat.Bc3Rgba or MtlPixelFormat.Bc3RgbaSrgb or
+            MtlPixelFormat.Bc5RgUnorm or MtlPixelFormat.Bc5RgSnorm or
+            MtlPixelFormat.Bc6HRgbFloat or MtlPixelFormat.Bc6HRgbUfloat or
+            MtlPixelFormat.Bc7RgbaUnorm or MtlPixelFormat.Bc7RgbaUnormSrgb => 16u,
+        _ => 0u,
+    };
+
+    private static uint WordBytes(MtlPixelFormat format) => format switch
+    {
+        MtlPixelFormat.Rg32Uint or MtlPixelFormat.Rg32Sint => 8u,
+        MtlPixelFormat.Rgba32Uint or MtlPixelFormat.Rgba32Sint => 16u,
+        _ => 0u,
+    };
+
+    // A row of blocks is a row of words: the same bytes per row and per layer on both sides,
+    // each side copied at its own texel extent.
+    private bool TryEncodeBlockWordCopy(
+        IMetalSubmissionContext context,
+        in ImageDescription sourceDescription,
+        nint sourceTexture,
+        in ImageDescription targetDescription,
+        nint targetTexture)
+    {
+        var words = sourceDescription.IsBlock ? targetDescription : sourceDescription;
+        var rowBytes = (ulong)words.Extent.Width * words.BytesPerBlock;
+        var sliceBytes = rowBytes * words.Extent.Height;
+        var layers = words.TransferLayers;
+        var staging = _tiler.Acquire(context, sliceBytes * layers);
+        if (!staging.IsValid)
+        {
+            return false;
+        }
+
+        var sourceSize = new MtlSize { Width = sourceDescription.Extent.Width, Height = sourceDescription.Extent.Height, Depth = 1 };
+        var targetSize = new MtlSize { Width = targetDescription.Extent.Width, Height = targetDescription.Extent.Height, Depth = 1 };
+        var blit = _tiler.BeginBlit(context);
+        for (uint layer = 0; layer < layers; layer++)
+        {
+            var offset = staging.Offset + (sliceBytes * layer);
+            MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
+                sourceTexture, layer, 0, default, sourceSize,
+                staging.Buffer, (nuint)offset, (nuint)rowBytes, (nuint)sliceBytes, (nuint)MtlBlitOption.None);
+            MetalNative.SendCopyBufferToTextureOptions(blit, SelCopyBufferToTexture,
+                staging.Buffer, (nuint)offset, (nuint)rowBytes, (nuint)sliceBytes,
+                targetSize, targetTexture, layer, 0, default, (nuint)MtlBlitOption.None);
+        }
+
+        MetalTiler.EndEncoding(blit);
+        return true;
+    }
 
     // The two surfaces cover the same texel grid, so a copy between them is a copy and
     // not a resample.

@@ -326,6 +326,128 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.Equal(1, counters.Published);
     }
 
+    // A block-compressed pitch counts texels, four to a block: a BC3 surface and the
+    // RGBA32Uint view of its blocks have the same rows, so they share a texel layout.
+    [Fact]
+    public void ABlockSurfaceAndItsUintBlockViewShareATexelLayout()
+    {
+        var blocks = BlockAliasRequest(ImageAddress, blockCompressed: false, ImageRole.ColorTarget).Description;
+        var texels = BlockAliasRequest(ImageAddress, blockCompressed: true, ImageRole.Texture).Description;
+        Assert.True(MetalImageCache.SameTexelLayout(in blocks, in texels));
+        Assert.True(MetalImageCache.SameTexelLayout(in texels, in blocks));
+
+        var wider = texels;
+        wider.Pitch = BlockAliasSide * 4 * 2;
+        Assert.False(MetalImageCache.SameTexelLayout(in blocks, in wider));
+    }
+
+    // UE5's virtual texture pool: a compute shader writes BC3 blocks through an RGBA32Uint
+    // view over the pool, and materials sample the pool as BC3. The sampled surface has to
+    // get the blocks the GPU wrote; a skipped handover left it with stale tiles (Silent
+    // Hill: The Short Message, a jacket patched with other textures' tiles).
+    // Through guest memory: the words are published and the blocks reloaded from there.
+    [Fact]
+    public void ABlockSurfaceReadsTheBlocksItsUintViewWrote()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Harness.Transfer.BlockAliasOnDevice = false;
+        var (written, _) = GpuWrittenBlockWords(rig);
+
+        var texels = rig.Cache.GetImage(rig.Acquire(BlockAliasRequest(ImageAddress, blockCompressed: true, ImageRole.Texture)));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.Equal(written, rig.ReadGuest(ImageAddress, BlockAliasSize));
+        Assert.Equal(written, ReadTexture(rig, texels));
+        var counters = rig.Cache.AliasCounters;
+        Assert.Equal(0, counters.ReadsSkipped);
+        Assert.Equal(1, counters.Published);
+    }
+
+    // On the device: the blocks are copied across and guest memory is left as it was, the
+    // word view still owing it the bytes.
+    [Fact]
+    public void ABlockSurfaceTakesTheBlocksItsUintViewWroteOnTheDevice()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        Assert.True(rig.Harness.Transfer.BlockAliasOnDevice);
+        var (written, stale) = GpuWrittenBlockWords(rig);
+        _ = rig.Cache.TakeDeviceAliasPublishes();
+
+        var texels = rig.Cache.GetImage(rig.Acquire(BlockAliasRequest(ImageAddress, blockCompressed: true, ImageRole.Texture)));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.Equal(written, ReadTexture(rig, texels));
+        Assert.Equal(stale, rig.ReadGuest(ImageAddress, BlockAliasSize));
+        Assert.False(texels.IsCpuDirty);
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(0, rig.Cache.AliasCounters.ReadsSkipped);
+    }
+
+    // The RGBA32Uint view holding blocks guest memory does not: what a compute shader wrote.
+    private static (byte[] Written, byte[] Stale) GpuWrittenBlockWords(Rig rig)
+    {
+        var written = MetalTileOracle.Pattern((int)BlockAliasSize, 0x5A);
+        rig.WriteGuest(ImageAddress, written);
+        var words = rig.Cache.GetImage(
+            rig.Acquire(BlockAliasRequest(ImageAddress, blockCompressed: false, ImageRole.ColorTarget)));
+        Assert.True(words.IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var stale = MetalTileOracle.Pattern((int)BlockAliasSize, 0xC3);
+        rig.WriteGuest(ImageAddress, stale);
+        _ = rig.Cache.AliasCounters;
+        return (written, stale);
+    }
+
+    // The bytes the image's texture holds, laid out as its (linear) guest bytes.
+    private static byte[] ReadTexture(Rig rig, MetalCachedImage image)
+    {
+        var description = image.Description;
+        var size = description.Data.Size;
+        var buffer = rig.Harness.Buffer(size);
+        rig.Harness.Transfer.EncodeTextureToGuest(
+            rig.Harness, in description, new SubresourceRange(0, 1, 0, 1), image.Texture,
+            new MetalGuestRange(buffer, 0, size, 0), default, 0, size, 0);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        return rig.Harness.Read(buffer, 0, size);
+    }
+
+    // 16x16 RGBA32Uint blocks over a 64x64 BC3 surface, linear: 4 KiB.
+    private const uint BlockAliasSide = 16;
+    private const ulong BlockAliasSize = BlockAliasSide * BlockAliasSide * 16;
+
+    private static ImageRequest BlockAliasRequest(ulong address, bool blockCompressed, ImageRole role)
+    {
+        var side = blockCompressed ? BlockAliasSide * 4 : BlockAliasSide;
+        var format = blockCompressed ? GpuFormat.BC3UnormBlock : GpuFormat.R32G32B32A32Uint;
+        var description = ImageDescription.Create();
+        description.Data = new GuestSpan(address, BlockAliasSize);
+        description.PixelFormat = format;
+        description.GuestFormat = blockCompressed ? GuestPixelFormat.Bc3UNorm : GuestPixelFormat.Bits32_32_32_32UInt;
+        description.Type = GuestImageType.Color2D;
+        description.Extent = new GpuExtent3D(side, side, 1);
+        description.Resources = new SubresourceCount(1, 1);
+        description.Pitch = side;
+        description.BytesPerBlock = 16;
+        description.Samples = 1;
+        description.TileMode = GuestTileMode.Linear;
+        description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = BlockAliasSize, Pitch = side, Height = side };
+        var view = ImageViewDescription.Default with
+        {
+            Format = format,
+            Type = GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.ColorBit,
+            LayerCount = 1,
+            Usage = role == ImageRole.ColorTarget ? GpuImageUsage.ColorAttachmentBit : GpuImageUsage.SampledBit,
+        };
+        return new ImageRequest(description, view, role);
+    }
+
     // A write through a small alias inside a GPU-written image publishes only the run the
     // two share and leaves the large image GPU-modified for the rest: stale over the run
     // alone, with the rest of guest memory untouched by the handover.
