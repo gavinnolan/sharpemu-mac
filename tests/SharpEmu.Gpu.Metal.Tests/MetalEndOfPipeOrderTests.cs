@@ -319,6 +319,37 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
     }
 
+    // The windows are untracked, so Metal may start a label copy's encoder before the work
+    // recorded ahead of it has finished. Each label copy, written at once or at an encoder
+    // boundary, waits on an event the command buffer signals once that work is done.
+    [Fact]
+    public void ALabelCopyWaitsBehindABarrierForTheWorkRecordedBeforeIt()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        const ulong filled = GuestBase + 0x10000;
+        _ = host.TakeLabelBarriers();
+
+        host.FillBufferInOrder(filled, 0x2000, 0x77);
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 7));
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+        Assert.Equal(1L, host.TakeLabelBarriers());
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x66UL), "WRITE_DATA");
+        Assert.Equal(1, host.DeferredLabelCopyCount);
+        Assert.Equal(0L, host.TakeLabelBarriers());
+
+        var serial = host.FlushCommandBuffer();
+        Assert.Equal(1L, host.TakeLabelBarriers());
+        WaitForGpu(host, serial);
+        WaitForCompletions(host);
+        Assert.Equal(7UL, rig.Backing.Read64(WindowedLabel));
+        Assert.Equal(0x66UL, rig.Backing.Read64(LaterLabel));
+        Assert.Equal(0x77u, rig.Backing.Read32(filled));
+    }
+
     [Theory]
     [InlineData(null, "Deferred")]
     [InlineData("", "Deferred")]

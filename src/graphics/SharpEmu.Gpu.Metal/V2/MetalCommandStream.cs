@@ -917,8 +917,54 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>Labels whose bytes waited for a boundary instead of ending a pass.</summary>
     public long TakeDeferredLabelWrites() => Interlocked.Exchange(ref _deferredLabelWrites, 0);
 
-    private static void EncodeLabelCopies(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)
+    // SHARPEMU_METAL_V2_LABEL_BARRIER=0 encodes label copies with no barrier ahead of them.
+    private static readonly bool LabelBarrierEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_BARRIER") != "0";
+
+    private static readonly nint SelEncodeWaitForEvent = MetalNative.Selector("encodeWaitForEvent:value:");
+    private static readonly nint SelNewEvent = MetalNative.Selector("newEvent");
+
+    private nint _labelBarrierEvent;
+    private ulong _labelBarrierValue;
+    private long _labelBarriers;
+
+    /// <summary>Barriers encoded ahead of label copies since the last call.</summary>
+    internal long TakeLabelBarriers() => Interlocked.Exchange(ref _labelBarriers, 0);
+
+    // The windows are untracked, so Metal orders nothing between the encoders of a
+    // command buffer: Apple silicon starts an encoder while the ones before it are still
+    // running (the pass profile shows compute encoders starting more than a millisecond
+    // before the render pass ahead of them ends). A label copy is an encoder of its own,
+    // and without this it could land while the work it reports was still storing. A guest
+    // that frees memory on the label then has those stores land in what it freed: Silent
+    // Hill's virtual-texture feedback copy wrote 0xFFFFFFFF over a freed block's free-list
+    // link and the allocator crashed on the render thread. Signalling an event once all
+    // the earlier work has finished and waiting for it makes the copy wait for that work.
+    private void EncodeLabelBarrier(nint commandBuffer)
     {
+        if (!LabelBarrierEnabled)
+        {
+            return;
+        }
+
+        if (_labelBarrierEvent == 0)
+        {
+            _labelBarrierEvent = MetalNative.Send(_device, SelNewEvent);
+            if (_labelBarrierEvent == 0)
+            {
+                throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order label copies after their work.");
+            }
+        }
+
+        var value = ++_labelBarrierValue;
+        MetalV2Native.SendEventValue(commandBuffer, SelEncodeSignalEvent, _labelBarrierEvent, value);
+        MetalV2Native.SendEventValue(commandBuffer, SelEncodeWaitForEvent, _labelBarrierEvent, value);
+        Interlocked.Increment(ref _labelBarriers);
+    }
+
+    private void EncodeLabelCopies(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)
+    {
+        EncodeLabelBarrier(commandBuffer);
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)

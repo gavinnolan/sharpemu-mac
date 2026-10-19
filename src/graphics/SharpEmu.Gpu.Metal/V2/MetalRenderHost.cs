@@ -2246,6 +2246,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" transient_commits=").Append(TakeTransientCommits())
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
+            .Append(" label_barriers=").Append(TakeLabelBarriers())
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)
             .Append(TakeDeviceAddressReachCounters())
@@ -2429,6 +2430,12 @@ internal sealed partial class MetalRenderHost :
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[METAL-V2][WARN] The render host could not drain on shutdown: {exception.Message}");
+        }
+
+        if (_labelBarrierEvent != 0)
+        {
+            MetalNative.SendVoid(_labelBarrierEvent, SelRelease);
+            _labelBarrierEvent = 0;
         }
 
         _completions.Dispose();
