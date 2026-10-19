@@ -699,6 +699,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 // never has, and checking for one per label is not free.
                 _imageCache.InvalidateMemoryFromGpu(copy.GuestAddress, (ulong)copy.Bytes);
             }
+            else
+            {
+                // Nor does it re-arm a DCC claim; one standing over the label is read again.
+                _imageCache.ForgetStandingDccClaims(copy.GuestAddress, (ulong)copy.Bytes);
+            }
 
             using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
                 SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping))
@@ -707,11 +712,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             }
 
             _pendingLabelWrites++;
-        }
-        else
-        {
-            // Nor does it re-arm a DCC claim; one standing over the label is read again.
-            _imageCache.ForgetStandingDccClaims(guestAddress, (ulong)copy.Bytes);
         }
 
         return serial;
