@@ -4,7 +4,7 @@
 """Turns one run-game.sh run directory into the performance table every perf change is judged by.
 
 Usage:
-  python3 -I scripts/macos/perf_report.py <run-dir> [--from 150] [--to 480] [--json out.json]
+  python3 -I scripts/macos/perf_report.py <run-dir> [--from 150] [--to 480 | --segment NAME] [--json out.json]
                                           [--baseline other-run-dir] [--md out.md]
   python3 -I scripts/macos/perf_report.py --selftest
 
@@ -24,7 +24,8 @@ SH cutscene). Inputs, every one optional except what a section needs:
   footprint.log     "seconds footprint_mb rss_mb" per second: peak footprint.
   result.txt        peak_footprint_mb / peak_rss_mb of the whole run.
 
---baseline <run-dir> analyses that run with the same window and prints Before / After / Delta%.
+--segment NAME takes the window from markers.tsv: NAME-start .. NAME-end (plan steps t:mark:NAME-start, see input-plan.py;
+the end of the run when NAME-end is missing). --baseline <run-dir> analyses that run with the same window and prints Before / After / Delta%.
 Loading gaps: a spike whose [METAL-V2][PERF] windows show (almost) no submissions or passes is the guest
 loading, not rendering; it is classed `loading (no GPU submissions)`, left out of the cause list and the top 10, and the
 frame-time table is given with and without those gaps. frame-times.txt is placed on the game.tlog clock through its
@@ -107,6 +108,33 @@ def read_flips(path, launch_epoch):
             times.append(origin + int(parts[1]) / 1e6)
     times.sort()
     return times
+
+
+def read_markers(path, launch_epoch):
+    """(seconds since launch, name) per line of markers.tsv (epoch<TAB>name, written by input-plan.py)."""
+    rows = []
+    if os.path.exists(path) and launch_epoch is not None:
+        for line in open(path, errors='replace'):
+            epoch, _, name = line.rstrip('\n').partition('\t')
+            try:
+                rows.append((float(epoch) - launch_epoch, name))
+            except ValueError:
+                pass
+    return sorted(rows)
+
+
+def segment_window(run, name):
+    """(lo, hi) seconds since launch of segment `name`: markers <name>-start and <name>-end of markers.tsv
+    (hi is None, the end of the run, when the end marker was never written)."""
+    env = read_env(os.path.join(run, 'run.env'))
+    launch = float(env['launch_epoch']) if env.get('launch_epoch') else None
+    marks = read_markers(os.path.join(run, 'markers.tsv'), launch)
+    starts = [t for t, n in marks if n == name + '-start']
+    if not starts:
+        raise SystemExit(f'perf_report: no {name}-start marker in {run}/markers.tsv')
+    lo = starts[0]
+    ends = [t for t, n in marks if n == name + '-end' and t >= lo]
+    return lo, (ends[0] if ends else None)
 
 
 def read_tlog(path):
@@ -557,7 +585,7 @@ def cause_text(causes):
 
 def render_markdown(m):
     L = [f'## Performance report: {m["tag"]}', '',
-         f'Window {m["window_s"][0]:g}-{m["window_s"][1]:g} s since launch. Commit {m.get("commit")}. {m.get("result") or ""}']
+         f'{"Segment " + m["segment"] + ", w" if m.get("segment") else "W"}indow {m["window_s"][0]:g}-{m["window_s"][1]:g} s since launch. Commit {m.get("commit")}. {m.get("result") or ""}']
     if m['env']:
         L.append('Env: ' + ' '.join(f'{k}={v}' for k, v in m['env'].items()))
     f = m['frames']
@@ -803,6 +831,9 @@ def selftest():
             fh.write('[+  20.000] [METAL-V2][PERF] seconds=2.00 draws=1000 passes=40 uploads=10 writebacks=4 gpu_busy_ms=400.0\n')
         with open(os.path.join(d, 'footprint.log'), 'w') as fh:
             fh.write('10 1000 500\n20 4000 900\n30 3000 900\n')
+        with open(os.path.join(d, 'markers.tsv'), 'w') as fh:
+            fh.write(f'{launch + 15:.3f}\tseg-start\n{launch + 40:.3f}\tseg-end\n')
+        check('segment window', segment_window(d, 'seg'), (15.0, 40.0))
         m = analyse(d, 15, 40)
         check('selftest fps', m['frames']['fps'], 2.0)
         check('render worker ms', m['render']['worker_ms_per_frame'], 110.0)
@@ -825,6 +856,8 @@ def main():
     ap.add_argument('run', nargs='?', help='run-game.sh run directory (artifacts/runs/<ts>-sh-<tag>)')
     ap.add_argument('--from', dest='lo', type=float, default=150.0, help='window start, s since launch (default 150)')
     ap.add_argument('--to', dest='hi', type=float, default=None, help='window end, s since launch (default end of run)')
+    ap.add_argument('--segment', help='window = markers NAME-start .. NAME-end of markers.tsv (plan t:mark: steps); '
+                    'replaces --from/--to, and --baseline uses the same marker names in its own run')
     ap.add_argument('--json', help='write the metrics as JSON to this path')
     ap.add_argument('--md', help='also write the markdown to this path')
     ap.add_argument('--baseline', help='a second run directory; prints Before (it) / After (run) / Delta')
@@ -835,10 +868,14 @@ def main():
         return selftest()
     if not args.run or not os.path.isdir(args.run):
         ap.error('a run directory is required')
-    m = analyse(args.run, args.lo, args.hi, args.slack)
+    lo, hi = segment_window(args.run, args.segment) if args.segment else (args.lo, args.hi)
+    m = analyse(args.run, lo, hi, args.slack)
+    if args.segment:
+        m['segment'] = args.segment
     text = render_markdown(m)
     if args.baseline:
-        base = analyse(args.baseline, args.lo, args.hi, args.slack)
+        blo, bhi = segment_window(args.baseline, args.segment) if args.segment else (lo, hi)
+        base = analyse(args.baseline, blo, bhi, args.slack)
         text += '\n' + compare_markdown(base, m)
         m['baseline'] = base
     print(text)
