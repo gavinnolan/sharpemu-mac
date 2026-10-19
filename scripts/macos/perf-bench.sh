@@ -41,7 +41,11 @@ case "$MODE" in plain|prof) ;; *) echo "mode must be plain or prof, got '$MODE'"
 [[ -x "$APP_DIR/SharpEmu" ]] || { echo "no SharpEmu in $APP_DIR (run scripts/macos/build-app.sh)" >&2; exit 2; }
 APP_DIR="$(cd "$APP_DIR" && pwd)"
 EXTRA=()
-if [[ "$MODE" == prof ]]; then EXTRA+=(SHARPEMU_PROFILE_RENDER=1 SHARPEMU_METAL_V2_PROFILE_PASSES=1 SHARPEMU_TRACE_AT=320 SHARPEMU_TRACE_SECONDS=20); fi
+if [[ "$MODE" == prof ]]; then
+  EXTRA+=(SHARPEMU_PROFILE_RENDER=1 SHARPEMU_METAL_V2_PROFILE_PASSES=1)
+  # run-game.sh reads the trace schedule from its own environment, not from the game's ENV=VALUE arguments.
+  export SHARPEMU_TRACE_AT="${SHARPEMU_TRACE_AT:-320}" SHARPEMU_TRACE_SECONDS="${SHARPEMU_TRACE_SECONDS:-20}"
+fi
 EXTRA+=("$@")
 
 # A busy build is a dotnet build/test/publish/restore/pack/msbuild/vstest command, or a resident MSBuild node,
