@@ -42,13 +42,13 @@ public sealed class Ngs2PanningTests
     public void SevenPointOneRowsRespectSpeakerPositionsAndTheLfeSlot()
     {
         Init(7, 360);
-        var result = Matrix(8, (-30f, 1f, .5f, .25f), (30f, 1f, 1f, .125f));
+        var result = Matrix(8, (-40f, 1f, .5f, .25f), (40f, 1f, 1f, .125f));
         Assert.Equal(.5f, result[0], 5);
-        Assert.Equal(.25f, result[3]);
-        Assert.Equal(1f, result[9], 5);
-        Assert.Equal(.125f, result[11]);
+        Assert.Equal(.25f, result[6]);
+        Assert.Equal(1f, result[3], 5);
+        Assert.Equal(.125f, result[7]);
         Assert.InRange(Math.Abs(result[1]), 0, 0.00001f);
-        Assert.InRange(Math.Abs(result[8]), 0, 0.00001f);
+        Assert.InRange(Math.Abs(result[2]), 0, 0.00001f);
     }
 
     [Fact]
@@ -59,7 +59,7 @@ public sealed class Ngs2PanningTests
         WriteParameters((0f, 1f, 1f, 0f), (float.NaN, 1f, 1f, 0f));
         _context[CpuRegister.Rdi] = Base; _context[CpuRegister.Rsi] = Base + 0x100;
         _context[CpuRegister.Rdx] = 2; _context[CpuRegister.Rcx] = 8; _context[CpuRegister.R8] = Base + 0x200;
-        Assert.Equal(unchecked((int)0x804A8454), Ngs2Exports.Ngs2PanGetVolumeMatrix(_context));
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ngs2Exports.Ngs2PanGetVolumeMatrix(_context));
         var data = new byte[64]; Assert.True(_memory.TryRead(Base + 0x200, data));
         Assert.All(data, value => Assert.Equal((byte)0xa5, value));
     }

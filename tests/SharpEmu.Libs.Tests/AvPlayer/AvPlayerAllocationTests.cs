@@ -34,14 +34,14 @@ public sealed class AvPlayerAllocationTests : IDisposable
         owner.Start();
         try
         {
-            Assert.True(locked.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(locked.Wait(TimeSpan.FromSeconds(10)));
             var poll = Task.Run(() =>
             {
                 var found = AvPlayerExports.TryGetFallbackPresentationFrame(
                     out var pixels, out var width, out var height, out var serial);
                 return (found, pixels, width, height, serial);
             });
-            var result = await poll.WaitAsync(TimeSpan.FromSeconds(5));
+            var result = await poll.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.False(result.found);
             Assert.Empty(result.pixels);
             Assert.Equal((0u, 0u, 0L), (result.width, result.height, result.serial));

@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Pad;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -87,6 +88,13 @@ public static class AudioOut2Exports
     private const int DeviceCushionMilliseconds = 40;
     private const byte SpeakerTypeTv = 0;
 
+    // A non-blocking push (SCE_AUDIO_OUT2_BLOCKING_ASYNC) never waits, and the queue level counts the
+    // silent grains the context's clock holds as well as the audio the device holds. Wwise advances
+    // and pushes asynchronously under its global lock; a push that slept a grain held that lock for
+    // the whole grain. SHARPEMU_AUDIO_OUT2_ASYNC_PUSH=0 restores the sleeping push.
+    private static readonly bool _asyncPushNeverWaits = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_ASYNC_PUSH"), "0", StringComparison.Ordinal);
+
     // libSceAudioOut2 has its own error space (0x80268xxx);
     // the generic ORBIS_GEN2_* codes are not what a title compares against.
     private const int AudioOut2ErrorInvalidParam = unchecked((int)0x8026_8001);
@@ -152,11 +160,8 @@ public static class AudioOut2Exports
         // Grains reserved on the clock that have not started playing, at most QueueDepth.
         public uint ClockQueuedGrains()
         {
-            long ahead;
-            lock (_paceGate)
-            {
-                ahead = _nextAdvanceTimestamp - Stopwatch.GetTimestamp();
-            }
+            // A single aligned 64-bit read: the level is a snapshot either way, and this is polled.
+            var ahead = Volatile.Read(ref _nextAdvanceTimestamp) - Stopwatch.GetTimestamp();
 
             return ahead <= 0 ? 0 : (uint)Math.Min((ahead + GrainTicks - 1) / GrainTicks, QueueDepth);
         }
@@ -188,6 +193,40 @@ public static class AudioOut2Exports
                 var start = _nextAdvanceTimestamp;
                 _nextAdvanceTimestamp = checked(_nextAdvanceTimestamp + GrainTicks);
                 return start;
+            }
+        }
+
+        // Claims the next grain only while the queue has a slot for it, the way a non-blocking push
+        // is refused rather than waited for.
+        public bool TryReserveGrain()
+        {
+            lock (_paceGate)
+            {
+                var now = Stopwatch.GetTimestamp();
+                if (_nextAdvanceTimestamp < now)
+                {
+                    _nextAdvanceTimestamp = now;
+                }
+
+                if (QueueSlotFree(_nextAdvanceTimestamp) > now)
+                {
+                    return false;
+                }
+
+                _nextAdvanceTimestamp = checked(_nextAdvanceTimestamp + GrainTicks);
+                return true;
+            }
+        }
+
+        // Returns a grain claimed at grainStart to the clock when it is still the last one claimed.
+        public void ReleaseGrain(long grainStart)
+        {
+            lock (_paceGate)
+            {
+                if (_nextAdvanceTimestamp == grainStart + GrainTicks)
+                {
+                    _nextAdvanceTimestamp = grainStart;
+                }
             }
         }
 
@@ -236,6 +275,10 @@ public static class AudioOut2Exports
 
         public byte[]? PcmData;
 
+        // The last snapshot the mixer finished with, kept so the next PortSetAttributes (a few
+        // thousand a second) refills it instead of allocating a grain-sized array.
+        public byte[]? SparePcm;
+
     }
 
     // Two host streams: primary FMOD context (menus) and everything else
@@ -249,6 +292,7 @@ public static class AudioOut2Exports
     private static ulong PrimaryContextHandle;
     private static readonly object HostSubmitGate = new();
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
+    private static int _chatEnabled;
 
     [SysAbiExport(
         Nid = "g2tViFIohHE",
@@ -274,6 +318,47 @@ public static class AudioOut2Exports
     {
         return SetReturn(ctx, 0);
     }
+
+    // ABI: int32_t sceAudioOut2MasteringTerm(void). Pairs with
+    // sceAudioOut2MasteringInit; titles call Init/Term once per audio device they
+    // create, possibly overlapping, and there is no mastering stage to tear down.
+    [SysAbiExport(
+        Nid = "2bbBBOkH4CY",
+        ExportName = "sceAudioOut2MasteringTerm",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2MasteringTerm(CpuContext ctx)
+    {
+        return SetReturn(ctx, 0);
+    }
+
+    // ABI: int32_t sceAudioOut2EnableChat(void) / sceAudioOut2DisableChat(void):
+    // allow (or stop allowing) system chat audio alongside the title's own.
+    // The host mixes no chat audio, so the state is only recorded; repeated
+    // calls are accepted.
+    [SysAbiExport(
+        Nid = "oiOi7vgPfAY",
+        ExportName = "sceAudioOut2EnableChat",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2EnableChat(CpuContext ctx)
+    {
+        Volatile.Write(ref _chatEnabled, 1);
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "vzvznsnpjKM",
+        ExportName = "sceAudioOut2DisableChat",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2DisableChat(CpuContext ctx)
+    {
+        Volatile.Write(ref _chatEnabled, 0);
+        return SetReturn(ctx, 0);
+    }
+
+    internal static bool ChatEnabled => Volatile.Read(ref _chatEnabled) != 0;
 
     [SysAbiExport(
         Nid = "v8iOE+j8a5o",
@@ -512,6 +597,8 @@ public static class AudioOut2Exports
             Producers[producer] = context;
         }
 
+        DrivePadVibrationPorts(ctx, context);
+
         // Host Submit already blocks on the output queue; software pacing covers grains with nothing
         // queued, once per grain whichever of Advance and Push comes first.
         var submitted = TrySubmitContextAudio(ctx, context);
@@ -526,6 +613,22 @@ public static class AudioOut2Exports
             if (blocking != 0)
             {
                 WaitForDeviceSlot(context);
+            }
+        }
+        else if (blocking == 0 && _asyncPushNeverWaits)
+        {
+            // A non-blocking push takes a slot when the queue has one and otherwise returns at once;
+            // a grain with no audio that finds the queue full is dropped instead of waited for.
+            if (advancedGrain != 0)
+            {
+                if (context.QueueSlotFree(advancedGrain) > Stopwatch.GetTimestamp())
+                {
+                    context.ReleaseGrain(advancedGrain);
+                }
+            }
+            else
+            {
+                _ = context.TryReserveGrain();
             }
         }
         else
@@ -755,7 +858,12 @@ public static class AudioOut2Exports
                     return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
                 }
 
-                pcmData = new byte[byteLength];
+                pcmData = Interlocked.Exchange(ref port.SparePcm, null);
+                if (pcmData is null || pcmData.Length != byteLength)
+                {
+                    pcmData = new byte[byteLength];
+                }
+
                 if (!ctx.Memory.TryRead(pcmAddress, pcmData))
                 {
                     return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -763,7 +871,11 @@ public static class AudioOut2Exports
             }
 
             port.PcmAddress = pcmAddress;
-            Volatile.Write(ref port.PcmData, pcmData);
+            var replaced = Interlocked.Exchange(ref port.PcmData, pcmData);
+            if (replaced is not null && !ReferenceEquals(replaced, pcmData))
+            {
+                port.SparePcm = replaced;
+            }
             var n = Interlocked.Increment(ref _attributePcmTraceCount);
             if (n <= 8 || n % 500 == 0)
             {
@@ -1132,6 +1244,11 @@ public static class AudioOut2Exports
     {
         var portHandle = ctx[CpuRegister.Rdi];
         var removed = Ports.TryRemove(portHandle, out var port);
+        if (removed && IsPadVibrationPort(port!.PortType))
+        {
+            PadHaptics.ReleaseAudioHaptics();
+        }
+
         var n = Interlocked.Increment(ref _portDestroyTraceCount);
         if (n <= 8 || n % 500 == 0)
         {
@@ -1347,6 +1464,24 @@ public static class AudioOut2Exports
 
     private static uint QueuedGrains(ContextState context)
     {
+        if (_asyncPushNeverWaits)
+        {
+            // Polled millions of times by Wwise: read the stream the context last submitted to
+            // without the backend lock. Grains with no audio hold the queue on the context's clock
+            // and grains with audio hold it in the device, so both count.
+            var clockGrains = context.ClockQueuedGrains();
+            if (context.DevicePaced && context.DeviceBackend is { } deviceBackend)
+            {
+                var deviceMilliseconds = deviceBackend.QueuedMilliseconds;
+                if (deviceMilliseconds >= 0)
+                {
+                    return Math.Max(clockGrains, context.DeviceQueuedGrains(deviceMilliseconds));
+                }
+            }
+
+            return clockGrains;
+        }
+
         if (context.DevicePaced)
         {
             var backend = ResolveContextBackend(context, out _);
@@ -1359,6 +1494,62 @@ public static class AudioOut2Exports
 
         return context.ClockQueuedGrains();
     }
+
+    // Pad vibration ports (type 0x6, mono or stereo) carry the DualSense
+    // actuator waveform: channel 0 left, channel 1 right. Each push reduces the
+    // grain the port's PCM attribute points at to actuator intensities for the
+    // host pad (PadHaptics); the waveform is never mixed into the speakers
+    // (RoutesToSpeakers excludes type 0x6). Several vibration ports in one
+    // context combine at the stronger level per actuator.
+    private static void DrivePadVibrationPorts(CpuContext ctx, ContextState context)
+    {
+        var frames = checked((int)context.GrainSamples);
+        var found = false;
+        byte left = 0;
+        byte right = 0;
+        foreach (var port in Ports.Values)
+        {
+            if (port.ContextHandle != context.Handle ||
+                !IsPadVibrationPort(port.PortType) ||
+                !TryDecodeDataFormat(port.DataFormat, out var channels, out var bytesPerSample, out var isFloat) ||
+                channels is not (1 or 2))
+            {
+                continue;
+            }
+
+            found = true;
+            if (port.PcmAddress == 0 || frames <= 0)
+            {
+                continue;
+            }
+
+            var byteLength = frames * channels * bytesPerSample;
+            var pcm = ArrayPool<byte>.Shared.Rent(byteLength);
+            try
+            {
+                if (!ctx.Memory.TryRead(port.PcmAddress, pcm.AsSpan(0, byteLength)))
+                {
+                    continue;
+                }
+
+                var (portLeft, portRight) = PadHaptics.IntensityFromPcm(
+                    pcm.AsSpan(0, byteLength), frames, channels, bytesPerSample, isFloat, port.Gain);
+                left = Math.Max(left, portLeft);
+                right = Math.Max(right, portRight);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(pcm);
+            }
+        }
+
+        if (found)
+        {
+            PadHaptics.SubmitAudioHaptics(left, right);
+        }
+    }
+
+    private static bool IsPadVibrationPort(ushort portType) => portType == AudioOut2PortTypeVibration;
 
     private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context)
     {
@@ -1390,39 +1581,46 @@ public static class AudioOut2Exports
                         continue;
                     }
 
-                    if (!TryGetStereoGains(
-                            port.PortType,
+                    try
+                    {
+                        if (!TryGetStereoGains(
+                                port.PortType,
+                                ch,
+                                port.Gain,
+                                port.Ambisonics,
+                                port.Passthrough,
+                                out var leftGain,
+                                out var rightGain))
+                        {
+                            continue;
+                        }
+
+                        var byteLength = checked(frames * ch * bps);
+                        if (byteLength <= 0 || byteLength > checked(frames * 16 * sizeof(float)))
+                        {
+                            continue;
+                        }
+
+                        if (pcmData.Length < byteLength)
+                        {
+                            continue;
+                        }
+
+                        MixPortIntoStereo(
+                            pcmData.AsSpan(0, byteLength),
+                            mix.AsSpan(0, frames * 2),
+                            frames,
                             ch,
-                            port.Gain,
-                            port.Ambisonics,
-                            port.Passthrough,
-                            out var leftGain,
-                            out var rightGain))
-                    {
-                        continue;
+                            bps,
+                            isFloat,
+                            leftGain,
+                            rightGain);
+                        mixedPorts++;
                     }
-
-                    var byteLength = checked(frames * ch * bps);
-                    if (byteLength <= 0 || byteLength > checked(frames * 16 * sizeof(float)))
+                    finally
                     {
-                        continue;
+                        port.SparePcm = pcmData;
                     }
-
-                    if (pcmData.Length < byteLength)
-                    {
-                        continue;
-                    }
-
-                    MixPortIntoStereo(
-                        pcmData.AsSpan(0, byteLength),
-                        mix.AsSpan(0, frames * 2),
-                        frames,
-                        ch,
-                        bps,
-                        isFloat,
-                        leftGain,
-                        rightGain);
-                    mixedPorts++;
                 }
 
                 if (mixedPorts == 0)
@@ -1524,6 +1722,7 @@ public static class AudioOut2Exports
         }
 
         Volatile.Write(ref _streamFactoryForTests, null);
+        Volatile.Write(ref _chatEnabled, 0);
     }
 
     private static bool IsMainOrBgmPort(ushort portType)

@@ -8,9 +8,6 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ngs2;
 
-[CollectionDefinition("Ngs2State", DisableParallelization = true)]
-public sealed class Ngs2StateCollection;
-
 [Collection("Ngs2State")]
 public sealed partial class Ngs2MixerTests : IDisposable
 {

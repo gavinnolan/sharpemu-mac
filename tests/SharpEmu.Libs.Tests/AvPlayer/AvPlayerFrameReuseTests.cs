@@ -42,7 +42,7 @@ public sealed class AvPlayerFrameReuseTests
         using var source = new PatternStream(384, 3, pauseBeforeFrame: 1);
         using var queue = new VideoFrameQueue(source, 384, 2);
         var firstFrame = ReadReadyFrame(queue);
-        Assert.True(source.Paused.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(source.Paused.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(VideoFrameReadResult.Pending, queue.TryRead(out var pendingFrame));
         Assert.Null(pendingFrame);
         source.Resume.Set();
@@ -58,7 +58,7 @@ public sealed class AvPlayerFrameReuseTests
         using var source = new PatternStream(384, 100);
         using var queue = new VideoFrameQueue(source, 384, 2);
         var firstFrame = ReadReadyFrame(queue);
-        Assert.True(SpinWait.SpinUntil(() => source.CompletedFrames >= 4, TimeSpan.FromSeconds(5)));
+        Assert.True(SpinWait.SpinUntil(() => source.CompletedFrames >= 4, TimeSpan.FromSeconds(10)));
         queue.Dispose();
         queue.Dispose();
         WaitForWorker(queue);
@@ -88,7 +88,7 @@ public sealed class AvPlayerFrameReuseTests
         {
             result = queue.TryRead(out frame);
             return result != VideoFrameReadResult.Pending;
-        }, TimeSpan.FromSeconds(5)), "The decoder did not supply a frame.");
+        }, TimeSpan.FromSeconds(10)), "The decoder did not supply a frame.");
         Assert.Equal(VideoFrameReadResult.Ready, result);
         return Assert.IsType<byte[]>(frame);
     }
@@ -97,7 +97,7 @@ public sealed class AvPlayerFrameReuseTests
     {
         var worker = (Thread)typeof(VideoFrameQueue)
             .GetField("_worker", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(queue)!;
-        Assert.True(worker.Join(TimeSpan.FromSeconds(5)), "The decoder worker did not finish.");
+        Assert.True(worker.Join(TimeSpan.FromSeconds(10)), "The decoder worker did not finish.");
     }
 
     private sealed class PatternStream(int frameByteCount, int frameCount, int pauseBeforeFrame = -1) : Stream

@@ -36,6 +36,11 @@ public static partial class Ngs2Exports
     private static readonly Dictionary<ulong, RackState> Racks = new();
     private static readonly Dictionary<ulong, VoiceState> Voices = new();
     private static long _nextUid;
+    // Rack handles are small, globally unique IDs: the follow-up NGS2 APIs
+    // receive only the rack handle, so per-system IDs would collide here.
+    // Keep them monotonic so a destroyed handle cannot alias a later rack.
+    private static ulong _nextRackHandle;
+    private static bool _rackZeroBootstrapAvailable = true;
     private static long _renderCount;
 
     // A system render advances one grain, regardless of the number of output buffers.
@@ -49,11 +54,18 @@ public static partial class Ngs2Exports
         public uint Uid { get; }
         public int GrainSamples { get; set; } = DefaultGrainSamples;
         public int SampleRate { get; set; } = DefaultSampleRate;
+        public SystemDescription Description { get; init; } = SystemDescription.Default;
+        public ulong UserData { get; set; }
+        public long RenderCount { get; set; }
         public ulong CallbackBuffer { get; set; }
         public Queue<VoiceCallback> Callbacks { get; } = new();
     }
 
-    private sealed record RackState(ulong SystemHandle, uint RackId);
+    private sealed record RackState(ulong SystemHandle, uint RackId)
+    {
+        public RackDescription Description { get; init; } = RackDescription.Default;
+        public ulong UserData { get; set; }
+    }
 
     private sealed class VoiceState
     {
@@ -100,7 +112,10 @@ public static partial class Ngs2Exports
         ExportName = "sceNgs2SystemCreateWithAllocator",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2SystemCreateWithAllocator(CpuContext ctx)
+    public static int Ngs2SystemCreateWithAllocator(CpuContext ctx) =>
+        CreateSystem(ctx, bufferInfoAddress: 0);
+
+    private static int CreateSystem(CpuContext ctx, ulong bufferInfoAddress)
     {
         var outHandleAddress = ctx[CpuRegister.Rdx];
         if (outHandleAddress == 0)
@@ -116,7 +131,10 @@ public static partial class Ngs2Exports
 
         lock (StateGate)
         {
-            var system = new SystemState(unchecked((uint)Interlocked.Increment(ref _nextUid)));
+            var system = new SystemState(unchecked((uint)Interlocked.Increment(ref _nextUid)))
+            {
+                Description = ReadSystemDescription(ctx, ctx[CpuRegister.Rdi], bufferInfoAddress),
+            };
             var options = ctx[CpuRegister.Rdi];
             var grainOffset = options != 0 && ctx.TryReadUInt64(options, out var optionSize) && optionSize >= 144 ? 112UL : 32UL;
             if (options != 0 && ctx.TryReadUInt32(options + grainOffset, out var grain) && grain is > 0 and <= 8192)
@@ -127,24 +145,6 @@ public static partial class Ngs2Exports
         }
 
         return SetReturn(ctx, 0);
-    }
-
-    [SysAbiExport(
-        Nid = "AQkj7C0f3PY",
-        ExportName = "sceNgs2SystemResetOption",
-        Target = Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2SystemResetOption(CpuContext ctx)
-    {
-        // PS5: size, name[64], four scheduler pointers, then the system limits and reserved words.
-        Span<byte> option = stackalloc byte[144];
-        option.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(option, (ulong)option.Length);
-        BinaryPrimitives.WriteUInt32LittleEndian(option[108..], 512);
-        BinaryPrimitives.WriteUInt32LittleEndian(option[112..], DefaultGrainSamples);
-        BinaryPrimitives.WriteUInt32LittleEndian(option[116..], DefaultSampleRate);
-        return SetReturn(ctx, ctx[CpuRegister.Rdi] != 0 && ctx.Memory.TryWrite(ctx[CpuRegister.Rdi], option)
-            ? 0 : unchecked((int)0x804A8012));
     }
 
     // Non-allocator create: identical to the WithAllocator form for our purposes.
@@ -159,7 +159,7 @@ public static partial class Ngs2Exports
         ExportName = "sceNgs2SystemCreate",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2SystemCreate(CpuContext ctx) => Ngs2SystemCreateWithAllocator(ctx);
+    public static int Ngs2SystemCreate(CpuContext ctx) => CreateSystem(ctx, ctx[CpuRegister.Rsi]);
 
     [SysAbiExport(
         Nid = "u-WrYDaJA3k",
@@ -194,7 +194,10 @@ public static partial class Ngs2Exports
         ExportName = "sceNgs2RackCreateWithAllocator",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2RackCreateWithAllocator(CpuContext ctx)
+    public static int Ngs2RackCreateWithAllocator(CpuContext ctx) =>
+        CreateRack(ctx, bufferInfoAddress: 0);
+
+    private static int CreateRack(CpuContext ctx, ulong bufferInfoAddress)
     {
         var systemHandle = ctx[CpuRegister.Rdi];
         var rackId = unchecked((uint)ctx[CpuRegister.Rsi]);
@@ -239,7 +242,15 @@ public static partial class Ngs2Exports
                 _rackZeroBootstrapAvailable = false;
             }
 
-            Racks[handle] = new RackState(systemHandle, rackId);
+            Racks[handle] = new RackState(systemHandle, rackId)
+            {
+                Description = ReadRackDescription(
+                    ctx,
+                    rackId,
+                    ctx[CpuRegister.Rdx],
+                    bufferInfoAddress,
+                    unchecked((uint)Interlocked.Increment(ref _nextUid))),
+            };
         }
 
         return SetReturn(ctx, 0);
@@ -252,7 +263,7 @@ public static partial class Ngs2Exports
         ExportName = "sceNgs2RackCreate",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2RackCreate(CpuContext ctx) => Ngs2RackCreateWithAllocator(ctx);
+    public static int Ngs2RackCreate(CpuContext ctx) => CreateRack(ctx, ctx[CpuRegister.Rcx]);
 
     [SysAbiExport(
         Nid = "lCqD7oycmIM",
@@ -426,6 +437,14 @@ public static partial class Ngs2Exports
     {
         var result = RenderSystem(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], unchecked((uint)ctx[CpuRegister.Rdx]));
         var count = Interlocked.Increment(ref _renderCount);
+        lock (StateGate)
+        {
+            if (Systems.TryGetValue(ctx[CpuRegister.Rdi], out var renderedSystem))
+            {
+                renderedSystem.RenderCount++;
+            }
+        }
+
         if (ShouldTrace() && (count <= 4 || count % 200 == 0))
             Trace($"render#{count} system=0x{ctx[CpuRegister.Rdi]:X} result=0x{result:X}");
         return SetReturn(ctx, result);
@@ -838,31 +857,4 @@ public static partial class Ngs2Exports
         ctx[CpuRegister.Rax] = unchecked((ulong)result);
         return result;
     }
-    [SysAbiExport(
-        Nid = "xa8oL9dmXkM",
-        ExportName = "sceNgs2PanInit",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2PanInit(CpuContext ctx) => SetReturn(ctx, InitializePanner(ctx));
-
-    [SysAbiExport(
-        Nid = "1WsleK-MTkE",
-        ExportName = "sceNgs2GeomCalcListener",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2GeomCalcListener(CpuContext ctx) => ctx.SetReturn(0);
-
-    [SysAbiExport(
-        Nid = "0lbbayqDNoE",
-        ExportName = "sceNgs2GeomResetSourceParam",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2GeomResetSourceParam(CpuContext ctx) => ctx.SetReturn(0);
-
-    [SysAbiExport(
-        Nid = "7Lcfo8SmpsU",
-        ExportName = "sceNgs2GeomResetListenerParam",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2GeomResetListenerParam(CpuContext ctx) => ctx.SetReturn(0);
 }

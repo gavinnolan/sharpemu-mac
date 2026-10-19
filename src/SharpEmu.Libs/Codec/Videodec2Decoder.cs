@@ -3,6 +3,7 @@
 
 using System.Threading.Channels;
 using FFmpeg.AutoGen;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Codec;
@@ -34,11 +35,11 @@ internal sealed record Videodec2DecodedFrame(
 /// thread may write to guest memory directly (the guest's stack slot may
 /// already be reused by the time they finish), so readiness is reported via
 /// TryConsumeProtocolReadySignal (metadata only) while pixels go straight
-/// to VulkanVideoPresenter.Submit from the scheduler thread.
+/// to the GPU backend's presenter from the scheduler thread.
 /// </summary>
 internal sealed unsafe class Videodec2Decoder : IDisposable
 {
-    // BGRA matches VulkanVideoPresenter.Submit; decode bypasses guest memory entirely.
+    // BGRA matches IGuestGpuBackend.Submit; decode bypasses guest memory entirely.
     private const AVPixelFormat OutputPixelFormat = AVPixelFormat.AV_PIX_FMT_BGRA;
 
     // Enough lookahead to absorb decode jitter without adding visible latency.
@@ -342,6 +343,25 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Signals end of stream to FFmpeg so the pictures it still buffers for
+    /// reordering can be collected with <see cref="FlushOutput"/>. <see cref="Reset"/>
+    /// makes the session usable again.
+    /// </summary>
+    public bool SendEndOfStream()
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return false;
+            }
+
+            var result = ffmpeg.avcodec_send_packet(_codecContext, null);
+            return result >= 0 || result == ffmpeg.AVERROR_EOF;
+        }
+    }
+
     public void Reset()
     {
         lock (_gate)
@@ -608,7 +628,7 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
                 }
             }
 
-            VulkanVideoPresenter.Submit(item.Bgra, item.Width, item.Height);
+            GuestGpu.Current.Submit(item.Bgra, item.Width, item.Height);
             nextDeadline += frameInterval;
 
             // Resync to "now" if we fell behind, instead of burning through a deadline backlog unpaced.

@@ -10,7 +10,7 @@ using System.Threading;
 
 namespace SharpEmu.Libs.Audio;
 
-public static class AjmExports
+public static partial class AjmExports
 {
     private const int OrbisAjmErrorInvalidContext = unchecked((int)0x80930002);
     private const int OrbisAjmErrorInvalidInstance = unchecked((int)0x80930003);
@@ -109,7 +109,7 @@ public static class AjmExports
         // Gen5.
         if ((ctx.TargetGeneration == Generation.Gen4 && reservedOrOptions != 0) || outputAddress == 0)
         {
-            return unchecked((int)0x806A0001);
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
 
         var contextId = unchecked((uint)Interlocked.Increment(ref _nextContextId));
@@ -117,7 +117,7 @@ public static class AjmExports
         BinaryPrimitives.WriteUInt32LittleEndian(value, contextId);
         if (!ctx.Memory.TryWrite(outputAddress, value))
         {
-            return unchecked((int)0x806A0001);
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
 
         Contexts[contextId] = new AjmContextState();
@@ -589,48 +589,10 @@ public static class AjmExports
     /// The split-buffer form of <see cref="AjmBatchJobDecode"/>: arrays of input and output AjmBuffer
     /// descriptors, decoding as many frames as fit, with the SceAjmDecodeResult at the seventh argument.
     /// </summary>
-    [SysAbiExport(
-        Nid = "SJ3i0DXP8vg",
-        ExportName = "sceAjmBatchJobDecodeSplit",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceAjm")]
-    public static int AjmBatchJobDecodeSplit(CpuContext ctx)
-    {
-        var infoAddress = ctx[CpuRegister.Rdi];
-        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
-        var inputAddress = ctx[CpuRegister.Rdx];
-        var inputCount = ctx[CpuRegister.Rcx];
-        var outputAddress = ctx[CpuRegister.R8];
-        var outputCount = ctx[CpuRegister.R9];
-        var resultAddress = ReadStackArg64(ctx, 0);
-
-        if (!TryAppendBatchJob(ctx, infoAddress, SplitJobSize(inputCount, outputCount)))
-        {
-            return ctx.SetReturn(OrbisAjmErrorJobCreation);
-        }
-
-        var result = DecodeJob(
-            ctx, instanceId, split: true, inputAddress, inputCount, outputAddress, outputCount, multipleFrames: true,
-            out _, out _);
-        WriteDecodeStreamResult(ctx, resultAddress, result, multipleFrames: true);
-        Trace(
-            $"batch_job_decode_split instance=0x{instanceId:X8} in=0x{inputAddress:X16}#{inputCount} " +
-            $"out=0x{outputAddress:X16}#{outputCount} consumed={result.InputConsumed} " +
-            $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
-        return ctx.SetReturn(0);
-    }
-
     /// <summary>
     /// The Ex form adds the ratio's change per sample in xmm1. Its integer arguments and its job are those of
     /// sceAjmBatchJobSetResampleParameters, and the change per sample is not modelled, so it shares that body.
     /// </summary>
-    [SysAbiExport(
-        Nid = "5ldnD16rYZw",
-        ExportName = "sceAjmBatchJobSetResampleParametersEx",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceAjm")]
-    public static int AjmBatchJobSetResampleParametersEx(CpuContext ctx) => AjmBatchJobSetResampleParameters(ctx);
-
     /// <summary>
     /// Records the gapless-decode window for a looping voice. SharpEmu decodes
     /// whole superframes and does not trim lead-in/lead-out samples yet, so this
@@ -1027,18 +989,38 @@ public static class AjmExports
     /// the descriptors are a single logical stream, so they are gathered on the
     /// way in and scattered on the way out.
     /// </summary>
-    private static int AjmBatchJobRunCore(CpuContext ctx, bool split)
-    {
-        var infoAddress = ctx[CpuRegister.Rdi];
-        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
-        var flags = ctx[CpuRegister.Rdx];
-        var inputAddress = ctx[CpuRegister.Rcx];
-        var inputCountOrSize = ctx[CpuRegister.R8];
-        var outputAddress = ctx[CpuRegister.R9];
-        var outputCountOrSize = ReadStackArg64(ctx, 0);
-        var sidebandAddress = ReadStackArg64(ctx, 1);
-        var sidebandSize = ReadStackArg64(ctx, 2);
+    private static int AjmBatchJobRunCore(CpuContext ctx, bool split) =>
+        AppendRunJob(
+            ctx,
+            infoAddress: ctx[CpuRegister.Rdi],
+            instanceId: unchecked((uint)ctx[CpuRegister.Rsi]),
+            flags: ctx[CpuRegister.Rdx],
+            inputAddress: ctx[CpuRegister.Rcx],
+            inputCountOrSize: ctx[CpuRegister.R8],
+            outputAddress: ctx[CpuRegister.R9],
+            outputCountOrSize: ReadStackArg64(ctx, 0),
+            sidebandAddress: ReadStackArg64(ctx, 1),
+            sidebandSize: ReadStackArg64(ctx, 2),
+            split);
 
+    /// <summary>
+    /// Appends one run job to the batch and executes it. Every typed job helper
+    /// (DecodeSplit, GetInfo, GetGaplessDecode, GetCodecInfo) is a run job with
+    /// a fixed flag set and sideband size, as in the SDK headers.
+    /// </summary>
+    private static int AppendRunJob(
+        CpuContext ctx,
+        ulong infoAddress,
+        uint instanceId,
+        ulong flags,
+        ulong inputAddress,
+        ulong inputCountOrSize,
+        ulong outputAddress,
+        ulong outputCountOrSize,
+        ulong sidebandAddress,
+        ulong sidebandSize,
+        bool split)
+    {
         var jobSize = split ? SplitJobSize(inputCountOrSize, outputCountOrSize) : AjmJobRunSize;
         if (!TryAppendBatchJob(ctx, infoAddress, jobSize))
         {
@@ -1095,6 +1077,13 @@ public static class AjmExports
         {
             return new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
         }
+        if (inputs.Count == 0 && outputs.Count == 0)
+        {
+            config = found.Atrac9?.Config;
+            return new Atrac9DecodeResult(0, 0, 0, found.Atrac9?.TotalDecodedSamples ?? found.Mp3?.TotalDecodedSamples ?? 0, 0);
+        }
+        if (found.Mp3 is not null)
+            return DecodeMp3Scattered(ctx, found, inputs, inputLength, outputs, outputLength);
 
         if (found.Opus is null && (found.Codec != Atrac9CodecType || found.Atrac9 is null))
         {
@@ -1300,6 +1289,7 @@ public static class AjmExports
             AjmSidebandStreamBytes +
             AjmSidebandFormatBytes +
             AjmSidebandGaplessDecodeBytes +
+            AjmSidebandAt9CodecInfoBytes +
             AjmSidebandMFrameBytes];
         sideband.Clear();
 
@@ -1335,6 +1325,21 @@ public static class AjmExports
             offset += AjmSidebandGaplessDecodeBytes;
         }
 
+        // SceAjmSidebandDecAt9CodecInfo { superFrameSize, framesInSuperFrame,
+        // nextFrameSize, frameSamples } follows the gapless block and precedes
+        // the multiple-frames block.
+        var at9CodecInfo = (flags & AjmJobRunFlagGetCodecInfo) != 0 && config is not null;
+        if (at9CodecInfo && (ulong)(offset + AjmSidebandAt9CodecInfoBytes) <= size)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], unchecked((uint)config!.SuperframeBytes));
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 4)..], unchecked((uint)config.FramesPerSuperframe));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                sideband[(offset + 8)..],
+                unchecked((uint)(instance?.Atrac9?.NextSuperframeBytes ?? config.SuperframeBytes)));
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 12)..], unchecked((uint)config.FrameSamples));
+            offset += AjmSidebandAt9CodecInfoBytes;
+        }
+
         if ((flags & AjmJobRunFlagMultipleFrames) != 0 && (ulong)(offset + AjmSidebandMFrameBytes) <= size)
         {
             BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], result.Frames);
@@ -1343,7 +1348,7 @@ public static class AjmExports
 
         _ = ctx.Memory.TryWrite(address, sideband[..offset]);
 
-        if ((flags & AjmJobRunFlagGetCodecInfo) != 0 && (ulong)offset < size)
+        if ((flags & AjmJobRunFlagGetCodecInfo) != 0 && !at9CodecInfo && (ulong)offset < size)
         {
             // No codec-info block is produced yet; zero it so the caller reads
             // defined values instead of whatever the buffer held before.
@@ -1480,6 +1485,7 @@ public static class AjmExports
     private const int AjmSidebandGaplessDecodeBytes = 8;
     private const int AjmSidebandMFrameBytes = 8;
     private const int AjmSidebandCodecInfoBytes = 64;
+    private const int AjmSidebandAt9CodecInfoBytes = 16;
     // AjmSidebandResult (8) + AjmSidebandStream (16) + AjmSidebandMFrame (8).
     private const int DecodeSidebandBytes =
         AjmSidebandResultBytes + AjmSidebandStreamBytes + AjmSidebandMFrameBytes;

@@ -219,7 +219,7 @@ public sealed partial class Ngs2MixerTests
         Assert.Equal(0u, Read32(Params + 120));
         Assert.Equal(0xa5a5a5a5a5a5a5a5UL, Read64(Params + 144));
         _ctx[CpuRegister.Rdi] = 0;
-        Assert.Equal(unchecked((int)0x804A8012), Ngs2Exports.Ngs2SystemResetOption(_ctx));
+        Assert.Equal(unchecked((int)0x804A8010), Ngs2Exports.Ngs2SystemResetOption(_ctx));
     }
 
     [Fact]

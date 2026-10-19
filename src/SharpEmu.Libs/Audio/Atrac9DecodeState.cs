@@ -77,6 +77,39 @@ internal sealed class Atrac9DecodeState
 
     private bool HasSampleLimit => _gaplessInit.TotalSamples is not 0 and not uint.MaxValue;
 
+    public ulong TotalDecodedSamples
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _totalDecodedSamples;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Bytes the decoder still needs to complete the superframe it is buffering,
+    /// or a whole superframe when none is in progress (the AT9 codec-info
+    /// sideband's nextFrameSize). 0 before initialization.
+    /// </summary>
+    public int NextSuperframeBytes
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (_decoder is null)
+                {
+                    return 0;
+                }
+
+                var superframeBytes = _decoder.Config.SuperframeBytes;
+                return _compressedLength == 0 ? superframeBytes : superframeBytes - _compressedLength;
+            }
+        }
+    }
+
     public Atrac9Config? Config
     {
         get

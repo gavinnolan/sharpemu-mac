@@ -72,7 +72,8 @@ public sealed class AjmExportsTests : IDisposable
         context[CpuRegister.Rdi] = 0x0000000300000000;
         context[CpuRegister.Rsi] = ContextAddress;
 
-        Assert.Equal(unchecked((int)0x806A0001), AjmExports.AjmInitialize(context));
+        Assert.Equal(InvalidParameter, AjmExports.AjmInitialize(context));
+        Assert.Equal(unchecked((ulong)InvalidParameter), context[CpuRegister.Rax]);
         Assert.Equal(sentinel, ReadUInt32(ContextAddress));
     }
 
@@ -337,7 +338,7 @@ public sealed class AjmExportsTests : IDisposable
         Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(result));                // result
         Assert.Equal(0x30, BinaryPrimitives.ReadInt32LittleEndian(result.AsSpan(8)));   // stream.input_consumed
         Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(result.AsSpan(12)));     // stream.output_written
-        Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(24)));   // mframe.num_frames
+        Assert.All(result[24..], value => Assert.Equal(0x5A, value)); // stream-only sideband leaves the mframe tail untouched
 
         // SCE_AJM_JOB_DECODE_SPLIT_SIZE(3) = 32 + (16 * 3).
         Assert.Equal(80ul, ReadUInt64(BatchInfoAddress + 8));
@@ -377,7 +378,7 @@ public sealed class AjmExportsTests : IDisposable
         sentinel.Fill(0xCC);
         Assert.True(_memory.TryWrite(resultAddress, sentinel));
 
-        Assert.Equal(0, SetResampleParametersEx(instanceId, 0.5f, 0.001f, flags: 0, resultAddress));
+        Assert.Equal(0, SetResampleParametersEx(instanceId, 0.5f, 0f, flags: 0, resultAddress));
 
         // SCE_AJM_JOB_SET_RESAMPLE_PARAMETERS_SIZE = 12 (the parameters) + 12 + 48 (a control job).
         Assert.Equal(72ul, ReadUInt64(BatchInfoAddress + 8));

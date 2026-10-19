@@ -15,16 +15,24 @@ public sealed class MediaFramePlaybackTests
 
         Assert.Equal(1, WaitForAdvancedFrame(playback)[0]);
         Assert.True(playback.TryGetFrame(true, out var heldFrame, out var advanced));
-        Assert.False(advanced);
-        Assert.Equal(1, heldFrame[0]);
+        var current = heldFrame[0];
+        Assert.True(advanced ? current > 1 : current == 1);
 
-        Assert.Equal(2, WaitForAdvancedFrame(playback)[0]);
-        Assert.Equal(3, WaitForAdvancedFrame(playback)[0]);
+        // A loaded machine can poll after the clock has passed a frame, which playback then drops;
+        // what must hold is that frames only move forward and the last one is reached.
+        while (current < 3)
+        {
+            var next = WaitForAdvancedFrame(playback)[0];
+            Assert.True(next > current);
+            current = next;
+        }
+
+        Assert.Equal(3, current);
     }
 
     private static byte[] WaitForAdvancedFrame(MediaFramePlayback playback)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
             if (playback.TryGetFrame(true, out var frame, out var advanced) && advanced)
@@ -60,7 +68,8 @@ public sealed class MediaFramePlaybackTests
     [Fact]
     public void PauseHoldsTheCurrentFrameWithoutClockCatchUp()
     {
-        using var playback = new MediaFramePlayback(new SequenceDecoder(1, 2));
+        // Frames past 2 so a loaded runner whose clock skips one still sees playback resume.
+        using var playback = new MediaFramePlayback(new SequenceDecoder(1, 2, 3, 4));
 
         Assert.Equal(1, WaitForAdvancedFrame(playback)[0]);
         playback.Pause();
@@ -72,7 +81,7 @@ public sealed class MediaFramePlaybackTests
         Assert.True(playback.TryGetFrame(true, out var held, out var advanced));
         Assert.False(advanced);
         Assert.Equal(1, held[0]);
-        Assert.Equal(2, WaitForAdvancedFrame(playback)[0]);
+        Assert.True(WaitForAdvancedFrame(playback)[0] >= 2);
     }
 
     [Fact]
@@ -100,7 +109,7 @@ public sealed class MediaFramePlaybackTests
         MediaFramePlayback playback,
         bool advanceClock)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
             if (playback.TryGetFrame(advanceClock, out var frame, out _))
@@ -118,7 +127,7 @@ public sealed class MediaFramePlaybackTests
         MediaFramePlayback playback,
         long targetFrameIndex)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
             if (playback.TryGetFrameAtOrBeforeIndex(

@@ -22,7 +22,7 @@ public sealed class Ngs2WaveformBlockTests
             .GetCustomAttribute<SysAbiExportAttribute>()!;
         Assert.Equal("3pCNbVM11UA", export.Nid);
         Assert.Equal("sceNgs2CalcWaveformBlock", export.ExportName);
-        Assert.Equal(Generation.Gen5, export.Target);
+        Assert.Equal(Generation.Gen4 | Generation.Gen5, export.Target);
     }
 
     [Theory]
