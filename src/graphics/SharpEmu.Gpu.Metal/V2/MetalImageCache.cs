@@ -312,6 +312,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>Changes whenever an image is added to or dropped from the cache.</summary>
     public long ImageSetVersion => Volatile.Read(ref _imageSetVersion);
 
+    /// <summary>The counts of the mutations a memo of this cache's state has to see (MetalImageEpochs).</summary>
+    public MetalImageEpochs Epochs { get; } = new();
+
     public bool TryGetImage(ResourceSlotIdentifier imageIdentifier, out MetalCachedImage image)
     {
         using var held = _lock.Hold();
@@ -902,8 +905,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         image.Uses.RenderTarget = true;
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
         {
+            var changed = !MetalImageEpochs.SameMetadata(in image.Description.Metadata, in request.Description.Metadata);
             image.Description.Metadata = request.Description.Metadata;
             RegisterDccMetadata(request.Description);
+            if (changed)
+            {
+                Epochs.NoteShapeChanged();
+            }
         }
 
         if (defer)
@@ -977,9 +985,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         image.Uses.DepthTarget = true;
         if (request.Description.HasMetadata)
         {
+            var before = image.Description.Metadata;
             image.Description.Metadata = request.Description.Metadata;
             image.Description.Metadata.Range = ImageHtileRange(in image.Description, in request.Description);
             RegisterHtileMetadata(request.Description);
+            if (!MetalImageEpochs.SameMetadata(in before, in image.Description.Metadata))
+            {
+                Epochs.NoteShapeChanged();
+            }
         }
 
         if (request.Description.HasStencil)
@@ -1632,8 +1645,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         image.AllocatedBytes = TextureAllocatedBytes(image);
         NoteRecreatedLocked(in admitted);
 
+        image.Epochs = Epochs;
         var imageIdentifier = _slots.Insert(image);
         Interlocked.Increment(ref _imageSetVersion);
+        Epochs.NoteBindingChanged();
         if (!ImageDescription.IsEmptyRange(description.Data))
         {
             AddToIndex(imageIdentifier);

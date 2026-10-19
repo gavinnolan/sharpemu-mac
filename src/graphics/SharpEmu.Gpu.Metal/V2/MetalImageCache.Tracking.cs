@@ -117,6 +117,8 @@ internal sealed partial class MetalImageCache
         RemoveFromIndex(imageIdentifier);
         _slots.Erase(imageIdentifier);
         RetireImage(image);
+        image.Epochs = null;
+        Epochs.NoteBindingChanged();
     }
 
     // What the cache keeps about an image outside its slot: claims on its DCC slices, clears
@@ -127,7 +129,7 @@ internal sealed partial class MetalImageCache
         _unpublishedLinearWrites.Remove(image);
         if (_materializedDccSlices.Count != 0)
         {
-            _materializedDccSlices.RemoveWhere(entry =>
+            var removed = _materializedDccSlices.RemoveWhere(entry =>
             {
                 if (entry.Image != imageIdentifier)
                 {
@@ -138,6 +140,10 @@ internal sealed partial class MetalImageCache
                 UnstandDccClaimLocked(entry.Image, entry.Address);
                 return true;
             });
+            if (removed != 0)
+            {
+                Epochs.NoteDccChanged();
+            }
         }
 
         if (_deferredDccSlices.Count != 0)
@@ -157,6 +163,8 @@ internal sealed partial class MetalImageCache
                 {
                     _deferredDccSlices.Remove(key);
                 }
+
+                Epochs.NoteDccChanged();
             }
         }
     }
@@ -813,7 +821,7 @@ internal sealed partial class MetalImageCache
             if (!DccClaimFirstVerify && _deferredDccSlices.Count != 0)
             {
                 // What the claimed repeat of the full path does with a deferral.
-                _deferredDccSlices.Remove((imageIdentifier, address));
+                RemoveDccDeferralLocked(imageIdentifier, address);
             }
         }
 
@@ -967,6 +975,7 @@ internal sealed partial class MetalImageCache
         StandDccClaimLocked(image, address, code);
         IndexDccClaim(address);
         WatchMetadataLocked(address, size);
+        Epochs.NoteDccChanged();
         return true;
     }
 
@@ -985,6 +994,11 @@ internal sealed partial class MetalImageCache
                 UnstandDccClaimLocked(entry.Image, entry.Address);
                 return true;
             });
+            if (removed != 0)
+            {
+                Epochs.NoteDccChanged();
+            }
+
             if (DccTraceActive && removed != 0 && DccTraceCovers(address, size) && Interlocked.Increment(ref _dccTraceLines) <= DccTraceMax)
             {
                 Console.Error.WriteLine($"[METAL-V2][DCC] re-arm range=0x{address:X}+0x{size:X} claims={removed}");
@@ -999,7 +1013,7 @@ internal sealed partial class MetalImageCache
             {
                 if (key.Address >= address && key.Address - address < size)
                 {
-                    _deferredDccSlices.Remove(key);
+                    RemoveDccDeferralLocked(key.Image, key.Address);
                 }
             }
         }
@@ -1029,7 +1043,16 @@ internal sealed partial class MetalImageCache
         }
 
         using var held = _lock.Hold();
-        _deferredDccSlices.Remove((image, address));
+        RemoveDccDeferralLocked(image, address);
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void RemoveDccDeferralLocked(ResourceSlotIdentifier image, ulong address)
+    {
+        if (_deferredDccSlices.Remove((image, address)))
+        {
+            Epochs.NoteDccChanged();
+        }
     }
 
     // Clear-code fills of DCC metadata that run as recorded GPU work, by metadata address.
@@ -1057,6 +1080,7 @@ internal sealed partial class MetalImageCache
         if (record)
         {
             _recordedDccFills[address] = new RecordedDccFill { Size = size, Code = code, AwaitingOwnWrite = true };
+            Epochs.NoteDccChanged();
         }
     }
 
@@ -1085,10 +1109,12 @@ internal sealed partial class MetalImageCache
             if (fill.AwaitingOwnWrite && address >= start && address + size <= start + fill.Size)
             {
                 System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(_recordedDccFills, start).AwaitingOwnWrite = false;
+                Epochs.NoteDccChanged();
                 continue;
             }
 
             _recordedDccFills.Remove(start);
+            Epochs.NoteDccChanged();
         }
     }
 
@@ -1106,6 +1132,7 @@ internal sealed partial class MetalImageCache
             if (address < start + fill.Size && start < address + size)
             {
                 _recordedDccFills.Remove(start);
+                Epochs.NoteDccChanged();
             }
         }
     }
@@ -1150,6 +1177,11 @@ internal sealed partial class MetalImageCache
     {
         using var held = _lock.Hold();
         var deferred = _deferredDccSlices.Remove((image, address), out var deferredAt);
+        if (deferred)
+        {
+            Epochs.NoteDccChanged();
+        }
+
         if (!TryClaimMaterializedDccLocked(image, address, size, code))
         {
             return DccClearDecision.Repeat;
@@ -1469,7 +1501,11 @@ internal sealed partial class MetalImageCache
         var range = description.Metadata.Range;
         // Taken before this lookup clears anything: its own clears are not draws.
         imageWriteSequence = found.GpuWriteSequence;
-        found.Description.Metadata = description.Metadata;
+        if (!MetalImageEpochs.SameMetadata(in found.Description.Metadata, in description.Metadata))
+        {
+            found.Description.Metadata = description.Metadata;
+            Epochs.NoteShapeChanged();
+        }
         if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
         {
             return false;
@@ -1599,7 +1635,11 @@ internal sealed partial class MetalImageCache
                     }
                     else
                     {
-                        _deferredDccSlices.TryAdd((imageIdentifier, address), imageWriteSequence);
+                        if (_deferredDccSlices.TryAdd((imageIdentifier, address), imageWriteSequence))
+                        {
+                            Epochs.NoteDccChanged();
+                        }
+
                         TraceDcc(imageIdentifier, in request, address, sliceSize, "pending-deferred");
                         continue;
                     }
@@ -1611,7 +1651,7 @@ internal sealed partial class MetalImageCache
                             allowClearToRegister: request.Role == ImageRole.ColorTarget,
                             out clear))
                     {
-                        _deferredDccSlices.Remove((imageIdentifier, address));
+                        RemoveDccDeferralLocked(imageIdentifier, address);
                         if (claimStands)
                         {
                             ReportDccClaimFirstMismatch(
@@ -1632,7 +1672,7 @@ internal sealed partial class MetalImageCache
                     // the repeat DecideDccClear would reach after the scan, deferral and all.
                     if (_materializedDccSlices.Contains((imageIdentifier, address, code)))
                     {
-                        _deferredDccSlices.Remove((imageIdentifier, address));
+                        RemoveDccDeferralLocked(imageIdentifier, address);
                         Interlocked.Increment(ref _dccRepeatsSkipped);
                         if (claimStands && code != standingCodes[(int)slice])
                         {

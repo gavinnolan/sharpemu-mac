@@ -157,10 +157,17 @@ internal sealed partial class MetalImageCache
     // Caller holds the lock.
     private void DrainDeferredRefreshesLocked()
     {
+        if (_deferredRefreshes.Count == 0)
+        {
+            return;
+        }
+
         while (_deferredRefreshes.Count != 0)
         {
             CompleteDeferredLocked(TakeDeferredLocked(0), overwritten: false);
         }
+
+        Epochs.NoteBindingChanged();
     }
 
     /// <summary>

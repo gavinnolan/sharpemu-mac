@@ -88,6 +88,13 @@ internal sealed class MetalCachedImage : IDisposable
     private bool _disposed;
     private bool _windowLinearView;
 
+    /// <summary>
+    /// The cache's mutation counts, which this image bumps when its texture, views or
+    /// ownership state change (MetalImageEpochs). Set while the image is in the cache; an
+    /// image retired from it, or never in it, counts nothing.
+    /// </summary>
+    public MetalImageEpochs? Epochs { get; set; }
+
     public MetalCachedImage(in ImageDescription description, in MetalTextureShape shape, nint texture)
     {
         Description = description;
@@ -327,6 +334,7 @@ internal sealed class MetalCachedImage : IDisposable
         _windowLinearView = false;
         MarkCpuDirty(MetalImageDirtyCause.Invalidated);
         NoteContentChanged();
+        Epochs?.NoteShapeChanged();
         return retired;
     }
 
@@ -360,6 +368,7 @@ internal sealed class MetalCachedImage : IDisposable
         SetResidentLevels(firstLevel, start, end);
         MarkCpuDirty(MetalImageDirtyCause.Invalidated);
         NoteContentChanged();
+        Epochs?.NoteShapeChanged();
         return retired;
     }
 
@@ -386,6 +395,7 @@ internal sealed class MetalCachedImage : IDisposable
         Shape = shape;
         Sparse = null;
         NoteContentChanged();
+        Epochs?.NoteShapeChanged();
         return retired;
     }
 
@@ -482,20 +492,30 @@ internal sealed class MetalCachedImage : IDisposable
             DirtyStart = start;
             DirtyEnd = end;
             _cpuDirty = true;
+            Epochs?.NoteBindingChanged();
             return;
         }
 
-        DirtyStart = Math.Min(DirtyStart, start);
-        DirtyEnd = Math.Max(DirtyEnd, end);
+        if (start < DirtyStart || end > DirtyEnd)
+        {
+            DirtyStart = Math.Min(DirtyStart, start);
+            DirtyEnd = Math.Max(DirtyEnd, end);
+            Epochs?.NoteBindingChanged();
+        }
     }
 
     /// <summary>The whole image is in the texture again.</summary>
     public void RefreshComplete()
     {
         NoteContentChanged();
+        var wasDirty = _cpuDirty;
         _cpuDirty = false;
         DirtyStart = 0;
         DirtyEnd = 0;
+        if (wasDirty)
+        {
+            Epochs?.NoteBindingChanged();
+        }
     }
 
     /// <summary>Only <c>[start, end)</c> was uploaded; whatever is left stays dirty.</summary>
@@ -523,11 +543,18 @@ internal sealed class MetalCachedImage : IDisposable
         {
             DirtyEnd = start;
         }
+        else
+        {
+            return;
+        }
 
         if (DirtyEnd <= DirtyStart)
         {
             RefreshComplete();
+            return;
         }
+
+        Epochs?.NoteBindingChanged();
     }
 
     /// <param name="depthPlaneChanged">
@@ -554,6 +581,9 @@ internal sealed class MetalCachedImage : IDisposable
             NoteStencilChanged();
         }
 
+        var wasModified = _gpuModified;
+        var wasDirty = _cpuDirty;
+        var wasPublished = PublishedEnd > PublishedStart;
         _gpuModified = true;
         _cpuDirty = false;
         DirtyStart = 0;
@@ -561,6 +591,14 @@ internal sealed class MetalCachedImage : IDisposable
         PublishedStart = 0;
         PublishedEnd = 0;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
+        if (!wasModified)
+        {
+            Epochs?.NoteGpuModified();
+        }
+        else if (wasDirty || wasPublished)
+        {
+            Epochs?.NoteBindingChanged();
+        }
     }
 
     /// <summary>Records that <c>[start, end)</c> of this image now also sits in guest memory.</summary>
@@ -572,14 +610,13 @@ internal sealed class MetalCachedImage : IDisposable
             return;
         }
 
+        var (wasStart, wasEnd) = (PublishedStart, PublishedEnd);
         if (PublishedEnd <= PublishedStart)
         {
             PublishedStart = start;
             PublishedEnd = end;
-            return;
         }
-
-        if (start > PublishedEnd || end < PublishedStart)
+        else if (start > PublishedEnd || end < PublishedStart)
         {
             // Two runs with unpublished bytes between them: one interval cannot hold both,
             // and widening it over the gap would claim bytes guest memory never got. The
@@ -589,12 +626,17 @@ internal sealed class MetalCachedImage : IDisposable
                 PublishedStart = start;
                 PublishedEnd = end;
             }
-
-            return;
+        }
+        else
+        {
+            PublishedStart = Math.Min(PublishedStart, start);
+            PublishedEnd = Math.Max(PublishedEnd, end);
         }
 
-        PublishedStart = Math.Min(PublishedStart, start);
-        PublishedEnd = Math.Max(PublishedEnd, end);
+        if (PublishedStart != wasStart || PublishedEnd != wasEnd)
+        {
+            Epochs?.NoteBindingChanged();
+        }
     }
 
     /// <summary>True when guest memory already holds this run of the image.</summary>
@@ -603,9 +645,14 @@ internal sealed class MetalCachedImage : IDisposable
 
     public void ClearGpuModified()
     {
+        var wasModified = _gpuModified;
         _gpuModified = false;
         PublishedStart = 0;
         PublishedEnd = 0;
+        if (wasModified)
+        {
+            Epochs?.NoteBindingChanged();
+        }
     }
 
     // A CPU write inside the image's bytes makes it dirty; a write that only shares a
@@ -890,6 +937,7 @@ internal sealed class MetalCachedImage : IDisposable
         Shape = shape;
         Sparse = null;
         NoteContentChanged();
+        Epochs?.NoteShapeChanged();
     }
 
     private void ReleaseViews()
