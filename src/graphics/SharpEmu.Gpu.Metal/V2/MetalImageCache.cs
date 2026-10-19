@@ -48,6 +48,11 @@ internal interface IMetalImageCacheOwner
     // Finishes every recorded command buffer so the CPU sees the GPU's writes.
     void WaitForGpu();
 
+    // Blocks a thread other than the GPU worker until the submission with this serial has
+    // completed, asking the worker to commit it if it is still being recorded. False when it
+    // did not complete in time, or when called on the worker, which would wait for itself.
+    bool WaitForSubmissionOffWorker(ulong serial, int timeoutMilliseconds) => CompletedSerial >= serial;
+
     void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color);
 
     void ClearTextureDepthStencil(
@@ -2169,11 +2174,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // The retile is a GPU store into guest memory: until it completes the bytes
         // in guest memory are the old ones, so a read of them has to wait for it.
         _owner.NoteGuestWrite(description.Data.Address, description.Data.Size);
+        // And a guest store into them waits for it too (MetalImageCache.WritebackFence.cs).
+        FenceWriteback(description.Data.Address, description.Data.Size, context.SubmissionSerial, cause);
         if (description.HasStencil)
         {
             // Noted whether or not every piece of the plane found a window: the hazard is
             // that a read sees stale bytes, and over-noting only costs a wait.
             _owner.NoteGuestWrite(description.Stencil.Address, description.Stencil.Size);
+            FenceWriteback(description.Stencil.Address, description.Stencil.Size, context.SubmissionSerial, cause);
         }
 
         _writebackCauses[(int)cause]++;
@@ -2605,6 +2613,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _disposed = true;
+        ReleaseAllFencedWritebacks();
         // Teardown follows a full GPU wait, so nothing is still naming these.
         foreach (var (_, retiring) in _retiring)
         {

@@ -301,12 +301,15 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        // A writeback still in flight over the page lands first; the store waits for it.
+        var fenced = Volatile.Read(ref _fencedWritebackCount) != 0 && WaitForFencedWritebacks(address, size);
+
         // A cached staged copy over the page is stale from here; the store may land once its watch is gone.
         var stagedHit = StagedRanges?.OnCpuWrite(address, size) ?? false;
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
         if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
-            return stagedHit;
+            return stagedHit | fenced;
         }
 
         CountLockedCpuWrite(mayOwn);
@@ -314,7 +317,7 @@ internal sealed partial class MetalImageCache
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
         var imageHit = mayOwn && InvalidateAliases(address, size);
         CountOwnerCpuWriteOutcome(mayOwn, imageHit);
-        return imageHit | metadataHit | stagedHit;
+        return imageHit | metadataHit | stagedHit | fenced;
     }
 
     // A managed write of exactly these bytes. Unlike a fault it names the bytes it
@@ -471,6 +474,7 @@ internal sealed partial class MetalImageCache
         SingleCopy?.StopWatching();
         using var held = _lock.Hold();
         _watchingStopped = true;
+        ReleaseAllFencedWritebacks();
         foreach (var (watchBegin, watchSize) in _metadataWatches)
         {
             _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
@@ -510,6 +514,7 @@ internal sealed partial class MetalImageCache
         using var held = _lock.Hold();
         _collectionTick++;
         DrainRetiredImages();
+        PruneFencedWritebacks();
         var now = _clock();
         _idleClock.Sample(now, _collectionTick);
         MaybeEvaluateBudgetLocked(now);

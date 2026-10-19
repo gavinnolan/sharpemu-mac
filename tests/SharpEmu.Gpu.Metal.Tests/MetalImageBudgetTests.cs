@@ -450,6 +450,12 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
             float depth, byte stencil, bool clearDepth, bool clearStencil)
         {
         }
+
+        // What a guest thread waiting for a recorded writeback does; a test supplies it.
+        public Func<ulong, int, bool>? WaitOffWorker { get; set; }
+
+        public bool WaitForSubmissionOffWorker(ulong serial, int timeoutMilliseconds) =>
+            WaitOffWorker?.Invoke(serial, timeoutMilliseconds) ?? CompletedSerial >= serial;
     }
 
     private sealed class Rig : IDisposable
@@ -468,7 +474,8 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
             Harness.Begin();
             _pages = new PageGuard(_space);
             _memory = new MetalGuestMemory(device, _backing, new NoMemory());
-            Cache = new MetalImageCache(new Owner(Harness), Harness.Transfer, _memory, _pages, _backing);
+            CacheOwner = new Owner(Harness);
+            Cache = new MetalImageCache(CacheOwner, Harness.Transfer, _memory, _pages, _backing);
             // Exact textures: lossy compression is not this suite's subject.
             Cache.LossyTextures = false;
             // No host readings and no retirement unless a test asks: a fixed budget nothing reaches.
@@ -477,6 +484,8 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public MetalTransferHarness Harness { get; }
         public MetalImageCache Cache { get; }
+        public Owner CacheOwner { get; }
+        public PageGuard Pages => _pages;
 
         // inUseFrames 0 leaves budget eviction to the frame guard and the idle minimum.
         public void Configure(

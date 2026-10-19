@@ -457,6 +457,45 @@ internal sealed class MetalCompletionQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// Blocks any thread until the GPU has signalled the serial or the timeout passes. Only
+    /// the signal: unlike <see cref="WaitFor"/> it does not wait for the completions to run,
+    /// so it never waits on the completion thread.
+    /// </summary>
+    public bool WaitForSignalled(ulong target, int timeoutMilliseconds)
+    {
+        if (SignaledValue >= target)
+        {
+            return true;
+        }
+
+        var frequency = System.Diagnostics.Stopwatch.Frequency;
+        var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + frequency * timeoutMilliseconds / 1000;
+        while (!_stopping)
+        {
+            lock (_wakeGate)
+            {
+                // Inside the lock the handler cannot pulse between the test and the wait.
+                if (SignaledValue >= target)
+                {
+                    return true;
+                }
+
+                var remaining = deadline - System.Diagnostics.Stopwatch.GetTimestamp();
+                if (remaining <= 0)
+                {
+                    return false;
+                }
+
+                // Polled as well as woken: without the completion handler nothing pulses.
+                var milliseconds = (int)Math.Clamp(remaining * 1000 / frequency, 1, HandlerWaitMilliseconds);
+                _ = Monitor.Wait(_wakeGate, milliseconds);
+            }
+        }
+
+        return SignaledValue >= target;
+    }
+
     // The original path, kept for A/B measurement under
     // SHARPEMU_METAL_V2_POLL_COMPLETIONS=1 and as the fallback when the completion
     // block could not be built.

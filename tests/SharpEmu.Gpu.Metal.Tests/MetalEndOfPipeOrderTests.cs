@@ -372,6 +372,35 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(3UL, rig.Backing.Read64(WindowedLabel));
     }
 
+    // A guest store waiting for a recorded writeback waits for its submission off the worker:
+    // the worker itself refuses (it would wait for itself), a submission still being recorded
+    // is committed through the relay, and a wait nobody commits for gives up at its timeout.
+    [Fact]
+    public void AWaitOffTheWorkerAsksTheWorkerToCommitTheSubmission()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        var owner = (IMetalImageCacheOwner)host;
+        host.Relay.BindCurrentThread();
+
+        host.FillBufferInOrder(GuestBase + 0x10000, 0x2000, 0x77);
+        var serial = host.LastWorkSerial;
+        Assert.True(host.CompletedSerial < serial);
+        Assert.False(owner.WaitForSubmissionOffWorker(serial, 10_000));
+
+        Assert.False(Task.Run(() => owner.WaitForSubmissionOffWorker(serial, 50)).Result);
+        Assert.True(host.Relay.HasPendingCommands);
+
+        var waiter = Task.Run(() => owner.WaitForSubmissionOffWorker(serial, 10_000));
+        host.RunPendingOperations();
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
+        Assert.True(waiter.Result);
+        Assert.True(host.CompletedSerial >= serial);
+        WaitForCompletions(host);
+        Assert.Equal(0x77u, rig.Backing.Read32(GuestBase + 0x10000));
+    }
+
     [Theory]
     [InlineData(null, "Deferred")]
     [InlineData("", "Deferred")]

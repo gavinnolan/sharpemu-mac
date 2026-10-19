@@ -1213,6 +1213,50 @@ internal sealed partial class MetalRenderHost :
     bool IMetalImageCacheOwner.HasPendingGpuWrite(ulong address, ulong size) =>
         _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0;
 
+    // A guest thread waiting for a recorded writeback (MetalImageCache.WritebackFence.cs). The
+    // GPU finishes a committed submission without the guest's help, so the one thing the wait
+    // needs from the worker is the commit, asked for through the relay; it holds no lock the
+    // worker takes, and the worker itself never waits here.
+    bool IMetalImageCacheOwner.WaitForSubmissionOffWorker(ulong serial, int timeoutMilliseconds)
+    {
+        if (CompletedSerial >= serial)
+        {
+            return true;
+        }
+
+        if (_relay.IsGpuQueueThread)
+        {
+            return false;
+        }
+
+        if (serial >= Volatile.Read(ref _submissionSerial))
+        {
+            RequestCommitThrough(serial);
+        }
+
+        return _completions.WaitForSignalled(serial, timeoutMilliseconds);
+    }
+
+    private ulong _commitRequestedSerial;
+
+    // One relay command per serial however many stores wait for it.
+    private void RequestCommitThrough(ulong serial)
+    {
+        var requested = Volatile.Read(ref _commitRequestedSerial);
+        if (requested >= serial || Interlocked.CompareExchange(ref _commitRequestedSerial, serial, requested) != requested)
+        {
+            return;
+        }
+
+        _ = _relay.TryPost(() =>
+        {
+            if (_commandBuffer != 0 && _submissionSerial <= serial)
+            {
+                FlushCommandBuffer(MetalFlushCause.WaitUncommitted);
+            }
+        });
+    }
+
     void IMetalImageCacheOwner.FillGuestRange(ulong address, ulong size, uint value) =>
         FillGuestMemory(address, size, value);
 
@@ -2265,7 +2309,7 @@ internal sealed partial class MetalRenderHost :
             $"up_other={causes.Invalidated} up_alias={causes.Alias} " +
             $"wb_bind={causes.Binding} wb_store={causes.Storage} " +
             $"wb_read={causes.HostRead} wb_copy={causes.GuestCopy} wb_overlap={causes.Overlap} " +
-            $"wb_release={causes.Release} wb_drain={causes.Drain}{ReleaseCauses()} " +
+            $"wb_release={causes.Release} wb_drain={causes.Drain}{ReleaseCauses()}{_imageCache.TakeWritebackFenceCounters()} " +
             $"alias_kept={aliases.Kept} alias_published={aliases.Published} alias_narrow={aliases.Narrow} " +
             $"alias_read_skip={aliases.ReadsSkipped} " +
             $"alias_fallback={_imageCache.TakeAliasFallbacks()} " +
