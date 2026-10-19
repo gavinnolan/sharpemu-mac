@@ -1173,9 +1173,14 @@ internal sealed partial class MetalRenderHost
     // Only remember: a dump reads back through its own command buffer and waits, and
     // EndRendering runs inside EndEncoders, which runs inside the flush. Dumping here
     // would nest a flush inside a flush. They are drained at the next flip instead.
+    // SHARPEMU_METAL_V2_DUMP_FLIPS_ONLY=1: a sampled frame writes only what it presents, not every
+    // pass target, so a long run can be followed picture by picture at the cost of one readback.
+    private static readonly bool DumpFlipsOnly =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_FLIPS_ONLY") == "1";
+
     private void DumpPassTargets(in RenderingState ending)
     {
-        if (!DumpTargetsEnabled)
+        if (!DumpTargetsEnabled || DumpFlipsOnly)
         {
             return;
         }
