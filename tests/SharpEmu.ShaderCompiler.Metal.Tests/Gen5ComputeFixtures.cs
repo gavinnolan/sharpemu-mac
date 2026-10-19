@@ -91,6 +91,160 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 16);
 
+    // A loop that continues from three places through one short latch, the shape of
+    // UE5's persistent culling loop. Odd i runs X and X2, i == 4 continues straight to
+    // the latch, i == 6 runs Y, and i == 9 leaves from inside X. s1 counts X (+1) and
+    // X2 (+16), s2 counts Y and s3 the latch; the store packs them as
+    // s1 | s2 << 8 | s3 << 16, which is 103 | 1 << 8 | 8 << 16 = 0x00080167.
+    public static readonly Gen5ComputeFixture SharedLatchLoop = new(
+        "shared-latch-loop",
+        [
+            0xBE800380,             // s_mov_b32 s0, 0
+            0xBE810380,             // s_mov_b32 s1, 0
+            0xBE820380,             // s_mov_b32 s2, 0
+            0xBE830380,             // s_mov_b32 s3, 0
+            0x80008100,             // H (0x10): s_add_u32 s0, s0, 1
+            0xBF0D8000,             // s_bitcmp1_b32 s0, 0
+            0xBF850004,             // s_cbranch_scc1 X
+            0xBF068400,             // s_cmp_eq_u32 s0, 4
+            0xBF850008,             // s_cbranch_scc1 L
+            0xBF068600,             // s_cmp_eq_u32 s0, 6
+            0xBF850005,             // s_cbranch_scc1 Y
+            0x80018101,             // X (0x2C): s_add_u32 s1, s1, 1
+            0xBF098900,             // s_cmp_ge_u32 s0, 9
+            0xBF850005,             // s_cbranch_scc1 DONE
+            0x80019001,             // X2: s_add_u32 s1, s1, 16
+            0xBF820001,             // s_branch L
+            0x80028102,             // Y (0x40): s_add_u32 s2, s2, 1
+            0x80038103,             // L (0x44): s_add_u32 s3, s3, 1
+            0xBF82FFF1,             // s_branch H
+            0x8F028802,             // DONE (0x4C): s_lshl_b32 s2, s2, 8
+            0x8F039003,             // s_lshl_b32 s3, s3, 16
+            0x88010201,             // s_or_b32 s1, s1, s2
+            0x88010301,             // s_or_b32 s1, s1, s3
+            0x7E020201,             // v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
+    // A branch inside a loop whose two arms each either run a shared tail T or skip
+    // straight to the join J, the shape EXEC-skip branches leave in UE5's cloud
+    // kernels. For i = 1..8, odd i counts s1 and runs T unless i == 5, even i runs T
+    // unless i == 4, and J counts every trip in s2. T counts in s3, so the store packs
+    // s1 | s2 << 8 | s3 << 16 = 4 | 8 << 8 | 6 << 16 = 0x00060804.
+    public static readonly Gen5ComputeFixture SharedTailLoop = new(
+        "shared-tail-loop",
+        [
+            0xBE800380,             // s_mov_b32 s0, 0
+            0xBE810380,             // s_mov_b32 s1, 0
+            0xBE820380,             // s_mov_b32 s2, 0
+            0xBE830380,             // s_mov_b32 s3, 0
+            0x80008100,             // H (0x10): s_add_u32 s0, s0, 1
+            0xBF0D8000,             // s_bitcmp1_b32 s0, 0
+            0xBF850003,             // s_cbranch_scc1 P
+            0xBF068400,             // s_cmp_eq_u32 s0, 4
+            0xBF850005,             // s_cbranch_scc1 J
+            0xBF820003,             // s_branch T
+            0x80018101,             // P (0x28): s_add_u32 s1, s1, 1
+            0xBF068500,             // s_cmp_eq_u32 s0, 5
+            0xBF850001,             // s_cbranch_scc1 J
+            0x80038103,             // T (0x34): s_add_u32 s3, s3, 1
+            0x80028102,             // J (0x38): s_add_u32 s2, s2, 1
+            0xBF0A8800,             // s_cmp_lt_u32 s0, 8
+            0xBF85FFF3,             // s_cbranch_scc1 H
+            0x8F028802,             // s_lshl_b32 s2, s2, 8
+            0x8F039003,             // s_lshl_b32 s3, s3, 16
+            0x88010201,             // s_or_b32 s1, s1, s2
+            0x88010301,             // s_or_b32 s1, s1, s3
+            0x7E020201,             // v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
+    // A loop with two ways out, A and B, that rejoin at J: for i = 1.. it leaves through A when
+    // i == 3 (s2 = 10) or through B when i == 5 (s2 = 11), counting the full trips in s1, and
+    // stores s1 | s2 << 8. This one leaves through A: 2 | 10 << 8 = 0x00000A02.
+    public static readonly Gen5ComputeFixture MultiExitLoopFirst = new(
+        "multi-exit-loop-first",
+        [
+            0xBE800380,             // s_mov_b32 s0, 0
+            0xBE810380,             // s_mov_b32 s1, 0
+            0xBE820380,             // s_mov_b32 s2, 0
+            0x80008100,             // H (0x0C): s_add_u32 s0, s0, 1
+            0xBF068300,             // s_cmp_eq_u32 s0, 3
+            0xBF850004,             // s_cbranch_scc1 A
+            0xBF068500,             // s_cmp_eq_u32 s0, 5
+            0xBF850004,             // s_cbranch_scc1 B
+            0x80018101,             // s_add_u32 s1, s1, 1
+            0xBF82FFF9,             // s_branch H
+            0xBE82038A,             // A (0x28): s_mov_b32 s2, 10
+            0xBF820001,             // s_branch J
+            0xBE82038B,             // B (0x30): s_mov_b32 s2, 11
+            0x8F028802,             // J (0x34): s_lshl_b32 s2, s2, 8
+            0x88010201,             // s_or_b32 s1, s1, s2
+            0x7E020201,             // v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
+    // The same loop with A at i == 7, so it leaves through B: 4 | 11 << 8 = 0x00000B04.
+    public static readonly Gen5ComputeFixture MultiExitLoopSecond = new(
+        "multi-exit-loop-second",
+        [
+            0xBE800380,             // s_mov_b32 s0, 0
+            0xBE810380,             // s_mov_b32 s1, 0
+            0xBE820380,             // s_mov_b32 s2, 0
+            0x80008100,             // H (0x0C): s_add_u32 s0, s0, 1
+            0xBF068700,             // s_cmp_eq_u32 s0, 7
+            0xBF850004,             // s_cbranch_scc1 A
+            0xBF068500,             // s_cmp_eq_u32 s0, 5
+            0xBF850004,             // s_cbranch_scc1 B
+            0x80018101,             // s_add_u32 s1, s1, 1
+            0xBF82FFF9,             // s_branch H
+            0xBE82038A,             // A (0x28): s_mov_b32 s2, 10
+            0xBF820001,             // s_branch J
+            0xBE82038B,             // B (0x30): s_mov_b32 s2, 11
+            0x8F028802,             // J (0x34): s_lshl_b32 s2, s2, 8
+            0x88010201,             // s_or_b32 s1, s1, s2
+            0x7E020201,             // v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
+    // A branch with an arm that can end the program: B0 goes to J or B1, B1 to an early
+    // S_ENDPGM at X or on to B2, and B2 falls into J. Nothing post-dominates B0, so its
+    // arms used to be emitted apart and met J twice. s0 = 3 runs J alone (1), 5 leaves
+    // through X (9) and 7 runs B2 then J (3).
+    public static Gen5ComputeFixture ExitArmJoin(uint selector) => new(
+        $"exit-arm-join-{selector}",
+        [
+            0xBE800380 | selector,  // s_mov_b32 s0, selector
+            0xBE810380,             // s_mov_b32 s1, 0
+            0xBF068300,             // B0: s_cmp_eq_u32 s0, 3
+            0xBF850003,             // s_cbranch_scc1 J
+            0xBF068500,             // B1 (0x10): s_cmp_eq_u32 s0, 5
+            0xBF850006,             // s_cbranch_scc1 X
+            0xBE810382,             // B2 (0x18): s_mov_b32 s1, 2
+            0x80018101,             // J (0x1C): s_add_u32 s1, s1, 1
+            0x7E020201,             // v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+            0xBE810389,             // X (0x30): s_mov_b32 s1, 9
+            0x7E020201,             // v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
     // LDS round trip: write a literal through workgroup-shared memory, barrier,
     // read it back, and store it to buffer 0.
     public static readonly Gen5ComputeFixture Lds = new(
