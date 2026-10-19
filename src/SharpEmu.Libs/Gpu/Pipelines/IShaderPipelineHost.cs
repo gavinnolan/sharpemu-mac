@@ -124,6 +124,12 @@ public interface IShaderPipelineHost
     // the resource cache then re-materializes instead of trusting a stale copy.
     bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) => false;
 
+    // TryReadResidentGuestBytes for each range, compared with the recorded bytes where they
+    // lie instead of copied out. True only when every range passed the same checks and is
+    // equal; false when one differs or the host cannot compare in place.
+    bool TryCompareResidentGuestBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
+        ReadOnlySpan<byte> recorded) => false;
+
     // Whether recorded GPU work may still write this dword, answered without waiting. A
     // host that returns a delegate lets a shader whose data-only table words the GPU writes
     // be re-planned to load them on the device (DeviceDataLoads); null keeps them flattened.

@@ -10,6 +10,14 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // returns false so the caller falls back to a full materialization.
 public delegate bool ResidentGuestBytesReader(ulong address, Span<byte> destination, bool clean);
 
+// Compares guest bytes with recorded ones where they lie: range i is lengths[i] bytes at
+// addresses[i], to equal recorded[offsets[i]..]. True only when every range was read
+// through the same checks ResidentGuestBytesReader makes and every byte is equal. False
+// says nothing about the bytes: one differs, or the host cannot compare in place, and the
+// caller then reads the ranges to find out which.
+public delegate bool ResidentGuestBytesComparer(
+    ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets, ReadOnlySpan<byte> recorded);
+
 // Materialization is a pure function of the plan, the user data words the evaluator
 // reads, the shader base, the compute state and the guest words it reads. This cache
 // records exactly those words and reuses the result while every one of them is
@@ -1127,7 +1135,7 @@ public sealed partial class ResourceMaterializationCache
                     continue;
                 }
                 if (Validate(variant, residentReader, rebase, inputs.UserData, slotRefresh,
-                    out var variantUnreadable, out var descriptorChanged, out rejection))
+                    out var variantUnreadable, out var descriptorChanged, out rejection, inputs.CompareResidentMemory))
                 {
                     if (previous is not null)
                     {
@@ -2124,13 +2132,14 @@ public sealed partial class ResourceMaterializationCache
         Validate(entry, residentReader, rebase, userData, joined, out unreadable, out _, out _);
 
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase, IReadOnlyList<uint> userData,
-        bool joined, out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)
+        bool joined, out bool unreadable, out bool descriptorChanged, out RejectionSample rejection,
+        ResidentGuestBytesComparer? comparer = null)
     {
         unreadable = false;
         descriptorChanged = false;
         rejection = default;
         if (joined && rebase.Active.Length == 0)
-            return ValidateJoined(entry, residentReader, out unreadable, out descriptorChanged, out rejection);
+            return ValidateJoined(entry, residentReader, comparer, out unreadable, out descriptorChanged, out rejection);
         // A memory-loaded base usually moved when anything did: its few bytes are checked before
         // ranges that can span kilobytes. The full comparison below still decides a match.
         if (entry.BaseWordBuffers is not null)

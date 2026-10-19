@@ -191,9 +191,17 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         public bool IsBackedRange(ulong address, ulong size) => Contains(address, size);
         public (ulong Base, ulong Size) BackingAliasRange => ((ulong)_block, Size);
 
+        // Off unless a test turns it on: whether the backing admits an access through its alias, and
+        // an address at which one view ends and the next begins, so no alias spans it.
+        public bool AliasAccess { get; set; }
+        public ulong ViewBoundary { get; set; }
+
+        public bool TryEnterBackingAliasAccess() => AliasAccess;
+
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
-            alias = Contains(address, size) ? (ulong)_block + (address - GuestBase) : 0;
+            var crossesView = ViewBoundary != 0 && address < ViewBoundary && address + size > ViewBoundary;
+            alias = Contains(address, size) && !crossesView ? (ulong)_block + (address - GuestBase) : 0;
             return alias != 0;
         }
 
@@ -233,6 +241,10 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         }
 
         public MetalRenderHost Host { get; }
+
+        public bool AliasAccess { set => _backing.AliasAccess = value; }
+
+        public ulong ViewBoundary { set => _backing.ViewBoundary = value; }
 
         public static ImageRequest Request(ulong address, ImageRole role)
         {

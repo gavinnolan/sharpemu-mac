@@ -1677,6 +1677,91 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    // Ranges closer than this share one ownership and overlay test in TryCompareResidentGuestBytes.
+    private const ulong CompareClusterGapBytes = 16 * 1024;
+
+    // TryReadResidentGuestBytes for each range, compared where it lies. The same refusals apply
+    // (a GPU-modified image over a byte, a pending command-processor write), tested once for each
+    // run of nearby ranges rather than for each range, and a refusal answers false for the
+    // caller to read the ranges itself. So do the cases this does not model: pending label
+    // bytes (reading them retires entries), a released single-copy chunk (reading restores it),
+    // a range that is not one backed view, and an alias access the backing will not admit.
+    public unsafe bool TryCompareResidentGuestBytes(
+        ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets, ReadOnlySpan<byte> recorded)
+    {
+        var count = addresses.Length;
+        if (count == 0)
+        {
+            return true;
+        }
+
+        if (lengths.Length != count || offsets.Length != count || _labelOverlay.Count != 0 ||
+            _backing.SingleCopy is { ReleasedChunks: > 0 })
+        {
+            return false;
+        }
+
+        var start = 0;
+        while (start < count)
+        {
+            var low = addresses[start];
+            var high = low;
+            var end = start;
+            while (end < count)
+            {
+                var address = addresses[end];
+                var length = lengths[end];
+                var offset = offsets[end];
+                if (length <= 0 || offset < 0 || offset > recorded.Length - length || ulong.MaxValue - address < (ulong)length)
+                {
+                    return false;
+                }
+
+                if (end > start && (address < low || (address > high && address - high > CompareClusterGapBytes)))
+                {
+                    break;
+                }
+
+                high = Math.Max(high, address + (ulong)length);
+                end++;
+            }
+
+            var size = high - low;
+            if (_imageCache.HasGpuModifiedImageBytes(low, size) ||
+                (_cpOverlay.Count != 0 &&
+                 _cpOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None))
+            {
+                return false;
+            }
+
+            start = end;
+        }
+
+        if (!_backing.TryEnterBackingAliasAccess())
+        {
+            return false;
+        }
+
+        try
+        {
+            for (var index = 0; index < count; index++)
+            {
+                var length = lengths[index];
+                if (!_backing.TryResolveBackingAlias(addresses[index], (ulong)length, out var alias) ||
+                    !new ReadOnlySpan<byte>((void*)alias, length).SequenceEqual(recorded.Slice(offsets[index], length)))
+                {
+                    return false;
+                }
+            }
+        }
+        finally
+        {
+            _backing.ExitBackingAliasAccess();
+        }
+
+        return true;
+    }
+
     private Func<ulong, bool>? _dataWritePending;
 
     // A data-only table word the GPU may still be writing: the shader is re-planned to load

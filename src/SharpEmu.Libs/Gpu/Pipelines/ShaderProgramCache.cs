@@ -220,6 +220,7 @@ internal sealed class ShaderProgramCache
     private readonly GuestWordReader _readCleanGuestWord;
     private readonly ResidentGuestBytesReader _readResidentGuestBytes;
     private readonly ResidentGuestBytesReader? _prefetchResidentGuestBytes;
+    private readonly ResidentGuestBytesComparer? _compareResidentGuestBytes;
 
     private static readonly bool PrefetchEnabled = Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_PREFETCH") != "0";
 
@@ -232,6 +233,7 @@ internal sealed class ShaderProgramCache
         _readCleanGuestWord = ReadCleanGuestWord;
         _readResidentGuestBytes = ReadResidentGuestBytes;
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
+        _compareResidentGuestBytes = ResourceMaterializationCache.InPlaceValidateEnabled ? CompareResidentGuestBytes : null;
         _dataWritePending = host.DataWritePending;
     }
 
@@ -259,6 +261,12 @@ internal sealed class ShaderProgramCache
         ReadLog?.Bytes(address, read, destination);
         return read;
     }
+
+    // A preparation that logs its reads for a retry (ReadLog) logs the bytes it validates, so it
+    // reads them.
+    private bool CompareResidentGuestBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
+        ReadOnlySpan<byte> recorded) =>
+        ReadLog is null && _host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded);
 
     private readonly Func<ulong, bool>? _dataWritePending;
     private ResourceRuntimeInputs? _inputs;
@@ -411,6 +419,7 @@ internal sealed class ShaderProgramCache
                     _imageDescriptorTrace.RecordCandidate(_materializingHash, descriptorSource, candidateKey, heap, address, words.Span)
                 : null,
             ReadResidentMemory = _prefetchResidentGuestBytes,
+            CompareResidentMemory = _compareResidentGuestBytes,
             DataWritePending = _dataWritePending,
         };
         _materializingHash = source.Hash;

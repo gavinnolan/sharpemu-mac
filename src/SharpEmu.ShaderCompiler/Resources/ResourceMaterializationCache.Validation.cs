@@ -116,7 +116,33 @@ public sealed partial class ResourceMaterializationCache
     // Validate for an entry whose reads do not move: every recorded byte is compared.
     // A changed descriptor word becomes the rejection sample, as in Validate, so the variants
     // behind this one that hold the old word are refused without being read.
-    private bool ValidateJoined(Entry entry, ResidentGuestBytesReader residentReader, out bool unreadable,
+    private bool ValidateJoined(Entry entry, ResidentGuestBytesReader residentReader, ResidentGuestBytesComparer? comparer,
+        out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)
+    {
+        if (comparer is null || !InPlaceValidateEnabled ||
+            !comparer(entry.RangeAddresses, entry.RangeLengths, entry.RangeOffsets, entry.Bytes))
+            return ValidateJoinedByReading(entry, residentReader, out unreadable, out descriptorChanged, out rejection);
+        unreadable = false;
+        descriptorChanged = false;
+        rejection = default;
+        if (!InPlaceValidateVerify)
+            return true;
+        // Verify: the reading path decides, and a difference from the in-place answer is reported.
+        var read = ValidateJoinedByReading(entry, residentReader, out unreadable, out descriptorChanged, out rejection);
+        if (!read)
+            Console.Error.WriteLine(
+                $"[PERF][INPLACE_VALIDATE_VERIFY] mismatch: the in-place compare found all {entry.RangeAddresses.Length} ranges equal, " +
+                $"reading found them {(unreadable ? "unreadable" : "changed")} (first range 0x{(entry.RangeAddresses.Length != 0 ? entry.RangeAddresses[0] : 0):X})");
+        return read;
+    }
+
+    // SHARPEMU_RESOURCE_INPLACE_VALIDATE=0 reads every recorded range back to compare it;
+    // SHARPEMU_RESOURCE_INPLACE_VALIDATE_VERIFY=1 (or SHARPEMU_PERF_VERIFY=1) also does so
+    // after an in-place compare found everything equal, and reports a disagreement.
+    public static readonly bool InPlaceValidateEnabled = PerfSwitches.Enabled("SHARPEMU_RESOURCE_INPLACE_VALIDATE");
+    internal static readonly bool InPlaceValidateVerify = PerfSwitches.Verify("SHARPEMU_RESOURCE_INPLACE_VALIDATE_VERIFY");
+
+    private bool ValidateJoinedByReading(Entry entry, ResidentGuestBytesReader residentReader, out bool unreadable,
         out bool descriptorChanged, out RejectionSample rejection)
     {
         unreadable = false;

@@ -16,6 +16,8 @@ public sealed class ResourceMaterializationCacheTests
     {
         public readonly Dictionary<ulong, uint> Words = new();
         public int Reads;
+        public int ResidentReads;
+        public int Compares;
         public bool GpuOwned;
 
         public Heap()
@@ -43,8 +45,25 @@ public sealed class ResourceMaterializationCacheTests
             return Words.TryGetValue(address, out word);
         }
 
+        // What a host compares in place: true only when every range reads as ReadResident would
+        // read it and equals the recorded bytes.
+        public bool Compare(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
+            ReadOnlySpan<byte> recorded)
+        {
+            Compares++;
+            if (GpuOwned)
+                return false;
+            for (var range = 0; range < addresses.Length; range++)
+                for (var offset = 0; offset < lengths[range]; offset += 4)
+                    if (!Words.TryGetValue(addresses[range] + (ulong)offset, out var word) ||
+                        word != BitConverter.ToUInt32(recorded.Slice(offsets[range] + offset, 4)))
+                        return false;
+            return true;
+        }
+
         public bool ReadResident(ulong address, Span<byte> destination, bool clean)
         {
+            ResidentReads++;
             if (GpuOwned)
                 return false;
             for (var offset = 0; offset < destination.Length; offset += 4)
@@ -68,6 +87,75 @@ public sealed class ResourceMaterializationCacheTests
         specialization = new ResourceSpecialization();
         return cache.Materialize(plan, Inputs(userData, readCleanMemory: heap.Read, shaderBase: shaderBase), heap.ReadResident,
             ref snapshot, ref specialization, out _);
+    }
+
+    private static bool RunCompared(ResourceMaterializationCache cache, ShaderResourcePlan plan, Heap heap, uint[] userData,
+        out ResourceSnapshot snapshot, out ResourceSpecialization specialization)
+    {
+        snapshot = new ResourceSnapshot();
+        specialization = new ResourceSpecialization();
+        var inputs = Inputs(userData, readCleanMemory: heap.Read);
+        return cache.Materialize(plan, new ResourceRuntimeInputs
+        {
+            UserData = inputs.UserData, ReadCleanMemory = inputs.ReadCleanMemory, CompareResidentMemory = heap.Compare,
+        }, heap.ReadResident, ref snapshot, ref specialization, out _);
+    }
+
+    [Fact]
+    public void AHitComparesInPlaceWithoutReadingTheRangesBack()
+    {
+        if (!ResourceMaterializationCache.InPlaceValidateEnabled) return;
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(RunCompared(cache, plan, heap, [0x1000, 0], out var first, out _));
+        var residentReads = heap.ResidentReads;
+        Assert.True(RunCompared(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Same(first, second);
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        Assert.Equal(1, heap.Compares);
+        // The verify mode reads them back to check the answer.
+        if (!ResourceMaterializationCache.InPlaceValidateVerify)
+            Assert.Equal(residentReads, heap.ResidentReads);
+    }
+
+    // The same sequence of guest memory states through a cache that compares in place and one
+    // that reads every range back: the same hits, misses and materialized images at each step,
+    // for equal, changed, unreadable and GPU-owned memory and for a write between two draws.
+    [Fact]
+    public void ComparingInPlaceDecidesLikeReadingTheRangesBack()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var compared = new ResourceMaterializationCache();
+        var read = new ResourceMaterializationCache();
+        var record5 = HeapBase + 0x100 + 5 * 32;
+        var steps = new (string Name, Action Change)[]
+        {
+            ("first", () => { }),
+            ("unchanged", () => { }),
+            ("changed descriptor", () => heap.Words[record5] = 0x3000),
+            ("changed back", () => heap.Words[record5] = 0x1000),
+            ("changed again", () => heap.Words[record5 + 4] = 21u << 20),
+            ("unreadable", () => heap.Words.Remove(record5 + 8)),
+            ("readable", () => heap.Words[record5 + 8] = 0),
+            ("gpu owned", () => heap.GpuOwned = true),
+            ("gpu released", () => heap.GpuOwned = false),
+            ("write between draws", () => heap.Words[HeapBase + 0x80] = (1u << 1) | (1u << 4) | (1u << 5)),
+            ("unchanged after", () => { }),
+        };
+        foreach (var (name, change) in steps)
+        {
+            change();
+            var okCompared = RunCompared(compared, plan, heap, [0x1000, 0], out var snapshotCompared, out var specCompared);
+            var okRead = Run(read, plan, heap, [0x1000, 0], out var snapshotRead, out var specRead);
+            Assert.True(okCompared == okRead, name);
+            Assert.True((compared.Hits, compared.Misses) == (read.Hits, read.Misses), $"{name}: {compared.Hits}/{compared.Misses} vs {read.Hits}/{read.Misses}");
+            if (!okRead) continue;
+            Assert.Equal(snapshotRead.Images.Select(image => image.ToArray()), snapshotCompared.Images.Select(image => image.ToArray()));
+            Assert.Equal(snapshotRead.FlattenedResourceTable, snapshotCompared.FlattenedResourceTable);
+            Assert.Equal(specRead, specCompared);
+        }
     }
 
     [Fact]

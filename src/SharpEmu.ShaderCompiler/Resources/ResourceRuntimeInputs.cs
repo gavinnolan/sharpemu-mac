@@ -27,6 +27,9 @@ public sealed class ResourceRuntimeInputs
 
     public ResidentGuestBytesReader? ReadResidentMemory { get; init; }
 
+    // Compares recorded ranges in place on a hit; null leaves a hit reading every range back.
+    public ResidentGuestBytesComparer? CompareResidentMemory { get; init; }
+
     public bool ReadsClean { get; init; }
 
     // Whether recorded GPU work may still write the dword at this address, asked without
@@ -44,6 +47,7 @@ public sealed class ResourceRuntimeInputs
         TraceImageCandidate = TraceImageCandidate,
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
+        CompareResidentMemory = CompareResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
         DataWritePending = DataWritePending,
     };
