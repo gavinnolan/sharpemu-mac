@@ -182,6 +182,20 @@ public sealed partial class DirectExecutionBackend
                 };
                 return true;
 
+            case Mnemonic.Adcx:
+            case Mnemonic.Adox:
+                if (!TryReadOperand(contextRecord, in instruction, 0, size, out var addDest) ||
+                    !TryReadOperand(contextRecord, in instruction, 1, size, out var addSrc))
+                {
+                    return false;
+                }
+
+                result = instruction.Mnemonic == Mnemonic.Adcx
+                    ? BmiInstructionEmulator.Adcx(addDest, addSrc, size, ref eflags)
+                    : BmiInstructionEmulator.Adox(addDest, addSrc, size, ref eflags);
+                flagsChanged = true;
+                return true;
+
             case Mnemonic.Pdep:
             case Mnemonic.Pext:
                 if (!TryReadOperand(contextRecord, in instruction, 1, size, out var packSrc) ||
