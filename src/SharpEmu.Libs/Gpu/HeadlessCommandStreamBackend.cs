@@ -47,6 +47,9 @@ internal sealed class HeadlessCommandStreamBackend : IGuestGpuBackend
 
     public bool SupportsPrimitiveShaderMeshPipelines => _host.Value.SupportsPrimitiveShaderMeshPipelines;
 
+    // The inline stream is fed the submit-time capture as before, so command-stream tests keep exercising it.
+    public bool ConsumesSubmittedGeometrySnapshots => true;
+
     public IGuestCompiledShader GetDepthOnlyFragmentShader() => _host.Value.GetDepthOnlyFragmentShader();
 
     public void HideSplashScreen() => _host.Value.HideSplashScreen();

@@ -93,6 +93,22 @@ public sealed class AgcSubmissionPreparationTests
         Assert.Equal(1, backend.Admissions); Assert.Equal(1, backend.Waits);
     }
 
+    // A set-shader-register packet: only the submit-time command-buffer walk shadows it.
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 1)]
+    public void SubmitWalksTheCommandBufferOnlyForAHostThatReadsGeometrySnapshots(bool consumesSnapshots, int shadowedRegisters)
+    {
+        var memory = Memory();
+        Write(memory, Command, 0xC0010000u | (0x76u << 8)); Write(memory, Command + 4, 0x48u); Write(memory, Command + 8, 1u);
+        Write(memory, Packet + 8, 3u);
+        SubmissionBackend backend = consumesSnapshots ? new SnapshotConsumingBackend() : new SubmissionBackend();
+        using var scope = new BackendScope(backend);
+        Assert.Equal(0, Submit(memory, "dcb"));
+        Assert.Equal(1, backend.Admissions);
+        Assert.Equal(shadowedRegisters, AgcExports.GetGeometryCaptureRegistersForTests(memory).Count);
+    }
+
     private static FakeCpuMemory Memory()
     {
         var memory = new FakeCpuMemory(Base, 0x1000);
@@ -151,6 +167,10 @@ public sealed class AgcSubmissionPreparationTests
         public void CountShaderCompilation() => throw new NotSupportedException();
         public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters() => throw new NotSupportedException();
         public void RequestClose() => throw new NotSupportedException();
+    }
+    private sealed class SnapshotConsumingBackend : SubmissionBackend, IGuestGpuBackend
+    {
+        public bool ConsumesSubmittedGeometrySnapshots => true;
     }
     private sealed class PreparingBackend : SubmissionBackend, IGuestSubmissionPreparationBackend
     {

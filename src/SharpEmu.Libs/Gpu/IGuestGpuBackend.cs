@@ -37,6 +37,12 @@ public interface IGuestGpuBackend
     /// works for passthrough ones, and the executor keeps skipping the rest.</summary>
     bool SupportsPrimitiveShaderMeshPipelines => false;
 
+    /// <summary>True when this backend's command-stream host reads the geometry snapshots that
+    /// the AGC submit prepass captures (the <c>geometrySnapshots</c> argument of
+    /// <see cref="SubmitCommandStream"/>). A backend that says no is handed none, and the guest
+    /// submit skips the walk of the command buffer that builds them.</summary>
+    bool ConsumesSubmittedGeometrySnapshots => false;
+
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();
 

@@ -39,6 +39,9 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
     // capability here would only turn a skipped draw into a failed pipeline.
     public bool SupportsPrimitiveShaderMeshPipelines => false;
 
+    // The legacy host fetches the submit-time vertex snapshots (MetalCommandStreamHost.Rendering.cs).
+    public bool ConsumesSubmittedGeometrySnapshots => true;
+
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         shader = null;

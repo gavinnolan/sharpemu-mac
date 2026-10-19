@@ -31,6 +31,14 @@ public static partial class AgcExports
         "0",
         StringComparison.Ordinal);
 
+    // The capture walks every submitted command buffer on the guest thread, under the submission
+    // gates. Only a host that reads the snapshots (IGuestGpuBackend.ConsumesSubmittedGeometrySnapshots)
+    // gets it; SHARPEMU_CAPTURE_SUBMITTED_GEOMETRY=1 walks for every backend as before.
+    private static readonly bool _forceSubmittedGeometryCapture = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_CAPTURE_SUBMITTED_GEOMETRY"),
+        "1",
+        StringComparison.Ordinal);
+
     // The state a snapshot was captured under; the draw validates it against the live banks.
     private sealed record GeometryCaptureFingerprint(
         uint IndexSize,
@@ -143,6 +151,11 @@ public static partial class AgcExports
         ulong commandAddress,
         uint dwordCount)
     {
+        if (!_forceSubmittedGeometryCapture && !GuestGpu.Current.ConsumesSubmittedGeometrySnapshots)
+        {
+            return null;
+        }
+
         var indexSnapshots = CaptureSubmittedIndexPackets(
             ctx,
             gpuState.GeometryCapture,
