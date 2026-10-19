@@ -153,6 +153,8 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
             };
             // Exact textures: lossy compression is not this suite's subject.
             Cache.LossyTextures = false;
+            // Off by default (MetalV2Diagnostics.DccClaimFirst); the suite covers it on.
+            Cache.DccClaimFirst = true;
             // Not a clear code, so the target lookups in a test do not materialize.
             FillMetadata(0x55);
         }
