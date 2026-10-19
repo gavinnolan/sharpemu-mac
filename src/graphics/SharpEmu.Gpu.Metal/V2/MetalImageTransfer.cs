@@ -599,7 +599,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return arrayed ? MtlTextureType.Type2DArray : MtlTextureType.Type2D;
     }
 
-    private static MtlTextureUsage UsageOf(in ImageDescription description, MtlPixelFormat format)
+    internal static MtlTextureUsage UsageOf(in ImageDescription description, MtlPixelFormat format)
     {
         if (MetalGuestFormats.IsDepthStencil(format))
         {
@@ -607,11 +607,17 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         // A compressed texture is only ever sampled: Metal rejects a render-target or
-        // writable compressed texture, and a reinterpreting view of one needs the
-        // block-size-compatible view rules the cache does not use.
+        // writable compressed texture. The one reinterpretation the cache makes of it is
+        // the sRGB/linear twin (GetOrCreateView): a guest that reads one block memory
+        // through both an sRGB and a linear descriptor (Unreal's virtual texture pools)
+        // otherwise gets whichever encoding created the image first. On Black Myth: Wukong
+        // that turned the armour's base colour pool linear in about half the runs, which
+        // washed the gold out to silver.
         if (description.IsBlock)
         {
-            return MtlTextureUsage.ShaderRead;
+            return MetalGuestFormats.HasSrgbTwin(format)
+                ? MtlTextureUsage.ShaderRead | MtlTextureUsage.PixelFormatView
+                : MtlTextureUsage.ShaderRead;
         }
 
         var usage = MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget | MtlTextureUsage.PixelFormatView;

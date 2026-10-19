@@ -816,6 +816,16 @@ internal sealed class MetalCachedImage : IDisposable
         // cache creates without that usage -- can still have the subresource view
         // a mipped or layered attachment binds.
         var viewable = (Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0;
+        if (viewable && MetalGuestFormats.HasSrgbTwin((MtlPixelFormat)Shape.PixelFormat))
+        {
+            // A compressed texture has the view usage only for its sRGB/linear twin (see
+            // MetalImageTransfer.UsageOf); any other format or a swizzle stays unviewed, as
+            // before, since Metal raises on a reinterpretation it does not allow.
+            identitySwizzle = true;
+            viewable = viewFormat == Shape.PixelFormat ||
+                MetalGuestFormats.AreSrgbTwins((MtlPixelFormat)Shape.PixelFormat, (MtlPixelFormat)viewFormat);
+        }
+
         if (!viewable && !identitySwizzle && !(sameFormatSwizzle && viewFormat == Shape.PixelFormat))
         {
             // Metal raises on a swizzled view of a texture without the usage, so the view
