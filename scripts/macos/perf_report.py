@@ -25,6 +25,10 @@ SH cutscene). Inputs, every one optional except what a section needs:
   result.txt        peak_footprint_mb / peak_rss_mb of the whole run.
 
 --baseline <run-dir> analyses that run with the same window and prints Before / After / Delta%.
+Loading gaps: a spike whose [METAL-V2][PERF] windows show (almost) no submissions or passes is the guest
+loading, not rendering; it is classed `loading (no GPU submissions)`, left out of the cause list and the top 10, and the
+frame-time table is given with and without those gaps. frame-times.txt is placed on the game.tlog clock through its
+t0_unix_us header and run.env's launch_epoch.
 Spike attribution: a flip interval longer than 2x the window median is a spike. Causes come from the log
 lines inside [flip before - slack, flip + slack]; SLOW-EOP and OverlapEvicted are point events, while
 compile, drop_budget, adopt_blocked (a [METAL-PRESENT] window that published nothing) and GC are
@@ -137,23 +141,48 @@ def kv(text):
 
 # ---------------------------------------------------------------- frame times
 
-def frame_section(flips, lo, hi):
-    """Frame-time statistics for the flip intervals that end inside [lo, hi]."""
-    pts = [t for t in flips if lo <= t <= hi]
-    intervals = [(a, b) for a, b in zip(pts, pts[1:])]
+LOADING = 'loading (no GPU submissions)'
+
+
+def interval_stats(intervals):
+    """Frame-time statistics of (start, end) flip intervals; fps is intervals per second of interval time."""
     ms = [(b - a) * 1000.0 for a, b in intervals]
-    out = {'flips': len(pts), 'intervals': len(ms)}
+    out = {'intervals': len(ms)}
     if not ms:
-        return out, intervals
+        return out
     median = percentile(ms, 50)
-    span = pts[-1] - pts[0]
     out.update({
-        'fps': r(len(ms) / span, 3) if span > 0 else None,
+        'fps': r(len(ms) / (sum(ms) / 1000.0), 3) if sum(ms) > 0 else None,
         'p50_ms': r(median, 1), 'p90_ms': r(percentile(ms, 90), 1), 'p99_ms': r(percentile(ms, 99), 1),
         'max_ms': r(max(ms), 1), 'mean_ms': r(sum(ms) / len(ms), 1),
         'over_2x_median': sum(1 for v in ms if v > SPIKE_FACTOR * median),
     })
+    return out
+
+
+def frame_section(flips, lo, hi):
+    """Frame-time statistics for the flip intervals that end inside [lo, hi]."""
+    pts = [t for t in flips if lo <= t <= hi]
+    intervals = [(a, b) for a, b in zip(pts, pts[1:])]
+    out = {'flips': len(pts)}
+    out.update(interval_stats(intervals))
     return out, intervals
+
+
+def is_loading(a, b, perf):
+    """True when the guest submitted (almost) nothing to the GPU for most of the flip gap (a, b): the
+    [METAL-V2][PERF] windows (each is the `seconds` before its tick) with fewer than 20 submissions
+    and 50 passes (a frame is ~500 passes; a loading screen trickles a few submissions) cover at least 60% of the gap. Windows that straddle the gap's edges may hold
+    the work just before or after it, so only the idle share has to dominate."""
+    idle = 0.0
+    for t, d in perf:
+        sec = d.get('seconds', 0.0)
+        if sec <= 0:
+            continue
+        overlap = min(t, b) - max(t - sec, a)
+        if overlap > 0 and d.get('submissions', 0) < 20 and d.get('passes', 0) < 50:
+            idle += overlap
+    return b > a and idle >= 0.6 * (b - a)
 
 
 def windowed_fps(flips, lo, hi, width):
@@ -378,6 +407,9 @@ def attribute_spikes(intervals, median_ms, tlog, fam, slack, slow_eop_min_ms=100
     for a, b in spikes:
         lo, hi = a - slack, b + slack
         causes = {}
+        if is_loading(a, b, fam['perf']):
+            out.append({'t': a, 'ms': (b - a) * 1000.0, 'causes': {LOADING: {'n': 1}}, 'loading': True})
+            continue
         for i in range(bisect.bisect_left(times, lo), bisect.bisect_right(times, hi)):
             text = tlog[i][1]
             if text.startswith('[METAL-V2][SLOW-EOP]'):
@@ -423,7 +455,11 @@ def spike_section(intervals, median_ms, tlog, fam, slack):
     spikes = attribute_spikes(intervals, median_ms, tlog, fam, slack) if tlog else \
         [{'t': a, 'ms': (b - a) * 1000.0, 'causes': {}} for a, b in intervals
          if (b - a) * 1000.0 > SPIKE_FACTOR * median_ms]
+    loading = [s for s in spikes if s.get('loading')]
+    spikes = [s for s in spikes if not s.get('loading')]
     counts = Counter()
+    if loading:
+        counts[LOADING] = len(loading)
     for s in spikes:
         for name in s['causes']:
             counts[name] += 1
@@ -431,7 +467,10 @@ def spike_section(intervals, median_ms, tlog, fam, slack):
             counts['(none)'] += 1
     top = sorted(spikes, key=lambda s: -s['ms'])[:10]
     return {
-        'threshold_ms': r(SPIKE_FACTOR * median_ms, 1), 'count': len(spikes),
+        'threshold_ms': r(SPIKE_FACTOR * median_ms, 1), 'count': len(spikes) + len(loading),
+        'count_excluding_loading': len(spikes),
+        'loading_gaps': [{'at_s': r(s['t'], 2), 'ms': r(s['ms'], 0)} for s in sorted(loading, key=lambda s: s['t'])],
+        'loading_seconds': r(sum(s['ms'] for s in loading) / 1000.0, 1),
         'ms_total_over_median': r(sum(s['ms'] - median_ms for s in spikes), 0),
         'cause_counts': dict(counts.most_common()),
         'top': [{'at_s': r(s['t'], 2), 'ms': r(s['ms'], 0), 'causes': s['causes']} for s in top],
@@ -462,6 +501,12 @@ def analyse(run, lo, hi, slack=0.25):
          'env': {k: v for k, v in env.items() if k.startswith('SHARPEMU_')}}
     frames, intervals = frame_section(flips, lo, hi)
     m['frames'] = frames
+    if frames.get('p50_ms') is not None:
+        limit = SPIKE_FACTOR * frames['p50_ms'] / 1000.0
+        loading = {iv for iv in intervals if iv[1] - iv[0] > limit and is_loading(iv[0], iv[1], fam['perf'])}
+        m['frames_no_loading'] = {'loading_gaps': len(loading),
+                                  'loading_seconds': r(sum(b - a for a, b in loading), 1)}
+        m['frames_no_loading'].update(interval_stats([iv for iv in intervals if iv not in loading]))
     if frames.get('p50_ms') is not None:
         m['windows_30s'] = [{'from': a, 'to': b, 'flips': n, 'fps': r(f, 3), 'p50_ms': r(p50, 0), 'max_ms': r(mx, 0)}
                             for a, b, n, f, p50, mx in windowed_fps(flips, lo, hi, 30.0)]
@@ -520,8 +565,12 @@ def render_markdown(m):
     if f.get('p50_ms') is None:
         L.append('No frame intervals in the window (frame-times.txt missing, or fewer than two flips).')
     else:
-        L += table(['flips', 'fps', 'p50 ms', 'p90 ms', 'p99 ms', 'max ms', 'frames > 2x median'],
-                   [[f['flips'], fmt(f['fps']), f['p50_ms'], f['p90_ms'], f['p99_ms'], f['max_ms'], f['over_2x_median']]])
+        nl = m.get('frames_no_loading') or {}
+        rows = [['all', f['flips'], fmt(f['fps']), f['p50_ms'], f['p90_ms'], f['p99_ms'], f['max_ms'], f['over_2x_median']]]
+        if nl.get('p50_ms') is not None:
+            rows.append([f'without {nl["loading_gaps"]} loading gaps ({nl["loading_seconds"]} s)', nl['intervals'] + 1,
+                         fmt(nl['fps']), nl['p50_ms'], nl['p90_ms'], nl['p99_ms'], nl['max_ms'], nl['over_2x_median']])
+        L += table(['intervals', 'flips', 'fps', 'p50 ms', 'p90 ms', 'p99 ms', 'max ms', 'frames > 2x median'], rows)
         L += ['', 'fps per 30 s window:', '']
         L += table(['window s', 'flips', 'fps', 'p50 ms', 'max ms'],
                    [[f'{w["from"]:g}-{w["to"]:g}', w['flips'], fmt(w['fps']), fmt(w['p50_ms']), fmt(w['max_ms'])]
@@ -570,9 +619,12 @@ def render_markdown(m):
     s = m.get('spikes')
     if s:
         L += ['', f'### Spikes (> {s["threshold_ms"]} ms = 2x median): {s["count"]}, '
-                  f'{s["ms_total_over_median"]:.0f} ms above the median in total', '']
+                  f'{s["count_excluding_loading"]} outside loading, {s["ms_total_over_median"]:.0f} ms above the median in total', '']
         L += table(['cause', 'spikes'], [[k, v] for k, v in s['cause_counts'].items()]) or []
-        L += ['', 'Top 10:', '']
+        if s['loading_gaps']:
+            L += ['', f'Loading gaps (under 20 submissions and 50 passes per 2 s in the gap), {s["loading_seconds"]} s in total: ' +
+                  ', '.join(f'{g["at_s"]:g} s +{g["ms"] / 1000:.1f} s' for g in s['loading_gaps'][:12])]
+        L += ['', 'Top 10 outside loading:', '']
         L += table(['at s', 'ms', 'causes'], [[t['at_s'], t['ms'], cause_text(t['causes'])] for t in s['top']])
         missing = [k for k, v in s['sources_present'].items() if not v]
         if missing:
@@ -596,6 +648,11 @@ HEADLINE = (
     ('frames.fps', 'fps'), ('frames.p50_ms', 'frame p50 ms'), ('frames.p90_ms', 'frame p90 ms'),
     ('frames.p99_ms', 'frame p99 ms'), ('frames.max_ms', 'frame max ms'),
     ('frames.over_2x_median', 'frames > 2x median'), ('spikes.count', 'spikes'),
+    ('frames_no_loading.fps', 'fps without loading gaps'), ('frames_no_loading.p50_ms', 'p50 ms without loading'),
+    ('frames_no_loading.p90_ms', 'p90 ms without loading'), ('frames_no_loading.p99_ms', 'p99 ms without loading'),
+    ('frames_no_loading.max_ms', 'max ms without loading'),
+    ('frames_no_loading.over_2x_median', 'frames > 2x median without loading'),
+    ('spikes.count_excluding_loading', 'spikes outside loading'),
     ('render.draws_per_frame', 'draws / frame (RENDER)'), ('render.worker_us_per_draw', 'worker us / draw'),
     ('render.worker_ms_per_frame', 'worker ms / frame'), ('counters.draws_per_frame', 'draws / frame (PERF)'),
     ('counters.passes_per_frame', 'passes / frame'), ('counters.gpu_busy_ms_per_frame', 'GPU busy ms / frame'),
@@ -697,7 +754,7 @@ def selftest():
     sp_tlog = [(5.0, '[METAL-V2][SLOW-EOP] serial=1 latency_ms=340.0 gpu_ms=340.0 noticed_ms=0.0'),
                (5.2, '[METAL-V2][WARN] A cached image is dropped and recreated: cause=OverlapEvicted cached=0x1'),
                (5.3, '[METAL-V2][SLOW-EOP] serial=2 latency_ms=20.0 gpu_ms=20.0'),
-               (6.0, '[METAL-V2][PERF] seconds=2.00 draws=1 pipeline_ms=120.0 library_wait_ms=0.0'),
+               (6.0, '[METAL-V2][PERF] seconds=2.00 submissions=30 passes=60 draws=500 pipeline_ms=120.0 library_wait_ms=0.0'),
                (6.0, '[METAL-V2][CHURN] up_new=1 drop_budget=7'),
                (6.0, '[METAL-PRESENT] guest_frames=0 seconds=2.000 published=0 adopt_blocked=200'),
                (20.0, '[METAL-V2][SLOW-EOP] serial=3 latency_ms=500.0')]
@@ -712,6 +769,24 @@ def selftest():
     check('drop_budget', causes['drop_budget']['n'], 7)
     check('adopt_blocked', causes['adopt_blocked']['n'], 200)
     check('far SLOW-EOP not attributed', causes['SLOW-EOP']['n'], 1)
+
+    # loading gaps: no submissions across the gap
+    lt = [(10.0, '[METAL-V2][PERF] seconds=2.00 submissions=100 draws=50 passes=5'),
+          (12.0, '[METAL-V2][PERF] seconds=2.00 submissions=100 draws=0 passes=0'),
+          (14.0, '[METAL-V2][PERF] seconds=2.00 submissions=100 draws=0 passes=0'),
+          (16.0, '[METAL-V2][PERF] seconds=2.00 submissions=130 draws=40 passes=4')]
+    lfam = parse_ticks(lt)
+    check('loading gap detected', is_loading(10.5, 15.0, lfam['perf']), True)
+    check('busy gap is not loading', is_loading(9.0, 10.5, lfam['perf']), False)
+    check('gap without ticks is not loading', is_loading(30.0, 35.0, lfam['perf']), False)
+    check('gap ending when work resumes', is_loading(11.0, 17.0, lfam['perf']), False)
+    lspikes = attribute_spikes([(10.5, 15.0)], 100.0, lt, lfam, slack=0.25)
+    check('loading cause', list(lspikes[0]['causes']), [LOADING])
+    lflips = [10.0 + 0.1 * i for i in range(5)] + [15.0 + 0.1 * i for i in range(5)]
+    ls = spike_section([(a, b) for a, b in zip(lflips, lflips[1:])], 100.0, lt, lfam, 0.25)
+    check('spike counts', (ls['count'], ls['count_excluding_loading'], ls['loading_gaps'][0]['ms']), (1, 0, 4600.0))
+    st = interval_stats([(0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 5.0)])
+    check('stats with gap', (st['p50_ms'], st['max_ms'], st['over_2x_median']), (100.0, 4700.0, 1))
 
     # end to end on a synthetic run directory, then compare against itself
     with tempfile.TemporaryDirectory() as d:
