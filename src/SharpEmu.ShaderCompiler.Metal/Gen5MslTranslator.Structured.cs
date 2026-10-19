@@ -378,10 +378,13 @@ public static partial class Gen5MslTranslator
 
         /// <summary>The dispatcher charged every block against the step cap so a
         /// mistranslated loop-exit condition could not wedge the GPU queue. The
-        /// structured form charges every loop iteration, which keeps the same valve.</summary>
+        /// structured form charges every loop iteration, which keeps the same valve, except in
+        /// a vertex or pixel program, whose runaway loop the GPU watchdog ends
+        /// (<see cref="Gen5MslCodegenOptions.GraphicsLoopStepCap"/>).</summary>
         private void AppendBackEdge(StringBuilder text, int indent)
         {
-            if (_maxDispatcherSteps <= 0)
+            if (_maxDispatcherSteps <= 0 ||
+                (_stage is Gen5MslStage.Vertex or Gen5MslStage.Pixel && !_options.GraphicsLoopStepCap))
             {
                 return;
             }

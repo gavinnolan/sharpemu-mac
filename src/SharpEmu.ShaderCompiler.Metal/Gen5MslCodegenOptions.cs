@@ -50,6 +50,11 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// statistics. The MSL text does not depend on when that happens, only the function the host
 /// makes of it. <c>SHARPEMU_LOD_STATS=always</c> leaves the sites unguarded: a pipeline has
 /// the counters from the first draw.</param>
+/// <param name="GraphicsLoopStepCap">Charge the step cap on every loop iteration of a structured
+/// vertex or pixel program too. The cap is for a mistranslated exit condition that would wedge
+/// the queue; a graphics program's runaway loop is ended by the GPU watchdog, and the counter
+/// is a register and a compare on every back edge. Compute and mesh programs keep the cap
+/// either way. <c>SHARPEMU_SHADER_MAX_STEPS_GRAPHICS=1</c> restores it.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -61,7 +66,8 @@ public sealed record Gen5MslCodegenOptions(
     bool DispatchThreadgroupMemory = true,
     bool DeadMaskBallotElision = true,
     bool ElideByteBias = true,
-    bool MipStatisticsFunctionConstant = true)
+    bool MipStatisticsFunctionConstant = true,
+    bool GraphicsLoopStepCap = false)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -76,5 +82,6 @@ public sealed record Gen5MslCodegenOptions(
         DeadMaskBallotElision:
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MASKBALLOT") != "0",
         ElideByteBias: Environment.GetEnvironmentVariable("SHARPEMU_MSL_BYTEBIAS") != "1",
-        MipStatisticsFunctionConstant: Environment.GetEnvironmentVariable("SHARPEMU_LOD_STATS") != "always");
+        MipStatisticsFunctionConstant: Environment.GetEnvironmentVariable("SHARPEMU_LOD_STATS") != "always",
+        GraphicsLoopStepCap: Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MAX_STEPS_GRAPHICS") == "1");
 }
