@@ -350,6 +350,28 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0x77u, rig.Backing.Read32(filled));
     }
 
+    // Finished is not visible: a device-only MTLEvent lets the copy land before the earlier
+    // stores reach memory the CPU reads, and a store the guest makes on seeing the label is
+    // then overwritten by them. The barrier signals an event the CPU can observe, which
+    // publishes those stores first. Only an MTLSharedEvent answers signaledValue.
+    [Fact]
+    public void ALabelBarrierSignalsAnEventTheCpuCanObserve()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 3));
+        Assert.Equal(1L, host.TakeLabelBarriers());
+        Assert.NotEqual(0, host.LabelBarrierEvent);
+        Assert.True(MetalNative.SendBool(
+            host.LabelBarrierEvent, MetalNative.Selector("respondsToSelector:"), MetalNative.Selector("signaledValue")));
+
+        WaitForGpu(host, host.FlushCommandBuffer());
+        WaitForCompletions(host);
+        Assert.Equal(3UL, rig.Backing.Read64(WindowedLabel));
+    }
+
     [Theory]
     [InlineData(null, "Deferred")]
     [InlineData("", "Deferred")]

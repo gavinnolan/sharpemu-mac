@@ -917,9 +917,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>Labels whose bytes waited for a boundary instead of ending a pass.</summary>
     public long TakeDeferredLabelWrites() => Interlocked.Exchange(ref _deferredLabelWrites, 0);
 
-    // SHARPEMU_METAL_V2_LABEL_BARRIER=0 encodes label copies with no barrier ahead of them.
-    private static readonly bool LabelBarrierEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_BARRIER") != "0";
+    // SHARPEMU_METAL_V2_LABEL_BARRIER=0 encodes label copies with no barrier ahead of them;
+    // =event uses a device-only MTLEvent, which orders the copy after the work but does not
+    // make that work's stores visible to the CPU first (see EncodeLabelBarrier).
+    private static readonly string? LabelBarrierMode =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_BARRIER");
+
+    private static readonly bool LabelBarrierEnabled = LabelBarrierMode != "0";
+
+    private static readonly bool LabelBarrierShared = LabelBarrierMode != "event";
 
     private static readonly nint SelEncodeWaitForEvent = MetalNative.Selector("encodeWaitForEvent:value:");
     private static readonly nint SelNewEvent = MetalNative.Selector("newEvent");
@@ -931,6 +937,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>Barriers encoded ahead of label copies since the last call.</summary>
     internal long TakeLabelBarriers() => Interlocked.Exchange(ref _labelBarriers, 0);
 
+    /// <summary>The event label barriers signal and wait on; zero until the first one.</summary>
+    internal nint LabelBarrierEvent => _labelBarrierEvent;
+
     // The windows are untracked, so Metal orders nothing between the encoders of a
     // command buffer: Apple silicon starts an encoder while the ones before it are still
     // running (the pass profile shows compute encoders starting more than a millisecond
@@ -940,6 +949,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // Hill's virtual-texture feedback copy wrote 0xFFFFFFFF over a freed block's free-list
     // link and the allocator crashed on the render thread. Signalling an event once all
     // the earlier work has finished and waiting for it makes the copy wait for that work.
+    //
+    // The event is a shared one because finishing is not the same as being seen. A shader's
+    // stores reach memory the CPU reads tens to hundreds of microseconds after the work
+    // ends, and a device-only MTLEvent lets the copy run in that gap: measured on an M-series
+    // GPU, a label copied behind one was in memory before a fragment shader's earlier store
+    // in a quarter of tries and before a compute store in one in twenty, and every CPU store
+    // made on seeing the label was then overwritten by the late one. Silent Hill's render
+    // thread freed a block that way and its free-list link became feedback-buffer words
+    // (0x0400E00EFFFFFFFF). Signalling an MTLSharedEvent - one the CPU can observe - makes
+    // the earlier stores visible first; none landed late in hundreds of tries.
     private void EncodeLabelBarrier(nint commandBuffer)
     {
         if (!LabelBarrierEnabled)
@@ -949,7 +968,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         if (_labelBarrierEvent == 0)
         {
-            _labelBarrierEvent = MetalNative.Send(_device, SelNewEvent);
+            _labelBarrierEvent = MetalNative.Send(_device, LabelBarrierShared ? SelNewSharedEvent : SelNewEvent);
             if (_labelBarrierEvent == 0)
             {
                 throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order label copies after their work.");
