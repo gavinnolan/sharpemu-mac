@@ -124,7 +124,9 @@ public static partial class ResourceMaterializer
         }
         else
         {
-            var candidate = CaptureGuard(plan, materialized);
+            // A guard is only kept when guards are on; the Metal backend turns them off, and
+            // capturing one anyway copied every descriptor of every miss for nothing.
+            var candidate = SpecializationGuards ? CaptureGuard(plan, materialized) : null;
             var originalSamplers = materialized.Samplers;
             if (!BuildSpecialization(plan, materialized, out nextSnapshot, out nextSpecialization, out failure, captureIndirectImageFailure))
                 return false;
