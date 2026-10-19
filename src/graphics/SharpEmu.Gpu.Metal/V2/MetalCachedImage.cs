@@ -144,9 +144,11 @@ internal sealed class MetalCachedImage : IDisposable
     // What the last device publication into this image copied: the source texture and
     // the version of its depth plane, and this image's own version once the copy landed.
     // While all three still hold, this texture already holds what a new copy would put
-    // there. The device publication copies a depth plane into a colour alias and nothing
-    // else (MetalImageTransfer.TryEncodeTextureToTexture), so the source's stencil plane
-    // is no part of what the alias holds.
+    // there. The device publication copies a depth plane into a colour alias, or a 16-bit
+    // colour alias into a depth plane with no stencil, and nothing else
+    // (MetalImageTransfer.TryEncodeTextureToTexture), so a stencil plane is never part of
+    // what either side holds from the other; a colour source's DepthPlaneVersion moves
+    // with every change of its texture.
     private nint _publishedSourceTexture;
     private long _publishedSourceVersion;
     private long _publishedOwnVersion;
