@@ -219,6 +219,9 @@ public sealed partial class DirectExecutionBackend
 	{
 		var name = backend.ActiveCpuContext is not null && (uint)importIndex < (uint)backend._importEntries.Length
 			? backend._importEntries[importIndex].Export?.Name ?? backend._importEntries[importIndex].Nid : null;
+		// The CPU clock is read outside the timed scope, so a sampled call's wall time
+		// does not carry the clock's own cost.
+		var cpuStart = HleDispatchTiming.ShouldSampleCpu(_perfHleCpuEvery) ? HleDispatchTiming.ThreadCpuNs() : -1;
 		var scope = HleDispatchTiming.Begin(Stopwatch.GetTimestamp());
 		if (name is not null) HleDispatchTiming.NameCurrent(name);
 		try
@@ -230,7 +233,12 @@ public sealed partial class DirectExecutionBackend
 		finally
 		{
 			var elapsed = scope.Complete(Stopwatch.GetTimestamp());
-			try { RecordPerfHleDispatchTime(elapsed); }
+			var cpuNs = cpuStart >= 0 ? HleDispatchTiming.ThreadCpuNs() - cpuStart : -1;
+			try
+			{
+				RecordPerfHleThreadCost(elapsed, scope.Thread, cpuNs);
+				RecordPerfHleDispatchTime(elapsed);
+			}
 			catch (Exception diagnosticFailure) when (diagnosticFailure is System.IO.IOException or ObjectDisposedException)
 			{
 				// A closed profiling sink cannot replace the export result/original exception.
