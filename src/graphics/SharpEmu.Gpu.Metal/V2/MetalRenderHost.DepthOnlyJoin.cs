@@ -38,11 +38,14 @@ internal sealed partial class MetalRenderHost
 
     private long _depthOnlyJoins;
     private long _depthOnlyJoinsSampled;
+    private long _depthOnlyJoinsDeferredCopies;
 
-    internal (long Joined, long Sampled) TakeDepthOnlyJoins() =>
-        (Interlocked.Exchange(ref _depthOnlyJoins, 0), Interlocked.Exchange(ref _depthOnlyJoinsSampled, 0));
+    internal (long Joined, long Sampled, long DeferredCopies) TakeDepthOnlyJoins() =>
+        (Interlocked.Exchange(ref _depthOnlyJoins, 0),
+         Interlocked.Exchange(ref _depthOnlyJoinsSampled, 0),
+         Interlocked.Exchange(ref _depthOnlyJoinsDeferredCopies, 0));
 
-    private void NoteJoinStages(ReadOnlySpan<IPreparedBindings> stages)
+    internal void NoteJoinStages(ReadOnlySpan<IPreparedBindings> stages)
     {
         _joinStages[0] = stages.Length > 0 ? stages[0] as MetalStageBindings : null;
         _joinStages[1] = stages.Length > 1 ? stages[1] as MetalStageBindings : null;
@@ -97,6 +100,14 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
+        // A copy deferred to the next encoder boundary lands there. Beginning a pass of its own
+        // is that boundary; joining skips it, and the draw would read the bytes before the copy.
+        if (_deferredLabelCopies.Count != 0 && BindsDeferredCopyDestination())
+        {
+            _depthOnlyJoinsDeferredCopies++;
+            return false;
+        }
+
         var variant = DepthOnlyJoinVariant(upcoming, description, in open);
         if (variant is null)
         {
@@ -106,7 +117,36 @@ internal sealed partial class MetalRenderHost
         _joinedPipeline = upcoming;
         _joinedVariant = variant;
         _depthOnlyJoins++;
+        PassProfileNoteJoin();
         return true;
+    }
+
+    // Whether the draw reads a buffer a deferred copy writes. A program that reaches guest
+    // memory through device addresses names no ranges, so any waiting copy may be one it reads.
+    private bool BindsDeferredCopyDestination()
+    {
+        foreach (var stage in _joinStages)
+        {
+            if (stage is null)
+            {
+                continue;
+            }
+
+            if (stage.Program.UsesDeviceAddresses)
+            {
+                return true;
+            }
+
+            for (var index = 0; index < stage.BufferCount; index++)
+            {
+                if (stage.Buffers[index].IsValid && DeferredLabelCopiesTouch(in stage.Buffers[index]))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     // Whether a texture the draw binds is one of the open pass's colour attachments, or a

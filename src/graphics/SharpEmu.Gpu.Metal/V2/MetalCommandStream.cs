@@ -1032,6 +1032,24 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         return false;
     }
 
+    // The same question for a binding already resolved to host memory: whether a copy waiting
+    // for the open encoder to end lands in the window bytes the range names.
+    private bool DeferredLabelCopiesTouch(in MetalGuestRange range)
+    {
+        foreach (ref readonly var copy in
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
+        {
+            if (copy.DestinationBuffer == range.Buffer &&
+                copy.DestinationOffset < range.Offset + range.Size &&
+                range.Offset < copy.DestinationOffset + (ulong)copy.Bytes)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// A dispatch about to bind these guest bytes runs after the command-processor writes
     /// recorded before it: one still waiting for the open compute encoder to end would land

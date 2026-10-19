@@ -31,7 +31,7 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelSetMeshBuffer = MetalNative.Selector("setMeshBuffer:offset:atIndex:");
 
     // The host descriptors of one stage, reused across draws so a draw allocates nothing.
-    private sealed class MetalStageBindings : IPreparedBindings
+    internal sealed class MetalStageBindings : IPreparedBindings
     {
         public ShaderStageResources StageResources;
         public ShaderProgramInfo Program = null!;

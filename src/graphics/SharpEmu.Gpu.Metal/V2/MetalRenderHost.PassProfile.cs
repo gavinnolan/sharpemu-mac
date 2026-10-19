@@ -50,6 +50,7 @@ internal sealed partial class MetalRenderHost
         public long LoadBytes;
         public long StoreBytes;
         public int Draws;
+        public int Joins;
         public ulong Groups;
         public Dictionary<string, int>? Shaders;
         public string End = string.Empty;
@@ -352,6 +353,15 @@ internal sealed partial class MetalRenderHost
         record.Shaders[key] = record.Shaders.TryGetValue(key, out var count) ? count + 1 : 1;
     }
 
+    /// <summary>A depth-only draw joined the open pass; its draw and shader are counted as any other's.</summary>
+    private void PassProfileNoteJoin()
+    {
+        if (_ppOpen is not null)
+        {
+            _ppOpen.Joins++;
+        }
+    }
+
     /// <summary>Mesh threadgroups one draw launched, the work a mesh-bound pass scales with.</summary>
     private void PassProfileNoteGroups(ulong groups)
     {
@@ -519,7 +529,7 @@ internal sealed partial class MetalRenderHost
                 $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} tg={record.Groups} " +
                 $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
-                $"after=[{after}] n_after={record.After?.Count ?? 0}")).Append('\n');
+                $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins}")).Append('\n');
         }
 
         var span = lastEnd > firstStart && firstStart != ulong.MaxValue
