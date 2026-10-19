@@ -693,12 +693,19 @@ internal sealed partial class MetalImageCache
     /// <summary>
     /// Recorded work stores into guest memory without re-arming the claims there: the
     /// slices starting in the range take the full path until a settled scan finds them
-    /// unchanged.
+    /// unchanged. Callable with or without the cache lock held: a writeback encoded under it
+    /// can end the encoders and record the staged stores, which land here.
     /// </summary>
     public void ForgetStandingDccClaims(ulong address, ulong size)
     {
         if (Volatile.Read(ref _standingDccClaimCount) == 0)
         {
+            return;
+        }
+
+        if (_lock.IsHeldByCurrentThread)
+        {
+            ForgetStandingDccClaimsLocked(address, size);
             return;
         }
 
@@ -710,15 +717,7 @@ internal sealed partial class MetalImageCache
     // does not re-arm claims, so the slices it reaches stop standing.
     private void NoteOwnGuestWrite(ulong address, ulong size)
     {
-        if (_lock.IsHeldByCurrentThread)
-        {
-            ForgetStandingDccClaimsLocked(address, size);
-        }
-        else
-        {
-            ForgetStandingDccClaims(address, size);
-        }
-
+        ForgetStandingDccClaims(address, size);
         _owner.NoteGuestWrite(address, size);
     }
 
@@ -730,9 +729,23 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        if (_lock.IsHeldByCurrentThread)
+        {
+            _standingDccClaims.Clear();
+            Volatile.Write(ref _standingDccClaimCount, 0);
+            return;
+        }
+
         using var held = _lock.Hold();
         _standingDccClaims.Clear();
         Volatile.Write(ref _standingDccClaimCount, 0);
+    }
+
+    /// <summary>Runs <paramref name="body"/> under the cache lock, as a writeback encoded inside a lookup does.</summary>
+    internal void RunLockedForTest(Action body)
+    {
+        using var held = _lock.Hold();
+        body();
     }
 
     // _standingDccClaims.Count, for the callers above to skip the lock when there is none.

@@ -183,6 +183,25 @@ public sealed unsafe partial class MetalDccMaterializationTests
         Assert.Equal(1, rig.Owner.PendingQueries);
     }
 
+    // A writeback encoded inside a lookup ends the encoders and records the staged stores
+    // with the cache lock still held; forgetting the claims there must not take it again.
+    [Fact]
+    public void ClaimFirst_ForgettingUnderTheCacheLockDoesNotReEnterIt()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        ClaimClear(rig);
+
+        rig.Cache.RunLockedForTest(() =>
+        {
+            rig.Cache.ForgetStandingDccClaims(MetadataAddress, 8);
+            rig.Cache.ForgetAllStandingDccClaims();
+        });
+        rig.Lookup();
+
+        Assert.Equal(1, rig.Owner.PendingQueries);
+    }
+
     // While a recorded fill still reaches the slice the full path runs, so the fill is
     // settled (forgotten) the way it always was once its bytes land.
     [Fact]
