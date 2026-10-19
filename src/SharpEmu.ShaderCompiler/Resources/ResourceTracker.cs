@@ -10,6 +10,13 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // and patches each access with its index. A failure names hash, stage and pc.
 public sealed partial class ResourceTracker
 {
+    /// <summary>
+    /// Process-wide: an address word the plan cannot validate at run time counts as a
+    /// scalar memory word, so what depends on it is a device descriptor. The Metal backend
+    /// turns it off and keeps such words host-evaluated.
+    /// </summary>
+    public static bool UnvalidatedAddressWordsAreMemory { get; set; } = true;
+
     private const uint SamplerBorderClampMask = (1u << 2) | (1u << 5) | (1u << 8);
     private const uint SamplerDword3ReservedMask = 0x3FFF_F000u;
 
@@ -511,7 +518,8 @@ public sealed partial class ResourceTracker
             }
 
             if (current.Kind == ScalarValueKind.ScalarBufferWord ||
-                current.Kind == ScalarValueKind.ScalarAddressWord && !_plan.ValidateRuntimeValue(current))
+                UnvalidatedAddressWordsAreMemory && current.Kind == ScalarValueKind.ScalarAddressWord &&
+                !_plan.ValidateRuntimeValue(current))
             {
                 return true;
             }
@@ -860,6 +868,7 @@ public sealed partial class ResourceTracker
             MipMode = mip,
             DepthCompare = depth,
             R128 = memory.ImageR128,
+            CubeAccess = true,
         };
         Merge(added, memory, pc);
         _info.Images.Add(added);
@@ -874,12 +883,9 @@ public sealed partial class ResourceTracker
         image.Read |= !write || atomic;
         image.Written |= write;
         image.Atomic |= atomic;
-        image.Atomic64 |= atomic && IsWideImageAtomic(memory);
+        image.Packed |= memory.ImagePacked;
+        image.CubeAccess &= memory.ImageCube;
     }
-
-    // IMAGE_ATOMIC_* names a 64-bit texel by two data dwords (compare-swap: the new value and the comparison, four).
-    private static bool IsWideImageAtomic(MemoryAccessInfo memory) =>
-        System.Numerics.BitOperations.PopCount(memory.Dmask) == (memory.Opcode == "ImageAtomicCmpswap" ? 4 : 2);
 
     private uint AddSampler(uint source, uint pc)
     {
@@ -937,6 +943,19 @@ public sealed partial class ResourceTracker
     }
 
     // ---- collection ----
+
+    // This access goes through the device-address page table. A store or an atomic
+    // through it can land on any mapped guest page and no host-side range says where,
+    // which a backend whose guest memory *is* the GPU's memory has to know: a later
+    // read of any address has to wait for the submission.
+    private void NoteDeviceAddresses(MemoryAccessInfo memory)
+    {
+        _info.UsesDeviceAddresses = true;
+        if (memory.Access is MemoryAccess.Write or MemoryAccess.Atomic)
+        {
+            _info.WritesDeviceAddresses = true;
+        }
+    }
 
     private void Collect(int index)
     {
@@ -1017,7 +1036,7 @@ public sealed partial class ResourceTracker
                     {
                         Provenance = BufferDescriptorProvenance.Runtime,
                     };
-                    _info.UsesDeviceAddresses = true;
+                    NoteDeviceAddresses(memory);
                     return;
                 }
             }
@@ -1052,7 +1071,7 @@ public sealed partial class ResourceTracker
                 if (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle))
                 {
                     memory.DeviceDescriptor = true;
-                    _info.UsesDeviceAddresses = true;
+                    NoteDeviceAddresses(memory);
                     return;
                 }
 
@@ -1060,7 +1079,7 @@ public sealed partial class ResourceTracker
                 {
                     Provenance = BufferDescriptorProvenance.Runtime,
                 };
-                _info.UsesDeviceAddresses = true;
+                NoteDeviceAddresses(memory);
                 return;
             }
 
@@ -1071,7 +1090,7 @@ public sealed partial class ResourceTracker
                     (IsDeviceLoadedBufferHandle(access.Handle) || HasDeviceRecordCount(access.Handle))))
             {
                 memory.DeviceDescriptor = true;
-                _info.UsesDeviceAddresses = true;
+                NoteDeviceAddresses(memory);
                 return;
             }
 
@@ -1095,7 +1114,7 @@ public sealed partial class ResourceTracker
                 }
 
                 memory.DeviceDescriptor = true;
-                _info.UsesDeviceAddresses = true;
+                NoteDeviceAddresses(memory);
                 return;
             }
 
@@ -1127,7 +1146,7 @@ public sealed partial class ResourceTracker
                 throw Failure(memory.Pc, "an address handle must have two address dwords");
             }
 
-            _info.UsesDeviceAddresses = true;
+            NoteDeviceAddresses(memory);
             return;
         }
 

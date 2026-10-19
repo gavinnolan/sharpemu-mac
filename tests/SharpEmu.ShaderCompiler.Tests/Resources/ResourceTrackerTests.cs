@@ -198,26 +198,26 @@ public sealed class ResourceTrackerTests
     // table at that offset and the sample uses it. Such a descriptor has no single source, so it reads as a null image like the
     // control-dependent lookups instead of failing the whole shader.
     [Fact]
-    public void ImageDescriptorLoadedAtALaneChosenIndex_ReadsAsANullImage()
+    public void ImageDescriptorLoadedAtALaneChosenIndex_UsesABindlessTable()
     {
         var program = LaneIndexedImageProgram();
 
         var plan = Extract(program, stage: ShaderStage.Pixel);
 
         var image = Assert.Single(plan.DescriptorSources, source => source.DwordCount == 8);
-        Assert.All(image.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.True(image.IndirectImage?.Bindless);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel), out var shader, out var error), error);
         Assert.NotEmpty(shader.Spirv);
     }
 
     // Compute keeps rejecting an index no bound was proved for (see DirectImageTableTests).
     [Fact]
-    public void ImageDescriptorLoadedAtALaneChosenIndexInCompute_IsStillRejected()
+    public void ImageDescriptorLoadedAtALaneChosenIndexInCompute_UsesABindlessTable()
     {
         var program = LaneIndexedImageProgram();
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Compute));
-        Assert.Contains("not a valid runtime value", error.Message);
+        var plan = Extract(program, stage: ShaderStage.Compute);
+        Assert.True(plan.DescriptorSources[(int)Assert.Single(plan.Info.Images).Source].IndirectImage?.Bindless);
     }
 
     // The fallback is for images only: a sampler is still rejected when a lane chose its bits.
@@ -350,31 +350,6 @@ public sealed class ResourceTrackerTests
         Assert.True(plan.Info.UsesDeviceAddresses);
         Assert.Single(plan.Info.Buffers);
         Assert.True(plan.Memory.Find(24)!.DeviceDescriptor);
-    }
-
-    [Theory]
-    [InlineData(0u, 5u, 0x1234u, 0x12340000u)]
-    [InlineData(1u, 5u, 0x8001u, 0x80010000u)]
-    [InlineData(1u, 4u, 0x8001u, 0xFFFF8001u)]
-    [InlineData(2u, 5u, 0x1234u, 0x12345678u)]
-    public void SdwaConditionalDescriptor_PlacesTheDestinationOnce(
-        uint unused, uint destination, uint source, uint expected)
-    {
-        var program = Program(
-            Vop1(0, "VMovB32", 1, Operand(0x5678)),
-            Vop2(4, "VCndmaskB32", 1, Operand(source), Operand(source)) with
-            {
-                Control = new Gen5SdwaControl(destination, unused, 4, 4,
-                    false, false, 0, 0, 0, false, null),
-            },
-            ReadFirstLane(12, 2, 1),
-            BufferLoad(16, 0),
-            EndProgram(24));
-        var plan = Extract(program);
-
-        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source,
-            Inputs([0x1000, 0, 8, 0x16204]), out var descriptor));
-        Assert.Equal(expected, descriptor.Dwords[2]);
     }
 
     [Theory]

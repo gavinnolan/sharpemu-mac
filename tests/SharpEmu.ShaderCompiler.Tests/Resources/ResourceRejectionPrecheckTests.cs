@@ -125,7 +125,9 @@ public sealed class ResourceRejectionPrecheckTests
         var reads = 0;
         bool Refuse(ulong address, Span<byte> bytes, bool clean) { reads++; return false; }
         Assert.True(fixture.Run(Refuse, ref snapshot, ref specialization));
-        Assert.Equal(4, reads);
+        // One validation read per variant: with no sample, none is skipped. Each variant is then
+        // offered to the slot refresh, which reads its range and retries the one word on its own.
+        Assert.Equal(4 + 4 * 2, reads);
         Assert.Equal(0, fixture.Cache.Hits);
         Assert.Equal(5, fixture.Cache.Misses);
     }
@@ -138,8 +140,11 @@ public sealed class ResourceRejectionPrecheckTests
         var fixture = new Fixture();
         var entry = fixture.OlderEntry();
         var property = changePolicy ? "RangeClean" : "WordTableOnly";
-        var flags = (bool[])entry.GetType().GetProperty(property)!.GetValue(entry)!;
+        // Variants share range arrays that did not change between them, so the older entry gets
+        // its own copy before it differs.
+        var flags = (bool[])((bool[])entry.GetType().GetProperty(property)!.GetValue(entry)!).Clone();
         flags[0] = true;
+        entry.GetType().GetProperty(property)!.SetValue(entry, flags);
         fixture.Memory.Words[0] = 0x6000;
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
@@ -153,8 +158,10 @@ public sealed class ResourceRejectionPrecheckTests
     {
         var fixture = new Fixture();
         var entry = fixture.OlderEntry();
-        var addresses = (ulong[])entry.GetType().GetProperty("RangeAddresses")!.GetValue(entry)!;
+        // Variants share range arrays that did not change between them (see above).
+        var addresses = (ulong[])((ulong[])entry.GetType().GetProperty("RangeAddresses")!.GetValue(entry)!).Clone();
         addresses[0] += 4;
+        entry.GetType().GetProperty("RangeAddresses")!.SetValue(entry, addresses);
         fixture.Memory.Words[0] = 0x6000;
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();

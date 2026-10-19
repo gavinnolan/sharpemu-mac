@@ -74,18 +74,25 @@ public sealed class ImageResource
     public bool Read { get; set; }
     public bool Written { get; set; }
     public bool Atomic { get; set; }
-    // An atomic on two data dwords (compare-swap: four), which works on 64-bit texels.
-    public bool Atomic64 { get; set; }
     public bool DepthCompare { get; set; }
     // Guest compare function (0..7) evaluated in the shader for a depth-compare
     // image whose format has no Vulkan depth equivalent; -1 when not emulated.
     public int EmulatedCompareFunction { get; set; } = -1;
     public bool Cube { get; set; }
+    // Every access is a DIM_CUBE instruction: a table candidate that is not a cube cannot be read.
+    public bool CubeAccess { get; set; }
     public bool R128 { get; set; }
+    // Some access is a _PCK load or store; the materializer then records the guest
+    // format in PackedFormat so the emitter can pack and unpack the texel's raw bits.
+    public bool Packed { get; set; }
+    public uint PackedFormat { get; set; } = DescriptorConstants.InvalidFormat;
     public uint IndirectRoot { get; set; } = DescriptorConstants.NoIndex;
     public uint IndirectMappingOffset { get; set; }
     public uint IndirectSearchIterations { get; set; }
     public List<uint> IndirectResources { get; set; } = [];
+    // The bindless table this image is a class variant of (its slot in the stage's bindless
+    // image tables), or NoIndex. The root and its variants list the variants in IndirectResources.
+    public uint BindlessSlot { get; set; } = DescriptorConstants.NoIndex;
 
     public bool MipStatistics { get; set; }
 
@@ -103,6 +110,17 @@ public sealed class SamplerResource
     public uint FirstUsePc { get; set; }
     public bool ForcePointFiltering { get; set; }
     public bool DepthCompare { get; set; }
+
+    // The paired S#'s LOD_BIAS (word 2 bits 13:0), signed 6.8 fixed point, which the
+    // emitter adds to every LOD the sampler computes or is given; zero for most samplers.
+    public int LodBias { get; set; }
+
+    // The axes (bit 0 X, 1 Y, 2 Z) whose S# clamp is MIRROR_ONCE_BORDER, which no host
+    // address mode is: the host samples mirror-once-to-edge and the emitter substitutes the
+    // S# border colour (BorderColorType) past the mirrored copy.
+    public uint MirrorOnceBorderAxes { get; set; }
+
+    public uint BorderColorType { get; set; }
 
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
@@ -184,6 +202,14 @@ public sealed class ShaderResourceInfo
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
 
+    /// <summary>
+    /// The program stores through the device-address page table, so it can write any
+    /// mapped guest page and no host-side range describes where. A backend that keeps
+    /// guest memory as the GPU's memory has to treat the submission as writing
+    /// everywhere; one that copies into staging resources does not.
+    /// </summary>
+    public bool WritesDeviceAddresses { get; set; }
+
     public ShaderResourceInfo Clone() => new()
     {
         Buffers = Buffers.Select(buffer => buffer.Clone()).ToList(),
@@ -200,6 +226,7 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        WritesDeviceAddresses = WritesDeviceAddresses,
     };
 }
 
@@ -218,6 +245,9 @@ public sealed record IndirectImageSelector(
     public uint DynamicOffsetBase { get; init; }
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
+    // A dense table a V# describes, read through a per-entry handle table on the device
+    // instead of a bounded set of bound candidates.
+    public bool Bindless { get; init; }
 
     // The key is selected by a value the whole wave shares (a loop counter), not by a lane's value. Such an image
     // used to read as a null image, so a table the host cannot read stays null instead of failing the program.

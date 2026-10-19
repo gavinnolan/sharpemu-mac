@@ -12,11 +12,13 @@ public delegate bool GuestWordReader(ulong address, out uint word);
 // the two memory readers. The clean reader refuses memory the GPU may still own.
 public sealed class ResourceRuntimeInputs
 {
-    public IReadOnlyList<uint> UserData { get; init; } = [];
-    public ulong ShaderBase { get; init; }
+    // Settable so the draw path can refill one instance per lookup; nothing keeps an
+    // inputs object past the call it was passed to.
+    public IReadOnlyList<uint> UserData { get; set; } = [];
+    public ulong ShaderBase { get; set; }
     public GuestWordReader? ReadMemory { get; init; }
     public GuestWordReader? ReadCleanMemory { get; init; }
-    public ComputeSelectorState? ComputeState { get; init; }
+    public ComputeSelectorState? ComputeState { get; set; }
     public Action<uint, uint, ulong, ulong, ReadOnlyMemory<uint>>? TraceImageCandidate { get; init; }
 
     // Told true before the flattened table's words are evaluated and false after, so a reader
@@ -25,7 +27,15 @@ public sealed class ResourceRuntimeInputs
 
     public ResidentGuestBytesReader? ReadResidentMemory { get; init; }
 
+    // Compares recorded ranges in place on a hit; null leaves a hit reading every range back.
+    public ResidentGuestBytesComparer? CompareResidentMemory { get; init; }
+
     public bool ReadsClean { get; init; }
+
+    // Whether recorded GPU work may still write the dword at this address, asked without
+    // waiting. A data-only table word found pending is learned as a device load
+    // (DeviceDataLoads); null leaves every data word flattened.
+    public Func<ulong, bool>? DataWritePending { get; init; }
 
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
@@ -37,7 +47,9 @@ public sealed class ResourceRuntimeInputs
         TraceImageCandidate = TraceImageCandidate,
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
+        CompareResidentMemory = CompareResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
+        DataWritePending = DataWritePending,
     };
 }
 

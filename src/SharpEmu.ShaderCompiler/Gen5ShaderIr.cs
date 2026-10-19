@@ -119,14 +119,20 @@ public readonly record struct Gen5ColorComponentMapping
     }
 }
 
-// SPI_SHADER_COL_FORMAT: what a compressed EXP of a color target carries in each half of a register.
-public enum Gen5PixelExportFormat : byte
+// SPI_SHADER_COL_FORMAT (and SPI_SHADER_Z_FORMAT): how the export's VGPRs carry the target's
+// channels. The 16-bit formats come from compressed (COMPR) exports, two channels a VGPR.
+public enum Gen5ColorExportFormat
 {
-    Float16 = 4,
-    Unorm16 = 5,
-    Snorm16 = 6,
-    Uint16 = 7,
-    Sint16 = 8,
+    Zero = 0,
+    R32 = 1,
+    GR32 = 2,
+    AR32 = 3,
+    Fp16Abgr = 4,
+    Unorm16Abgr = 5,
+    Snorm16Abgr = 6,
+    Uint16Abgr = 7,
+    Sint16Abgr = 8,
+    Abgr32 = 9,
 }
 
 public readonly record struct Gen5PixelOutputBinding(
@@ -145,8 +151,21 @@ public readonly record struct Gen5PixelOutputBinding(
 
     private readonly uint? _exportTarget;
 
-    // Preserve shader alpha at location zero, index one when component mapping moves it.
+    // The fragment output index: 1 is the second source of dual-source blending (the MRT1
+    // export), which shares host location 0 with the first and is not a render target.
+    public uint BlendSourceIndex { get; init; }
+    // The blend reads source alpha but the component mapping moves the shader's alpha out of
+    // the host alpha channel: the program also writes that alpha to the dual-source output
+    // (Location 0, Index 1) so the pipeline can blend with SRC1_ALPHA.
     public bool DualSourceAlpha { get; init; }
+
+    // SPI_SHADER_COL_FORMAT of the export target; null when the registers name no format, and
+    // then the export's own layout (COMPR or not) decides.
+    public Gen5ColorExportFormat? ExportFormat { get; init; }
+
+    // CB_COLOR_INFO.BLEND_CLAMP on a float target written without blending: the CB clamps
+    // the exported colour to [0, 1], so the program saturates the output.
+    public bool ClampToUnit { get; init; }
 
     // The EXP MRT target that feeds this slot. It differs from the slot when the pixel
     // program skips targets, because the hardware packs color exports into the slots
@@ -156,13 +175,6 @@ public readonly record struct Gen5PixelOutputBinding(
         get => _exportTarget ?? GuestSlot;
         init => _exportTarget = value;
     }
-
-    // The fragment output index: 1 is the second source of dual-source blending, which
-    // shares its location with the first and is not a render target.
-    public uint Index { get; init; }
-
-    // The format of the export that feeds this slot.
-    public Gen5PixelExportFormat ExportFormat { get; init; } = Gen5PixelExportFormat.Float16;
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(
@@ -170,6 +182,46 @@ public readonly record struct Gen5ComputeSystemRegisters(
     uint? WorkGroupYRegister,
     uint? WorkGroupZRegister,
     uint? ThreadGroupSizeRegister);
+
+// The geometry-engine state one NGG primitive-shader (merged ES/GS) subgroup runs under.
+// A primitive shader is one workgroup of waves that share LDS, so the emitter needs the
+// subgroup's vertex/primitive budget to size its output and its workgroup.
+//
+// VerticesPerSubgroup/PrimitivesPerSubgroup come from VGT_GS_ONCHIP_CNTL
+// (ES_VERTS_PER_SUBGRP / GS_PRIMS_PER_SUBGRP); when the title leaves them zero the
+// emitter falls back to MaxOutputPerSubgroup (GE_MAX_OUTPUT_PER_SUBGROUP). The group
+// sizes are GE_CNTL.VERT_GRP_SIZE / PRIM_GRP_SIZE, which bound what the geometry engine
+// packs into one subgroup. OutputPrimitiveType is VGT_GS_OUT_PRIM_TYPE
+// (0 point, 1 line strip, 2 triangle strip). LocalDataShareBytes is the LDS the stage
+// allocates, decoded from the geometry stage's resource register.
+public readonly record struct Gen5NggStageInfo(
+    uint VerticesPerSubgroup,
+    uint PrimitivesPerSubgroup,
+    uint MaxOutputPerSubgroup,
+    uint OutputPrimitiveType,
+    uint PrimitiveAmplificationFactor,
+    uint LocalDataShareBytes,
+    uint VertexGroupSize,
+    uint PrimitiveGroupSize)
+{
+    /// <summary>VGT_GS_MAX_VERT_OUT of a fused program, whose GS half runs after the ES
+    /// half in the same workgroup; zero for a primitive shader without a GS half. A GS
+    /// half reads its input vertices back from LDS through the GS vertex offsets, so the
+    /// launch state has to assemble those from the draw's input topology, and every input
+    /// primitive can emit up to this many vertices into the subgroup's output.</summary>
+    public uint GeometryVerticesOut { get; init; }
+
+    /// <summary>True when the stage runs as wave64 (VGT_SHADER_STAGES_EN.GS_W32_EN clear).
+    /// A mesh program without a GS half translates such a wave as a narrow wave64: one
+    /// 32-lane Metal simdgroup whose upper 32 guest lanes are architecturally inactive.</summary>
+    public bool IsWave64 { get; init; }
+
+    /// <summary>True in NGG passthrough mode (VGT_SHADER_STAGES_EN.PRIMGEN_PASSTHRU_EN): the
+    /// geometry engine hands every lane its primitive already packed the way the primitive
+    /// export takes it (three 10-bit vertex fields) in v0, instead of the GS vertex offsets,
+    /// and the program exports that register as it is.</summary>
+    public bool Passthrough { get; init; }
+}
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
 {
@@ -228,6 +280,21 @@ public sealed record Gen5ImageControl(
     bool A16,
     bool D16) : Gen5InstructionControl
 {
+    /// <summary>MIMG UNRM (word bit 12): the address is in texels rather than normalized.</summary>
+    public bool Unorm { get; init; }
+
+    /// <summary>MIMG DLC (word bit 7): a cache policy, no effect on the result.</summary>
+    public bool Dlc { get; init; }
+
+    /// <summary>MIMG R128 (word bit 15): the T# is four dwords rather than eight.</summary>
+    public bool R128 { get; init; }
+
+    /// <summary>MIMG TFE (word bit 16): a PRT fault-status dword follows the data.</summary>
+    public bool Tfe { get; init; }
+
+    /// <summary>MIMG LWE (word bit 17): an LOD-warning status dword follows the data.</summary>
+    public bool Lwe { get; init; }
+
     public uint GetAddressRegister(int component) =>
         component < AddressRegisters.Count
             ? AddressRegisters[component]
@@ -249,6 +316,8 @@ public sealed record Gen5RayIntersectControl(
             : VectorAddress + (uint)component;
 }
 
+// Dlc (FLAT word 0 bit 12) only steers the GL1 cache policy. AddThreadId marks
+// GLOBAL_LOAD/STORE_DWORD_ADDTID, whose address is SADDR + offset + lane * 4 with no VADDR.
 public sealed record Gen5GlobalMemoryControl(
     uint DwordCount,
     uint VectorAddress,
@@ -260,10 +329,14 @@ public sealed record Gen5GlobalMemoryControl(
     bool Slc,
     bool UsesFlatAddress = false,
     uint? DynamicOffsetRegister = null,
-    bool SourceIsScalar = false) : Gen5InstructionControl;
+    bool SourceIsScalar = false,
+    bool Dlc = false,
+    bool AddThreadId = false) : Gen5InstructionControl;
 
 // A typed access carries the unified format from the instruction; a formatted
-// untyped access reads the descriptor format when it executes.
+// untyped access reads the descriptor format when it executes. Dlc only steers the GL1
+// cache policy. Tfe (a load's texel-fault enable) writes a status dword to the VGPR after
+// the data; Lds (MUBUF word 0 bit 16) returns a load's data to LDS at M0 instead of VGPRs.
 public sealed record Gen5BufferMemoryControl(
     uint DwordCount,
     uint VectorAddress,
@@ -275,7 +348,10 @@ public sealed record Gen5BufferMemoryControl(
     bool Glc,
     bool Slc,
     bool Typed = false,
-    uint TypedFormat = 0) : Gen5InstructionControl;
+    uint TypedFormat = 0,
+    bool Dlc = false,
+    bool Tfe = false,
+    bool Lds = false) : Gen5InstructionControl;
 
 public sealed record Gen5ExportControl(
     uint Target,
@@ -286,7 +362,18 @@ public sealed record Gen5ExportControl(
 
 public sealed record Gen5InterpolationControl(
     uint Attribute,
-    uint Channel) : Gen5InstructionControl;
+    uint Channel) : Gen5InstructionControl
+{
+    // V_INTERP_MOV's parameter: 0 is P10, 1 P20 and 2 P0 (the VINTRP vsrc field, VOP3 src1).
+    public uint Parameter { get; init; }
+
+    // The f16 forms' HIGH bit (VOP3 src0[8]): the attribute's upper 16 bits.
+    public bool High { get; init; }
+
+    // The VOP3 encoding's modifiers (abs/neg on the I/J and S2 operands, clamp, omod);
+    // null for VINTRP.
+    public Gen5Vop3Control? Modifiers { get; init; }
+}
 
 public sealed record Gen5Vop3Control(
     uint AbsoluteMask,
@@ -333,10 +420,14 @@ public sealed record Gen5Dpp8Control(
     uint LaneSelectors,
     bool FetchInactive) : Gen5InstructionControl;
 
+// Glc is the SMEM GLC bit (gfx10 word 0 bit 16): the load misses the scalar cache and
+// reads the device-coherent value. Dlc (word 0 bit 14) only steers the GL1 cache policy.
 public sealed record Gen5ScalarMemoryControl(
     uint DestinationCount,
     int ImmediateOffsetBytes,
-    uint? DynamicOffsetRegister) : Gen5InstructionControl;
+    uint? DynamicOffsetRegister,
+    bool Glc = false,
+    bool Dlc = false) : Gen5InstructionControl;
 
 public sealed record Gen5DataShareControl(
     uint Offset0,

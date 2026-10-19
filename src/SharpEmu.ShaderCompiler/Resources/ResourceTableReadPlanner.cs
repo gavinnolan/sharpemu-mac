@@ -32,7 +32,8 @@ public sealed class ResourceTableReadPlanner
         IReadOnlyList<ResourceTableRead> Reads,
         IReadOnlyList<ScalarValue> DynamicReads,
         IReadOnlyDictionary<ScalarValue, ScalarValue> Replacements,
-        IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex);
+        IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex,
+        int DataSlotStart);
 
     public static Result Plan(ScalarValueGraph graph, ShaderStage stage, ulong hash) =>
         new ResourceTableReadPlanner(graph, stage, hash).Run();
@@ -73,19 +74,34 @@ public sealed class ResourceTableReadPlanner
             }
         }
 
+        // Slots from here on are data reads: no descriptor depends on them, the shader only
+        // uses their values. A load a host learned the GPU writes stays a device load, but
+        // what its address depends on is still collected as before.
         var validatorReadCount = _reads.Count;
+        var deviceData = DeviceDataLoads.For(_hash);
         foreach (var access in _graph.Accesses)
         {
             if (access?.Read is { Kind: ScalarValueKind.ScalarAddressWord } read &&
                 IsRawRead(read) && read.Operands[1].IsConstant &&
                 new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, validatorReadCount).Validate(read))
             {
-                Collect(read, _graph.Memory[read.MemoryIndex].Pc);
+                var pc = _graph.Memory[read.MemoryIndex].Pc;
+                if (deviceData is not null && deviceData.Contains(read.MemoryIndex))
+                {
+                    foreach (var operand in read.Operands)
+                    {
+                        Collect(operand, pc);
+                    }
+
+                    continue;
+                }
+
+                Collect(read, pc);
             }
         }
 
         PatchReads();
-        return new Result(_reads, _dynamicReads, _replacements, _flattenedSlotByMemoryIndex);
+        return new Result(_reads, _dynamicReads, _replacements, _flattenedSlotByMemoryIndex, validatorReadCount);
     }
 
     private void Fail(uint pc, string message) =>

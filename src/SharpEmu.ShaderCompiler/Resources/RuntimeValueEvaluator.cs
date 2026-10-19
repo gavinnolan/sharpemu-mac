@@ -66,6 +66,9 @@ public sealed class RuntimeValueEvaluator
         if (_compiled is not null) _compiledValues.EnsureCapacity(_compiled.Count);
     }
 
+    // Whether this walk runs the plan's IL-compiled evaluator or interprets the graph.
+    internal bool UsesCompiledEvaluator => _compiled is not null;
+
     public bool Evaluate(ScalarValue value, out uint result)
     {
         if (!EvaluateWide(value, out var wide))
@@ -140,7 +143,8 @@ public sealed class RuntimeValueEvaluator
                     return false;
                 }
 
-                result = _inputs.UserData[(int)(register - _plan.UserDataBase)];
+                var offset = (int)(register - _plan.UserDataBase);
+                result = _inputs.UserData[offset];
                 return true;
             }
             case ScalarValueKind.ShaderBase:
@@ -389,6 +393,34 @@ public sealed class RuntimeValueEvaluator
 
     internal ResourceRuntimeInputs Inputs => _inputs;
 
+    // Before a data-only slot is read: when the GPU may still be writing its dword, the
+    // shader learns it as a device load. This read still waits, the next plan does not.
+    private void LearnPendingDataSlot(int slot, int[] memoryIndices)
+    {
+        var value = _plan.TableReads[slot].Value;
+        if (value.MemoryIndex >= _plan.Memory.Count || value.Operands.Length < 2)
+        {
+            return;
+        }
+
+        var handle = value.Operands[0];
+        if (handle.Operands.Length < 2 ||
+            !EvaluateWide(handle.Operands[0], out var low) ||
+            !EvaluateWide(handle.Operands[1], out var high) ||
+            !Operand(value, 1, out var offset))
+        {
+            return;
+        }
+
+        var baseAddress = ((high << 32) | (uint)low) & AddressMask;
+        if (ResolveRawAddress(value.Kind, baseAddress, high, 0, (int)_plan.Memory[value.MemoryIndex].Offset, (uint)offset,
+                out var address) == RawAddress.Read &&
+            _inputs.DataWritePending!(address))
+        {
+            DeviceDataLoads.Learn(_plan.Hash, memoryIndices);
+        }
+    }
+
     private static bool AddSignedAddress(ulong baseAddress, long offset, out ulong result)
     {
         result = 0;
@@ -416,6 +448,63 @@ public sealed class RuntimeValueEvaluator
         }
 
         result = baseAddress + forward;
+        return true;
+    }
+
+    // The compiled transactions read the table themselves, so the walk below that learns a
+    // pending data slot before reading it never runs for them. The same probe is made here,
+    // before the transaction reads (and waits for) the word, and only for a slot whose loads
+    // the shader has not learned yet: a learned shader costs a set lookup per slot, and a
+    // draw with no GPU write pending evaluates each unlearned slot's address and no more.
+    private static void LearnPendingDataSlots(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    {
+        if (inputs.DataWritePending is null || plan.DeviceDataSlots.Count == 0)
+        {
+            return;
+        }
+
+        RuntimeEvaluationScratch? scratch = null;
+        RuntimeValueEvaluator? evaluator = null;
+        try
+        {
+            foreach (var (slot, memoryIndices) in plan.DeviceDataSlots)
+            {
+                if (AllLearned(plan.Hash, memoryIndices))
+                {
+                    continue;
+                }
+
+                if (evaluator is null)
+                {
+                    scratch = RuntimeEvaluationScratch.Rent();
+                    evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
+                    inputs.TablePhase?.Invoke(true);
+                }
+
+                evaluator.LearnPendingDataSlot(slot, memoryIndices);
+            }
+        }
+        finally
+        {
+            if (evaluator is not null)
+            {
+                inputs.TablePhase?.Invoke(false);
+            }
+
+            scratch?.Dispose();
+        }
+    }
+
+    private static bool AllLearned(ulong hash, int[] memoryIndices)
+    {
+        foreach (var index in memoryIndices)
+        {
+            if (!DeviceDataLoads.Contains(hash, index))
+            {
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -449,12 +538,14 @@ public sealed class RuntimeValueEvaluator
         if (evaluateTable && sources.Count == 0 && !HasResourceStructure(plan) && ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) &&
             plan.CompiledTableTransaction is { } tableTransaction)
         {
+            LearnPendingDataSlots(plan, inputs);
             ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_table");
             return tableTransaction.Evaluate(inputs, additionalTableWords, out results, out table);
         }
         if (evaluateTable && ReferenceEquals(sources, plan.MaterializationSources) &&
             ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) && plan.CompiledTransaction is { } transaction)
         {
+            LearnPendingDataSlots(plan, inputs);
             ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_whole");
             // A failed transaction must not replay guest reads through the fallback evaluator.
             return transaction.Evaluate(inputs, additionalTableWords, out results, out table);
@@ -480,51 +571,68 @@ public sealed class RuntimeValueEvaluator
         var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs, cleanFlatSlots, cleanEvaluator);
         if (evaluateTable && plan.ResourceBranches.Count != 0)
         {
-            using var branchProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.BranchSelection);
+            using var activeProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.ActiveSources);
             activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
         }
         var evaluated = new List<DescriptorWords>(sources.Count);
-        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorPrefetch))
-            RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
-        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorEvaluation))
-        foreach (var sourceIndex in sources)
+        var descriptorWords = 0;
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorWords))
         {
-            if (sourceIndex >= plan.DescriptorSources.Count)
+            using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead))
             {
-                return false;
+                RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
             }
 
-            var source = plan.DescriptorSources[(int)sourceIndex];
-            var words = new uint[source.DwordCount];
-            if (activeSources.Length == 0 || activeSources[sourceIndex])
+            foreach (var sourceIndex in sources)
             {
-                for (var index = 0; index < words.Length; index++)
+                if (sourceIndex >= plan.DescriptorSources.Count)
                 {
-                    if (!evaluator.EvaluateSourceWord((int)sourceIndex, index, out words[index]))
-                    {
-                        return false;
-                    }
+                    return false;
                 }
-            }
 
-            evaluated.Add(new DescriptorWords(words));
+                var source = plan.DescriptorSources[(int)sourceIndex];
+                var words = new uint[source.DwordCount];
+                if (activeSources.Length == 0 || activeSources[sourceIndex])
+                {
+                    for (var index = 0; index < words.Length; index++)
+                    {
+                        if (!evaluator.EvaluateSourceWord((int)sourceIndex, index, out words[index]))
+                        {
+                            return false;
+                        }
+                    }
+
+                    descriptorWords += words.Length;
+                }
+
+                evaluated.Add(new DescriptorWords(words));
+            }
         }
 
         uint[] flattened = [];
         if (evaluateTable)
         {
+            using var tableProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.TableEvaluation);
             flattened = new uint[checked(plan.TableReads.Count + additionalTableWords)];
             inputs.TablePhase?.Invoke(true);
             try
             {
-                using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.TablePrefetch))
+                using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead))
+                {
                     RawReadPrefetch.PrefetchTable(plan, evaluator, cleanEvaluator, cleanFlatSlots);
-                using var tableProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.TableEvaluation);
+                }
+
                 for (var index = 0; index < plan.TableReads.Count; index++)
                 {
                     var read = plan.TableReads[index];
                     var clean = read.FlatOffset < cleanFlatSlots.Count && cleanFlatSlots[(int)read.FlatOffset] != 0;
                     var selected = clean ? cleanEvaluator : evaluator;
+                    if (!clean && inputs.DataWritePending is not null &&
+                        plan.DeviceDataSlots.TryGetValue((int)read.FlatOffset, out var memoryIndices))
+                    {
+                        evaluator.LearnPendingDataSlot((int)read.FlatOffset, memoryIndices);
+                    }
+
                     if (read.FlatOffset >= plan.TableReads.Count || !selected.EvaluateTableRead(index, out var word))
                     {
                         return false;
@@ -538,6 +646,9 @@ public sealed class RuntimeValueEvaluator
                 inputs.TablePhase?.Invoke(false);
             }
         }
+
+        ResourceMaterializationProfile.RecordWalk(
+            evaluateTable ? plan.TableReads.Count : 0, descriptorWords, evaluator.UsesCompiledEvaluator);
 
         results = evaluated;
         table = flattened;

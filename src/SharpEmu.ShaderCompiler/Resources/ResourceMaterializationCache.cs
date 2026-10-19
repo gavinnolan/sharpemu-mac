@@ -10,27 +10,66 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // returns false so the caller falls back to a full materialization.
 public delegate bool ResidentGuestBytesReader(ulong address, Span<byte> destination, bool clean);
 
-// Cache hits require current dependency bytes and the current draw's address mapping.
-// Failed resident reads fall back to full evaluation without changing GPU ownership.
+// Compares guest bytes with recorded ones where they lie: range i is lengths[i] bytes at
+// addresses[i], to equal recorded[offsets[i]..]. True only when every range was read
+// through the same checks ResidentGuestBytesReader makes and every byte is equal. False
+// says nothing about the bytes: one differs, or the host cannot compare in place, and the
+// caller then reads the ranges to find out which.
+public delegate bool ResidentGuestBytesComparer(
+    ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets, ReadOnlySpan<byte> recorded);
+
+// Materialization is a pure function of the plan, the user data words the evaluator
+// reads, the shader base, the compute state and the guest words it reads. This cache
+// records exactly those words and reuses the result while every one of them is
+// unchanged, so a draw that re-binds the same resources skips the descriptor walk. A user
+// data word the evaluator never read (a per-draw constant for the shader's own ALU, say)
+// does not distinguish two draws; the snapshot a hit returns carries the current user
+// data. Any failed read, any GPU-owned range and any byte difference make the entry
+// miss; nothing is guessed.
 public sealed partial class ResourceMaterializationCache
 {
     // Two generations approximate LRU: a full young generation becomes the old one,
-    // and an old entry that is used again is promoted back.
+    // and an old entry that is used again is promoted back. A generation is full at
+    // _generationCapacity keys or at _generationByteBudget estimated retained bytes,
+    // whichever comes first: a count alone let entries with large bindless tables or long
+    // read lists hold hundreds of MB. Dropping the old generation only costs rebuilds.
     private readonly int _generationCapacity;
+    private readonly long _generationByteBudget;
     private Dictionary<ulong, Entry> _young = new();
     private Dictionary<ulong, Entry> _old = new();
+    private long _youngBytes;
+    private long _oldBytes;
+    // The rebases' recent entries (AddressRebase.Learn) hold entries the generations may have
+    // dropped already; past this estimate every rebase forgets them, which only delays learning.
+    private readonly long _recentByteBudget;
+    private long _recentBytes;
     private byte[] _scratch = new byte[256];
-    private byte[] _refreshScratch = [];
     private ReadRecorder? _spareRecorder;
+    private ReadRecorder? _secondSpareRecorder;
     // The user data words each (plan, base, compute state) has read so far. They only index the
     // entries; Entry.Matches is what decides a hit.
     private readonly Dictionary<ulong, ulong[]> _learnedUserData = new();
     private readonly Dictionary<ulong, AddressRebase> _rebases = new();
+    private const int MaxDrawKeys = 16384;
 
     private AddressRebase RebaseOf(ulong drawKey, ShaderResourcePlan plan)
     {
         if (!_rebases.TryGetValue(drawKey, out var rebase))
+        {
+            // Bounded: every replanned program or new shader base adds a key, and each rebase keeps
+            // up to RecentCapacity entries alive. Dropping them is what a draw key seen for the
+            // first time gets: nothing rebased and nothing learned, so entries are matched on
+            // every word again and missing ones are rebuilt.
+            if (_rebases.Count >= MaxDrawKeys)
+            {
+                _rebases.Clear();
+                _learnedUserData.Clear();
+                _recentBytes = 0;
+            }
+
             _rebases.Add(drawKey, rebase = new AddressRebase(plan));
+        }
+
         return rebase;
     }
 
@@ -62,6 +101,15 @@ public sealed partial class ResourceMaterializationCache
         private readonly Dictionary<int, int> _confirmed = new();
         private const int RecentCapacity = 512;
         private readonly Dictionary<ulong, Entry> _recent = new();
+
+        // The estimated bytes the recent entries hold (Entry.EstimatedBytes).
+        public long RecentBytes { get; private set; }
+
+        public void ForgetRecent()
+        {
+            _recent.Clear();
+            RecentBytes = 0;
+        }
 
         private ulong StructureOf(Entry entry)
         {
@@ -243,6 +291,7 @@ public sealed partial class ResourceMaterializationCache
                 {
                     _memoryState[buffer] = MemoryRejected;
                     _memoryLearnable--;
+                    Interlocked.Increment(ref _memoryBasesRejected);
                 }
                 else if (_memoryState[buffer] < MemoryActive)
                 {
@@ -263,35 +312,32 @@ public sealed partial class ResourceMaterializationCache
             return true;
         }
 
-        // The base dword moves, and so does the table slot that holds the same word.
-        public ResourceSnapshot PatchMemoryBases(ResourceSnapshot snapshot, List<(int Buffer, uint Word)> patches)
+        // The base dword moves, and so does the table slot that holds the same word. buffers are the
+        // entry's (shared) or ApplyBuffers' copy of them; only arrays shared with the entry are copied
+        // before they are written. The table is copied when a slot moves.
+        public (uint[][] Buffers, uint[] Table) PatchMemoryBases(uint[][] shared, uint[][] buffers, uint[] table,
+            List<(int Buffer, uint Word)> patches)
         {
-            var buffers = (uint[][])snapshot.Buffers.Clone();
-            uint[]? table = null;
+            if (ReferenceEquals(buffers, shared))
+                buffers = (uint[][])buffers.Clone();
+            var sharedTable = table;
             foreach (var (buffer, word) in patches)
             {
-                if (ReferenceEquals(buffers[buffer], snapshot.Buffers[buffer]))
+                if (ReferenceEquals(buffers[buffer], shared[buffer]))
                     buffers[buffer] = (uint[])buffers[buffer].Clone();
                 var previous = buffers[buffer][0];
                 buffers[buffer][0] = word;
                 var slot = _memorySlots[buffer];
                 var flat = slot >= 0 && slot < _plan.TableReads.Count ? (int)_plan.TableReads[slot].FlatOffset : -1;
-                if (flat >= 0 && flat < snapshot.FlattenedResourceTable.Length && snapshot.FlattenedResourceTable[flat] == previous)
+                if (flat >= 0 && flat < sharedTable.Length && sharedTable[flat] == previous)
                 {
-                    table ??= (uint[])snapshot.FlattenedResourceTable.Clone();
+                    if (ReferenceEquals(table, sharedTable))
+                        table = (uint[])table.Clone();
                     table[flat] = word;
                 }
             }
 
-            return new ResourceSnapshot
-            {
-                Buffers = buffers,
-                Images = snapshot.Images,
-                Samplers = snapshot.Samplers,
-                FlattenedResourceTable = table ?? snapshot.FlattenedResourceTable,
-                UserData = snapshot.UserData,
-                DeviceAddressRanges = snapshot.DeviceAddressRanges,
-            };
+            return (buffers, table);
         }
 
         private int? UserDataIndex(ScalarValue value)
@@ -461,22 +507,13 @@ public sealed partial class ResourceMaterializationCache
             return true;
         }
 
+        // The cached snapshot as a hit gives it to this draw: carrying the draw's user data, with the
+        // rebased base dwords patched from it. One snapshot at most, none when neither differs.
         public ResourceSnapshot Apply(ResourceSnapshot snapshot, IReadOnlyList<uint> userData)
         {
-            if (Active.Length == 0)
-                return snapshot;
-            uint[][]? buffers = null;
-            foreach (var (index, buffer, _, _, _, _) in _candidates)
-            {
-                if (buffer < 0 || !IsUsed(Active, index) || snapshot.Buffers[buffer][0] == userData[index])
-                    continue;
-                buffers ??= (uint[][])snapshot.Buffers.Clone();
-                if (ReferenceEquals(buffers[buffer], snapshot.Buffers[buffer]))
-                    buffers[buffer] = (uint[])buffers[buffer].Clone();
-                buffers[buffer][0] = userData[index];
-            }
-
-            return buffers is null
+            var buffers = ApplyBuffers(snapshot.Buffers, userData);
+            var current = CurrentUserData(snapshot.UserData, userData);
+            return ReferenceEquals(buffers, snapshot.Buffers) && ReferenceEquals(current, snapshot.UserData)
                 ? snapshot
                 : new ResourceSnapshot
                 {
@@ -484,9 +521,30 @@ public sealed partial class ResourceMaterializationCache
                     Images = snapshot.Images,
                     Samplers = snapshot.Samplers,
                     FlattenedResourceTable = snapshot.FlattenedResourceTable,
-                    UserData = snapshot.UserData,
+                    UserData = current,
                     DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                    BindlessImages = snapshot.BindlessImages,
                 };
+        }
+
+        // The buffers with each rebased base dword taken from this draw's user data; the same array
+        // when none moves, otherwise a copy that copies only the descriptors it patches.
+        public uint[][] ApplyBuffers(uint[][] shared, IReadOnlyList<uint> userData)
+        {
+            if (Active.Length == 0)
+                return shared;
+            uint[][]? buffers = null;
+            foreach (var (index, buffer, _, _, _, _) in _candidates)
+            {
+                if (buffer < 0 || !IsUsed(Active, index) || shared[buffer][0] == userData[index])
+                    continue;
+                buffers ??= (uint[][])shared.Clone();
+                if (ReferenceEquals(buffers[buffer], shared[buffer]))
+                    buffers[buffer] = (uint[])buffers[buffer].Clone();
+                buffers[buffer][0] = userData[index];
+            }
+
+            return buffers ?? shared;
         }
 
         // Compares a fresh materialization with the latest one that agrees on every word but the
@@ -501,8 +559,17 @@ public sealed partial class ResourceMaterializationCache
             var structure = StructureOf(built);
             _recent.TryGetValue(structure, out var previous);
             if (_recent.Count >= RecentCapacity)
+            {
                 _recent.Clear();
+                RecentBytes = 0;
+            }
+            else if (previous is not null)
+            {
+                RecentBytes -= previous.EstimatedBytes;
+            }
+
             _recent[structure] = built;
+            RecentBytes += built.EstimatedBytes;
             if (previous is null || previous.UserData.Length != built.UserData.Length ||
                 !previous.UsedUserData.AsSpan().SequenceEqual(built.UsedUserData))
                 return;
@@ -778,10 +845,30 @@ public sealed partial class ResourceMaterializationCache
         }
     }
 
-    public ResourceMaterializationCache(int generationCapacity = 16384)
+    // SHARPEMU_RESOURCE_CACHE_MB overrides the default total.
+    public const long DefaultByteBudget = 256L << 20;
+
+    // byteBudget is the total estimated retained bytes: three quarters for the two
+    // generations, one quarter for the rebases' recent entries. Negative takes the default.
+    public ResourceMaterializationCache(int generationCapacity = 16384, long byteBudget = -1)
     {
         _generationCapacity = Math.Max(1, generationCapacity);
+        var budget = byteBudget >= 0 ? byteBudget : ConfiguredByteBudget();
+        _recentByteBudget = budget / 4;
+        _generationByteBudget = Math.Max(1, (budget - _recentByteBudget) / 2);
     }
+
+    private static long ConfiguredByteBudget() =>
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_MB"), out var megabytes) && megabytes > 0
+            ? megabytes << 20
+            : DefaultByteBudget;
+
+    // The estimated bytes the cache retains: both generations and the rebases' recent entries.
+    public long RetainedBytes => _youngBytes + _oldBytes + _recentBytes;
+
+    public int EntryCount => _young.Count + _old.Count;
+
+    private static long _lastRetainedBytes;
 
     private static long _totalHits;
     private static long _totalMisses;
@@ -794,6 +881,36 @@ public sealed partial class ResourceMaterializationCache
     private static readonly long[] _refreshRefusals = new long[6];
     private static readonly string[] RefreshRefusalNames = ["not_refreshable", "unreadable", "descriptor_words", "unchanged", "table_eval", "rebased"];
     private int _lastRefreshRefusal;
+
+    // Why a rebased refresh was refused, for the render report; MemoryBasesRejected counts bases a
+    // wrong prediction rejected for good.
+    private enum RebaseRefusal
+    {
+        NoMap,
+        Unreadable,
+        BaseInWindow,
+        RejectedBase,
+        ChangedWord,
+        NoBaseChange,
+        Table,
+        Count,
+    }
+
+    private static readonly string[] RebaseRefusalNames =
+        ["no_map", "unreadable", "base_in_window", "rejected_base", "changed_word", "no_base_change", "table"];
+    private static readonly long[] _rebaseRefusals = new long[(int)RebaseRefusal.Count];
+    private static long _memoryBasesRejected;
+
+    private static bool RefuseRebase(RebaseRefusal reason)
+    {
+        Interlocked.Increment(ref _rebaseRefusals[(int)reason]);
+        return false;
+    }
+
+    private static string TakeRebaseReport() =>
+        " rebase_refused=" + string.Join(",", RebaseRefusalNames.Select((name, index) =>
+            FormattableString.Invariant($"{name}:{Interlocked.Exchange(ref _rebaseRefusals[index], 0)}"))) +
+        FormattableString.Invariant($" memory_bases_rejected={Interlocked.Exchange(ref _memoryBasesRejected, 0)}");
 
     private enum Diagnostic
     {
@@ -848,7 +965,8 @@ public sealed partial class ResourceMaterializationCache
                 $"{(Diagnostic)index}={Interlocked.Exchange(ref DiagnosticCounts[index], 0)}"))
             : string.Empty;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}{diagnostics}") +
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% retained_mb={Volatile.Read(ref _lastRetainedBytes) / (1024.0 * 1024.0):F1} {RawReadPrefetch.TakeReport()}{diagnostics}") +
+            TakeSlotReport() + TakeRebaseReport() +
             TakeStaleDifferenceReport() + TakeMissReport() + TakeDetailReport();
     }
 
@@ -973,11 +1091,28 @@ public sealed partial class ResourceMaterializationCache
         out ResourceMaterializationFailure failure,
         ref MaterializationTiming timing)
     {
-        var drawKey = DrawKeyOf(plan, inputs);
-        _learnedUserData.TryGetValue(drawKey, out var learned);
-        var rebase = RebaseOf(drawKey, plan);
-        var key = KeyOf(drawKey, inputs.UserData, learned, rebase.Active);
-        var found = TryFind(key, plan, inputs, rebase.Active, out var cached);
+        ulong drawKey;
+        ulong[]? learned;
+        AddressRebase rebase;
+        ulong key;
+        var phase = SlotRefreshRuntime.Phase();
+        if (phase != _slotPhase)
+            ReportSlotPhase(phase);
+        var slotRefresh = SlotRefreshRuntime.Enabled(phase);
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CacheKey))
+        {
+            drawKey = DrawKeyOf(plan, inputs);
+            _learnedUserData.TryGetValue(drawKey, out learned);
+            rebase = RebaseOf(drawKey, plan);
+            key = KeyOf(drawKey, inputs.UserData, learned, rebase.Active);
+        }
+
+        bool found;
+        Entry cached;
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CacheFind))
+        {
+            found = TryFind(key, plan, inputs, rebase.Active, out cached);
+        }
         Entry? stale = null;
         (List<(int Buffer, uint Word)> Patches, ResourceSnapshot Snapshot, Entry From)? learning = null;
         if (found)
@@ -999,8 +1134,8 @@ public sealed partial class ResourceMaterializationCache
                     CountDiagnostic(Diagnostic.RefreshDescriptorSkipped);
                     continue;
                 }
-                if (Validate(variant, residentReader, rebase, inputs.UserData,
-                    out var variantUnreadable, out var descriptorChanged, out rejection))
+                if (Validate(variant, residentReader, rebase, inputs.UserData, slotRefresh,
+                    out var variantUnreadable, out var descriptorChanged, out rejection, inputs.CompareResidentMemory))
                 {
                     if (previous is not null)
                     {
@@ -1011,7 +1146,7 @@ public sealed partial class ResourceMaterializationCache
 
                     Hits++;
                     Interlocked.Increment(ref _totalHits);
-                    snapshot = rebase.Apply(WithCurrentUserData(variant.Snapshot, inputs.UserData), inputs.UserData);
+                    snapshot = HitSnapshot(variant, inputs.UserData, rebase);
                     specialization = variant.Specialization;
                     failure = default;
                     return true;
@@ -1026,6 +1161,56 @@ public sealed partial class ResourceMaterializationCache
             }
 
             timing.ChangePhase(MaterializationPhase.TableRefresh);
+            // Slots evaluated again first: exact, and it follows a moved pointer the rebase cannot.
+            var tableRefused = false;
+            if (stale is not null && slotRefresh)
+            {
+                if (SlotPlanOf(plan) is not { } slots)
+                {
+                    RefuseSlots(SlotRefusal.Plan);
+                }
+                else
+                {
+                    for (Entry? previousVariant = null, variant = cached; variant is not null; previousVariant = variant, variant = variant.Next)
+                    {
+                        if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant))
+                            continue;
+                        // A rebased word that moves, or an entry whose bytes were read where another
+                        // draw's rebased words moved them: the slots would be read elsewhere.
+                        if (variant.MovedReads || rebase.Moves(variant, inputs.UserData))
+                        {
+                            RefuseSlots(SlotRefusal.UserData);
+                            continue;
+                        }
+
+                        if (TryRefreshSlots(variant, plan, slots, inputs, residentReader, rebase, rejection, out var evaluated, out var descriptorChanged))
+                        {
+                            if (ReferenceEquals(variant, cached))
+                            {
+                                evaluated.Next = cached.Next;
+                            }
+                            else
+                            {
+                                previousVariant!.Next = variant.Next;
+                                evaluated.Next = cached;
+                            }
+
+                            Store(key, evaluated);
+                            TableRefreshes++;
+                            SlotRefreshes++;
+                            Interlocked.Increment(ref _totalRefreshes);
+                            Interlocked.Increment(ref _totalSlotRefreshes);
+                            snapshot = evaluated.Snapshot;
+                            specialization = evaluated.Specialization;
+                            failure = default;
+                            return true;
+                        }
+
+                        // A descriptor slot that changed is a word the table refresh would refuse.
+                        tableRefused |= descriptorChanged && ReferenceEquals(variant, cached);
+                    }
+                }
+            }
             // Moved bases first: a changed base word is a descriptor word, which a table refresh
             // would read in full only to refuse.
             ResourceSnapshot rebased = null!;
@@ -1071,8 +1256,14 @@ public sealed partial class ResourceMaterializationCache
 
                 learning = (patches, rebased, refreshedFrom);
             }
-            if (refreshedFrom is null)
+            else if (tableRefused)
             {
+                _lastRefreshRefusal = 2;
+            }
+            else
+            {
+                // With fixed addresses any variant that validated readable with only table words
+                // changed is a candidate; with rebased words only the newest one is.
                 previous = null;
                 variantIndex = 0;
                 for (var variant = cached; variant is not null; previous = variant, variant = variant.Next, variantIndex++)
@@ -1092,12 +1283,11 @@ public sealed partial class ResourceMaterializationCache
                     Store(key, refreshed);
                     TableRefreshes++;
                     Interlocked.Increment(ref _totalRefreshes);
-                    snapshot = rebase.Apply(WithCurrentUserData(refreshed.Snapshot, inputs.UserData), inputs.UserData);
+                    snapshot = HitSnapshot(refreshed, inputs.UserData, rebase);
                     specialization = refreshed.Specialization;
                     failure = default;
                     return true;
                 }
-
             }
 
             Interlocked.Increment(ref _totalStale);
@@ -1117,17 +1307,23 @@ public sealed partial class ResourceMaterializationCache
         var recorder = TakeRecorder();
         try
         {
-            var recording = new ResourceRuntimeInputs
+            ResourceRuntimeInputs recording;
+            using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.RecorderWrap))
             {
-                UserData = recorder.WrapUserData(inputs.UserData),
-                ShaderBase = inputs.ShaderBase,
-                ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
-                ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-                ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
-                ReadsClean = inputs.ReadsClean,
-                ComputeState = inputs.ComputeState,
-                TablePhase = recorder.TablePhase,
-            };
+                recording = new ResourceRuntimeInputs
+                {
+                    UserData = recorder.WrapUserData(inputs.UserData),
+                    ShaderBase = inputs.ShaderBase,
+                    ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
+                    ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                    ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
+                    ReadsClean = inputs.ReadsClean,
+                DataWritePending = inputs.DataWritePending,
+                    ComputeState = inputs.ComputeState,
+                    TablePhase = recorder.TablePhase,
+                };
+            }
+
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
                 return false;
 
@@ -1139,7 +1335,11 @@ public sealed partial class ResourceMaterializationCache
             }
 
             timing.ChangePhase(MaterializationPhase.CacheStore);
-            var built = recorder.Build(plan, inputs, snapshot, specialization, rebase.MemoryBases);
+            Entry built;
+            using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.EntryBuild))
+            {
+                built = recorder.Build(plan, inputs, snapshot, specialization, rebase.MemoryBases, like: stale);
+            }
             if (StaleDiffEnabled && stale is not null && learning is null)
                 NoteStaleDifference(stale, built);
             if (learning is { } pending)
@@ -1190,30 +1390,32 @@ public sealed partial class ResourceMaterializationCache
         if (!cached.TableRefreshable)
             return RejectRefresh(Diagnostic.RefreshLayout);
 
+        // Each range is compared as soon as it is read: the first changed descriptor word refuses
+        // the entry before the rest is read. The words are kept only once the refresh succeeds.
+        if (_refreshCurrent.Length < cached.Bytes.Length)
+            _refreshCurrent = new byte[Math.Max(cached.Bytes.Length, _refreshCurrent.Length * 2)];
+        var current = _refreshCurrent;
         var moves = rebase.Moves(cached, inputs.UserData);
-        if (!moves && _refreshScratch.Length < cached.Bytes.Length)
-            _refreshScratch = new byte[cached.Bytes.Length];
-        var current = moves ? new byte[cached.Bytes.Length] : _refreshScratch;
-        var currentLength = cached.Bytes.Length;
-        var moved = cached.RangeAddresses;
-        if (rebase.Moves(cached, inputs.UserData))
-        {
-            moved = new ulong[cached.RangeAddresses.Length];
-            for (var index = 0; index < moved.Length; index++)
-                moved[index] = rebase.MoveRead(cached, inputs.UserData, cached.RangeAddresses[index], cached.RangeLengths[index]);
-        }
-
+        if (moves && _refreshMoved.Length < cached.RangeAddresses.Length)
+            _refreshMoved = new ulong[Math.Max(cached.RangeAddresses.Length, _refreshMoved.Length * 2)];
         var changed = false;
         for (var index = 0; index < cached.RangeAddresses.Length; index++)
         {
-            if (!ReadWithProfile(residentReader, moved[index], current.AsSpan(cached.RangeOffsets[index], cached.RangeLengths[index]), cached.RangeClean[index], CacheDetail.RefreshRead))
+            var address = cached.RangeAddresses[index];
+            var start = cached.RangeOffsets[index];
+            var length = cached.RangeLengths[index];
+            if (moves)
+                _refreshMoved[index] = address = rebase.MoveRead(cached, inputs.UserData, address, length);
+            if (!ReadWithProfile(residentReader, address, current.AsSpan(start, length), cached.RangeClean[index], CacheDetail.RefreshRead))
             {
                 _lastRefreshRefusal = 1;
                 return false;
             }
+
             using var comparisonProfile = MeasureDetail(CacheDetail.RefreshCompare);
-            var end = cached.RangeOffsets[index] + cached.RangeLengths[index];
-            for (var offset = cached.RangeOffsets[index]; offset < end; offset += sizeof(uint))
+            if (current.AsSpan(start, length).SequenceEqual(cached.Bytes.AsSpan(start, length)))
+                continue;
+            for (var offset = start; offset < start + length; offset += sizeof(uint))
             {
                 if (current.AsSpan(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
                     continue;
@@ -1237,16 +1439,7 @@ public sealed partial class ResourceMaterializationCache
         var recorder = TakeRecorder();
         try
         {
-            var recording = new ResourceRuntimeInputs
-            {
-                UserData = inputs.UserData,
-                ShaderBase = inputs.ShaderBase,
-                ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
-                ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-                ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
-                ReadsClean = inputs.ReadsClean,
-                ComputeState = inputs.ComputeState,
-            };
+            var recording = recorder.TableInputs(inputs);
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;
             bool evaluated;
@@ -1267,9 +1460,9 @@ public sealed partial class ResourceMaterializationCache
             using (MeasureDetail(CacheDetail.RefreshVerify))
             foreach (var (address, word, _, _) in recorder.Reads)
             {
-                var found = ReferenceEquals(moved, cached.RangeAddresses)
-                    ? TryFindWord(cached, address, out var offset)
-                    : TryFindMovedWord(cached, moved, address, out offset);
+                var found = moves
+                    ? TryFindMovedWord(cached, _refreshMoved, address, out var offset)
+                    : TryFindWord(cached, address, out offset);
                 if (!found || System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
                     return false;
             }
@@ -1292,9 +1485,19 @@ public sealed partial class ResourceMaterializationCache
                 RangeClean = cached.RangeClean,
                 WordTableOnly = cached.WordTableOnly,
                 BaseWordBuffers = cached.BaseWordBuffers,
+                // Derived from the ranges and base words, which the refreshed entry shares.
+                Joined = cached.Joined,
+                JoinedHint = cached.Joined is null ? cached.JoinedHint : null,
+                BaseWordProbes = cached.BaseWordProbes,
+                // From the ranges and the descriptors, which it shares too (RangeWindowsOf,
+                // TableCopySourcesOf); the slots' words changed, where they lie did not.
+                RangeWindows = cached.RangeWindows,
+                TableCopySources = cached.TableCopySources,
+                SlotsHint = cached.Slots is { } slots && !ReferenceEquals(slots, Unmodelled) ? slots : cached.SlotsHint,
                 TableRefreshable = true,
+                MovedReads = moves || cached.MovedReads,
                 // Published entries must not share mutable scratch storage.
-                Bytes = current.AsSpan(0, currentLength).ToArray(),
+                Bytes = current.AsSpan(0, cached.Bytes.Length).ToArray(),
                 Snapshot = new ResourceSnapshot
                 {
                     Buffers = previous.Buffers,
@@ -1303,6 +1506,7 @@ public sealed partial class ResourceMaterializationCache
                     FlattenedResourceTable = table,
                     UserData = previous.UserData,
                     DeviceAddressRanges = previous.DeviceAddressRanges,
+                    BindlessImages = previous.BindlessImages,
                 },
                 Specialization = cached.Specialization,
                 Next = cached.Next,
@@ -1315,16 +1519,24 @@ public sealed partial class ResourceMaterializationCache
         }
     }
 
+    // A miss that learns predicts with a table evaluation of its own while its recorder is still
+    // taken, so up to two are kept: one spare made a new recorder, its lists and scratch, per such miss.
     private ReadRecorder TakeRecorder()
     {
-        var recorder = _spareRecorder ?? new ReadRecorder();
-        _spareRecorder = null;
-        return recorder;
+        if (_spareRecorder is { } recorder)
+        {
+            _spareRecorder = _secondSpareRecorder;
+            _secondSpareRecorder = null;
+            return recorder;
+        }
+
+        return new ReadRecorder();
     }
 
     private void ReturnRecorder(ReadRecorder recorder)
     {
         recorder.Reset();
+        _secondSpareRecorder = _spareRecorder;
         _spareRecorder = recorder;
     }
 
@@ -1349,33 +1561,8 @@ public sealed partial class ResourceMaterializationCache
     }
 
     // The byte offset of a recorded dword in the entry's bytes, found by its address.
-    private static bool TryFindWord(Entry entry, ulong address, out int offset)
-    {
-        offset = 0;
-        var addresses = entry.RangeAddresses;
-        int low = 0, high = addresses.Length - 1, found = -1;
-        while (low <= high)
-        {
-            var middle = (low + high) >>> 1;
-            if (addresses[middle] <= address)
-            {
-                found = middle;
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
-        }
-
-        if (found < 0)
-            return false;
-        var delta = address - addresses[found];
-        if (delta % sizeof(uint) != 0 || delta >= (ulong)entry.RangeLengths[found])
-            return false;
-        offset = entry.RangeOffsets[found] + (int)delta;
-        return true;
-    }
+    private static bool TryFindWord(Entry entry, ulong address, out int offset) =>
+        TryFindRange(entry, address, out _, out offset);
 
     private static ulong DrawKeyOf(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
@@ -1428,27 +1615,51 @@ public sealed partial class ResourceMaterializationCache
     }
 
     // A cached snapshot is shared by every draw that hits it, so it keeps the user data of the draw
-    // that built it; a draw whose unread words differ gets its own copy that carries its own.
-    private static ResourceSnapshot WithCurrentUserData(ResourceSnapshot cached, IReadOnlyList<uint> userData)
+    // that built it; a draw whose unread words differ gets a copy that carries its own: these words.
+    private static uint[] CurrentUserData(uint[] words, IReadOnlyList<uint> userData)
     {
-        var words = cached.UserData;
-        var same = words.Length == userData.Count;
-        for (var index = 0; same && index < words.Length; index++)
-            same = words[index] == userData[index];
-        if (same)
-            return cached;
-        var current = new uint[userData.Count];
-        for (var index = 0; index < current.Length; index++)
-            current[index] = userData[index];
-        return new ResourceSnapshot
+        if (SameUserData(words, userData))
+            return words;
+        // A draw's user data array is never written once made (ShaderSource.UserData), so the
+        // snapshot shares it rather than copying it for every draw, as ResourceSnapshot.WithUserData does.
+        var current = userData as uint[];
+        if (current is null)
         {
-            Buffers = cached.Buffers,
-            Images = cached.Images,
-            Samplers = cached.Samplers,
-            FlattenedResourceTable = cached.FlattenedResourceTable,
-            UserData = current,
-            DeviceAddressRanges = cached.DeviceAddressRanges,
-        };
+            current = new uint[userData.Count];
+            for (var index = 0; index < current.Length; index++)
+                current[index] = userData[index];
+        }
+
+        return current;
+    }
+
+    private static bool SameUserData(uint[] words, IReadOnlyList<uint> userData)
+    {
+        if (words.Length != userData.Count)
+            return false;
+        if (userData is uint[] array)
+            return ReferenceEquals(words, array) || words.AsSpan().SequenceEqual(array);
+        for (var index = 0; index < words.Length; index++)
+            if (words[index] != userData[index])
+                return false;
+        return true;
+    }
+
+    // The snapshot a hit on the entry gives this draw (AddressRebase.Apply). A draw that differs from
+    // the entry's in user data words its plan never reads differs on every hit, and so does a rebased
+    // one: the entry keeps the last snapshot it made for a draw, which an identical draw shares.
+    private static ResourceSnapshot HitSnapshot(Entry entry, IReadOnlyList<uint> userData, AddressRebase rebase)
+    {
+        if (entry.LastHit is { } last && ReferenceEquals(entry.LastHitActive, rebase.Active) && SameUserData(last.UserData, userData))
+            return last;
+        var snapshot = rebase.Apply(entry.Snapshot, userData);
+        if (!ReferenceEquals(snapshot, entry.Snapshot))
+        {
+            entry.LastHit = snapshot;
+            entry.LastHitActive = rebase.Active;
+        }
+
+        return snapshot;
     }
 
     private bool TryFind(ulong key, ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ulong[] rebased, out Entry entry)
@@ -1471,22 +1682,47 @@ public sealed partial class ResourceMaterializationCache
         }
         CountDiagnostic(Diagnostic.OldPromotion);
         _old.Remove(key);
+        _oldBytes -= entry.StoredChainBytes;
         Store(key, entry);
         return true;
     }
 
     private void Store(ulong key, Entry entry)
     {
-        if (_young.Count >= _generationCapacity && !_young.ContainsKey(key))
+        var bytes = ChainBytes(entry);
+        if (_young.TryGetValue(key, out var replaced))
+        {
+            _youngBytes -= replaced.StoredChainBytes;
+        }
+        else if (_young.Count >= _generationCapacity || (_young.Count != 0 && _youngBytes + bytes > _generationByteBudget))
         {
             CountDiagnostic(Diagnostic.GenerationRotation);
             CountDiagnostic(Diagnostic.GenerationEntriesDropped, _old.Count);
             RecordEvictions(_old.Keys);
+            // The dropped generation's table becomes the new young one: a fresh table of this
+            // capacity was ~450 KB on the large object heap per rotation.
+            var recycled = _old;
+            recycled.Clear();
+            recycled.EnsureCapacity(_generationCapacity);
             _old = _young;
-            _young = new Dictionary<ulong, Entry>(_generationCapacity);
+            _oldBytes = _youngBytes;
+            _young = recycled;
+            _youngBytes = 0;
         }
 
+        entry.StoredChainBytes = bytes;
         _young[key] = entry;
+        _youngBytes += bytes;
+        Volatile.Write(ref _lastRetainedBytes, RetainedBytes);
+    }
+
+    // A key holds its entry and the variants chained behind it.
+    private static long ChainBytes(Entry entry)
+    {
+        long bytes = 0;
+        for (Entry? variant = entry; variant is not null; variant = variant.Next)
+            bytes += variant.EstimatedBytes;
+        return bytes;
     }
 
     // What a hit on the previous entry would give this draw with the words in probe rebased: its
@@ -1498,8 +1734,8 @@ public sealed partial class ResourceMaterializationCache
         {
             if (!previous.Matches(plan, inputs, probe) || !rebase.AppliesTo(previous))
                 return null;
-            if (Validate(previous, residentReader, rebase, inputs.UserData, out _))
-                return (rebase.Apply(WithCurrentUserData(previous.Snapshot, inputs.UserData), inputs.UserData), null);
+            if (Validate(previous, residentReader, rebase, inputs.UserData, false, out _))
+                return (rebase.Apply(previous.Snapshot, inputs.UserData), null);
             if (rebase.HasLearnableMemoryBases &&
                 TryRebaseRefresh(previous, plan, inputs, residentReader, rebase, out var snapshot, out var patches))
                 return (snapshot, patches);
@@ -1509,8 +1745,17 @@ public sealed partial class ResourceMaterializationCache
     // Its own method: a lambda in MaterializeCore that captured the parameters made every call,
     // hits included, allocate the closure on entry.
     private void Learn(AddressRebase rebase, Entry built, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
-        ResidentGuestBytesReader residentReader) =>
+        ResidentGuestBytesReader residentReader)
+    {
+        var before = rebase.RecentBytes;
         rebase.Learn(built, (previous, probe) => Predict(previous, plan, inputs, residentReader, rebase, probe));
+        _recentBytes += rebase.RecentBytes - before;
+        if (_recentBytes <= _recentByteBudget)
+            return;
+        foreach (var other in _rebases.Values)
+            other.ForgetRecent();
+        _recentBytes = 0;
+    }
 
     // The table for this draw without evaluating it: a slot that reads a memory-based buffer at a
     // constant offset takes the word now at that offset, which the moved window has just read; the
@@ -1610,24 +1855,34 @@ public sealed partial class ResourceMaterializationCache
     }
 
     // Where each memory-loaded base word of the entry lies: its range and byte offset in it.
+    // Counted first, so the one array is all it allocates: it runs for every new entry.
     private static (int Range, int Offset)[] BaseWordProbesOf(Entry entry)
     {
-        var probes = new List<(int Range, int Offset)>();
+        var map = entry.BaseWordBuffers!;
+        var count = 0;
         for (var range = 0; range < entry.RangeAddresses.Length; range++)
-        {
             for (var offset = 0; offset < entry.RangeLengths[range]; offset += sizeof(uint))
-            {
-                if (entry.BaseWordBuffers![(entry.RangeOffsets[range] + offset) / sizeof(uint)] >= 0)
-                    probes.Add((range, offset));
-            }
-        }
+                if (map[(entry.RangeOffsets[range] + offset) / sizeof(uint)] >= 0)
+                    count++;
+        if (count == 0)
+            return [];
 
-        return probes.ToArray();
+        var probes = new (int Range, int Offset)[count];
+        var next = 0;
+        for (var range = 0; range < entry.RangeAddresses.Length; range++)
+            for (var offset = 0; offset < entry.RangeLengths[range]; offset += sizeof(uint))
+                if (map[(entry.RangeOffsets[range] + offset) / sizeof(uint)] >= 0)
+                    probes[next++] = (range, offset);
+        return probes;
     }
 
     private byte[] _rebaseCurrent = [];
+    private byte[] _refreshCurrent = [];
+    private ulong[] _refreshMoved = [];
     private ulong[] _rebaseMoved = [];
     private readonly List<(int Buffer, uint Word)> _rebaseBases = new();
+    private readonly List<(int Buffer, uint Word)> _rebaseFound = new();
+    private readonly List<(ulong Start, ulong Size)> _rebaseWindows = new();
 
     // Per recorded range: the memory-based buffer whose window wholly holds it, or NoBase. Such a
     // range is read only once the buffer's base is known: it moves with the base.
@@ -1664,7 +1919,7 @@ public sealed partial class ResourceMaterializationCache
         snapshot = null!;
         patches = null!;
         if (entry.BaseWordBuffers is not { } map)
-            return false;
+            return RefuseRebase(RebaseRefusal.NoMap);
         var userData = inputs.UserData;
         // The words read here are compared and copied, never kept, so the buffers are reused.
         if (_rebaseCurrent.Length < entry.Bytes.Length)
@@ -1680,7 +1935,17 @@ public sealed partial class ResourceMaterializationCache
                 continue;
             moved[index] = rebase.MoveRead(entry, userData, entry.RangeAddresses[index], entry.RangeLengths[index]);
             if (!residentReader(moved[index], current.AsSpan(entry.RangeOffsets[index], entry.RangeLengths[index]), entry.RangeClean[index]))
-                return false;
+                return RefuseRebase(RebaseRefusal.Unreadable);
+            // A changed word of a range that does not move is a base or a constant, or the entry is
+            // refused below whatever the other ranges hold.
+            for (var offset = entry.RangeOffsets[index]; offset < entry.RangeOffsets[index] + entry.RangeLengths[index]; offset += sizeof(uint))
+            {
+                var word = offset / sizeof(uint);
+                if (map[word] < 0 && !entry.WordTableOnly[word] &&
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset)) !=
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset)))
+                    return RefuseRebase(RebaseRefusal.ChangedWord);
+            }
         }
 
         // The new base of each buffer whose base word changed, from the ranges read so far. A base
@@ -1691,7 +1956,7 @@ public sealed partial class ResourceMaterializationCache
         foreach (var (range, rangeOffset) in entry.BaseWordProbes ??= BaseWordProbesOf(entry))
         {
             if (windowed[range] != NoBase)
-                return false;
+                return RefuseRebase(RebaseRefusal.BaseInWindow);
             var offset = entry.RangeOffsets[range] + rangeOffset;
             var now = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset));
             if (now != System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset)))
@@ -1710,10 +1975,13 @@ public sealed partial class ResourceMaterializationCache
                     newBase = word;
             moved[index] = entry.RangeAddresses[index] - oldBase + newBase;
             if (!residentReader(moved[index], current.AsSpan(entry.RangeOffsets[index], entry.RangeLengths[index]), entry.RangeClean[index]))
-                return false;
+                return RefuseRebase(RebaseRefusal.Unreadable);
         }
 
-        List<(int Buffer, uint Word)>? found = null;
+        // Reused: the patches a refresh returns are read before the next one runs (Materialize
+        // confirms a pending refresh's before Learn predicts with another).
+        var found = _rebaseFound;
+        found.Clear();
         // A changed constant outside the moved windows is read by a slot the copy cannot place.
         var constantsOutsideWindows = false;
         for (var index = 0; index < rangeCount; index++)
@@ -1732,42 +2000,39 @@ public sealed partial class ResourceMaterializationCache
                 if (buffer >= 0)
                 {
                     if (rebase.IsRejectedMemoryBase(buffer))
-                        return false;
-                    (found ??= new()).Add((buffer, now));
+                        return RefuseRebase(RebaseRefusal.RejectedBase);
+                    found.Add((buffer, now));
                 }
                 else if (!entry.WordTableOnly[word])
-                    return false;
+                    return RefuseRebase(RebaseRefusal.ChangedWord);
                 else
                     constantsOutsideWindows |= windowed[index] == NoBase;
             }
         }
 
-        if (found is null)
-            return false;
-        var patched = rebase.PatchMemoryBases(rebase.Apply(WithCurrentUserData(entry.Snapshot, userData), userData), found);
+        if (found.Count == 0)
+            return RefuseRebase(RebaseRefusal.NoBaseChange);
+        // The entry's snapshot as a hit applies it, with the moved bases patched in: built from its
+        // parts, so the draw allocates only the snapshot it returns.
+        var cached = entry.Snapshot;
+        var (patchedBuffers, patchedTable) = rebase.PatchMemoryBases(cached.Buffers, rebase.ApplyBuffers(cached.Buffers, userData),
+            cached.FlattenedResourceTable, found);
+        var patchedUserData = CurrentUserData(cached.UserData, userData);
         // A changed constant outside the windows is still copied when every slot is a direct load:
         // each slot's word is then the dword at its own address, which this draw has just read.
         var copyDirect = constantsOutsideWindows && CanCopyDirect(rebase);
         if (plan.TableReads.Count != 0 && (!constantsOutsideWindows || copyDirect) && !rebase.TableSlotsThroughBases)
         {
             // The patch cloned the table when it moved a base slot; otherwise it is the entry's.
-            var table = ReferenceEquals(patched.FlattenedResourceTable, entry.Snapshot.FlattenedResourceTable)
-                ? (uint[])patched.FlattenedResourceTable.Clone()
-                : patched.FlattenedResourceTable;
+            var table = ReferenceEquals(patchedTable, cached.FlattenedResourceTable)
+                ? (uint[])patchedTable.Clone()
+                : patchedTable;
             // The copy writes nothing unless every slot can be placed.
             if (copyDirect
                     ? TryCopyDirectTable(entry, plan, rebase, current, moved, userData, table)
                     : TryCopyTable(entry, plan, rebase, current, table))
             {
-                snapshot = new ResourceSnapshot
-                {
-                    Buffers = patched.Buffers,
-                    Images = patched.Images,
-                    Samplers = patched.Samplers,
-                    FlattenedResourceTable = table,
-                    UserData = patched.UserData,
-                    DeviceAddressRanges = patched.DeviceAddressRanges,
-                };
+                snapshot = PatchedSnapshot(cached, patchedBuffers, table, patchedUserData);
                 patches = found;
                 return true;
             }
@@ -1776,25 +2041,17 @@ public sealed partial class ResourceMaterializationCache
         if (plan.TableReads.Count != 0)
         {
             if (!entry.TableRefreshable)
-                return false;
-            var windows = new List<(ulong Start, ulong Size)>(found.Count);
+                return RefuseRebase(RebaseRefusal.Table);
+            var windows = _rebaseWindows;
+            windows.Clear();
             foreach (var (buffer, baseWord) in found)
-                if (AddressRebase.TryMovedWindow(patched.Buffers[buffer], baseWord, out var start, out var size))
+                if (AddressRebase.TryMovedWindow(patchedBuffers[buffer], baseWord, out var start, out var size))
                     windows.Add((start, size));
 
             var recorder = TakeRecorder();
             try
             {
-                var recording = new ResourceRuntimeInputs
-                {
-                    UserData = userData,
-                    ShaderBase = inputs.ShaderBase,
-                    ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
-                    ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-                    ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
-                    ReadsClean = inputs.ReadsClean,
-                    ComputeState = inputs.ComputeState,
-                };
+                var recording = recorder.TableInputs(inputs);
                 var cachedTable = entry.Snapshot.FlattenedResourceTable;
                 ReadingTable = true;
                 bool evaluated;
@@ -1809,7 +2066,7 @@ public sealed partial class ResourceMaterializationCache
                 }
 
                 if (!evaluated || recorder.Failed || table.Length != cachedTable.Length)
-                    return false;
+                    return RefuseRebase(RebaseRefusal.Table);
 
                 foreach (var (address, word, _, _) in recorder.Reads)
                 {
@@ -1820,21 +2077,13 @@ public sealed partial class ResourceMaterializationCache
                         continue;
                     if (!TryFindMovedWord(entry, moved, address, out var offset) ||
                         System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
-                        return false;
+                        return RefuseRebase(RebaseRefusal.Table);
                 }
 
                 // The written device-address slots come from reads validated unchanged above.
                 foreach (var slot in plan.WrittenRangeSlotByHandle.Values)
                     cachedTable.AsSpan((int)slot, ShaderResourcePlan.WrittenRangeDwordCount).CopyTo(table.AsSpan((int)slot));
-                patched = new ResourceSnapshot
-                {
-                    Buffers = patched.Buffers,
-                    Images = patched.Images,
-                    Samplers = patched.Samplers,
-                    FlattenedResourceTable = table,
-                    UserData = patched.UserData,
-                    DeviceAddressRanges = patched.DeviceAddressRanges,
-                };
+                patchedTable = table;
             }
             finally
             {
@@ -1842,10 +2091,22 @@ public sealed partial class ResourceMaterializationCache
             }
         }
 
-        snapshot = patched;
+        snapshot = PatchedSnapshot(cached, patchedBuffers, patchedTable, patchedUserData);
         patches = found;
         return true;
     }
+
+    private static ResourceSnapshot PatchedSnapshot(ResourceSnapshot cached, uint[][] buffers, uint[] table, uint[] userData) =>
+        new()
+        {
+            Buffers = buffers,
+            Images = cached.Images,
+            Samplers = cached.Samplers,
+            FlattenedResourceTable = table,
+            UserData = userData,
+            DeviceAddressRanges = cached.DeviceAddressRanges,
+            BindlessImages = cached.BindlessImages,
+        };
 
     private readonly record struct RejectionSample(int Range, ulong Address, int Length, bool Clean, int WordOffset, uint Word)
     {
@@ -1859,18 +2120,26 @@ public sealed partial class ResourceMaterializationCache
             return !entry.WordTableOnly[offset / sizeof(uint)] &&
                 System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset, sizeof(uint))) != Word;
         }
+
+        // The same refusal for a slot refresh: the sampled word, read under the same policy at
+        // the slot's address, differs from the descriptor word the entry evaluated there.
+        public bool RefutesWord(ulong address, bool clean, uint expected) =>
+            Length != 0 && Clean == clean && Address + (ulong)WordOffset == address && Word != expected;
     }
 
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase,
-        IReadOnlyList<uint> userData, out bool unreadable) =>
-        Validate(entry, residentReader, rebase, userData, out unreadable, out _, out _);
+        IReadOnlyList<uint> userData, bool joined, out bool unreadable) =>
+        Validate(entry, residentReader, rebase, userData, joined, out unreadable, out _, out _);
 
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase, IReadOnlyList<uint> userData,
-        out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)
+        bool joined, out bool unreadable, out bool descriptorChanged, out RejectionSample rejection,
+        ResidentGuestBytesComparer? comparer = null)
     {
         unreadable = false;
         descriptorChanged = false;
         rejection = default;
+        if (joined && rebase.Active.Length == 0)
+            return ValidateJoined(entry, residentReader, comparer, out unreadable, out descriptorChanged, out rejection);
         // A memory-loaded base usually moved when anything did: its few bytes are checked before
         // ranges that can span kilobytes. The full comparison below still decides a match.
         if (entry.BaseWordBuffers is not null)
@@ -1948,7 +2217,89 @@ public sealed partial class ResourceMaterializationCache
         public int[]? RangeWindows { get; set; }
         public int[]? TableCopySources { get; set; }
         public (int Range, int Offset)[]? BaseWordProbes { get; set; }
+        // Bytes a table refresh read where rebased words moved the ranges, not at RangeAddresses.
+        public bool MovedReads { get; init; }
+        // Filled on the first slot refresh of the entry; see ModelOf.
+        public SlotModel? Slots { get; set; }
+        // Filled on the first joined validation of the entry; see JoinedReadsOf.
+        public JoinedReads? Joined { get; set; }
+        // The derived data of the entry this one was rebuilt from, when it could not be shared whole:
+        // its arrays that come out equal are shared when this entry's are made, then dropped.
+        public JoinedReads? JoinedHint { get; set; }
+        public SlotModel? SlotsHint { get; set; }
+        // The last snapshot a hit made for a draw (HitSnapshot), with the rebased words it applied.
+        public ResourceSnapshot? LastHit { get; set; }
+        public ulong[]? LastHitActive { get; set; }
         public Entry? Next { get; set; }
+
+        // The chain bytes (ChainBytes) this entry was stored with as a key's head.
+        public long StoredChainBytes { get; set; }
+
+        private long _estimatedBytes = -1;
+
+        // An upper bound on what the entry keeps alive, from its immutable arrays. Arrays it shares
+        // with the entry it was rebuilt from are counted in both. The derived data filled in later
+        // (RangeWindows, BaseWordProbes, TableCopySources, Joined, Slots, LastHit) is counted up
+        // front from the sizes it is made of, so the estimate never changes.
+        public long EstimatedBytes
+        {
+            get
+            {
+                if (_estimatedBytes >= 0)
+                    return _estimatedBytes;
+                var ranges = RangeAddresses.Length;
+                var table = Snapshot.FlattenedResourceTable.Length;
+                var size = EntryObjectBytes +
+                    ArrayBytes(UserData.Length, sizeof(uint)) + ArrayBytes(UsedUserData.Length, sizeof(ulong)) +
+                    ArrayBytes(ranges, sizeof(ulong)) + 2 * ArrayBytes(ranges, sizeof(int)) + ArrayBytes(ranges, sizeof(bool)) +
+                    ArrayBytes(WordTableOnly.Length, sizeof(bool)) + ArrayBytes(Bytes.Length, sizeof(byte)) +
+                    (BaseWordBuffers is null ? 0 : ArrayBytes(BaseWordBuffers.Length, sizeof(int))) +
+                    SnapshotBytes(Snapshot) + SpecializationBytes(Specialization) +
+                    // RangeWindows, BaseWordProbes, TableCopySources.
+                    ArrayBytes(ranges, sizeof(int)) + ArrayBytes(ranges, 2 * sizeof(int)) + ArrayBytes(table, sizeof(int)) +
+                    // JoinedReads: at most one read per range.
+                    ObjectBytes + ArrayBytes(ranges, sizeof(ulong)) + 4 * ArrayBytes(ranges, sizeof(int)) + ArrayBytes(ranges, sizeof(bool)) +
+                    // SlotModel: at most one slot per table word.
+                    ObjectBytes + 2 * ArrayBytes(table, sizeof(ulong)) + 2 * ArrayBytes(table, sizeof(int)) +
+                    // LastHit: a snapshot shell with its patched buffers.
+                    ObjectBytes + JaggedBytes(Snapshot.Buffers) + ArrayBytes(UsedUserData.Length, sizeof(ulong));
+                _estimatedBytes = size;
+                return size;
+            }
+        }
+
+        private const long ObjectBytes = 64;
+        private const long EntryObjectBytes = 256;
+
+        private static long ArrayBytes(int length, int elementBytes) => 24 + (long)length * elementBytes;
+
+        private static long JaggedBytes(uint[][] arrays)
+        {
+            var size = ArrayBytes(arrays.Length, IntPtr.Size);
+            foreach (var array in arrays)
+                size += ArrayBytes(array.Length, sizeof(uint));
+            return size;
+        }
+
+        private static long SnapshotBytes(ResourceSnapshot snapshot)
+        {
+            var size = ObjectBytes + JaggedBytes(snapshot.Buffers) + JaggedBytes(snapshot.Images) + JaggedBytes(snapshot.Samplers) +
+                ArrayBytes(snapshot.FlattenedResourceTable.Length, sizeof(uint)) + ArrayBytes(snapshot.UserData.Length, sizeof(uint)) +
+                ArrayBytes(snapshot.DeviceAddressRanges.Length, Unsafe.SizeOf<DeviceAddressRange>()) +
+                ArrayBytes(snapshot.BindlessImages.Length, IntPtr.Size);
+            foreach (var table in snapshot.BindlessImages)
+            {
+                size += ObjectBytes + ArrayBytes(table.VariantImages.Length, sizeof(uint)) + JaggedBytes(table.Descriptors) +
+                    ArrayBytes(table.DescriptorVariants.Length, sizeof(byte)) + ArrayBytes(table.Entries.Length, sizeof(int));
+            }
+
+            return size;
+        }
+
+        private static long SpecializationBytes(ResourceSpecialization specialization) =>
+            ObjectBytes + 6 * ObjectBytes +
+            32L * (specialization.Buffers.Count + specialization.Images.Count + specialization.BufferCandidateTables.Count +
+                specialization.ImageDescriptorGroups.Count + specialization.SamplerDescriptorGroups.Count + specialization.Samplers.Count);
 
         // A rebased word is an address the hit patches in, so it does not distinguish entries.
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ulong[] rebased)
@@ -2030,6 +2381,8 @@ public sealed partial class ResourceMaterializationCache
             _residentReader = null;
             _inTable = false;
             Failed = false;
+            if (_tableInputs is { } table)
+                table.UserData = [];
         }
 
         public bool Failed { get; private set; }
@@ -2043,6 +2396,8 @@ public sealed partial class ResourceMaterializationCache
         }
 
         public List<(ulong Address, uint Word, bool Clean, bool Table)> Reads => _reads;
+
+        public void Record(ulong address, uint word, bool clean, bool table) => _reads.Add((address, word, clean, table));
 
         public Action<bool> TablePhase { get; }
 
@@ -2069,6 +2424,37 @@ public sealed partial class ResourceMaterializationCache
             using (ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.ReadRecording))
                 _reads.Add((address, word, clean, _inTable));
             return true;
+        }
+
+        private ResourceRuntimeInputs? _tableInputs;
+
+        // The inputs of a table evaluation that records through this recorder: the draw's, every
+        // reader wrapped, no table phase. One instance serves every evaluation with the same readers,
+        // refilled per draw; nothing keeps inputs past the call (ResourceRuntimeInputs).
+        public ResourceRuntimeInputs TableInputs(ResourceRuntimeInputs inputs)
+        {
+            var read = Wrap(inputs.ReadMemory, clean: false);
+            var clean = Wrap(inputs.ReadCleanMemory, clean: true);
+            var resident = WrapResident(inputs.ReadResidentMemory);
+            var table = _tableInputs;
+            if (table is null || !ReferenceEquals(table.ReadMemory, read) || !ReferenceEquals(table.ReadCleanMemory, clean) ||
+                !ReferenceEquals(table.ReadResidentMemory, resident) || table.ReadsClean != inputs.ReadsClean ||
+                !ReferenceEquals(table.DataWritePending, inputs.DataWritePending))
+            {
+                _tableInputs = table = new ResourceRuntimeInputs
+                {
+                    ReadMemory = read,
+                    ReadCleanMemory = clean,
+                    ReadResidentMemory = resident,
+                    ReadsClean = inputs.ReadsClean,
+                    DataWritePending = inputs.DataWritePending,
+                };
+            }
+
+            table.UserData = inputs.UserData;
+            table.ShaderBase = inputs.ShaderBase;
+            table.ComputeState = inputs.ComputeState;
+            return table;
         }
 
         public ResidentGuestBytesReader? WrapResident(ResidentGuestBytesReader? inner)
@@ -2102,8 +2488,20 @@ public sealed partial class ResourceMaterializationCache
             return true;
         }
 
+        // The range layout of the last build, filled before its retained arrays are made: an entry
+        // rebuilt from the same reads (a stale entry evaluated again, often every frame) shares the
+        // arrays of the entry it replaces instead of allocating them again.
+        private ulong[] _scratchAddresses = [];
+        private int[] _scratchOffsets = [];
+        private int[] _scratchLengths = [];
+        private bool[] _scratchClean = [];
+        private bool[] _scratchTableOnly = [];
+        private byte[] _scratchBytes = [];
+        private int[] _scratchBaseWords = [];
+
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,
-            ResourceSpecialization specialization, IReadOnlyList<int> memoryBases)
+            ResourceSpecialization specialization, IReadOnlyList<int> memoryBases, ulong[]? usedUserData = null,
+            Entry? like = null)
         {
             // Reads mostly arrive in address order; sorting a sorted list was ~5% of a draw-heavy render thread.
             var ordered = true;
@@ -2127,12 +2525,27 @@ public sealed partial class ResourceMaterializationCache
                 end = read.Address + sizeof(uint);
             }
 
-            var addresses = new ulong[rangeCount];
-            var offsets = new int[rangeCount];
-            var lengths = new int[rangeCount];
-            var clean = new bool[rangeCount];
-            var bytes = new byte[wordCount * sizeof(uint)];
-            var tableOnly = new bool[wordCount];
+            if (_scratchAddresses.Length < rangeCount)
+            {
+                var capacity = Math.Max(rangeCount, _scratchAddresses.Length * 2);
+                _scratchAddresses = new ulong[capacity];
+                _scratchOffsets = new int[capacity];
+                _scratchLengths = new int[capacity];
+                _scratchClean = new bool[capacity];
+            }
+
+            if (_scratchTableOnly.Length < wordCount)
+                _scratchTableOnly = new bool[Math.Max(wordCount, _scratchTableOnly.Length * 2)];
+            var addresses = _scratchAddresses.AsSpan(0, rangeCount);
+            var offsets = _scratchOffsets.AsSpan(0, rangeCount);
+            var lengths = _scratchLengths.AsSpan(0, rangeCount);
+            var clean = _scratchClean.AsSpan(0, rangeCount);
+            var tableOnly = _scratchTableOnly.AsSpan(0, wordCount);
+            if (_scratchBytes.Length < wordCount * sizeof(uint))
+                _scratchBytes = new byte[Math.Max(wordCount * sizeof(uint), _scratchBytes.Length * 2)];
+            lengths.Clear();
+            clean.Clear();
+            var bytes = _scratchBytes.AsSpan(0, wordCount * sizeof(uint));
             var rangeIndex = -1;
             var wordIndex = -1;
             end = 0;
@@ -2157,41 +2570,82 @@ public sealed partial class ResourceMaterializationCache
                 clean[rangeIndex] |= wordClean;
                 tableOnly[wordIndex] = table;
                 System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
-                    bytes.AsSpan(wordIndex * sizeof(uint)), word);
+                    bytes[(wordIndex * sizeof(uint))..], word);
                 previous = address;
                 end = address + sizeof(uint);
             }
 
-            var userData = new uint[inputs.UserData.Count];
-            for (var index = 0; index < userData.Length; index++)
-                userData[index] = inputs.UserData[index];
+            // The entry's arrays are never written once built, so equal ones are shared. An entry
+            // rebuilt every frame for a moved ring keeps its layout, its flags and often its words:
+            // each array is shared on its own, not only when every range is where it was.
+            var sameAddresses = like is not null && addresses.SequenceEqual(like.RangeAddresses);
+            var sameLayout = like is not null && offsets.SequenceEqual(like.RangeOffsets) && lengths.SequenceEqual(like.RangeLengths);
+            var sameClean = like is not null && clean.SequenceEqual(like.RangeClean);
+            var sameRanges = sameAddresses && sameLayout && sameClean;
+            var sameWords = like is not null && tableOnly.SequenceEqual(like.WordTableOnly);
+            var sameBytes = like is not null && bytes.SequenceEqual(like.Bytes);
+            var baseWords = memoryBases.Count == 0 ? null : MapBaseWords(snapshot, memoryBases, bytes, like?.BaseWordBuffers);
+            var sameBaseWords = like is not null && ReferenceEquals(baseWords, like.BaseWordBuffers);
+            // A draw's user data array is never written once made (ShaderSource.UserData): the entry
+            // shares it, as the snapshot does.
+            var userData = like is not null && like.UserData.Length == inputs.UserData.Count && SameWords(like.UserData, inputs.UserData)
+                ? like.UserData
+                : inputs.UserData as uint[] ?? CopyWords(inputs.UserData);
+            // Derived from the layout and the base words alone (BaseWordProbesOf), and with the
+            // addresses and flags from the ranges alone (JoinedReadsOf).
+            var probes = sameLayout && sameBaseWords ? like!.BaseWordProbes : null;
+            var joined = sameRanges && sameBaseWords ? like!.Joined : null;
             return new Entry
             {
-                BaseWordBuffers = memoryBases.Count == 0 ? null : MapBaseWords(snapshot, memoryBases, bytes),
+                BaseWordBuffers = baseWords,
                 Plan = plan,
                 UserData = userData,
-                UsedUserData = _userData.TakeUsed(),
+                UsedUserData = usedUserData ?? _userData.TakeUsed(),
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
-                RangeAddresses = addresses,
-                RangeOffsets = offsets,
-                RangeLengths = lengths,
-                RangeClean = clean,
-                WordTableOnly = tableOnly,
+                RangeAddresses = sameAddresses ? like!.RangeAddresses : addresses.ToArray(),
+                RangeOffsets = sameLayout ? like!.RangeOffsets : offsets.ToArray(),
+                RangeLengths = sameLayout ? like!.RangeLengths : lengths.ToArray(),
+                RangeClean = sameClean ? like!.RangeClean : clean.ToArray(),
+                WordTableOnly = sameWords ? like!.WordTableOnly : tableOnly.ToArray(),
                 TableRefreshable = snapshot.FlattenedResourceTable.Length ==
                     plan.TableReads.Count + plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount,
-                Bytes = bytes,
+                Bytes = sameBytes ? like!.Bytes : bytes.ToArray(),
                 Snapshot = snapshot,
                 Specialization = specialization,
+                Joined = joined,
+                BaseWordProbes = probes,
+                JoinedHint = joined is null ? like?.Joined ?? like?.JoinedHint : null,
+                SlotsHint = like?.Slots is { } slots && !ReferenceEquals(slots, Unmodelled) ? slots : like?.SlotsHint,
             };
         }
 
-        // The recorded word each memory-loaded base dword came from: the only recorded word holding
-        // that value. A word two bases claim names neither. Learning checks the guess.
-        private static int[]? MapBaseWords(ResourceSnapshot snapshot, IReadOnlyList<int> memoryBases, byte[] bytes)
+        private static bool SameWords(uint[] words, IReadOnlyList<uint> other)
         {
-            int[]? map = null;
+            for (var index = 0; index < words.Length; index++)
+                if (words[index] != other[index])
+                    return false;
+            return true;
+        }
+
+        private static uint[] CopyWords(IReadOnlyList<uint> words)
+        {
+            var copy = new uint[words.Count];
+            for (var index = 0; index < copy.Length; index++)
+                copy[index] = words[index];
+            return copy;
+        }
+
+        // The recorded word each memory-loaded base dword came from: the only recorded word holding
+        // that value. A word two bases claim names neither. Learning checks the guess. Built in
+        // scratch: a map equal to like's is like's, and only a new one is allocated.
+        private int[]? MapBaseWords(ResourceSnapshot snapshot, IReadOnlyList<int> memoryBases, ReadOnlySpan<byte> bytes, int[]? like)
+        {
+            var mapped = false;
             var wordCount = bytes.Length / sizeof(uint);
+            if (_scratchBaseWords.Length < wordCount)
+                _scratchBaseWords = new int[Math.Max(wordCount, _scratchBaseWords.Length * 2)];
+            var map = _scratchBaseWords.AsSpan(0, wordCount);
             foreach (var buffer in memoryBases)
             {
                 if (buffer >= snapshot.Buffers.Length || snapshot.Buffers[buffer].Length < 2)
@@ -2200,7 +2654,7 @@ public sealed partial class ResourceMaterializationCache
                 var match = -1;
                 for (var word = 0; word < wordCount; word++)
                 {
-                    if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(word * sizeof(uint))) != value)
+                    if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(word * sizeof(uint))..]) != value)
                         continue;
                     if (match >= 0)
                     {
@@ -2212,16 +2666,18 @@ public sealed partial class ResourceMaterializationCache
 
                 if (match < 0)
                     continue;
-                if (map is null)
+                if (!mapped)
                 {
-                    map = new int[wordCount];
-                    map.AsSpan().Fill(NoBase);
+                    mapped = true;
+                    map.Fill(NoBase);
                 }
 
                 map[match] = map[match] == NoBase ? buffer : SharedBase;
             }
 
-            return map;
+            if (!mapped)
+                return null;
+            return like is not null && map.SequenceEqual(like) ? like : map.ToArray();
         }
     }
 

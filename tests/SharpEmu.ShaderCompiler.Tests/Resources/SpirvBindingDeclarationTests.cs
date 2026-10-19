@@ -363,34 +363,31 @@ public sealed class SpirvBindingDeclarationTests
         Assert.Equal(secondImageType, snapshot.Images[2][3] >> 28);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains((ushort)SpirvOp.Select, new SpirvModuleInspector(shader.Spirv).Opcodes);
-        Assert.False(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError));
-        Assert.False(string.IsNullOrWhiteSpace(metalError));
+
+        // The Metal backend declares a texture type per dimension too, so candidates
+        // spread across two binding classes translate there as well.
+        Assert.True(
+            SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError),
+            metalError);
+        Assert.Contains("texture2d<float>", metal.Source);
+        Assert.Contains("texture2d_array<float>", metal.Source);
     }
 
     [Theory]
     [InlineData(ImageType2D, ImageTypeCube)]
     [InlineData(ImageTypeCube, ImageType2D)]
-    public void IndirectImage_MixedCubeAnd2DCandidatesAreNotDiscarded(
-        uint firstImageType,
-        uint secondImageType)
+    public void IndirectImage_CubeAccessBindsA2DCandidateNull(uint firstImageType, uint secondImageType)
     {
-        AssertMixedImageCandidatesAreRejected(firstImageType, secondImageType);
-    }
-
-    private static void AssertMixedImageCandidatesAreRejected(uint firstImageType, uint secondImageType)
-    {
-        var plan = Extract(IndirectImageAfterPlainImageProgram(indirectDimension: 3));
-        var (userData, memory) = IndirectImageAfterPlainImageInputs(
-            64, false, firstImageType: firstImageType, secondImageType: secondImageType);
-        var snapshot = new ResourceSnapshot();
-        var specialization = new ResourceSpecialization();
-        var previousSnapshot = snapshot;
-        var previousSpecialization = specialization;
-        Assert.False(ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: memory.Read),
-            ref snapshot, ref specialization, out var failure));
-        Assert.Equal(ResourceMaterializationFailure.IncompatibleImageCandidates, failure);
-        Assert.Same(previousSnapshot, snapshot);
-        Assert.Same(previousSpecialization, specialization);
+        // A DIM_CUBE access cannot read a 2D candidate, so it binds null and the cube stays.
+        var (_, snapshot) = IndirectImageAfterPlainImageRequest(
+            firstImageType: firstImageType,
+            secondImageType: secondImageType,
+            indirectDimension: 3);
+        var first = snapshot.Images[1];
+        var second = snapshot.Images[2];
+        Assert.Equal(firstImageType == ImageTypeCube, first.Any(word => word != 0));
+        Assert.Equal(secondImageType == ImageTypeCube, second.Any(word => word != 0));
+        Assert.Equal(ImageTypeCube, (firstImageType == ImageTypeCube ? first : second)[3] >> 28);
     }
 
     [Fact]

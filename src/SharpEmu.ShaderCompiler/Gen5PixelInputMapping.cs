@@ -50,4 +50,50 @@ public static class Gen5PixelInputMapping
             }
         }
     }
+
+    /// <summary>
+    /// The parameter exports (SPI_PS_INPUT_CNTL.OFFSET, one bit each) whose three vertex
+    /// values a pixel program reads: an input slot it reads with V_INTERP_MOV P10/P20, an
+    /// f16 interpolation or modified I/J needs every vertex of the primitive, unlike one it
+    /// reads only through P0 (the provoking vertex, which a flat input gives).
+    /// </summary>
+    public static uint PerVertexParameterMask(Gen5ShaderProgram program, ReadOnlySpan<uint> controls)
+    {
+        Span<bool> needsVertices = stackalloc bool[32];
+        Span<bool> otherThanP0 = stackalloc bool[32];
+        foreach (var instruction in program.Instructions)
+        {
+            if (instruction.Control is not Gen5InterpolationControl control || control.Attribute >= 32u)
+            {
+                continue;
+            }
+
+            var attribute = (int)control.Attribute;
+            if (instruction.Opcode is "VInterpMovF32" or "VInterpP1llF16" or "VInterpP1lvF16" or "VInterpP2F16" ||
+                control.Modifiers is { } modifiers && ((modifiers.AbsoluteMask | modifiers.NegateMask) & 0x6u) != 0)
+            {
+                needsVertices[attribute] = true;
+            }
+
+            if (instruction.Opcode != "VInterpMovF32" || control.Parameter != ProvokingVertexParameter)
+            {
+                otherThanP0[attribute] = true;
+            }
+        }
+
+        var mask = 0u;
+        for (var attribute = 0; attribute < 32; attribute++)
+        {
+            if (needsVertices[attribute] && otherThanP0[attribute])
+            {
+                var offset = attribute < controls.Length ? controls[attribute] & 0x1Fu : (uint)attribute;
+                mask |= 1u << (int)offset;
+            }
+        }
+
+        return mask;
+    }
+
+    // V_INTERP_MOV's P0 selector.
+    private const uint ProvokingVertexParameter = 2;
 }

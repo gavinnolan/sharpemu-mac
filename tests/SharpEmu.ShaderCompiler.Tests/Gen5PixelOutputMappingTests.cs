@@ -134,10 +134,10 @@ public sealed class Gen5PixelOutputMappingTests
         var packedType = signed ? "short2" : "ushort2";
         var components = Enumerable.Range(0, 4).Select(component =>
             (enableMask & (1u << component)) != 0
-                ? $"{componentType}(as_type<{packedType}>(v[{component >> 1}])[{component & 1}])"
+                ? $"{componentType}(as_type<{packedType}>(v{component >> 1})[{component & 1}])"
                 : $"sharpemu_out.mrt0[{component}]");
         Assert.Contains($"vec<{componentType}, 4>({string.Join(", ", components)})", metal.Source);
-        Assert.DoesNotContain("as_type<half2>(v[", metal.Source);
+        Assert.DoesNotContain("as_type<half2>(v", metal.Source);
     }
 
     [Fact]
@@ -149,17 +149,17 @@ public sealed class Gen5PixelOutputMappingTests
         Assert.Equal(4, instructions.Count(instruction =>
             instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62));
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
-        Assert.Contains("(float)as_type<half2>(v[0])[0]", metal.Source);
-        Assert.Contains("(float)as_type<half2>(v[1])[1]", metal.Source);
+        Assert.Contains("(float)as_type<half2>(v0)[0]", metal.Source);
+        Assert.Contains("(float)as_type<half2>(v1)[1]", metal.Source);
     }
 
     // SPI_SHADER_COL_FORMAT decides what a compressed export carries: two halves, or two normalized
     // 16-bit values (an engine packs integer bits into a UNORM16 target this way).
     [Theory]
-    [InlineData(Gen5PixelExportFormat.Float16, 62u, "(float)as_type<half2>(v[1])[1]")]
-    [InlineData(Gen5PixelExportFormat.Unorm16, 61u, "(float(as_type<ushort2>(v[1])[1]) / 65535.0f)")]
-    [InlineData(Gen5PixelExportFormat.Snorm16, 60u, "max(float(as_type<short2>(v[1])[1]) / 32767.0f, -1.0f)")]
-    public void CompressedFloatExportUnpacksItsDeclaredFormat(Gen5PixelExportFormat format, uint unpack, string metalComponent)
+    [InlineData(Gen5ColorExportFormat.Fp16Abgr, 62u, "(float)as_type<half2>(v1)[1]")]
+    [InlineData(Gen5ColorExportFormat.Unorm16Abgr, 61u, "(float(as_type<ushort2>(v1)[1]) * (1.0f / 65535.0f))")]
+    [InlineData(Gen5ColorExportFormat.Snorm16Abgr, 60u, "max(float(as_type<short2>(v1)[1]) * (1.0f / 32767.0f), -1.0f)")]
+    public void CompressedFloatExportUnpacksItsDeclaredFormat(Gen5ColorExportFormat format, uint unpack, string metalComponent)
     {
         var request = CompressedPixelRequest(Gen5PixelOutputKind.Float, 15, format);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
@@ -186,7 +186,7 @@ public sealed class Gen5PixelOutputMappingTests
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             PixelOutputs = [new(0, 0, Gen5PixelOutputKind.Float),
-                new(1, location, Gen5PixelOutputKind.Float) { Index = blendIndex }],
+                new(1, location, Gen5PixelOutputKind.Float) { BlendSourceIndex = blendIndex }],
         };
         Assert.Equal(valid, Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error));
         Assert.Equal(valid, Gen5MslTranslator.TryCompileProgram(request, out var metal, out _));
@@ -203,7 +203,7 @@ public sealed class Gen5PixelOutputMappingTests
     }
 
     private static ShaderCompileRequest CompressedPixelRequest(Gen5PixelOutputKind kind, uint enableMask,
-        Gen5PixelExportFormat format = Gen5PixelExportFormat.Float16)
+        Gen5ColorExportFormat format = Gen5ColorExportFormat.Fp16Abgr)
     {
         var export = new Gen5ShaderInstruction(
             0, Gen5ShaderEncoding.Exp, "Exp", [],

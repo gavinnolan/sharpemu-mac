@@ -60,6 +60,13 @@ internal sealed class CompiledResourceEvaluator
 
     private static void CompilePending()
     {
+        // A guest waiting on its first draw is waiting on this queue, so the
+        // thread is not background work — but it has no frame deadline and must
+        // not compete with the presenter, hence UserInitiated rather than
+        // UserInteractive. (The BelowNormal Thread.Priority set at construction
+        // is a no-op on Unix hosts; this is what actually classifies the thread.)
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInitiated);
         while (true)
         {
             PendingSignal.Wait();
@@ -131,9 +138,15 @@ internal sealed class CompiledResourceEvaluator
         return values.Count == 0 ? null : new(plan, values, indices, phis);
     }
 
+    // SHARPEMU_LOG_MEMORY=1: DynamicMethods compiled so far (each stays alive as long as its delegate).
+    private static readonly SharpEmu.Logging.MemoryCounter DynamicMethodsCreated =
+        SharpEmu.Logging.MemoryTelemetry.Counter("eval.dynamic_methods");
+
     private EvaluateFunction Compile(ShaderResourcePlan plan, int first, Dictionary<ScalarValue, ScalarValue?> phis)
     {
         var count = Math.Min(NodesPerMethod, Count - first);
+        DynamicMethodsCreated.Add();
+        ResourcePlanBuildCounters.RecordEvaluatorMethod();
         var method = new DynamicMethod($"Srt_{plan.Hash:X16}_{first}", typeof(bool),
             [typeof(RuntimeValueEvaluator), typeof(int), typeof(ulong).MakeByRefType()], typeof(CompiledResourceEvaluator).Module, true);
         var il = method.GetILGenerator();

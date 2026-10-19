@@ -242,14 +242,18 @@ public sealed class ResourceMaterializationProfileTests
     }
 
     [Theory]
-    [InlineData(null, null, false)]
-    [InlineData("1", null, false)]
-    [InlineData(null, "1", false)]
-    [InlineData("1", "0", false)]
-    [InlineData("0", "1", false)]
-    [InlineData("1", "1", true)]
-    public void DetailedMeasurementsRequireBothSwitches(string? performance, string? frameTrace, bool expected)
-        => Assert.Equal(expected, ResourceMaterializationProfile.IsEnabled(performance, frameTrace));
+    [InlineData(null, null, null, false)]
+    [InlineData("1", null, null, false)]
+    [InlineData(null, "1", null, false)]
+    [InlineData("1", "0", null, false)]
+    [InlineData("0", "1", null, false)]
+    [InlineData("1", "1", null, true)]
+    [InlineData(null, null, "1", true)]
+    [InlineData(null, null, "0", false)]
+    [InlineData("1", "0", "1", true)]
+    public void DetailedMeasurementsNeedBothFrameTraceSwitchesOrTheirOwn(
+        string? performance, string? frameTrace, string? materialization, bool expected)
+        => Assert.Equal(expected, ResourceMaterializationProfile.IsEnabled(performance, frameTrace, materialization));
 
     [Fact]
     public void ScopeRecordsAllocationAndExceptionalExitWhenEnabled()

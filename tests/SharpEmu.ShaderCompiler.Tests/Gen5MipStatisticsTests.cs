@@ -9,6 +9,15 @@ using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Tests;
 
+// These tests set the process-wide ResourceMaterializer.RecordMipStatistics; nothing else
+// may apply a specialization while they do.
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class MipStatisticsSwitchCollection
+{
+    public const string Name = "MipStatisticsSwitch";
+}
+
+[Collection(MipStatisticsSwitchCollection.Name)]
 public sealed class Gen5MipStatisticsTests
 {
     private const ulong ShaderAddress = 0x1_0000_C000;
@@ -33,8 +42,18 @@ public sealed class Gen5MipStatisticsTests
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         Assert.True(ResourceMaterializer.Materialize(plan, ResourceTestProgram.Inputs(userData), ref snapshot, ref specialization));
-        specialization.Images[0] = specialization.Images[0] with { MipStatistics = recordStatistics };
-        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var previous = ResourceMaterializer.RecordMipStatistics;
+        ResourceMaterializer.RecordMipStatistics = recordStatistics;
+        SpecializedResourceInfo resources;
+        try
+        {
+            resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        }
+        finally
+        {
+            ResourceMaterializer.RecordMipStatistics = previous;
+        }
+
         var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 20), false,
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         var request = new ShaderCompileRequest(plan, resources, layout)
@@ -75,6 +94,15 @@ public sealed class Gen5MipStatisticsTests
         Assert.Contains(SpirvOp.AtomicUMin, opcodes);
         Assert.Equal(opcode == "ImageSample", opcodes.Contains(SpirvOp.ImageQueryLod));
         Assert.Equal(reduce, opcodes.Contains(SpirvOp.GroupNonUniformUMin));
+        // The slot's field gates the LOD query and the atomics at run time.
+        var sample = opcodes.FindIndex(static op => op is SpirvOp.ImageSampleImplicitLod or SpirvOp.ImageSampleExplicitLod);
+        var guard = opcodes.FindIndex(sample, static op => op == SpirvOp.BranchConditional);
+        Assert.True(sample >= 0 && guard > sample);
+        Assert.True(opcodes.IndexOf(SpirvOp.AtomicUMin) > guard);
+        if (opcode == "ImageSample")
+        {
+            Assert.True(opcodes.IndexOf(SpirvOp.ImageQueryLod) > guard);
+        }
     }
 
     [Fact]

@@ -58,9 +58,11 @@ public sealed class RuntimeEvaluationScratchTests
         second.Buffers[0][0] = 0x9000;
         Assert.Equal(0x2000u, first.FlattenedResourceTable[0]);
         Assert.Equal(0x2000u, first.Buffers[0][0]);
-        userData[0] = 0x4000;
+        // Each draw builds its own user-data array and never writes it again, so the
+        // snapshot holds the array it was given (37e1ca1a); the next draw brings a new one.
+        uint[] nextUserData = [0x4000, 0];
         var otherMemory = new TestWordMemory { Base = 0x4000, Words = [0x5000, 0, 512, 0] };
-        var third = Materialize(plan, Inputs(userData, otherMemory.Read));
+        var third = Materialize(plan, Inputs(nextUserData, otherMemory.Read));
         Assert.Equal(0x5000u, third.Buffers[0][0]);
         Assert.Equal(0x1000u, first.UserData[0]);
         Assert.Equal(0x4000u, third.UserData[0]);

@@ -29,8 +29,9 @@ public sealed class Gen5OrderedCountTests
 
         Assert.Equal(["DsOrderedCount", "SEndpgm"], program.Instructions.Select(instruction => instruction.Opcode));
         var instruction = program.Instructions[0];
-        Assert.Equal(new[] { Gen5OperandKind.ScalarRegister, Gen5OperandKind.VectorRegister }, instruction.Sources.Select(source => source.Kind));
-        Assert.Equal(1u, instruction.Sources[1].Value);
+        Assert.Equal(new[] { Gen5OperandKind.VectorRegister, Gen5OperandKind.ScalarRegister }, instruction.Sources.Select(source => source.Kind));
+        Assert.Equal(1u, instruction.Sources[0].Value);
+        Assert.Equal(124u, instruction.Sources[1].Value);
         Assert.Equal(4u, Assert.Single(instruction.Destinations).Value);
     }
 

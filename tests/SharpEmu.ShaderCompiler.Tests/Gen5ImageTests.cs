@@ -168,11 +168,11 @@ public sealed class Gen5ImageTests
         var request = ImageOperationRequest("ImageGather4L", dimension: 1, unifiedFormat: 22u);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
 
-        // gather() has no level argument either.
-        Assert.DoesNotContain(".gather(", shader.Source);
+        // Only mip zero can take the conditional native gather path; other mips use four explicit-level samples.
+        Assert.Contains("== 0u &&", shader.Source);
         Assert.Contains(".get_num_mip_levels()", shader.Source);
         Assert.Equal(4, shader.Source.Split(".sample(").Length - 1);
-        Assert.Equal(4, shader.Source.Split(", level((float)").Length - 1);
+        Assert.Equal(4, shader.Source.Split(", metal::level((float)").Length - 1);
     }
 
     [Fact]

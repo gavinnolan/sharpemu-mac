@@ -91,6 +91,8 @@ public sealed class MemoryAccessInfo
     public uint NumberFormat { get; init; }
     public ImageSampleFlags ImageSampleFlags { get; init; }
     public ImageDimension ImageDimension { get; init; }
+    // DIM_CUBE: the access addresses faces, which only a cube descriptor has.
+    public bool ImageCube { get; init; }
     public ImageResourceClass ImageClass { get; init; }
     public bool NeedsSampler { get; init; }
     public bool AddressIsFull { get; init; }
@@ -98,6 +100,8 @@ public sealed class MemoryAccessInfo
     public bool Typed { get; init; }
     public bool Formatted { get; init; }
     public bool ImageHasMip { get; init; }
+    // A _PCK load or store: raw texel bits, which need the guest format to pack.
+    public bool ImagePacked { get; init; }
     public bool ImageR128 { get; init; }
     public bool Glc { get; init; }
     public bool Slc { get; init; }
@@ -128,10 +132,10 @@ public sealed class MemoryAccessInfo
         Kind == other.Kind && Access == other.Access && Offset == other.Offset && Dmask == other.Dmask &&
         DataDwords == other.DataDwords && DataBits == other.DataBits && ComponentIndex == other.ComponentIndex &&
         ComponentCount == other.ComponentCount && DataFormat == other.DataFormat && NumberFormat == other.NumberFormat &&
-        ImageSampleFlags == other.ImageSampleFlags && ImageDimension == other.ImageDimension &&
+        ImageSampleFlags == other.ImageSampleFlags && ImageDimension == other.ImageDimension && ImageCube == other.ImageCube &&
         ImageClass == other.ImageClass && NeedsSampler == other.NeedsSampler && AddressIsFull == other.AddressIsFull &&
         DataSigned == other.DataSigned && Typed == other.Typed && Formatted == other.Formatted &&
-        ImageHasMip == other.ImageHasMip && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
+        ImageHasMip == other.ImageHasMip && ImagePacked == other.ImagePacked && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
         IndexEnabled == other.IndexEnabled && OffsetEnabled == other.OffsetEnabled &&
         Resource == other.Resource && Sampler == other.Sampler && PlanningOnly == other.PlanningOnly &&
         DeviceDescriptor == other.DeviceDescriptor && AddressSpace == other.AddressSpace;
@@ -186,19 +190,10 @@ public sealed class MemoryAccessTable
                     table.Add(FromImage(instruction, image));
                     break;
                 case Gen5RayIntersectControl:
-                    // BVH nodes use device addresses, not an image binding.
-                    table.Add(new MemoryAccessInfo
-                    {
-                        Pc = instruction.Pc,
-                        Opcode = instruction.Opcode,
-                        Kind = MemoryResourceKind.None,
-                        Access = MemoryAccess.None,
-                        DataDwords = Gen5RayIntersectControl.ResultDwords,
-                        ComponentCount = Gen5RayIntersectControl.ResultDwords,
-                    });
+                    table.Add(FromRayIntersect(instruction));
                     break;
                 case Gen5DataShareControl share:
-                    if (instruction.Opcode is "DsSwizzleB32" or "DsBpermuteB32")
+                    if (instruction.Opcode is "DsSwizzleB32" or "DsBpermuteB32" or "DsPermuteB32" or "DsNop")
                     {
                         break;
                     }
@@ -257,7 +252,11 @@ public sealed class MemoryAccessTable
             Kind = MemoryResourceKind.Buffer,
             Access = access,
             Offset = unchecked((uint)control.OffsetBytes),
-            DataDwords = Math.Max(control.DwordCount, 1u),
+            // An atomic's DwordCount counts its data registers (CMPSWAP's comparator too);
+            // the memory it reaches is one dword, or a pair for the X2 forms.
+            DataDwords = access == MemoryAccess.Atomic
+                ? (opcode.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u)
+                : Math.Max(control.DwordCount, 1u),
             DataBits = bits,
             ComponentCount = Math.Max(control.DwordCount, 1u),
             DataFormat = dataFormat,
@@ -292,7 +291,8 @@ public sealed class MemoryAccessTable
                     : MemoryResourceKind.Global,
             Access = access,
             Offset = unchecked((uint)control.OffsetBytes),
-            DataDwords = Math.Max(control.DwordCount, 1u),
+            // GLOBAL_*_DWORD_ADDTID reaches one dword per lane past SADDR + offset.
+            DataDwords = control.AddThreadId ? 64u : Math.Max(control.DwordCount, 1u),
             DataBits = bits,
             ComponentCount = Math.Max(control.DwordCount, 1u),
             DataSigned = signed,
@@ -302,22 +302,30 @@ public sealed class MemoryAccessTable
         };
     }
 
+    // A BVH T# is not an image descriptor: the backend reads the nodes through device
+    // addresses, so nothing is materialized here. The decoder gives the BVH opcodes a
+    // Gen5RayIntersectControl, never a Gen5ImageControl.
+    private static MemoryAccessInfo FromRayIntersect(Gen5ShaderInstruction instruction) => new()
+    {
+        Pc = instruction.Pc,
+        Opcode = instruction.Opcode,
+        Kind = MemoryResourceKind.None,
+        Access = MemoryAccess.None,
+        DataDwords = 4,
+        ComponentCount = 4,
+    };
+
     private static MemoryAccessInfo FromImage(Gen5ShaderInstruction instruction, Gen5ImageControl control)
     {
         var opcode = instruction.Opcode;
-        var atomic = opcode.StartsWith("ImageAtomic", StringComparison.Ordinal);
-        var store = opcode.StartsWith("ImageStore", StringComparison.Ordinal);
-        var sampled = opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
-            opcode.StartsWith("ImageGather", StringComparison.Ordinal) ||
-            opcode == "ImageGetLod";
-        var compare = (opcode.StartsWith("ImageSampleC", StringComparison.Ordinal) && !opcode.StartsWith("ImageSampleCd", StringComparison.Ordinal)) ||
-            opcode.StartsWith("ImageGather4C", StringComparison.Ordinal);
-        var mimgOpcode = instruction.Words.Count != 0
-            ? ((instruction.Words[0] >> 18) & 0x7F) | ((instruction.Words[0] & 1) << 7)
-            : 0u;
-        var adjust = mimgOpcode is
-            0xA0 or 0xA1 or 0xA5 or 0xA6 or 0xA8 or 0xA9 or 0xAD or 0xAE or
-            0xB0 or 0xB1 or 0xB5 or 0xB6 or 0xB8 or 0xB9 or 0xBD or 0xBE;
+        var flags = Gen5ImageOpcodes.FlagsOf(opcode);
+        var atomic = (flags & Gen5ImageOp.Atomic) != 0;
+        var store = (flags & Gen5ImageOp.Store) != 0;
+        var sampled = Gen5ImageOpcodes.UsesSampler(opcode);
+        // SAMPLE_CL and SAMPLE_CD are not comparisons: only the opcode table's
+        // z-compare operand makes a depth-reference access.
+        var compare = (flags & Gen5ImageOp.Compare) != 0;
+        var adjust = (flags & Gen5ImageOp.Adjust) != 0;
         return new MemoryAccessInfo
         {
             Pc = instruction.Pc,
@@ -328,10 +336,12 @@ public sealed class MemoryAccessTable
             NeedsSampler = sampled,
             Dmask = control.Dmask,
             ImageDimension = DecodeImageDimension(control.Dimension),
+            ImageCube = control.Dimension == 3,
             ImageSampleFlags =
                 (compare ? ImageSampleFlags.Compare : ImageSampleFlags.None) |
                 (adjust ? ImageSampleFlags.Adjust : ImageSampleFlags.None),
-            ImageHasMip = opcode is "ImageLoadMip" or "ImageStoreMip",
+            ImageHasMip = (flags & Gen5ImageOp.Mip) != 0,
+            ImagePacked = (flags & Gen5ImageOp.Packed) != 0,
             ImageR128 = instruction.Words.Count != 0 && ((instruction.Words[0] >> 15) & 1) != 0,
             Glc = control.Glc,
             Slc = control.Slc,
@@ -367,7 +377,9 @@ public sealed class MemoryAccessTable
     }
 
     private static MemoryAccess DataShareAccess(string opcode) =>
-        Gen5ShaderTranslator.IsDataShareAtomic(opcode) ? MemoryAccess.Atomic
+        Gen5ShaderTranslator.IsDataShareAtomic(opcode) ||
+        opcode is "DsCondxchg32RtnB64" or "DsOrderedCount" ||
+        opcode.StartsWith("DsGws", StringComparison.Ordinal) ? MemoryAccess.Atomic
         : opcode.StartsWith("DsWrite", StringComparison.Ordinal) ? MemoryAccess.Write
         : MemoryAccess.Read;
 }

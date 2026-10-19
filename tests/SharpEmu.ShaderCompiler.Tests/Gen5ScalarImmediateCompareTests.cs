@@ -49,8 +49,8 @@ public sealed class Gen5ScalarImmediateCompareTests
             Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metalShader, out error), error);
             var constant = $"0x{expected:X}u";
             var condition = signed
-                ? $"scc = as_type<int>(s[4]) {operation} as_type<int>({constant});"
-                : $"scc = (s[4]) {operation} ({constant});";
+                ? $"scc = as_type<int>(s4) {operation} as_type<int>({constant});"
+                : $"scc = (s4) {operation} ({constant});";
             Assert.Contains(condition, metalShader.Source);
         }
     }

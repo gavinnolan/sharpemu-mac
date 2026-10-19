@@ -45,7 +45,7 @@ public sealed class Gen5DualSourceBlendTests
     {
         var request = Request(
             new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
-            new Gen5PixelOutputBinding(1, 0, Gen5PixelOutputKind.Float) { ExportTarget = 1, Index = 1 });
+            new Gen5PixelOutputBinding(1, 0, Gen5PixelOutputKind.Float) { ExportTarget = 1, BlendSourceIndex = 1 });
 
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         const uint Decorate = 71, Location = 30, Index = 32;
@@ -78,7 +78,7 @@ public sealed class Gen5DualSourceBlendTests
         var request = Request(
             new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
             new Gen5PixelOutputBinding(2, 1, Gen5PixelOutputKind.Float),
-            new Gen5PixelOutputBinding(1, 0, Gen5PixelOutputKind.Float) { ExportTarget = 1, Index = 1 });
+            new Gen5PixelOutputBinding(1, 0, Gen5PixelOutputKind.Float) { ExportTarget = 1, BlendSourceIndex = 1 });
 
         Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error));
         Assert.Contains("second source", error, StringComparison.Ordinal);
@@ -89,7 +89,7 @@ public sealed class Gen5DualSourceBlendTests
     {
         var request = Request(
             new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float) { DualSourceAlpha = true },
-            new Gen5PixelOutputBinding(1, 0, Gen5PixelOutputKind.Float) { Index = 1 });
+            new Gen5PixelOutputBinding(1, 0, Gen5PixelOutputKind.Float) { BlendSourceIndex = 1 });
         Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error));
         Assert.Contains("synthetic alpha", error, StringComparison.Ordinal);
     }

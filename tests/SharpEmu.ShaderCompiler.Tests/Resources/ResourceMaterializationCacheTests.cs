@@ -16,6 +16,8 @@ public sealed class ResourceMaterializationCacheTests
     {
         public readonly Dictionary<ulong, uint> Words = new();
         public int Reads;
+        public int ResidentReads;
+        public int Compares;
         public bool GpuOwned;
 
         public Heap()
@@ -43,8 +45,25 @@ public sealed class ResourceMaterializationCacheTests
             return Words.TryGetValue(address, out word);
         }
 
+        // What a host compares in place: true only when every range reads as ReadResident would
+        // read it and equals the recorded bytes.
+        public bool Compare(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
+            ReadOnlySpan<byte> recorded)
+        {
+            Compares++;
+            if (GpuOwned)
+                return false;
+            for (var range = 0; range < addresses.Length; range++)
+                for (var offset = 0; offset < lengths[range]; offset += 4)
+                    if (!Words.TryGetValue(addresses[range] + (ulong)offset, out var word) ||
+                        word != BitConverter.ToUInt32(recorded.Slice(offsets[range] + offset, 4)))
+                        return false;
+            return true;
+        }
+
         public bool ReadResident(ulong address, Span<byte> destination, bool clean)
         {
+            ResidentReads++;
             if (GpuOwned)
                 return false;
             for (var offset = 0; offset < destination.Length; offset += 4)
@@ -68,6 +87,75 @@ public sealed class ResourceMaterializationCacheTests
         specialization = new ResourceSpecialization();
         return cache.Materialize(plan, Inputs(userData, readCleanMemory: heap.Read, shaderBase: shaderBase), heap.ReadResident,
             ref snapshot, ref specialization, out _);
+    }
+
+    private static bool RunCompared(ResourceMaterializationCache cache, ShaderResourcePlan plan, Heap heap, uint[] userData,
+        out ResourceSnapshot snapshot, out ResourceSpecialization specialization)
+    {
+        snapshot = new ResourceSnapshot();
+        specialization = new ResourceSpecialization();
+        var inputs = Inputs(userData, readCleanMemory: heap.Read);
+        return cache.Materialize(plan, new ResourceRuntimeInputs
+        {
+            UserData = inputs.UserData, ReadCleanMemory = inputs.ReadCleanMemory, CompareResidentMemory = heap.Compare,
+        }, heap.ReadResident, ref snapshot, ref specialization, out _);
+    }
+
+    [Fact]
+    public void AHitComparesInPlaceWithoutReadingTheRangesBack()
+    {
+        if (!ResourceMaterializationCache.InPlaceValidateEnabled) return;
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(RunCompared(cache, plan, heap, [0x1000, 0], out var first, out _));
+        var residentReads = heap.ResidentReads;
+        Assert.True(RunCompared(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Same(first, second);
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        Assert.Equal(1, heap.Compares);
+        // The verify mode reads them back to check the answer.
+        if (!ResourceMaterializationCache.InPlaceValidateVerify)
+            Assert.Equal(residentReads, heap.ResidentReads);
+    }
+
+    // The same sequence of guest memory states through a cache that compares in place and one
+    // that reads every range back: the same hits, misses and materialized images at each step,
+    // for equal, changed, unreadable and GPU-owned memory and for a write between two draws.
+    [Fact]
+    public void ComparingInPlaceDecidesLikeReadingTheRangesBack()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var compared = new ResourceMaterializationCache();
+        var read = new ResourceMaterializationCache();
+        var record5 = HeapBase + 0x100 + 5 * 32;
+        var steps = new (string Name, Action Change)[]
+        {
+            ("first", () => { }),
+            ("unchanged", () => { }),
+            ("changed descriptor", () => heap.Words[record5] = 0x3000),
+            ("changed back", () => heap.Words[record5] = 0x1000),
+            ("changed again", () => heap.Words[record5 + 4] = 21u << 20),
+            ("unreadable", () => heap.Words.Remove(record5 + 8)),
+            ("readable", () => heap.Words[record5 + 8] = 0),
+            ("gpu owned", () => heap.GpuOwned = true),
+            ("gpu released", () => heap.GpuOwned = false),
+            ("write between draws", () => heap.Words[HeapBase + 0x80] = (1u << 1) | (1u << 4) | (1u << 5)),
+            ("unchanged after", () => { }),
+        };
+        foreach (var (name, change) in steps)
+        {
+            change();
+            var okCompared = RunCompared(compared, plan, heap, [0x1000, 0], out var snapshotCompared, out var specCompared);
+            var okRead = Run(read, plan, heap, [0x1000, 0], out var snapshotRead, out var specRead);
+            Assert.True(okCompared == okRead, name);
+            Assert.True((compared.Hits, compared.Misses) == (read.Hits, read.Misses), $"{name}: {compared.Hits}/{compared.Misses} vs {read.Hits}/{read.Misses}");
+            if (!okRead) continue;
+            Assert.Equal(snapshotRead.Images.Select(image => image.ToArray()), snapshotCompared.Images.Select(image => image.ToArray()));
+            Assert.Equal(snapshotRead.FlattenedResourceTable, snapshotCompared.FlattenedResourceTable);
+            Assert.Equal(specRead, specCompared);
+        }
     }
 
     [Fact]
@@ -185,6 +273,23 @@ public sealed class ResourceMaterializationCacheTests
         Assert.True(Run(cache, plan, heap, [0x1000, 0], out var third, out _));
         Assert.Same(first, third);
         Assert.Equal((1, 2), (cache.Hits, cache.Misses));
+    }
+
+    // Demon's Souls rewrites user data every draw, but most of those words are inline
+    // constants the descriptors never read: the walk is the same, so the entry must survive.
+    [Fact]
+    public void AWordTheWalkNeverReadsKeepsTheMaterialization()
+    {
+        var plan = ShaderResourcePlan.Extract(
+            DirectImageTableTests.CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 4);
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0, 0, 0], out var first, out _));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0, 0xDEAD, 0xBEEF], out var second, out _));
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        // The hit shares the materialization and carries the second draw's user data.
+        Assert.Same(first.Images, second.Images);
+        Assert.Equal(new uint[] { 0x1000, 0, 0xDEAD, 0xBEEF }, second.UserData);
     }
 
     [Fact]
@@ -554,6 +659,76 @@ public sealed class ResourceMaterializationCacheTests
         Assert.True(cache.Hits >= 20, $"hits={cache.Hits} misses={cache.Misses}");
     }
 
+    // A descriptor table at s[0:1] holds a pointer to a per-frame ring at +8; the ring holds two
+    // constants the shader reads and, at +0x60, the V# of the buffer it loads.
+    private static ShaderResourcePlan RingPointerPlan() =>
+        Extract(Program(ScalarLoad(0, 0, 4, 2, immediateOffset: 8), ScalarLoad(4, 4, 8, 4, immediateOffset: 0x60),
+            ScalarLoad(8, 4, 12, 2), Vop1(12, "VMovB32", 0, Gen5Operand.Scalar(12)), Vop1(16, "VMovB32", 1, Gen5Operand.Scalar(13)),
+            BufferLoad(20, 8), EndProgram(24)), userDataCount: 2);
+
+    private static void WriteRing(TestWordMemory memory, uint ring, uint first, uint second, uint size = 256)
+    {
+        memory.At(0x1008) = ring;
+        memory.At(0x100C) = 0;
+        memory.At(ring) = first;
+        memory.At(ring + 4) = second;
+        memory.At(ring + 0x60) = 0x18000;
+        memory.At(ring + 0x64) = 0;
+        memory.At(ring + 0x68) = size;
+        memory.At(ring + 0x6C) = 0x2_0000;
+    }
+
+    [Fact]
+    public void AMovedRingWithTheSameDescriptorsRefreshesItsSlots()
+    {
+        var plan = RingPointerPlan();
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x8000] };
+        var cache = new ResourceMaterializationCache();
+        uint[] userData = [0x1000, 0];
+        WriteRing(memory, 0x10000, 11, 22);
+        Assert.True(RunWords(cache, plan, memory, userData, out var first));
+        AssertMatchesFullWalk(plan, memory, userData, first);
+
+        // The next frame's ring: a new pointer, new constants, the same V# words.
+        WriteRing(memory, 0x14000, 33, 44);
+        Assert.True(RunWords(cache, plan, memory, userData, out var moved));
+        AssertMatchesFullWalk(plan, memory, userData, moved);
+        Assert.Equal((0, 1, 1), (cache.Hits, cache.Misses, cache.SlotRefreshes));
+        Assert.Same(first.Buffers, moved.Buffers);
+        Assert.Contains(33u, moved.FlattenedResourceTable);
+        Assert.Contains(44u, moved.FlattenedResourceTable);
+
+        // The refreshed entry records where this draw read: the same frame's next draw is a hit.
+        Assert.True(RunWords(cache, plan, memory, userData, out var again));
+        Assert.Same(moved, again);
+        Assert.Equal((1, 1, 1), (cache.Hits, cache.Misses, cache.SlotRefreshes));
+    }
+
+    [Fact]
+    public void AMovedRingWithAnotherDescriptorMaterializesAgain()
+    {
+        var plan = RingPointerPlan();
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x8000] };
+        var cache = new ResourceMaterializationCache();
+        uint[] userData = [0x1000, 0];
+        WriteRing(memory, 0x10000, 11, 22);
+        Assert.True(RunWords(cache, plan, memory, userData, out _));
+
+        // The V# behind the moved pointer describes another size.
+        WriteRing(memory, 0x14000, 33, 44, size: 512);
+        Assert.True(RunWords(cache, plan, memory, userData, out var resized));
+        AssertMatchesFullWalk(plan, memory, userData, resized);
+        Assert.Equal(512u, resized.Buffers[0][2]);
+        Assert.Equal((0, 2, 0L), (cache.Hits, cache.Misses, cache.SlotRefreshes));
+
+        // The same ring, its V# rewritten in place.
+        memory.At(0x14000 + 0x60) = 0x19000;
+        Assert.True(RunWords(cache, plan, memory, userData, out var rebased));
+        AssertMatchesFullWalk(plan, memory, userData, rebased);
+        Assert.Equal(0x19000u, rebased.Buffers[0][0]);
+        Assert.Equal(0L, cache.SlotRefreshes);
+    }
+
     [Fact]
     public void AFullGenerationKeepsRecentEntries()
     {
@@ -565,5 +740,71 @@ public sealed class ResourceMaterializationCacheTests
         // The first entry moved to the old generation and is still found.
         Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
         Assert.Equal(1, cache.Hits);
+    }
+
+    // The retained-byte estimate, not only the key count, decides when a generation is full:
+    // many distinct draws stay under the budget however many keys they add.
+    [Fact]
+    public void RetainedBytesStayWithinTheBudget()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        const long budget = 64 * 1024;
+        var cache = new ResourceMaterializationCache(generationCapacity: 1 << 20, byteBudget: budget);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
+        var oneEntry = cache.RetainedBytes;
+        Assert.True(oneEntry > 0);
+        for (ulong draw = 1; draw < 4096; draw++)
+        {
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _, shaderBase: draw * 0x100));
+            // Both generations at their share, plus the entry that opened the young one.
+            Assert.True(cache.RetainedBytes <= budget + oneEntry, $"retained={cache.RetainedBytes} after {draw} draws");
+        }
+
+        Assert.True(cache.EntryCount < 4096);
+        Assert.True(cache.EntryCount * oneEntry <= budget + oneEntry);
+        Assert.Equal(4096, cache.Misses);
+    }
+
+    // An entry the byte budget dropped is materialized again, to the same descriptors.
+    [Fact]
+    public void AnEvictedEntryRebuildsIdentically()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(generationCapacity: 1 << 20, byteBudget: 16 * 1024);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out var firstSpecialization));
+        for (ulong draw = 1; draw < 512; draw++)
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _, shaderBase: draw * 0x100));
+        var misses = cache.Misses;
+        var reads = heap.Reads;
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var rebuilt, out var rebuiltSpecialization));
+        Assert.Equal(misses + 1, cache.Misses);
+        Assert.True(heap.Reads > reads);
+        Assert.NotSame(first, rebuilt);
+        Assert.Equal(firstSpecialization, rebuiltSpecialization);
+        Assert.Equal(first.Images.Select(image => image.ToArray()), rebuilt.Images.Select(image => image.ToArray()));
+        Assert.Equal(first.Buffers.Select(buffer => buffer.ToArray()), rebuilt.Buffers.Select(buffer => buffer.ToArray()));
+        Assert.Equal(first.Samplers.Select(sampler => sampler.ToArray()), rebuilt.Samplers.Select(sampler => sampler.ToArray()));
+        Assert.Equal(first.FlattenedResourceTable, rebuilt.FlattenedResourceTable);
+        Assert.Equal(first.DeviceAddressRanges, rebuilt.DeviceAddressRanges);
+
+        // And the rebuilt entry is cached again.
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var again, out _));
+        Assert.Same(rebuilt, again);
+    }
+
+    // The default budget keeps the count bound: small entries still rotate at the key count.
+    [Fact]
+    public void TheDefaultBudgetLeavesSmallEntriesToTheCountBound()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(generationCapacity: 64);
+        for (ulong draw = 0; draw < 256; draw++)
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _, shaderBase: draw * 0x100));
+        Assert.True(cache.EntryCount <= 128);
+        Assert.True(cache.RetainedBytes < ResourceMaterializationCache.DefaultByteBudget);
     }
 }

@@ -10,6 +10,9 @@ public sealed partial class ResourceTracker
     private const uint DenseIndirectImageShift = 5;
     private const uint MaxDenseIndirectImageEntries = 4096;
 
+    // An image descriptor read from a table at a key-scaled offset: S_LOAD_DWORDX8 from an
+    // address pair, or S_BUFFER_LOAD_DWORDX8 through a V# that describes the table. The host
+    // enumerates the table's entries and the shader selects among them by the offset it reads at.
     private bool TryMakeDenseIndirectImage(ScalarValue handle, uint pc, out IndirectImagePlan plan)
     {
         plan = null!;
@@ -22,16 +25,29 @@ public sealed partial class ResourceTracker
         ScalarValue? based = null;
         uint tableImmediate = 0;
         var canSuppressMemoryReads = true;
+        var bufferHeap = handle.Operands[0].Kind == ScalarValueKind.ScalarBufferWord;
+        var readKind = bufferHeap ? ScalarValueKind.ScalarBufferWord : ScalarValueKind.ScalarAddressWord;
+        var memoryKind = bufferHeap ? MemoryResourceKind.ScalarBuffer : MemoryResourceKind.ScalarAddress;
+        var heapKind = bufferHeap ? ScalarValueKind.BufferHandle : ScalarValueKind.AddressHandle;
+
+        // A V#-table entry at an offset the draw can evaluate is one descriptor, read directly.
+        if (bufferHeap && ValidateSource(MakeSource(handle, 8, false, false, pc), out _))
+            return false;
+
+        // A V# table is read through texture handles, which only sampled reads take. Stores
+        // and atomics through one keep the descriptor resolution they had before.
+        if (bufferHeap && !OnlySampledReadsThrough(handle))
+            return false;
 
         for (var dword = 0; dword < 8; dword++)
         {
             var read = handle.Operands[dword];
-            if (read.Kind != ScalarValueKind.ScalarAddressWord || read.MemoryIndex < 0 ||
+            if (read.Kind != readKind || read.MemoryIndex < 0 ||
                 read.MemoryIndex >= _plan.Memory.Count || !MemoryIndexBelongsTo(read.MemoryIndex, read))
                 return false;
 
             var memory = _plan.Memory[read.MemoryIndex];
-            if (memory.Kind != MemoryResourceKind.ScalarAddress || memory.DataBits != 32 || memory.DataDwords != 1)
+            if (memory.Kind != memoryKind || memory.DataBits != 32 || memory.DataDwords != 1)
                 return false;
 
             var offset = read.Operands[1];
@@ -75,7 +91,7 @@ public sealed partial class ResourceTracker
                 return false;
 
             var currentHandle = read.Operands[0];
-            if (currentHandle.Kind != ScalarValueKind.AddressHandle ||
+            if (currentHandle.Kind != heapKind ||
                 (heapHandle is not null && !_graph.Equivalent(currentHandle, heapHandle)))
                 return false;
 
@@ -114,23 +130,35 @@ public sealed partial class ResourceTracker
             return false;
 
         var key = scaled.Operands[0];
-        var bound = BoundBySamplerLoads(DenseKeyBound(key), heapHandle, tableOffset);
-        var waveIndexed = TryCreateWaveIndexedImageSelector(key, reads);
-        if (bound == 0 && waveIndexed is null)
+        // A V#-described table needs no proven key bound: the scalar buffer load is range checked
+        // against the V#'s size, so the host enumerates exactly the entries it reaches and a key
+        // past them reads the null descriptor the hardware returns.
+        var bound = DenseKeyBound(key);
+        WaveIndexedImageSelector? waveIndexed = null;
+        if (!bufferHeap)
         {
-            return false;
+            bound = BoundBySamplerLoads(bound, heapHandle, tableOffset);
+            waveIndexed = TryCreateWaveIndexedImageSelector(key, reads);
+            if (bound == 0 && waveIndexed is null)
+            {
+                return false;
+            }
         }
 
         foreach (var read in reads)
             if (!UsesOnly(read, [handle]))
                 return false;
 
-        if (!MakeRuntimeAddressSource(heapHandle, pc, out var heapSourceIndex, out var heapSource))
+        uint heapSourceIndex;
+        DescriptorSource heapSource;
+        if (bufferHeap
+                ? !MakeRuntimeBufferSource(heapHandle, pc, out heapSourceIndex, out heapSource)
+                : !MakeRuntimeAddressSource(heapHandle, pc, out heapSourceIndex, out heapSource))
             return false;
 
+        // The table's handle words lead; the key fills the rest so tables differing only in key stay distinct.
         var imageDwords = Enumerable.Repeat(key, 8).ToArray();
-        imageDwords[0] = heapSource.Dwords[0];
-        imageDwords[1] = heapSource.Dwords[1];
+        Array.Copy(heapSource.Dwords, imageDwords, heapSource.Dwords.Length);
         var imageSource = new DescriptorSource
         {
             Dwords = imageDwords,
@@ -141,6 +169,7 @@ public sealed partial class ResourceTracker
                 DynamicOffsetBase = unchecked(tableOffset - tableImmediate),
                 KeyBound = bound,
                 WaveIndexed = waveIndexed,
+                Bindless = bufferHeap,
             },
         };
 
@@ -155,6 +184,19 @@ public sealed partial class ResourceTracker
             Memory = memoryIndices,
             Reads = reads,
         };
+        return true;
+    }
+
+    private bool OnlySampledReadsThrough(ScalarValue handle)
+    {
+        for (var index = 0; index < _plan.Memory.Count; index++)
+        {
+            var memory = _plan.Memory[index];
+            if (memory.Kind == MemoryResourceKind.Image && ReferenceEquals(_plan.Accesses[index]?.Handle, handle) &&
+                (memory.ImageClass != ImageResourceClass.Sampled || memory.Access != MemoryAccess.Read))
+                return false;
+        }
+
         return true;
     }
 

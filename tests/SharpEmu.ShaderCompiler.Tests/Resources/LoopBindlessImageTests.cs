@@ -465,14 +465,14 @@ public sealed class LoopBindlessImageTests
     }
 
     [Fact]
-    public void LoopWithoutAMaterialKey_StaysANullImage()
+    public void LoopWithoutAMaterialKey_UsesTheBufferHeapBindlessPath()
     {
         var plan = Extract(LoopProgram(false, keyFromMaterialTable: false));
 
         Assert.Single(plan.Info.Images);
         var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
-        Assert.Null(source.IndirectImage);
-        Assert.Empty(plan.IndirectImages);
-        Assert.All(source.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.True(source.IndirectImage?.Bindless);
+        Assert.True(source.IndirectImage?.Dense);
+        Assert.Single(plan.IndirectImages);
     }
 }

@@ -141,6 +141,48 @@ public sealed class ScalarGraphDiskCacheTests
     }
 
     [Fact]
+    public void WritingGraphsListsTheDirectoryOnceNotPerGraph()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Assert.Equal(0, ScalarGraphDiskCache.ListingsOf(directory));
+            for (uint register = 0; register < 6; register++)
+            {
+                _ = ScalarGraphDiskCache.Build(Program(ScalarLoad(0, register * 2, 4), EndProgram(8)), 0, 16, null, 64, directory);
+            }
+
+            Assert.Equal(6, Directory.GetFiles(directory, "*.graph").Length);
+            Assert.Equal(1, ScalarGraphDiskCache.ListingsOf(directory));
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void PruningPastTheLimitDeletesTheOldestDownToTheTarget()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var start = DateTime.UtcNow.AddHours(-1);
+            for (var i = 0; i < 4; i++)
+            {
+                var path = Path.Combine(directory, $"{i}.graph");
+                File.WriteAllBytes(path, new byte[100]);
+                File.SetLastWriteTimeUtc(path, start.AddMinutes(i));
+            }
+
+            Assert.Equal(400, ScalarGraphDiskCache.Prune(directory, 400, 100));
+            Assert.Equal(4, Directory.GetFiles(directory, "*.graph").Length);
+            Assert.Equal(200, ScalarGraphDiskCache.Prune(directory, 399, 200));
+            Assert.Equal(new[] { "2.graph", "3.graph" },
+                Directory.GetFiles(directory, "*.graph").Select(Path.GetFileName).Order().ToArray());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void KeysIncludeEffectiveInstructionsControlsWaveAndFixedFunctionLoads()
     {
         var instruction = ScalarLoad(0, 0, 4);

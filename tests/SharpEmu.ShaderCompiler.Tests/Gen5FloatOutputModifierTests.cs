@@ -18,7 +18,7 @@ public sealed class Gen5FloatOutputModifierTests
     private static string Metal(Gen5ShaderInstruction instruction)
     {
         var (plan, resources, layout) = Prepare(Program(instruction, EndProgram(8)));
-        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1, FloatMode = 0 };
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader.Source;
     }

@@ -18,15 +18,72 @@ internal static class DescriptorBindingAliases
         }
     }
 
-    // Images of an indirect table keep their own bindings (see Apply), so they take no part in a group: a table that pads
-    // its candidates with null images does not change the specialization of its program.
-    public static List<uint> Group(IReadOnlyList<uint[]> descriptors, IReadOnlyList<ImageSpecialization>? images = null)
+    // SHARPEMU_RESOURCE_GROUP_REUSE=0 groups through the allocating implementation.
+    internal static readonly bool Reuse = PerfSwitches.Enabled("SHARPEMU_RESOURCE_GROUP_REUSE");
+
+    private const int RetainedCapacityLimit = 1024;
+
+    [ThreadStatic]
+    private static Dictionary<uint[], uint>? _groups;
+
+    [ThreadStatic]
+    private static uint[]? _scratch;
+
+    // The group (index of the first equal descriptor) of each of the first count descriptors,
+    // or none when they are all distinct. A materialization miss calls this twice, so the
+    // dictionary and the group array are reused: growing a fresh dictionary per call was a
+    // twentieth of the Metal worker.
+    public static List<uint> Group(IReadOnlyList<uint[]> descriptors, IReadOnlyList<ImageSpecialization> images) =>
+        Group(descriptors, descriptors.Count, images);
+
+    public static List<uint> Group(IReadOnlyList<uint[]> descriptors, int count, IReadOnlyList<ImageSpecialization>? images = null)
     {
-        if (descriptors.Count < 2) return [];
-        var groups = new Dictionary<uint[], uint>(new WordComparer());
-        var result = new List<uint>(descriptors.Count);
+        if (!Reuse) return GroupAllocating(descriptors, count, images);
+        if (count < 2) return [];
+        var groups = _groups ??= new Dictionary<uint[], uint>(new WordComparer());
+        var scratch = _scratch;
+        if (scratch is null || scratch.Length < count) _scratch = scratch = new uint[Math.Max(count, 32)];
+        groups.EnsureCapacity(count);
         var ungrouped = 0;
-        for (var index = 0; index < descriptors.Count; index++)
+        try
+        {
+            for (var index = 0; index < count; index++)
+            {
+                if (images is not null && images[index].IndirectRoot != DescriptorConstants.NoIndex)
+                {
+                    scratch[index] = (uint)index;
+                    ungrouped++;
+                    continue;
+                }
+                if (!groups.TryGetValue(descriptors[index], out var group))
+                {
+                    group = (uint)index;
+                    groups.Add(descriptors[index], group);
+                }
+                scratch[index] = group;
+            }
+
+            return groups.Count + ungrouped == count ? [] : [.. scratch.AsSpan(0, count)];
+        }
+        finally
+        {
+            groups.Clear();
+            // A rare huge table is not kept alive for the life of the thread.
+            if (count > RetainedCapacityLimit)
+            {
+                _groups = null;
+                _scratch = null;
+            }
+        }
+    }
+
+    internal static List<uint> GroupAllocating(IReadOnlyList<uint[]> descriptors, int count, IReadOnlyList<ImageSpecialization>? images = null)
+    {
+        if (count < 2) return [];
+        var groups = new Dictionary<uint[], uint>(new WordComparer());
+        var result = new List<uint>(count);
+        var ungrouped = 0;
+        for (var index = 0; index < count; index++)
         {
             if (images is not null && images[index].IndirectRoot != DescriptorConstants.NoIndex)
             {
@@ -42,7 +99,7 @@ internal static class DescriptorBindingAliases
             }
             result.Add(group);
         }
-        return groups.Count + ungrouped == descriptors.Count ? [] : result;
+        return groups.Count + ungrouped == count ? [] : result;
     }
 
     public static void Apply(ShaderResourceInfo info, ShaderResourceInfo source, ResourceSpecialization specialization)
