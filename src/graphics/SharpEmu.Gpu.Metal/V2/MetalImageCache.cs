@@ -365,6 +365,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     ///
     /// Caller holds the lock.
     /// </summary>
+    // SHARPEMU_METAL_V2_NEWER_WRITER_WINS=0 restores publishing every GPU-modified alias into the
+    // image being acquired, whichever of the two wrote the shared bytes last.
+    private static readonly bool NewerWriterWins =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_NEWER_WRITER_WINS") != "0";
+
+    private long _aliasNewerKept;
+
+    /// <summary>Alias syncs that kept this image's newer contents instead of publishing an older alias.</summary>
+    public long TakeAliasNewerKept() => Interlocked.Exchange(ref _aliasNewerKept, 0);
+
     private void SynchronizeAliases(
         ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership, bool keepsDepthPlane = false)
     {
@@ -420,6 +430,29 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // alias and owns only the rest: its texture is stale here, so it has
                     // nothing to publish, and the image that wrote them since - this one,
                     // or one this loop publishes on its own turn - is what holds them.
+                    continue;
+                }
+
+                if (NewerWriterWins && image.IsGpuModified && image.GpuWriteSequence > other.GpuWriteSequence)
+                {
+                    // This image wrote the shared bytes after the other did - typically a DCC
+                    // fast clear this lookup just materialized - so its texture holds what the
+                    // guest last put there. Publishing the other into it would put the older
+                    // contents back over the newer: UE5's shadow mask came out of its clear
+                    // white, then had the lower half of an overlapping transient copied over
+                    // it, and its per-object shadow channel left every character unlit; the
+                    // refraction buffer kept stale offsets the same way (the screen blocks).
+                    // The other gives the run up instead, and takes it back from this image
+                    // through the ordinary path when it is used again.
+                    if (!TryHandOverAliasRun(other, otherStart, otherEnd, out _))
+                    {
+                        WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                        other.ClearGpuModified();
+                        other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                    }
+
+                    _aliasNewerKept++;
+                    NoteAliasPublication("newer-kept", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     continue;
                 }
 
