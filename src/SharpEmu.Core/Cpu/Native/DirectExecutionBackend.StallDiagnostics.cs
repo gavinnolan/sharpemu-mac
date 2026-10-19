@@ -4,13 +4,21 @@
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Host;
 using Microsoft.Win32.SafeHandles;
+
+using SharpEmu.Core.Cpu.Native.Platform;
 
 namespace SharpEmu.Core.Cpu.Native;
 
 public sealed unsafe partial class DirectExecutionBackend
 {
     private SafeWaitHandle? _mainExecutionThreadHandle;
+
+    // Suspending another thread is an explicit platform capability. Native
+    // declarations and export resolution belong to the execution package.
+    private static bool SupportsThreadContextCapture =>
+        (DirectExecutionPlatform.Current.Capabilities & DirectExecutionCapabilities.ThreadContextCapture) != 0;
     // One immutable code page serves all diagnostic samples for the process lifetime.
     private static readonly Lazy<ThreadContextCaptureCode> ThreadCaptureCode = new(() => new());
 
@@ -20,10 +28,9 @@ public sealed unsafe partial class DirectExecutionBackend
 
         public ThreadContextCaptureCode() : base(0, ownsHandle: true)
         {
-            var kernelModule = GetModuleHandle("kernel32.dll");
-            var suspendAddress = GetProcAddress(kernelModule, "SuspendThread");
-            var contextAddress = GetProcAddress(kernelModule, "GetThreadContext");
-            var resumeAddress = GetProcAddress(kernelModule, "ResumeThread");
+            var suspendAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.SuspendThread);
+            var contextAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.GetThreadContext);
+            var resumeAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.ResumeThread);
             if (suspendAddress == 0 || contextAddress == 0 || resumeAddress == 0) return;
             var instructions = BuildThreadContextCaptureCode(suspendAddress, contextAddress, resumeAddress);
             SetHandle((nint)VirtualAlloc(null, (nuint)instructions.Length, 0x3000, 0x04));
@@ -43,11 +50,10 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private static SafeWaitHandle? OpenThreadForContext(uint threadId)
     {
-        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64 || threadId == 0)
+        if (!SupportsThreadContextCapture || RuntimeInformation.ProcessArchitecture != Architecture.X64 || threadId == 0)
             return null;
 
-        const uint queryLimitedInformation = 0x0800;
-        var threadHandle = OpenThread(ThreadGetContext | ThreadSuspendResume | queryLimitedInformation, false, threadId);
+        var threadHandle = ExecutionPlatform.OpenThreadForContext(threadId);
         return threadHandle == 0 ? null : new SafeWaitHandle(threadHandle, ownsHandle: true);
     }
 
@@ -60,7 +66,7 @@ public sealed unsafe partial class DirectExecutionBackend
     private static bool TryCaptureThreadContext(SafeWaitHandle? threadHandle, out HostThreadContextSnapshot snapshot)
     {
         snapshot = default;
-        if (threadHandle is null || !OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        if (threadHandle is null || !SupportsThreadContextCapture || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return false;
 
         var handleReferenced = false;
@@ -68,7 +74,7 @@ public sealed unsafe partial class DirectExecutionBackend
         {
             threadHandle.DangerousAddRef(ref handleReferenced);
             var nativeHandle = threadHandle.DangerousGetHandle();
-            var threadId = GetThreadId(nativeHandle);
+            var threadId = ExecutionPlatform.GetThreadId(nativeHandle);
             if (threadId == 0 || threadId == GetCurrentThreadId()) return false;
 
             var captureCode = ThreadCaptureCode.Value;
@@ -177,6 +183,4 @@ public sealed unsafe partial class DirectExecutionBackend
         }
     }
 
-    [DllImport("kernel32.dll")]
-    private static extern uint GetThreadId(nint threadHandle);
 }

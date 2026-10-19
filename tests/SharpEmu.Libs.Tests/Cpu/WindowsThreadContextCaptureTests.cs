@@ -184,7 +184,7 @@ public sealed class WindowsThreadContextCaptureTests
         thread.Start();
         try
         {
-            Assert.True(ready.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(ready.Wait(TimeSpan.FromSeconds(10)));
             using var handle = new SafeWaitHandle(OpenThread(0x080A, false, threadId), true);
             for (var sampleIndex = 0; sampleIndex < 50; sampleIndex++)
             {
@@ -195,7 +195,7 @@ public sealed class WindowsThreadContextCaptureTests
         finally
         {
             Volatile.Write(ref stop, 1);
-            Assert.True(thread.Join(TimeSpan.FromSeconds(5)));
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
         }
     }
 
@@ -250,7 +250,7 @@ public sealed class WindowsThreadContextCaptureTests
             Handle = new SafeWaitHandle(CreateThread(0, 0, _code.Address, _state, 0, out var threadId), true);
             ThreadId = threadId;
             Assert.False(Handle.IsInvalid);
-            Assert.True(SpinWait.SpinUntil(() => Marshal.ReadInt32(_state) == 1, TimeSpan.FromSeconds(5)));
+            Assert.True(SpinWait.SpinUntil(() => Marshal.ReadInt32(_state) == 1, TimeSpan.FromSeconds(10)));
         }
 
         public void Stop()

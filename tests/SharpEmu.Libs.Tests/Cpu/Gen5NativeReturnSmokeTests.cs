@@ -20,6 +20,7 @@ public sealed class Gen5NativeReturnSmokeTests
     private const ulong CallbackReturnValue = 0xFEDC_BA98_7654_3210UL;
     private const string WorkerEnvironmentVariable = "SHARPEMU_NATIVE_RETURN_SMOKE_WORKER";
     private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(30);
+    private const string FaultWorkerReportVariable = "SHARPEMU_NATIVE_FAULT_SMOKE_REPORT";
 
     [Fact]
     public async Task SyntheticGen5Entry_ReturnsToHost()
@@ -47,6 +48,197 @@ public sealed class Gen5NativeReturnSmokeTests
             result.ExitCode == 0,
             $"native return worker exited with code {result.ExitCode}\n{result.Output}");
     }
+
+    [Fact]
+    public async Task PosixUnsupportedSse4a_RecoversThroughPlatformProbeAndReturnsToHost()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        // AMD hosts can execute SSE4a directly. This fixture requires the
+        // actual SIGILL path, which Rosetta's Intel-compatible CPU uses.
+        if ((X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) != 0) return;
+        const string completed = "[CPU-FAULT] unsupported SSE4a recovered through platform probe and returned";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixUnsupportedSse4a_RecoversThroughPlatformProbeAndReturnsToHost), completed);
+            return;
+        }
+
+        ExecuteSyntheticGuest([
+            0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, // mov rax, callback value
+            0x66, 0x48, 0x0F, 0x6E, 0xC0,                               // movq xmm0, rax
+            0x66, 0x0F, 0x78, 0xC0, 0x40, 0x00,                         // extrq xmm0, 64, 0
+            0x66, 0x48, 0x0F, 0x7E, 0xC0,                               // movq rax, xmm0
+            0xC3
+        ]);
+        // ExecuteSyntheticGuest asserts exactly one instruction recovery.
+        File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
+    }
+
+    [Fact]
+    public async Task PosixProtectedPageWrite_RecoversOnGuestStackAndReturnsToHost()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        const string completed = "[CPU-FAULT] protected-page guest write recovered and returned";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixProtectedPageWrite_RecoversOnGuestStackAndReturnsToHost), completed);
+            return;
+        }
+
+        ExecuteSyntheticGuest([
+            0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, // mov rax, callback value
+            0x48, 0x89, 0x47, 0x10,                                      // mov [rdi+16], rax (RO page)
+            0x48, 0x8B, 0x47, 0x10,                                      // mov rax, [rdi+16]
+            0xC3
+        ], protectData: true);
+        File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
+    }
+
+    [Fact]
+    public async Task PosixProtectedPageWrite_PreservesRawNativeEntryDiagnostics()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        const string completed = "[CPU-FAULT] real protected write retained raw native telemetry";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixProtectedPageWrite_PreservesRawNativeEntryDiagnostics), completed);
+            return;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"sharpemu-real-native-trace-{Guid.NewGuid():N}.bin");
+        Environment.SetEnvironmentVariable("SHARPEMU_NATIVE_FAULT_TRACE_PATH", path);
+        try
+        {
+            ExecuteSyntheticGuest([
+                0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+                0x48, 0x89, 0x47, 0x10, // real store into the tracker-protected data
+                0x48, 0x8B, 0x47, 0x10,
+                0xC3
+            ], protectData: true);
+            var records = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests();
+            var entry = Assert.Single(records.Where(record => record.Kind == 1 && record.Access == 1 && record.OwnerIdentity > 0));
+            Assert.True(entry.Signal == 10 || entry.Signal == 11);
+            Assert.Equal(2, entry.SignalCode);
+            Assert.True((entry.ErrorCode & 2) != 0);
+            Assert.Equal(1, entry.OwnerState);
+            Assert.True(entry.Invocation > 0 && entry.ArmEpoch > 0);
+            if (entry.RawAddress != 0) Assert.Equal(entry.RawAddress, entry.Address);
+            var begin = Assert.Single(records.Where(record => record.Kind == 3 && record.Invocation == entry.Invocation));
+            var restore = Assert.Single(records.Where(record => record.Kind == 4 && record.Invocation == entry.Invocation));
+            Assert.True(begin.Operation > 0);
+            Assert.Equal(begin.Operation, restore.Operation);
+            Assert.Equal(entry.OwnerIdentity, restore.OwnerIdentity);
+            Assert.Equal(2, restore.OwnerObservation);
+            Assert.Equal(0, restore.Result);
+            Assert.Equal(0, restore.Errno);
+            Assert.True(begin.Nanoseconds >= entry.Nanoseconds && restore.Nanoseconds >= begin.Nanoseconds);
+            AssertDiagnosticPair(records, entry.Invocation, true, 1, 0);
+            // A distinct real SIGILL exercises early decline followed by the
+            // existing shared instruction recovery, rather than tracker recovery.
+            if ((X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) == 0)
+            {
+                ExecuteSyntheticGuest([
+                    0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+                    0x66, 0x48, 0x0F, 0x6E, 0xC0,
+                    0x66, 0x0F, 0x78, 0xC0, 0x40, 0x00,
+                    0x66, 0x48, 0x0F, 0x7E, 0xC0, 0xC3
+                ]);
+                records = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests();
+                var illegalInstruction = Assert.Single(records.Where(record => record.Kind == 1 && record.Signal == 4));
+                Assert.Equal(-1, illegalInstruction.Access);
+                AssertDiagnosticPair(records, illegalInstruction.Invocation, false, 4, 0);
+            }
+            // Ordinary file reads see completed MAP_SHARED slots before disposal;
+            // no handler flush or file I/O was used to preserve the record.
+            var bytes = File.ReadAllBytes(path);
+            Assert.Equal(SharpEmu.HLE.Host.NativeFaultTraceBuffer.Magic, BinaryPrimitives.ReadUInt64LittleEndian(bytes));
+            File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
+        }
+        finally { File.Delete(path); }
+    }
+
+    private static void AssertDiagnosticPair(SharpEmu.HLE.Host.NativeFaultTraceRecord[] records,
+        long invocation, bool earlyHandled, int finalRoute, int finalReason, bool finalRecovered = true)
+    {
+        var entry = Assert.Single(records.Where(record => record.Kind == 1 && record.Invocation == invocation));
+        var early = Assert.Single(records.Where(record => record.Kind == 2 && record.Invocation == invocation));
+        var final = Assert.Single(records.Where(record => record.Kind == 7 && record.Invocation == invocation));
+        Assert.Equal(earlyHandled ? 1 : 0, early.Result);
+        Assert.Equal(finalRecovered ? 1 : 0, final.Result);
+        Assert.Equal(finalRoute, final.Route);
+        Assert.Equal(finalReason, final.Reason);
+        Assert.True(entry.Sequence < early.Sequence && early.Sequence < final.Sequence);
+        Assert.True(entry.Nanoseconds <= early.Nanoseconds && early.Nanoseconds <= final.Nanoseconds);
+    }
+
+    [Fact]
+    public async Task PosixBridgeDisposition_PairsRecoveredDeclinedExceptionAndWarmup()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        const string completed = "[CPU-FAULT] fabricated bridge outcomes retained exact invocation pairing";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixBridgeDisposition_PairsRecoveredDeclinedExceptionAndWarmup), completed);
+            return;
+        }
+        ExecuteFabricatedDiagnosticBridgeOutcomes();
+        File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
+    }
+
+    private static unsafe void ExecuteFabricatedDiagnosticBridgeOutcomes()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sharpemu-bridge-trace-{Guid.NewGuid():N}.bin");
+        Environment.SetEnvironmentVariable("SHARPEMU_NATIVE_FAULT_TRACE_PATH", path);
+        try
+        {
+            GuestImageWriteTracker.InitializeNativeFaultDiagnostics();
+            var package = OperatingSystem.IsMacOS() ? "SharpEmu.Cpu.DirectExecution.MacOS.X64" :
+                "SharpEmu.Cpu.DirectExecution.Linux.X64";
+            var assembly = Assembly.Load(package);
+            var bridge = assembly.GetType(package + ".PosixFaultBridge", true)!;
+            var layout = assembly.GetType(package + ".PosixSignalLayout", true)!;
+            var entries = bridge.GetMethod("UseSharedRecoveryEntriesForTest", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var warmup = bridge.GetField("_signalWarmup", BindingFlags.NonPublic | BindingFlags.Static)!;
+            bridge.GetField("_rawRecoveryEnabled", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, true);
+            // Keep legacy optional signal logging out of the measured scalar fixture.
+            bridge.GetField("_signalTraceCount", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, 16);
+            var handler = (delegate* unmanaged<int, nint, nint, void>)bridge.GetMethod(
+                "HandlePosixSignal", BindingFlags.NonPublic | BindingFlags.Static)!.MethodHandle.GetFunctionPointer();
+            byte* user = stackalloc byte[512];
+            byte* machine = stackalloc byte[1032];
+            new Span<byte>(user, 512).Clear();
+            new Span<byte>(machine, 1032).Clear();
+            layout.GetMethod("PrepareWarmUpContext", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null,
+                [Pointer.Box(user, typeof(byte*)), Pointer.Box(machine, typeof(byte*)), 1032UL]);
+            // Signal 0 is deliberately synthetic: chaining its absent previous
+            // action calls sigaction(0), which fails without changing real handlers.
+            void Check(nint raw, nint core, int route, int reason, bool recovered, bool isWarmup = false,
+                bool missingContext = false)
+            {
+                entries.Invoke(null, [raw, core]);
+                warmup.SetValue(null, isWarmup);
+                var lastSequence = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests().Max(record => record.Sequence);
+                handler(0, 0, missingContext ? 0 : (nint)user);
+                var records = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests();
+                var entry = Assert.Single(records.Where(record => record.Kind == 1 && record.Sequence > lastSequence));
+                AssertDiagnosticPair(records, entry.Invocation, false, route, reason, recovered);
+            }
+            Check((nint)(delegate* managed<void*, int>)&RecoverDiagnosticFrame, 0, 3, 0, true);
+            Check((nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame,
+                (nint)(delegate* managed<void*, int>)&RecoverDiagnosticFrame, 4, 0, true);
+            Check((nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame,
+                (nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame, 4, 1, false);
+            Check((nint)(delegate* managed<void*, int>)&ThrowDiagnosticFrame, 0, 6, 3, false);
+            Check((nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame, 0, 3, 4, true, isWarmup: true);
+            Check(0, 0, 5, 1, false);
+            Check(0, 0, 5, 2, false, missingContext: true);
+        }
+        finally { File.Delete(path); }
+    }
+
+    private static unsafe int RecoverDiagnosticFrame(void* _) => -1;
+    private static unsafe int DeclineDiagnosticFrame(void* _) => 0;
+    private static unsafe int ThrowDiagnosticFrame(void* _) => throw new InvalidOperationException("fabricated callback failure");
 
     private static bool IsSupportedHost =>
         RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
@@ -252,7 +444,7 @@ public sealed class Gen5NativeReturnSmokeTests
     }
 
     private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false,
-        int expectedExtracts = 1, bool checkRedZone = false, bool checkExtractControls = false)
+        bool protectData = false, int expectedExtracts = 1, bool checkRedZone = false, bool checkExtractControls = false)
     {
         using var memory = new PhysicalVirtualMemory();
         var image = new SelfLoader().Load(BuildSyntheticElf(callbackInstructions), memory);
@@ -314,7 +506,7 @@ public sealed class Gen5NativeReturnSmokeTests
             Assert.True(memory.TryRead(image.EntryPoint + 3, loadedInstructions));
             Assert.Equal(callbackInstructions, loadedInstructions);
             Assert.True(memory.TryAllocateAtOrAbove(0x1_0000_0000, 0x4000, false, 0x4000, out dataAddress));
-            Assert.True(memory.TryWriteUInt64(dataAddress + 16, CallbackReturnValue));
+            Assert.True(memory.TryWriteUInt64(dataAddress + 16, protectData ? 0 : CallbackReturnValue));
         }
 
         if (checkExtractControls)
@@ -324,20 +516,52 @@ public sealed class Gen5NativeReturnSmokeTests
             return;
         }
 
-        Assert.True(
-            backend.TryCallGuestFunction(
-                callerContext,
-                image.EntryPoint + 3,
-                dataAddress,
-                0,
-                callbackInstructions is not null ? 0x00FF9300UL : 0,
-                0,
-                0,
-                "synthetic-native-callback-return",
-                out var callbackReturn,
-                out var callbackError),
-            callbackError);
-        if (callbackInstructions is not null)
+        ulong callbackReturn;
+        var trackingWasEnabled = GuestImageWriteTracker.Enabled;
+        try
+        {
+            if (protectData)
+            {
+                GuestImageWriteTracker.Configure(true);
+                GuestImageWriteTracker.Track(dataAddress, (ulong)Environment.SystemPageSize,
+                    source: "cpu-platform-fault-fixture");
+                Assert.True(GuestImageWriteTracker.TryGetProtectionState(dataAddress, out var protectedRange, out var armed));
+                Assert.True(protectedRange && armed);
+            }
+            Assert.True(
+                backend.TryCallGuestFunction(
+                    callerContext,
+                    image.EntryPoint + 3,
+                    dataAddress,
+                    0,
+                    callbackInstructions is not null ? 0x00FF9300UL : 0,
+                    0,
+                    0,
+                    "synthetic-native-callback-return",
+                    out callbackReturn,
+                    out var callbackError),
+                callbackError);
+            if (protectData)
+            {
+                Assert.True(GuestImageWriteTracker.ConsumeDirty(dataAddress), "the native write did not reach fault recovery");
+                Span<byte> written = stackalloc byte[8];
+                Assert.True(memory.TryRead(dataAddress + 16, written));
+                Assert.Equal(CallbackReturnValue, BinaryPrimitives.ReadUInt64LittleEndian(written));
+                Assert.True(GuestImageWriteTracker.TryGetProtectionState(dataAddress, out var protectedRange, out var armed));
+                Assert.True(protectedRange);
+                Assert.False(armed);
+            }
+        }
+        finally
+        {
+            if (protectData)
+            {
+                GuestImageWriteTracker.Untrack(dataAddress);
+                GuestImageWriteTracker.Configure(trackingWasEnabled);
+            }
+        }
+
+        if (callbackInstructions is not null && !protectData)
         {
             var recoveriesAfter = (long)recoveryCounter.GetValue(null)!;
             var supportsSse4a = (X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) != 0;
@@ -360,7 +584,23 @@ public sealed class Gen5NativeReturnSmokeTests
         }
     }
 
-    private static async Task<WorkerResult> RunIsolatedWorker(string testMethod)
+    private static async Task RunIsolatedFaultWorker(string testMethod, string completionEvidence)
+    {
+        var report = Path.GetTempFileName();
+        try
+        {
+            var result = await RunIsolatedWorker(testMethod, report);
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            Assert.Equal(completionEvidence, File.ReadAllText(report));
+        }
+        finally
+        {
+            File.Delete(report);
+        }
+    }
+
+    private static async Task<WorkerResult> RunIsolatedWorker(string testMethod, string? faultReport = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -376,6 +616,7 @@ public sealed class Gen5NativeReturnSmokeTests
         startInfo.ArgumentList.Add(
             $"FullyQualifiedName={typeof(Gen5NativeReturnSmokeTests).FullName}.{testMethod}");
         startInfo.Environment[WorkerEnvironmentVariable] = "1";
+        startInfo.Environment[FaultWorkerReportVariable] = faultReport;
         startInfo.Environment["SHARPEMU_SENTINEL_PROBE"] = null;
 
         using var process = Process.Start(startInfo) ??

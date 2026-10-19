@@ -9,7 +9,7 @@ namespace SharpEmu.Core.Patches;
 
 public sealed class GamePatchRepository
 {
-    public static string DefaultDirectory => Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "patches");
+    public static string DefaultDirectory => Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "patches");
 
     public GamePatchRepository(string? directory = null) => DirectoryPath = directory ?? DefaultDirectory;
 

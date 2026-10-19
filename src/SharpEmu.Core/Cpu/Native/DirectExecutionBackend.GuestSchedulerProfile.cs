@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using SharpEmu.HLE.DsTrace;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -44,7 +45,10 @@ public sealed unsafe partial class DirectExecutionBackend
             StringComparison.Ordinal);
 
     private readonly ConcurrentDictionary<ulong, GuestSchedulerThreadStats> _guestSchedulerStats = new();
-    private readonly GuestThreadFlowProfile _guestThreadFlowProfile = new();
+    private readonly GuestThreadFlowProfile _guestThreadFlowProfile = new(
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GUEST_FLOW_CAPACITY"), out var capacity) && capacity > 0
+            ? capacity
+            : 131072);
     private readonly object _guestTraceOutputGate = new();
     private long _guestSchedulerProfileWindowStart = Stopwatch.GetTimestamp();
     private long _guestSchedulerProfileNextReport =
@@ -53,6 +57,15 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private void StartGuestFlowTraces()
     {
+        if (DsTrace.On)
+        {
+            DsGuestMem.Init(_cpuContext?.Memory);
+            DsTrace.ConfigureTsc(
+                SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency,
+                SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.ReadTscCounter);
+            DsTrace.Start();
+        }
+
         lock (_guestTraceOutputGate)
         {
             _guestThreadFlowProfile.StartSession();
@@ -85,6 +98,14 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private void RecordGuestThreadFlow(GuestThreadState thread, GuestThreadFlowProfile.EventKind kind, string? reason = null)
     {
+        if (DsTrace.Sched && DsTrace.Armed)
+        {
+            DsSched.Gf(
+                (int)kind, thread.ThreadHandle, thread.Name, reason, thread.BlockWakeKey,
+                Volatile.Read(ref thread.LastImportNid), Volatile.Read(ref thread.LastImportRdi),
+                Volatile.Read(ref thread.LastImportRsi), thread.BlockDeadlineTimestamp);
+        }
+
         if (!GuestThreadFlowProfile.Enabled) return;
         _guestThreadFlowProfile.Record(new GuestThreadFlowProfile.TraceEvent(
             Stopwatch.GetTimestamp(), Environment.CurrentManagedThreadId, thread.ThreadHandle,
@@ -101,9 +122,9 @@ public sealed unsafe partial class DirectExecutionBackend
         return stats;
     }
 
-    private void ProfileGuestThreadReady(GuestThreadState thread)
+    private void ProfileGuestThreadReady(GuestThreadState thread, string? source = null)
     {
-        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Ready);
+        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Ready, source);
         if (!_profileGuestScheduler)
         {
             return;

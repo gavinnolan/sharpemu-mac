@@ -22,53 +22,66 @@ public sealed partial class DirectExecutionBackend
 	private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _perfHleCounts = new();
 	private static long _perfHleTotal;
 	private static long _perfHleDispatchTicks;
+	private static long _perfHleExclusiveTicks;
+	private static long _perfHleCompleted;
 
 	private sealed class PerfHleExportCost
 	{
 		public long Calls;
 		public long Ticks;
+		public long ExclusiveTicks;
 	}
 
 	private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, PerfHleExportCost> _perfHleCosts = new();
 
-	/// <summary>
-	/// Name of the export currently being dispatched on this thread, so the
-	/// gateway can attribute its elapsed time once the call returns. Answering
-	/// "which export is worth optimising" needs cost per export, not just call
-	/// counts — a rare expensive call and a hot cheap one look identical in a
-	/// frequency histogram.
-	/// </summary>
-	[System.ThreadStatic]
-	private static string? _perfHleCurrentExport;
-
 	private static long _perfHleFirstTimestamp;
 
-	private static void RecordPerfHleDispatchTime(long ticks)
-	{
-		var total = System.Threading.Interlocked.Add(ref _perfHleDispatchTicks, ticks);
-		var calls = System.Threading.Interlocked.Read(ref _perfHleTotal);
+	// Per-thread export report (SHARPEMU_PERF_HLE_THREADS=0 drops it). The thread CPU
+	// clock costs microseconds under Rosetta, so it is read on one call in
+	// SHARPEMU_PERF_HLE_CPU_EVERY (default 64; 0 never).
+	private static readonly bool _perfHleThreads = _perfHleHistogram &&
+		!string.Equals(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE_THREADS"), "0", System.StringComparison.Ordinal);
+	private static readonly int _perfHleCpuEvery = !_perfHleThreads
+		? 0
+		: int.TryParse(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE_CPU_EVERY"), out var perfHleCpuEvery) && perfHleCpuEvery >= 0
+			? perfHleCpuEvery
+			: 64;
+	private static readonly int _perfHleThreadReportSeconds =
+		int.TryParse(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE_THREAD_REPORT_S"), out var perfHleReport) && perfHleReport > 0
+			? perfHleReport
+			: 15;
+	private static long _perfHleNextThreadReport;
+	private static int _perfHleThreadReporting;
 
-		var name = _perfHleCurrentExport;
+	private static void RecordPerfHleDispatchTime(HleDispatchTiming.Elapsed elapsed)
+	{
+		if (!elapsed.Recorded) return; // omitted nesting must not enter the measured denominator
+		var total = System.Threading.Interlocked.Add(ref _perfHleDispatchTicks, elapsed.InclusiveTicks);
+		var exclusive = System.Threading.Interlocked.Add(ref _perfHleExclusiveTicks, elapsed.ExclusiveTicks);
+		var completed = System.Threading.Interlocked.Increment(ref _perfHleCompleted);
+
+		var name = elapsed.Name;
 		if (name is not null)
 		{
 			var cost = _perfHleCosts.GetOrAdd(name, static _ => new PerfHleExportCost());
 			System.Threading.Interlocked.Increment(ref cost.Calls);
-			System.Threading.Interlocked.Add(ref cost.Ticks, ticks);
+			System.Threading.Interlocked.Add(ref cost.Ticks, elapsed.InclusiveTicks);
+			System.Threading.Interlocked.Add(ref cost.ExclusiveTicks, elapsed.ExclusiveTicks);
 		}
 
-		if (calls > 0 && calls % 500000 == 0)
+		if (completed % 500000 == 0)
 		{
 			var frequency = (double)System.Diagnostics.Stopwatch.Frequency;
-			var avgUs = (double)total / frequency * 1_000_000.0 / calls;
+			var avgUs = (double)total / frequency * 1_000_000.0 / completed;
 			var first = System.Threading.Interlocked.CompareExchange(ref _perfHleFirstTimestamp, 0, 0);
 			var wallSeconds = first == 0
 				? 0
 				: (double)(System.Diagnostics.Stopwatch.GetTimestamp() - first) / frequency;
 			System.Console.Error.WriteLine(
-				$"[PERF][HLE] managed_dispatch_avg={avgUs:F3}us " +
-				$"total_managed_s={(double)total / frequency:F2} " +
-				$"wall_s={wallSeconds:F2} " +
-				$"cores={(wallSeconds > 0 ? total / frequency / wallSeconds : 0):F2}");
+				$"[PERF][HLE] inclusive_dispatch_avg={avgUs:F3}us " +
+				$"inclusive_wall_s={(double)total / frequency:F2} exclusive_wall_s={(double)exclusive / frequency:F2} " +
+				$"wall_s={wallSeconds:F2} recorded_completed={completed} window=process_cumulative " +
+				$"units=elapsed_wall_not_cpu omitted_nested_scopes={HleDispatchTiming.OmittedScopes}");
 
 			var snapshot = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, PerfHleExportCost>>(_perfHleCosts.Count + 16);
 			foreach (var kvp in _perfHleCosts)
@@ -83,9 +96,9 @@ public sealed partial class DirectExecutionBackend
 				{
 					var seconds = System.Threading.Interlocked.Read(ref kvp.Value.Ticks) / frequency;
 					var callCount = System.Threading.Interlocked.Read(ref kvp.Value.Calls);
-					var cores = wallSeconds > 0 ? seconds / wallSeconds : 0;
+					var exclusiveSeconds = System.Threading.Interlocked.Read(ref kvp.Value.ExclusiveTicks) / frequency;
 					var perCallUs = callCount > 0 ? seconds * 1_000_000.0 / callCount : 0;
-					return $"{kvp.Key}: {cores:F2}cores {seconds:F1}s n={callCount} {perCallUs:F2}us/call";
+					return $"{kvp.Key}: inclusive_wall_s={seconds:F3} exclusive_wall_s={exclusiveSeconds:F3} n={callCount} inclusive_us_per_call={perCallUs:F2}";
 				});
 			System.Console.Error.WriteLine($"[PERF][HLE] cost: {string.Join(" | ", top)}");
 
@@ -99,12 +112,106 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	private static void RecordPerfHleThreadCost(HleDispatchTiming.Elapsed elapsed, HleDispatchTiming.ThreadState thread, long cpuNs)
+	{
+		if (!_perfHleThreads || !elapsed.Recorded || elapsed.Name is null) return;
+		// Owner-thread writes only: the dictionary is per thread, so no interlocked traffic.
+		if (!thread.Costs.TryGetValue(elapsed.Name!, out var cost))
+		{
+			cost = thread.Costs.GetOrAdd(elapsed.Name!, static _ => new HleDispatchTiming.ExportCost());
+		}
+		cost.Calls++;
+		cost.ExclusiveTicks += elapsed.ExclusiveTicks;
+		if (thread.Depth == 0)
+		{
+			thread.LastTopLevel = cost;
+		}
+		if (cpuNs >= 0)
+		{
+			cost.CpuSamples++;
+			cost.SampledCpuNs += cpuNs;
+			cost.SampledWallTicks += elapsed.InclusiveTicks;
+		}
+
+		var now = System.Diagnostics.Stopwatch.GetTimestamp();
+		var next = System.Threading.Interlocked.Read(ref _perfHleNextThreadReport);
+		if (next == 0)
+		{
+			System.Threading.Interlocked.CompareExchange(
+				ref _perfHleNextThreadReport,
+				now + _perfHleThreadReportSeconds * System.Diagnostics.Stopwatch.Frequency,
+				0);
+			return;
+		}
+		if (now < next || System.Threading.Interlocked.Exchange(ref _perfHleThreadReporting, 1) != 0)
+		{
+			return;
+		}
+		try
+		{
+			System.Threading.Interlocked.Exchange(
+				ref _perfHleNextThreadReport,
+				now + _perfHleThreadReportSeconds * System.Diagnostics.Stopwatch.Frequency);
+			ReportPerfHleThreads();
+		}
+		finally
+		{
+			System.Threading.Interlocked.Exchange(ref _perfHleThreadReporting, 0);
+		}
+	}
+
+	// Per thread, cumulative since its first import: wall time, how much of it was inside
+	// top-level imports (the rest is guest code, or parked outside an import), and the
+	// exports by exclusive wall. cpu% is sampled CPU over the same calls' inclusive wall:
+	// near 100 burns the core, near 0 waits.
+	private static void ReportPerfHleThreads()
+	{
+		var frequency = (double)System.Diagnostics.Stopwatch.Frequency;
+		var threads = HleDispatchTiming.Threads.ToArray()
+			.OrderByDescending(thread => thread.TopLevelTicks)
+			.Take(12);
+		foreach (var thread in threads)
+		{
+			var wall = (thread.LastTimestamp - thread.FirstTimestamp) / frequency;
+			var cpuNs = thread.CpuSinceFirstNs();
+			var hle = thread.TopLevelTicks / frequency;
+			var snapshot = new List<KeyValuePair<string, HleDispatchTiming.ExportCost>>(thread.Costs.Count + 8);
+			foreach (var pair in thread.Costs)
+			{
+				snapshot.Add(pair);
+			}
+			var top = snapshot
+				.OrderByDescending(pair => pair.Value.ExclusiveTicks)
+				.Take(20)
+				.Select(pair =>
+				{
+					var cost = pair.Value;
+					var calls = Math.Max(1, cost.Calls);
+					var cpuPercent = cost.SampledWallTicks > 0
+						? $"{cost.SampledCpuNs / 1e9 / (cost.SampledWallTicks / frequency) * 100:F0}"
+						: "-";
+					return $"{pair.Key}: n={cost.Calls} excl_s={cost.ExclusiveTicks / frequency:F2} " +
+						$"excl_us={cost.ExclusiveTicks / frequency * 1e6 / calls:F2} cpu%={cpuPercent}";
+				});
+			System.Console.Error.WriteLine(
+				$"[PERF][HLE] thread name={thread.ThreadName} wall_s={wall:F1} cpu_s={(cpuNs >= 0 ? $"{cpuNs / 1e9:F1}" : "-")} hle_s={hle:F2} " +
+				$"outside_hle_s={wall - hle:F2} top: {string.Join(" | ", top)}");
+			var gaps = snapshot
+				.Where(pair => pair.Value.GapAfterTicks > 0)
+				.OrderByDescending(pair => pair.Value.GapAfterTicks)
+				.Take(8)
+				.Select(pair => $"{pair.Key}: gap_s={pair.Value.GapAfterTicks / frequency:F2} long_gaps={pair.Value.LongGapsAfter}");
+			System.Console.Error.WriteLine(
+				$"[PERF][HLE] thread_gaps name={thread.ThreadName} (outside-HLE time after each import): {string.Join(" | ", gaps)}");
+		}
+	}
+
 	private static readonly bool _perfHleNoDict =
 		string.Equals(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE_NODICT"), "1", System.StringComparison.Ordinal);
 
 	private static void RecordPerfHleCall(string name)
 	{
-		_perfHleCurrentExport = name;
+		HleDispatchTiming.NameCurrent(name);
 		var total = System.Threading.Interlocked.Increment(ref _perfHleTotal);
 		if (total == 1)
 		{
@@ -167,12 +274,13 @@ public sealed partial class DirectExecutionBackend
 
 	private void DumpRecentImportTrace()
 	{
+		DumpFaultThreadImportTrace();
 		var trace = _recentImportTrace;
 		if (trace is null || _recentImportTraceCount == 0)
 		{
 			return;
 		}
-		Log.Info($"   Recent import calls for managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ({_recentImportTraceCount}):");
+		Log.Info($"   Legacy backend import ring (guest workers and fast paths excluded; not fault-thread history) dump_context_managed={Environment.CurrentManagedThreadId} dump_context_guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ({_recentImportTraceCount}):");
 		int num = (_recentImportTraceWriteIndex - _recentImportTraceCount + trace.Length) % trace.Length;
 		for (int i = 0; i < _recentImportTraceCount; i++)
 		{
@@ -534,11 +642,35 @@ public sealed partial class DirectExecutionBackend
 		return IsExecutableAddress(address);
 	}
 
+	// Front cache for the executable-page set, direct-mapped by page number.
+	// Every import dispatch sanity-checks its return address through here, so
+	// the cost of the ConcurrentDictionary probe behind it was being paid about
+	// a million times a second in Quake. A slot only ever holds a page that was
+	// verified executable, and a ulong store is atomic on both architectures
+	// the emulator targets, so a racing write can publish a different verified
+	// page but never a half-written address.
+	private const int ExecutablePageCacheMask = 4095;
+	private static readonly ulong[] _executablePageCache = new ulong[ExecutablePageCacheMask + 1];
+
 	private unsafe static bool IsExecutableAddress(ulong address)
 	{
 		var pageAddress = address & ~0xFFFUL;
+		if (pageAddress == 0)
+		{
+			// 0 is the empty-slot sentinel, so the null page can never be served
+			// from the cache. The only caller rejects it earlier anyway.
+			return false;
+		}
+
+		var slot = (int)((pageAddress >> 12) & ExecutablePageCacheMask);
+		if (_executablePageCache[slot] == pageAddress)
+		{
+			return true;
+		}
+
 		if (_knownExecutablePages.ContainsKey(pageAddress))
 		{
+			_executablePageCache[slot] = pageAddress;
 			return true;
 		}
 
@@ -551,6 +683,7 @@ public sealed partial class DirectExecutionBackend
 		if (executable)
 		{
 			_knownExecutablePages.TryAdd(pageAddress, 0);
+			_executablePageCache[slot] = pageAddress;
 		}
 
 		return executable;

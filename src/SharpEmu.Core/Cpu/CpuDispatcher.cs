@@ -332,6 +332,14 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             return nativeResult;
         }
 
+        // A confirmed forced host stop is not a missing backend implementation,
+        // nor a successful normal guest return. Keep its non-success native result.
+        if (_nativeCpuBackend is DirectExecutionBackend { HostShutdownCompleted: true })
+        {
+            debugHook?.OnFrameExit(debugFrame!, nativeResult);
+            return FailEarly(nativeResult, CpuExitReason.HostShutdownRequested);
+        }
+
         debugHook?.OnFrameExit(debugFrame!, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
 
         var backendName = string.IsNullOrWhiteSpace(_nativeCpuBackend.BackendName)
@@ -358,6 +366,14 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             nativeStatistics);
     }
 
+    // Maps runtime-owned guest memory and records it in the kernel's guest VA map.
+    private void MapGuestRegion(KernelMemoryCompatExports.HostMappingKind kind, ulong address, ulong size,
+        ulong fileOffset, ReadOnlySpan<byte> fileData, ProgramHeaderFlags protection)
+    {
+        _virtualMemory.Map(address, size, fileOffset, fileData, protection);
+        GuestHostMappings.Register(_virtualMemory, address, size, protection, kind);
+    }
+
     private ulong TryMapStackRegion()
     {
         const ulong stackStride = 0x0100_0000UL;
@@ -366,7 +382,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = StackBaseAddress - ((ulong)i * stackStride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Stack,
                     candidateBase,
                     StackSize,
                     fileOffset: 0,
@@ -392,7 +409,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var mappedBase = candidateBase - TlsPrefixSize;
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.ThreadLocalStorage,
                     mappedBase,
                     TlsSize + TlsPrefixSize,
                     fileOffset: 0,
@@ -490,8 +508,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         {
             return false;
         }
-
-        KernelExports.ConfigureProcessArguments(arguments.Count, entryParamsAddress + 0x08);
 
         if (arguments.Count > 1)
         {
@@ -619,7 +635,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = BootstrapStubBaseAddress - ((ulong)i * stride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,
@@ -644,7 +661,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = BootstrapPayloadBaseAddress - ((ulong)i * stride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,
@@ -674,7 +692,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = DynlibFallbackStubBaseAddress - ((ulong)i * stride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,
@@ -702,7 +721,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = ReturnToHostStubBaseAddress - ((ulong)i * ReturnToHostStubStride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,

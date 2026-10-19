@@ -3,7 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Globalization;
-using System.Runtime.InteropServices;
+using SharpEmu.Core.Cpu.Native.Platform;
 using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -80,7 +80,8 @@ internal sealed unsafe class NativeFunctionTrace : IDisposable
     internal static NativeFunctionTrace? FromEnvironment()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_NATIVE_FUNCTION") != "1") return null;
-        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        // The breakpoint sites are resumed through the Windows x64 exception path.
+        if (DirectExecutionPlatform.Current.Name != "windows-x64")
             throw new PlatformNotSupportedException("Native function tracing requires Windows x64.");
         static ulong Address(string name)
         {
@@ -514,13 +515,11 @@ internal sealed unsafe class NativeFunctionTrace : IDisposable
         if (_resumeCode != 0 && _memory.Free(_resumeCode)) _resumeCode = 0;
     }
 
+    // The execution platform reads through the kernel, so an unmapped address cannot fault
+    // the trace inside the exception handler.
     private static bool Read(ulong address, Span<byte> bytes)
     {
         fixed (byte* destination = bytes)
-            return ReadProcessMemory((nint)(-1), (void*)address, destination, (nuint)bytes.Length, out var read) && read == (nuint)bytes.Length;
+            return DirectExecutionPlatform.Current.TryReadHostMemory(address, destination, bytes.Length);
     }
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ReadProcessMemory(nint process, void* address, void* destination, nuint size, out nuint read);
 }

@@ -12,6 +12,8 @@ using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 public sealed partial class DirectExecutionBackend
@@ -24,50 +26,13 @@ public sealed partial class DirectExecutionBackend
 	private nint _workerAbortStack;
 	private const uint WorkerAbortStackSize = 0x10000u;
 
-	private unsafe void SetupExceptionHandler()
-	{
-		if (!OperatingSystem.IsWindows())
-		{
-			SetupPosixExceptionHandler();
-			return;
-		}
+	// Fault interception is installed by the registered execution platform:
+	// a vectored handler on Windows, a sigaction bridge on POSIX. Everything
+	// below this point is the shared recovery chain those hooks call, written
+	// once against the Win64 EXCEPTION_POINTERS/CONTEXT view.
+	private unsafe void SetupExceptionHandler() => InstallPlatformFaultHandling();
 
-		if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RAW_HANDLER"), "1", StringComparison.Ordinal))
-		{
-			_rawExceptionHandlerStub = CreateExceptionHandlerTrampoline(RawVectoredHandlerPtrManaged);
-			if (_rawExceptionHandlerStub == 0)
-			{
-				throw new InvalidOperationException("Failed to create raw exception handler trampoline");
-			}
-			_rawExceptionHandler = (nint)AddVectoredExceptionHandler(1u, _rawExceptionHandlerStub);
-			Console.Error.WriteLine($"[LOADER][INFO] Raw exception handler installed: 0x{_rawExceptionHandler:X16}");
-		}
-		else
-		{
-			Console.Error.WriteLine("[LOADER][INFO] Raw exception handler disabled by SHARPEMU_DISABLE_RAW_HANDLER=1");
-		}
-
-		_handlerDelegate = VectoredHandler;
-		_handlerHandle = GCHandle.Alloc(_handlerDelegate);
-		_exceptionHandlerStub = CreateExceptionHandlerTrampoline(Marshal.GetFunctionPointerForDelegate(_handlerDelegate));
-		if (_exceptionHandlerStub == 0)
-		{
-			throw new InvalidOperationException("Failed to create exception handler trampoline");
-		}
-		_exceptionHandler = (nint)AddVectoredExceptionHandler(1u, _exceptionHandlerStub);
-		Console.Error.WriteLine($"[LOADER][INFO] Exception handler installed: 0x{_exceptionHandler:X16}");
-
-		_unhandledFilterDelegate = UnhandledExceptionFilter;
-		_unhandledFilterHandle = GCHandle.Alloc(_unhandledFilterDelegate);
-		_unhandledFilterStub = CreateExceptionHandlerTrampoline(Marshal.GetFunctionPointerForDelegate(_unhandledFilterDelegate));
-		if (_unhandledFilterStub == 0)
-		{
-			throw new InvalidOperationException("Failed to create unhandled exception filter trampoline");
-		}
-		SetUnhandledExceptionFilter(_unhandledFilterStub);
-	}
-
-	private unsafe int UnhandledExceptionFilter(void* exceptionInfo)
+	internal unsafe int UnhandledExceptionFilter(void* exceptionInfo)
 	{
 		try
 		{
@@ -88,7 +53,7 @@ public sealed partial class DirectExecutionBackend
 		return 0;
 	}
 
-	private unsafe int VectoredHandler(void* exceptionInfo)
+	internal unsafe int VectoredHandler(void* exceptionInfo)
 	{
 		if (_vectoredHandlerDepth > 0)
 		{
@@ -122,7 +87,7 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
-			if (!OperatingSystem.IsWindows() &&
+			if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.VectoredFaultDispatch) == 0 &&
 				exceptionCode == 3221225477u &&
 				exceptionRecord->NumberParameters >= 2 &&
 				exceptionRecord->ExceptionInformation[0] == 1uL &&
@@ -153,6 +118,11 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (exceptionCode == StatusIllegalInstruction &&
 				TryRecoverIllegalInstruction(contextRecord, rip))
+			{
+				return -1;
+			}
+			if (exceptionCode == DirectExecutionFaultFrame.HostSyscallTrapCode &&
+				TryRecoverUnpatchedSyscall(contextRecord, rip))
 			{
 				return -1;
 			}
@@ -221,7 +191,7 @@ public sealed partial class DirectExecutionBackend
 					$"[LOADER][INFO]   Guest thread: handle=0x{activeGuestThread.ThreadHandle:X16} " +
 					$"name='{activeGuestThread.Name}' state={activeGuestThread.State} " +
 					$"last_import={activeGuestThread.LastImportNid ?? "<none>"} " +
-					$"last_ret=0x{activeGuestThread.LastReturnRip:X16}");
+					$"last_ret=0x{activeGuestThread.LastReturnRip:X16} last_import_scope=recorded-general-dispatch-fast-paths-excluded");
 				Console.Error.WriteLine(
 					$"[LOADER][INFO]   Last import registers: " +
 					$"rax=0x{Volatile.Read(ref activeGuestThread.LastImportRax):X16} " +
@@ -324,6 +294,25 @@ public sealed partial class DirectExecutionBackend
 				}
 			}
 
+			// With the GPU write guard armed, say whether the bytes any faulting address
+			// points at were ones a GPU-side write to guest memory claimed. An address no
+			// record covers was not written by a declared host-side GPU write.
+			SharpEmu.HLE.GuestWriteJournal.ReportCandidates(
+				"gpu-write-journal",
+				[
+					("target", target), ("rax", rax), ("rbx", rbx), ("rcx", rcx), ("rdx", rdx),
+					("rsi", rsi), ("rdi", rdi), ("r8", r8), ("r9", r9), ("r10", r10), ("r11", r11),
+					("r12", r12), ("r13", r13), ("r14", r14), ("r15", r15),
+				]);
+
+			// rax and rdx are where a faulting load's base and the structure it walked
+			// usually live, so their neighbourhoods say whether one field was clobbered
+			// or the whole block holds something else entirely.
+			DumpPointerWindow("fault-register-rax", rax, 0x80);
+			// From before rdx, so the entries on both sides of the faulting one are
+			// visible: one odd entry among healthy neighbours is a clobbered field,
+			// while a run of unrelated bytes is an index that left its table.
+			DumpPointerWindow("fault-register-rdx-0x80", rdx >= 0x80 ? rdx - 0x80 : rdx, 0x100);
 			DumpPointerWindow("fault-register-rbx", rbx, 0x60);
 			DumpPointerWindow("fault-register-rsi", rsi, 0x60);
 			DumpPointerWindow("fault-register-rcx", rcx, 0x80);
@@ -630,7 +619,7 @@ public sealed partial class DirectExecutionBackend
 	// thousands of times per frame, so skip the opcode probe (a VirtualQuery and a
 	// read of the faulting instruction) for them.
 	private static unsafe bool MayBeGuestInt41(EXCEPTION_RECORD* exceptionRecord) =>
-		!OperatingSystem.IsWindows() ||
+		(ExecutionPlatform.Capabilities & DirectExecutionCapabilities.GeneralProtectionFaultsReportAllOnesAddress) == 0 ||
 		exceptionRecord->NumberParameters < 2 ||
 		exceptionRecord->ExceptionInformation[1] == ulong.MaxValue;
 
@@ -1291,7 +1280,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (!OperatingSystem.IsWindows())
+		if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.StrayReadsSurfaceAsManagedExceptions) == 0)
 		{
 			// A stray read inside the signal handler would raise a nested
 			// SIGSEGV and kill the process before diagnostics finish, so
@@ -1310,184 +1299,37 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	// Diagnostic host reads go through the execution platform: each OS reads
+	// through the kernel (mach_vm_read_overwrite, process_vm_readv,
+	// ReadProcessMemory) so an unmapped or inaccessible page cannot fault the
+	// reader, which inside a fault handler would kill the process before the
+	// diagnostics finish.
 	private unsafe static bool TryReadDiagnosticHostQword(ulong address, out ulong value)
 	{
-		if (OperatingSystem.IsLinux())
-		{
-			ulong result = 0;
-			bool success = TryReadLinuxMemory(address, (byte*)&result, sizeof(ulong));
-			value = success ? result : 0;
-			return success;
-		}
-
-		if (OperatingSystem.IsMacOS())
-		{
-			ulong result = 0;
-			bool success = TryReadMacOsMemory(address, (byte*)&result, sizeof(ulong));
-			value = success ? result : 0;
-			return success;
-		}
-
-		if (!OperatingSystem.IsWindows())
-		{
-			return TryReadStackU64(address, out value);
-		}
-
-		value = 0;
-		if (!IsReadableHostRange(address, sizeof(ulong)))
-		{
-			return false;
-		}
-
-		ulong readValue = 0;
-		if (ReadProcessMemory(
-				(nint)(-1),
-				(nint)address,
-				&readValue,
-				sizeof(ulong),
-				out var bytesRead) == 0 ||
-			bytesRead != sizeof(ulong))
-		{
-			return false;
-		}
-
-		value = readValue;
-		return true;
+		ulong result = 0;
+		var success = ExecutionPlatform.TryReadHostMemory(address, (byte*)&result, sizeof(ulong));
+		value = success ? result : 0;
+		return success;
 	}
 
 	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
 	{
-		if (OperatingSystem.IsLinux())
+		fixed (byte* destination = buffer)
 		{
-			fixed (byte* destination = buffer)
-			{
-				return TryReadLinuxMemory(address, destination, buffer.Length);
-			}
-		}
-
-		if (OperatingSystem.IsMacOS())
-		{
-			fixed (byte* destination = buffer)
-			{
-				return TryReadMacOsMemory(address, destination, buffer.Length);
-			}
-		}
-
-		if (!IsReadableHostRange(address, buffer.Length))
-		{
-			return false;
-		}
-
-		if (buffer.Length == 0)
-		{
-			return true;
-		}
-
-		if (OperatingSystem.IsWindows())
-		{
-			fixed (byte* destination = buffer)
-			{
-				return ReadProcessMemory(
-					(nint)(-1),
-					(nint)address,
-					destination,
-					(nuint)buffer.Length,
-					out var bytesRead) != 0 &&
-					bytesRead == (nuint)buffer.Length;
-			}
-		}
-
-		try
-		{
-			Marshal.Copy((nint)address, buffer, 0, buffer.Length);
-			return true;
-		}
-		catch
-		{
-			return false;
+			return ExecutionPlatform.TryReadHostMemory(address, destination, buffer.Length);
 		}
 	}
 
-	private unsafe static bool TryReadLinuxMemory(ulong address, byte* destination, int byteCount)
-	{
-		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
-			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
-		{
-			return false;
-		}
-
-		if (byteCount == 0) return true;
-
-		// Read through the kernel so untracked or inaccessible pages cannot fault the reader.
-		var local = new DiagnosticMemoryVector { Address = (nint)destination, Length = (nuint)byteCount };
-		var remote = new DiagnosticMemoryVector { Address = (nint)address, Length = (nuint)byteCount };
-		return ReadLinuxProcessMemory(Environment.ProcessId, &local, 1, &remote, 1, 0) == byteCount;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	private struct DiagnosticMemoryVector
-	{
-		public nint Address;
-		public nuint Length;
-	}
-
-	[DllImport("libc", EntryPoint = "process_vm_readv")]
-	private unsafe static extern nint ReadLinuxProcessMemory(
-		int processId, DiagnosticMemoryVector* local, nuint localCount,
-		DiagnosticMemoryVector* remote, nuint remoteCount, nuint flags);
-
-	private unsafe static bool TryReadMacOsMemory(ulong address, byte* destination, int byteCount)
-	{
-		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
-			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
-		{
-			return false;
-		}
-
-		if (byteCount == 0)
-		{
-			return true;
-		}
-
-		// The host memory table does not contain all guest code mappings.
-		// Use Mach to read the memory and report access errors without another fault.
-		return ReadMachVirtualMemory(GetCurrentMachTask(), address, (ulong)byteCount,
-			(ulong)destination, out var bytesRead) == 0 && bytesRead == (ulong)byteCount;
-	}
-
-	[DllImport("libSystem.B.dylib", EntryPoint = "mach_task_self")]
-	private static extern uint GetCurrentMachTask();
-
-	[DllImport("libSystem.B.dylib", EntryPoint = "mach_vm_read_overwrite")]
-	private static extern int ReadMachVirtualMemory(
-		uint taskHandle, ulong sourceAddress, ulong byteCount, ulong destinationAddress, out ulong bytesRead);
-
+	// Faulting x64 code can have execute-only protection, which a plain data
+	// probe cannot touch on every platform.
 	private unsafe static bool TryReadExecutableBytes(ulong address, byte[] buffer)
 	{
-		if (!OperatingSystem.IsWindows())
+		fixed (byte* destination = buffer)
 		{
-			return TryReadHostBytes(address, buffer);
+			return ExecutionPlatform.TryReadExecutableHostMemory(address, destination, buffer.Length);
 		}
-
-		// Faulting x64 code can have execute-only protection. Data probes still require read access.
-		if (!IsReadableHostRange(address, buffer.Length, allowExecuteOnly: true))
-		{
-			return false;
-		}
-
-		if (buffer.Length == 0)
-		{
-			return true;
-		}
-
-		// RIP identifies code that Windows was already executing when the
-		// exception occurred. These mappings are stable for the duration of
-		// dispatch, so read them directly. Arbitrary diagnostic and operand
-		// addresses continue to use ReadProcessMemory above because they can
-		// become invalid while an exception is being reported.
-		new ReadOnlySpan<byte>((void*)address, buffer.Length).CopyTo(buffer);
-		return true;
 	}
+
 
 	/// <summary>
 	/// Reads guest bytes for a crash report, preferring the guest memory view
@@ -1527,56 +1369,11 @@ public sealed partial class DirectExecutionBackend
 			$"state=0x{mbi.State:X08} protect=0x{mbi.Protect:X08} type=0x{mbi.Type:X08}");
 	}
 
-	private unsafe static bool IsReadableHostRange(ulong address, int byteCount, bool allowExecuteOnly = false)
-	{
-		if (byteCount < 0 || !IsCanonicalUserAddress(address))
-		{
-			return false;
-		}
 
-		var length = (ulong)byteCount;
-		if (address > 0x0000_8000_0000_0000UL - length)
-		{
-			return false;
-		}
-
-		var end = address + length;
-		var cursor = address;
-		while (cursor < end)
-		{
-			if (VirtualQuery(
-					(void*)cursor,
-					out var mbi,
-					(nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
-				mbi.State != MEM_COMMIT ||
-				(!IsReadableProtection(mbi.Protect) &&
-				 !(allowExecuteOnly && mbi.Protect == 0x10)))
-			{
-				return false;
-			}
-
-			var regionEnd = mbi.BaseAddress + mbi.RegionSize;
-			if (regionEnd < mbi.BaseAddress || regionEnd <= cursor)
-			{
-				return false;
-			}
-
-			cursor = Math.Min(regionEnd, end);
-		}
-
-		return true;
-	}
 
 	private static bool IsCanonicalUserAddress(ulong address) =>
 		address >= 0x10000 && address < 0x0000_8000_0000_0000UL;
 
-	[DllImport("kernel32.dll", SetLastError = false)]
-	private unsafe static extern int ReadProcessMemory(
-		nint process,
-		nint baseAddress,
-		void* buffer,
-		nuint byteCount,
-		out nuint bytesRead);
 
 	private string FormatPointerWithNearestSymbol(ulong value)
 	{
@@ -1616,7 +1413,12 @@ public sealed partial class DirectExecutionBackend
 
 	private bool TryFormatNearestRuntimeSymbol(ulong address, out string text)
 	{
-		text = string.Empty;
+		// Guest modules are not dyld images, so a dladdr hit means a host address.
+		if (HostSymbolizer.TryFormat(address, out text))
+		{
+			return true;
+		}
+
 		KeyValuePair<string, ulong>[] runtimeSymbolsByAddress = _runtimeSymbolsByAddress;
 		if (runtimeSymbolsByAddress.Length == 0)
 		{

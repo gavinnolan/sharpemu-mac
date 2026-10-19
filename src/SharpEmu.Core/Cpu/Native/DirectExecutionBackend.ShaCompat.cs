@@ -6,6 +6,8 @@ using System.Threading;
 using Iced.Intel;
 using SharpEmu.Core.Cpu.Emulation;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 // The PS5 CPU has the SHA extensions and titles use them without a CPUID check.
@@ -17,7 +19,7 @@ public sealed partial class DirectExecutionBackend
 
     private unsafe bool TryRecoverShaInstruction(void* contextRecord, ulong rip)
     {
-        if (!OperatingSystem.IsWindows() && !_posixXmmContextBridged ||
+        if (!FaultContextHasVectorRegisters ||
             !TryReadFaultingInstruction(rip, out var instruction))
         {
             return false;

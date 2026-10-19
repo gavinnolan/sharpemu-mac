@@ -9,6 +9,8 @@ using System.Linq;
 using System.Threading;
 using SharpEmu.HLE;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 /// <summary>
@@ -108,7 +110,7 @@ public sealed partial class DirectExecutionBackend
 	private void EnsureGuestRipSampler()
 	{
 		if (!_profileGuestRip ||
-			!OperatingSystem.IsWindows() ||
+			(ExecutionPlatform.Capabilities & DirectExecutionCapabilities.GuestRipSampling) == 0 ||
 			Interlocked.Exchange(ref _guestRipSamplerStarted, 1) != 0)
 		{
 			return;

@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Cpu.Emulation;
 using SharpEmu.Core.Cpu.Native;
+using SharpEmu.Core.Cpu.Native.Platform;
 using SharpEmu.HLE;
 using Xunit;
 
@@ -16,9 +17,9 @@ namespace SharpEmu.Libs.Tests.Cpu;
 [Collection("PosixSignalRecovery")]
 public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
 {
-    private readonly object? _previousBackend = PosixSignalBackend.GetValue(null);
+    private readonly object? _previousBackend = FaultRecoveryBackend.GetValue(null);
 
-    public void Dispose() => PosixSignalBackend.SetValue(null, _previousBackend);
+    public void Dispose() => FaultRecoveryBackend.SetValue(null, _previousBackend);
 
     private const int PosixSigIll = 4;
     private const int LinuxUcontextGregsOffset = 40;
@@ -27,20 +28,54 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     private const int FxsaveXmm0Offset = 160;
     private const int FxsaveXmm1Offset = 176;
 
-    private static readonly MethodInfo TryHandlePosixFault = typeof(DirectExecutionBackend).GetMethod(
-        "TryHandlePosixFault",
+    // The signal bridge lives in whichever per-OS execution package this build
+    // references (W10), so it is reached by name rather than by a compile-time
+    // reference: a Windows build has neither POSIX package, and every test
+    // here returns before touching this.
+    private static readonly Assembly? PosixExecutionPackage = LoadPosixExecutionPackage();
+
+    private static Assembly? LoadPosixExecutionPackage()
+    {
+        // Only this host's package: every project builds into the shared artifacts directory,
+        // so the other OS's package can be loadable here although nothing references it, and
+        // its signal layout is not the one the fabricated frames below use.
+        var names = OperatingSystem.IsMacOS() ? new[] { "SharpEmu.Cpu.DirectExecution.MacOS.X64" }
+            : OperatingSystem.IsLinux() ? new[] { "SharpEmu.Cpu.DirectExecution.Linux.X64" }
+            : Array.Empty<string>();
+        foreach (var name in names)
+        {
+            try
+            {
+                return Assembly.Load(name);
+            }
+            catch (FileNotFoundException)
+            {
+            }
+            catch (FileLoadException)
+            {
+            }
+        }
+
+        return null;
+    }
+
+    private static Type PosixType(string name) =>
+        PosixExecutionPackage!.GetType(PosixExecutionPackage!.GetName().Name + "." + name, throwOnError: true)!;
+
+    private static readonly MethodInfo? TryHandlePosixFault = PosixExecutionPackage is null ? null : PosixType("PosixFaultBridge").GetMethod(
+        "TryHandleFault",
         BindingFlags.Static | BindingFlags.NonPublic)!;
 
-    private static readonly FieldInfo PosixSignalBackend = typeof(DirectExecutionBackend).GetField(
-        "_posixSignalBackend",
+    private static readonly MethodInfo? UseSharedRecoveryEntries = PosixExecutionPackage is null ? null : PosixType("PosixFaultBridge").GetMethod(
+        "UseSharedRecoveryEntriesForTest",
+        BindingFlags.Static | BindingFlags.NonPublic)!;
+
+    private static readonly FieldInfo FaultRecoveryBackend = typeof(DirectExecutionBackend).GetField(
+        "_faultRecoveryBackend",
         BindingFlags.Static | BindingFlags.NonPublic)!;
 
     private static readonly FieldInfo EmulatedCounter = typeof(DirectExecutionBackend).GetField(
         "_sse4aInstructionsEmulated",
-        BindingFlags.Static | BindingFlags.NonPublic)!;
-
-    private static readonly FieldInfo XmmBridgedFlag = typeof(DirectExecutionBackend).GetField(
-        "_posixXmmContextBridged",
         BindingFlags.Static | BindingFlags.NonPublic)!;
 
     private static readonly MethodInfo TryRecoverAmdCompat = typeof(DirectExecutionBackend).GetMethod(
@@ -58,8 +93,8 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         if (!OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
-        var getVectorRegisterAddress = typeof(DirectExecutionBackend).GetMethod(
-            "GetSignalVectorRegisterAddress", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var getVectorRegisterAddress = PosixType("PosixSignalLayout").GetMethod(
+            "GetVectorRegisterAddress", BindingFlags.Static | BindingFlags.NonPublic)!;
         byte* userContext = stackalloc byte[64];
         byte* machineContext = stackalloc byte[1032];
         *(ulong*)(userContext + 40) = contextSize;
@@ -228,7 +263,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         var code = AllocateProbeVisibleCode([0x66, 0x0F, 0x78, 0xC0, 0x10, 0x08]);
         try
         {
-            XmmBridgedFlag.SetValue(null, false);
+            DirectExecutionFaultContext.VectorRegistersBridged = false;
             var backend = RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
             var contextRecord = stackalloc byte[0x4D0];
 
@@ -342,7 +377,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
                     *(byte**)(userContext + LinuxUcontextGregsOffset + LinuxGregsFpstateOffset) = floatingPointState;
                 }
 
-                return (bool)TryHandlePosixFault.Invoke(
+                return (bool)TryHandlePosixFault!.Invoke(
                     null,
                     [PosixSigIll, (nint)0, (nint)userContext])!;
             }
@@ -350,16 +385,20 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     }
 
     /// <summary>
-    /// TryHandlePosixFault only runs the recovery chain when a backend instance is
+    /// The bridge only runs the recovery chain when a backend instance is
     /// registered. The tests do not need any of the constructor's state (and must not run
     /// it: it installs process-wide signal handlers), so register an uninitialized
     /// instance - the SIGILL recovery path only touches static state.
     /// </summary>
     private static void EnsureBridgeBackend()
     {
-        if (PosixSignalBackend.GetValue(null) == null)
+        // Point the bridge at the shared recovery entries without installing
+        // the signal handlers, which is process-wide and cannot be undone.
+        UseSharedRecoveryEntries!.Invoke(null, [(nint)(delegate* managed<void*, int>)&DirectExecutionBackend.SharedRawFaultRecovery,
+            (nint)(delegate* managed<void*, int>)&DirectExecutionBackend.SharedFaultRecovery]);
+        if (FaultRecoveryBackend.GetValue(null) == null)
         {
-            PosixSignalBackend.SetValue(
+            FaultRecoveryBackend.SetValue(
                 null,
                 RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend)));
         }

@@ -6,6 +6,8 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 /// <summary>
@@ -23,6 +25,13 @@ public sealed unsafe partial class DirectExecutionBackend
 		PthreadSelf,
 		PthreadGetspecific,
 		MemoryCopy,
+		MemorySet,
+
+		/// <summary>
+		/// An export whose whole observable effect is RAX = 0. The thunk is
+		/// <c>xor eax,eax; ret</c>, so the guest never crosses into managed code.
+		/// </summary>
+		ConstantZero,
 	}
 
 	// scePthreadSelf / pthread_self.
@@ -36,6 +45,7 @@ public sealed unsafe partial class DirectExecutionBackend
 	// memcpy / memmove.
 	private const string MemcpyNid = "Q3VBxCXhUHs";
 	private const string MemmoveNid = "+P6FRGH4LfA";
+	private const string MemsetNid = "8zTFvBIAIN8";
 
 	// Guest memory is identity-mapped and every fault the copy can take (write tracking, lazy
 	// commit) is resolved from the fault address alone, so the copy may run as guest-side code.
@@ -43,9 +53,51 @@ public sealed unsafe partial class DirectExecutionBackend
 	private static readonly bool GuestMemoryCopyStubEnabled =
 		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_HLE_FAST_MEMCPY"), "0", StringComparison.Ordinal);
 
+	// SHARPEMU_NATIVE_IMPORT_THUNKS=0 routes the constant-result imports back
+	// through the managed gateway, which is the way to tell a thunk apart from
+	// the export it stands in for.
+	private static readonly bool NativeImportThunksEnabled =
+		!string.Equals(
+			Environment.GetEnvironmentVariable("SHARPEMU_NATIVE_IMPORT_THUNKS"),
+			"0",
+			StringComparison.Ordinal);
+
+	/// <summary>
+	/// Imports whose managed export does nothing but set RAX to 0 and report
+	/// success, for every argument and in every state.
+	/// </summary>
+	/// <remarks>
+	/// These are the unimplemented input and gesture surfaces a title polls
+	/// every frame regardless: Quake crosses into managed code 22.1 million
+	/// times in two minutes for the five hottest of them, and the import
+	/// profile measures their export bodies at 23-42 ns behind a ~300 ns
+	/// crossing. A native thunk removes the crossing rather than shortening it.
+	///
+	/// The list is only sound while those exports really are constant, so
+	/// NativeImportThunkTests drives each managed export with varied arguments
+	/// and fails if one ever answers with anything but RAX = 0 - which is what
+	/// would happen the day somebody implements it for real.
+	/// </remarks>
+	private static bool IsConstantZeroImport(string nid) => nid is
+		// libSceSystemGesture is entirely unimplemented; a title's touch
+		// pipeline polls these on every frame.
+		"3pcAvmwKCvM" or // sceSystemGestureInitializePrimitiveTouchRecognizer
+		"FWF8zkhr854" or // sceSystemGestureCreateTouchRecognizer
+		"qpo-mEOwje0" or // sceSystemGestureOpen
+		"GgFMb22sbbI" or // sceSystemGestureUpdatePrimitiveTouchRecognizer
+		"j4h82CQWENo" or // sceSystemGestureUpdateTouchRecognizer
+		"h8uongcBNVs" or // sceSystemGestureGetTouchEventsCount
+		"1MMK0W-kMgA" or // sceSystemGestureAppendTouchRecognizer
+		"wPJGwI2RM2I" or // sceSystemGestureUpdateAllTouchRecognizer
+		// Keyboard and mouse surfaces the host does not present to the guest.
+		"-4GCfYdNF1s" or // sceImeUpdate
+		"x8qnXqh-tiM";   // sceMouseRead
+
 	private uint _fastPathBlockTlsIndex = uint.MaxValue;
 	private bool _guestFastPathEnabled;
+	private bool _nativeConstantThunksAllowed;
 	private int _guestFastPathStubCount;
+	private int _nativeConstantThunkCount;
 
 	/// <summary>
 	/// Decides whether native fast-path stubs may be installed for this run and
@@ -57,10 +109,23 @@ public sealed unsafe partial class DirectExecutionBackend
 	{
 		_guestFastPathEnabled = false;
 		_guestFastPathStubCount = 0;
+		_nativeConstantThunkCount = 0;
 
-		// Emission uses the macOS pthread gs-indexed key array. Windows and
-		// Linux keep the managed gateway until their TLS read is emitted too.
-		if (!OperatingSystem.IsMacOS() ||
+		// A constant thunk answers without reaching the managed gateway, so a
+		// diagnostic mode that has to observe every import call rules it out -
+		// the same reason the TLS stubs below are gated. It needs no TLS read,
+		// so it survives on a platform whose TLS access is a real call, and it
+		// needs no per-thread block, so it does not depend on GuestFastPath
+		// being armed at all.
+		_nativeConstantThunksAllowed =
+			RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
+			!_logAllImports &&
+			string.IsNullOrEmpty(_importFilter);
+
+		// Emission needs a TLS read the platform can express as inline code
+		// (the Darwin pthread gs-indexed key array). Platforms whose TLS read is
+		// a real call keep the managed gateway.
+		if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.EmittedTlsFastPath) == 0 ||
 			RuntimeInformation.ProcessArchitecture != Architecture.X64)
 		{
 			return;
@@ -95,12 +160,13 @@ public sealed unsafe partial class DirectExecutionBackend
 		_guestFastPathEnabled = true;
 	}
 
-	private static GuestFastPathStub ClassifyGuestFastPathStub(string nid) => nid switch
+	internal static GuestFastPathStub ClassifyGuestFastPathStub(string nid) => nid switch
 	{
 		PthreadSelfNid or PosixPthreadSelfNid => GuestFastPathStub.PthreadSelf,
 		PthreadGetspecificNid or PosixPthreadGetspecificNid => GuestFastPathStub.PthreadGetspecific,
 		MemcpyNid or MemmoveNid => GuestFastPathStub.MemoryCopy,
-		_ => GuestFastPathStub.None,
+		MemsetNid => GuestFastPathStub.MemorySet,
+		_ => IsConstantZeroImport(nid) ? GuestFastPathStub.ConstantZero : GuestFastPathStub.None,
 	};
 
 	/// <summary>
@@ -111,7 +177,7 @@ public sealed unsafe partial class DirectExecutionBackend
 	private unsafe bool TryCreateGuestFastPathStub(string nid, nint fallbackTrampoline, out nint address)
 	{
 		address = 0;
-		if (!_guestFastPathEnabled || fallbackTrampoline == 0)
+		if (fallbackTrampoline == 0)
 		{
 			return false;
 		}
@@ -119,7 +185,23 @@ public sealed unsafe partial class DirectExecutionBackend
 		var kind = ClassifyGuestFastPathStub(nid);
 		if (kind == GuestFastPathStub.None ||
 			// The write watch inspects every managed guest write, which a native copy never reaches.
-			(kind == GuestFastPathStub.MemoryCopy && (!GuestMemoryCopyStubEnabled || GuestWriteWatch.Armed)))
+			(kind is GuestFastPathStub.MemoryCopy or GuestFastPathStub.MemorySet && (!GuestMemoryCopyStubEnabled || GuestWriteWatch.Armed)))
+		{
+			return false;
+		}
+
+		if (kind == GuestFastPathStub.ConstantZero)
+		{
+			// A constant answer needs neither the per-thread block nor a
+			// fallback, so it does not depend on the emitted TLS read the other
+			// stubs do - but it is still invisible to import tracing, which has
+			// to see every call.
+			if (!NativeImportThunksEnabled || !_nativeConstantThunksAllowed)
+			{
+				return false;
+			}
+		}
+		else if (!_guestFastPathEnabled)
 		{
 			return false;
 		}
@@ -153,6 +235,11 @@ public sealed unsafe partial class DirectExecutionBackend
 		address = (nint)memory;
 		_importHandlerTrampolines.Add(address);
 		_guestFastPathStubCount++;
+		if (kind == GuestFastPathStub.ConstantZero)
+		{
+			_nativeConstantThunkCount++;
+		}
+
 		return true;
 	}
 
@@ -171,6 +258,20 @@ public sealed unsafe partial class DirectExecutionBackend
 		if (kind == GuestFastPathStub.MemoryCopy)
 		{
 			return EmitGuestMemoryCopyStub(fallbackTrampoline);
+		}
+
+		if (kind == GuestFastPathStub.MemorySet)
+		{
+			return EmitGuestMemorySetStub(fallbackTrampoline);
+		}
+
+		if (kind == GuestFastPathStub.ConstantZero)
+		{
+			// xor eax,eax / ret. The guest's incoming RAX carries the SysV
+			// variadic vector count, which the managed export overwrote with the
+			// result just the same, and only RAX and the flags change - both
+			// caller-saved across a call.
+			return [0x31, 0xC0, 0xC3];
 		}
 
 		var code = new List<byte>(48);
@@ -262,23 +363,96 @@ public sealed unsafe partial class DirectExecutionBackend
 	}
 
 	/// <summary>
-	/// memcpy/memmove(dst, src, n) as a forward <c>rep movsb</c>, returning dst. The libc
-	/// export copies with memmove semantics, so a destination that starts inside the source
-	/// (where a forward copy would read bytes it already overwrote) takes the managed path.
-	/// Only RAX, RCX, RSI, RDI and the flags change - all caller-saved - and the direction
-	/// flag is clear on entry per the SysV ABI.
+	/// memcpy/memmove(dst, src, n) as a forward 32-byte SSE loop (16-byte step, then
+	/// <c>rep movsb</c> for the last 0-15 bytes), returning dst. Rosetta translates
+	/// <c>rep movsb</c> to a byte-granular loop, which measured 10-40x slower than
+	/// movdqu pairs for 256 B - 1 MiB. The libc export copies with memmove semantics, so a
+	/// destination that starts inside the source (where a forward copy would read bytes it
+	/// already overwrote) takes the managed path. Only RAX, RCX, RSI, RDI, XMM0, XMM1 and the
+	/// flags change - all caller-saved - and the direction flag is clear on entry per the
+	/// SysV ABI.
 	/// </summary>
 	internal static List<byte> EmitGuestMemoryCopyStub(nint fallbackTrampoline)
 	{
-		var code = new List<byte>(40);
-		// mov rcx, rdi / sub rcx, rsi / cmp rcx, rdx / jb slow: dst - src < n (unsigned) is
+		var code = new List<byte>(104);
+		// mov rcx,rdi / sub rcx,rsi / cmp rcx,rdx / jb slow: dst - src < n (unsigned) is
 		// exactly a destination in (src, src + n) or equal to src with a non-empty copy.
 		code.AddRange([0x48, 0x89, 0xF9, 0x48, 0x29, 0xF1, 0x48, 0x39, 0xD1, 0x72, 0x00]);
 		var slowPathFixup = code.Count - 1;
-		// mov rax, rdi / mov rcx, rdx / rep movsb / ret
-		code.AddRange([0x48, 0x89, 0xF8, 0x48, 0x89, 0xD1, 0xF3, 0xA4, 0xC3]);
+		code.AddRange([
+			0x48, 0x89, 0xF8,                   // mov rax, rdi
+			0x48, 0x89, 0xD1,                   // mov rcx, rdx
+			0x48, 0x83, 0xF9, 0x20,             // cmp rcx, 32
+			0x72, 0x24,                         // jb l16
+			0xF3, 0x0F, 0x6F, 0x06,             // l32: movdqu xmm0, [rsi]
+			0xF3, 0x0F, 0x6F, 0x4E, 0x10,       // movdqu xmm1, [rsi+16]
+			0xF3, 0x0F, 0x7F, 0x07,             // movdqu [rdi], xmm0
+			0xF3, 0x0F, 0x7F, 0x4F, 0x10,       // movdqu [rdi+16], xmm1
+			0x48, 0x83, 0xC6, 0x20,             // add rsi, 32
+			0x48, 0x83, 0xC7, 0x20,             // add rdi, 32
+			0x48, 0x83, 0xE9, 0x20,             // sub rcx, 32
+			0x48, 0x83, 0xF9, 0x20,             // cmp rcx, 32
+			0x73, 0xDC,                         // jae l32
+			0x48, 0x83, 0xF9, 0x10,             // l16: cmp rcx, 16
+			0x72, 0x14,                         // jb tail
+			0xF3, 0x0F, 0x6F, 0x06,             // movdqu xmm0, [rsi]
+			0xF3, 0x0F, 0x7F, 0x07,             // movdqu [rdi], xmm0
+			0x48, 0x83, 0xC6, 0x10,             // add rsi, 16
+			0x48, 0x83, 0xC7, 0x10,             // add rdi, 16
+			0x48, 0x83, 0xE9, 0x10,             // sub rcx, 16
+			0xF3, 0xA4,                         // tail: rep movsb
+			0xC3,                               // ret
+		]);
 		code[slowPathFixup] = checked((byte)(code.Count - (slowPathFixup + 1)));
 		// jmp qword [rip+0] with the absolute trampoline address after it.
+		code.AddRange([0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
+		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
+		return code;
+	}
+
+	/// <summary>
+	/// memset(dst, value, n) as a 16-byte SSE store loop (then <c>rep stosb</c> for the last
+	/// 0-15 bytes), returning dst. The managed export tolerates a null/low or non-canonical
+	/// destination and clamps oversized clears that run off the mapped range, so those cases
+	/// (dst below 0x10000, dst at or above 2^47, n above 1 MiB) take the managed path; so does
+	/// everything while the write watch is armed (see <c>TryCreateGuestFastPathStub</c>).
+	/// Changes only RAX, RCX, R8, XMM0 and the flags, all caller-saved.
+	/// </summary>
+	internal static List<byte> EmitGuestMemorySetStub(nint fallbackTrampoline)
+	{
+		var code = new List<byte>(112);
+		var slowPathFixups = new List<int>();
+		code.AddRange([0x48, 0x81, 0xFF, 0x00, 0x00, 0x01, 0x00]);                         // cmp rdi, 0x10000
+		code.AddRange([0x72, 0x00]); slowPathFixups.Add(code.Count - 1);                   // jb slow
+		code.AddRange([0x48, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x00]);       // mov rax, 0x7FFFFFFFFFFF
+		code.AddRange([0x48, 0x39, 0xC7]);                                                 // cmp rdi, rax
+		code.AddRange([0x77, 0x00]); slowPathFixups.Add(code.Count - 1);                   // ja slow
+		code.AddRange([0x48, 0x81, 0xFA, 0x00, 0x00, 0x10, 0x00]);                         // cmp rdx, 0x100000
+		code.AddRange([0x77, 0x00]); slowPathFixups.Add(code.Count - 1);                   // ja slow
+		code.AddRange([
+			0x40, 0x0F, 0xB6, 0xC6,                                                         // movzx eax, sil
+			0x48, 0xB9, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,                     // mov rcx, 0x0101010101010101
+			0x48, 0x0F, 0xAF, 0xC1,                                                         // imul rax, rcx
+			0x66, 0x48, 0x0F, 0x6E, 0xC0,                                                   // movq xmm0, rax
+			0x66, 0x0F, 0x6C, 0xC0,                                                         // punpcklqdq xmm0, xmm0
+			0x49, 0x89, 0xF8,                                                               // mov r8, rdi
+			0x48, 0x89, 0xD1,                                                               // mov rcx, rdx
+			0x48, 0x83, 0xF9, 0x10,                                                         // cmp rcx, 16
+			0x72, 0x12,                                                                     // jb tail
+			0xF3, 0x0F, 0x7F, 0x07,                                                         // l16: movdqu [rdi], xmm0
+			0x48, 0x83, 0xC7, 0x10,                                                         // add rdi, 16
+			0x48, 0x83, 0xE9, 0x10,                                                         // sub rcx, 16
+			0x48, 0x83, 0xF9, 0x10,                                                         // cmp rcx, 16
+			0x73, 0xEE,                                                                     // jae l16
+			0xF3, 0xAA,                                                                     // tail: rep stosb (AL = value)
+			0x4C, 0x89, 0xC0,                                                               // mov rax, r8
+			0xC3,                                                                           // ret
+		]);
+		foreach (var fixup in slowPathFixups)
+		{
+			code[fixup] = checked((byte)(code.Count - (fixup + 1)));
+		}
+
 		code.AddRange([0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
 		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
 		return code;

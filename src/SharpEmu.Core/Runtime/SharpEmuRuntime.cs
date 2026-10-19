@@ -166,7 +166,6 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         NpAuthExports.ResetRuntimeState();
         NpUniversalDataSystemExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
-        KernelExports.ResetProcessArguments();
         var image = LoadImage(normalizedEbootPath);
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
         KernelMemoryCompatExports.ConfigureApplicationInfo(image.TitleId);
@@ -196,6 +195,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             loadedModuleImages,
             activeImportStubs,
             activeRuntimeSymbols));
+        // Guest code starts with the initializers. The persisted app0 listings
+        // load while modules do; make sure they are in place before the guest
+        // resolves its first asset path, without letting a stalled volume hold
+        // boot hostage.
+        if (!SharpEmu.Libs.Kernel.HostDirectoryIndex.WaitForSnapshot(TimeSpan.FromSeconds(10)))
+        {
+            Console.Error.WriteLine("[RUNTIME][WARN] dir_index.snapshot_wait_timed_out");
+        }
+
         var initializerResult = RunAllInitializers(
             image,
             loadedModuleImages,
@@ -504,6 +512,11 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         // Overlap the cooked-id APR walk with module load so the first ReadFile
         // miss mid-boot does not stall on a cold USB index.
         SharpEmu.Libs.Ampr.AmprFileRegistry.BeginApp0IndexPreload(app0Root);
+        // Same reason, for the directory listings the path resolver reads its
+        // existence/symlink/size answers out of: pay the cold metadata walk
+        // here rather than on the guest thread that resolves first. app0 is
+        // read-only, so a later boot of the same dump reads them back instead.
+        SharpEmu.Libs.Kernel.HostDirectoryIndex.BeginWarm(app0Root, persistSnapshot: true);
         return new App0BindingScope(app0VariableName);
     }
 
@@ -604,7 +617,13 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IReadOnlyDictionary<ulong, string> activeImportStubs,
         IReadOnlyDictionary<string, ulong> activeRuntimeSymbols)
     {
-        for (var i = 0; i < loadedModuleImages.Count; i++)
+        // Dependencies start before the modules that need them, not in file
+        // name order. A module already started (TryBeginModuleStart) is never
+        // initialized twice.
+        var startOrder = ModuleStartOrder.Compute(
+            loadedModuleImages.Select(module => module.Path).ToArray(),
+            loadedModuleImages.Select(module => module.Image.ImportedModuleNames).ToArray());
+        foreach (var i in startOrder)
         {
             var loadedModule = loadedModuleImages[i];
             if (!loadedModule.StartAtBoot)
@@ -1290,9 +1309,44 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             isMain,
             isSystemModule);
         KernelModuleRegistry.RegisterModuleSymbols(handle, image.RuntimeSymbols);
+        // The kernel names a module's mappings after the module file.
+        var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint ? image.EntryPoint - image.ElfHeader.EntryPoint : 0UL;
+        GuestHostMappings.RegisterModuleSegments(_virtualMemory, image.ProgramHeaders, imageBase, Path.GetFileName(modulePath));
+        KernelModuleRegistry.RegisterModuleDependencies(handle, image.ImportedModuleNames);
+        KernelModuleRegistry.RegisterModuleSegments(handle, ComputeModuleSegments(image));
         Console.Error.WriteLine(
             $"[RUNTIME] Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
         return handle;
+    }
+
+    /// <summary>
+    /// The PT_LOAD segments of a mapped image, as the module-info structs
+    /// report them (address, size, SCE_KERNEL_PROT_CPU_* bits).
+    /// </summary>
+    internal static List<KernelModuleRegistry.ModuleSegment> ComputeModuleSegments(SelfImage image)
+    {
+        var segments = new List<KernelModuleRegistry.ModuleSegment>();
+        var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint
+            ? image.EntryPoint - image.ElfHeader.EntryPoint
+            : 0UL;
+        foreach (var header in image.ProgramHeaders)
+        {
+            if (header.HeaderType != ProgramHeaderType.Load || header.MemorySize == 0)
+            {
+                continue;
+            }
+
+            var protection =
+                ((header.Flags & ProgramHeaderFlags.Read) != 0 ? 1 : 0) |
+                ((header.Flags & ProgramHeaderFlags.Write) != 0 ? 2 : 0) |
+                ((header.Flags & ProgramHeaderFlags.Execute) != 0 ? 4 : 0);
+            segments.Add(new KernelModuleRegistry.ModuleSegment(
+                unchecked(imageBase + header.VirtualAddress),
+                header.MemorySize,
+                protection));
+        }
+
+        return segments;
     }
 
     private static bool TryComputeImageRange(SelfImage image, out ulong baseAddress, out ulong size)

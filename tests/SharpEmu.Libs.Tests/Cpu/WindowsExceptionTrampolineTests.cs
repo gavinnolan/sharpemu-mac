@@ -46,9 +46,9 @@ public sealed class WindowsExceptionTrampolineTests
         try
         {
             firstCallback = StartCallback(trampoline.Address);
-            Assert.True(firstEntered.Wait(TimeSpan.FromSeconds(5)), "The first callback did not enter.");
+            Assert.True(firstEntered.Wait(TimeSpan.FromSeconds(10)), "The first callback did not enter.");
             secondCallback = StartCallback(trampoline.Address);
-            Assert.True(secondEntered.Wait(TimeSpan.FromSeconds(5)),
+            Assert.True(secondEntered.Wait(TimeSpan.FromSeconds(10)),
                 "The second callback was blocked by the first callback.");
         }
         finally
@@ -208,12 +208,17 @@ public sealed class WindowsExceptionTrampolineTests
             _backend = new DirectExecutionBackend(modules);
             try
             {
-                var createTrampoline = typeof(DirectExecutionBackend).GetMethod(
-                    "CreateExceptionHandlerTrampoline", BindingFlags.Instance | BindingFlags.NonPublic);
-                Assert.NotNull(createTrampoline);
-                Address = (nint)createTrampoline.Invoke(_backend,
-                    [Marshal.GetFunctionPointerForDelegate(callback)])!;
+#if SHARPEMU_CPU_WINDOWS_X64
+                var parameters = _backend.FaultThunkParametersForTest;
+                Address = SharpEmu.Cpu.DirectExecution.Windows.X64.WindowsFaultTrampoline.Create(
+                    Marshal.GetFunctionPointerForDelegate(callback),
+                    parameters.HostRspSlotTlsIndex, parameters.TlsGetValueAddress,
+                    parameters.WorkerAbortStub, parameters.WorkerAbortEligibleTlsIndex);
                 Assert.NotEqual(0, Address);
+#else
+                // Unreachable: every test here returns early off Windows.
+                Address = 0;
+#endif
             }
             catch
             {

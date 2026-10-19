@@ -20,12 +20,15 @@ public sealed unsafe class WindowsFaultFilterTests
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
+#if SHARPEMU_CPU_WINDOWS_X64
         var modules = new ModuleManager();
         modules.Freeze();
         using var backend = new DirectExecutionBackend(modules);
-        var create = typeof(DirectExecutionBackend).GetMethod(
-            "CreateExceptionHandlerTrampoline", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var thunk = (nint)create.Invoke(backend, [(nint)0])!;
+        var parameters = backend.FaultThunkParametersForTest;
+        // A null callback makes the test fail if the filter calls managed code.
+        var thunk = SharpEmu.Cpu.DirectExecution.Windows.X64.WindowsFaultTrampoline.Create(
+            0, parameters.HostRspSlotTlsIndex, parameters.TlsGetValueAddress,
+            parameters.WorkerAbortStub, parameters.WorkerAbortEligibleTlsIndex);
         Assert.NotEqual(0, thunk);
         try
         {
@@ -38,6 +41,7 @@ public sealed unsafe class WindowsFaultFilterTests
         {
             HostPlatform.Current.Memory.Free((ulong)thunk);
         }
+#endif
     }
 
     [Theory]
@@ -48,8 +52,9 @@ public sealed unsafe class WindowsFaultFilterTests
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
-        var type = typeof(DirectExecutionBackend).Assembly.GetType(
-            "SharpEmu.Core.Cpu.Native.Windows.WindowsFaultHandling", throwOnError: true)!;
+#if SHARPEMU_CPU_WINDOWS_X64
+        var type = typeof(SharpEmu.Cpu.DirectExecution.Windows.X64.WindowsExecutionPlatform).Assembly.GetType(
+            "SharpEmu.Cpu.DirectExecution.Windows.X64.WindowsFaultHandling", throwOnError: true)!;
         var handler = (IHostFaultHandling)Activator.CreateInstance(type,
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
             null, [HostPlatform.Current.Memory], null)!;
@@ -68,5 +73,6 @@ public sealed unsafe class WindowsFaultFilterTests
         {
             handler.FreeThunk(thunk);
         }
+#endif
     }
 }
