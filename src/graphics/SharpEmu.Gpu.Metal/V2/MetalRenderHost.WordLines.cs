@@ -10,7 +10,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 // recorded GPU writes (twice, with a message send for the completed serial each time)
 // whether it may have to wait: measured at about 2.5 us a word with 250 live write
 // records, which made the walk a third of the Metal worker in Demon's Souls character
-// creation. Inside one materialization a word is instead served from a 64-byte line read
+// creation. Inside one materialization a word is instead served from a 256-byte line read
 // once, after the whole line passed the same tests a word read makes:
 //   - no pending command-processor bytes over it (overlay coverage None), and
 //   - no GPU-modified image bytes and no pending recorded write over it,
@@ -22,8 +22,11 @@ namespace SharpEmu.Gpu.Metal.V2;
 // BeginGuestWordReads and EndGuestWordReads on the thread that began them.
 internal sealed partial class MetalRenderHost
 {
-    private const int WordLineBytes = 64;
-    private const int WordLineSlots = 16;
+    // SHARPEMU_RESOURCE_WIDE_LINES=0 keeps the 64-byte lines of 16 slots. A line costs the same
+    // tests however wide it is, and a descriptor table or pointer ring is read from a few lines.
+    private static readonly bool WideLines = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOURCE_WIDE_LINES");
+    private static readonly int WordLineBytes = WideLines ? 256 : 64;
+    private static readonly int WordLineSlots = WideLines ? 32 : 16;
 
     private readonly ulong[] _wordLineAddress = new ulong[WordLineSlots];
     private readonly ulong[] _wordLineGeneration = new ulong[WordLineSlots];
@@ -60,7 +63,7 @@ internal sealed partial class MetalRenderHost
     private bool TryReadWordFromLine(ulong address, out uint word)
     {
         word = 0;
-        var offset = (int)(address & (WordLineBytes - 1));
+        var offset = (int)(address & (ulong)(WordLineBytes - 1));
         if (offset > WordLineBytes - sizeof(uint))
         {
             return false;
@@ -76,7 +79,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var line = address - (ulong)offset;
-        var slot = (int)((line / WordLineBytes) & (WordLineSlots - 1));
+        var slot = (int)((line / (ulong)WordLineBytes) & (ulong)(WordLineSlots - 1));
         var bytes = _wordLineBytes.AsSpan(slot * WordLineBytes, WordLineBytes);
         if (_wordLineAddress[slot] != line || _wordLineGeneration[slot] != _wordLineGenerationCurrent)
         {
@@ -102,7 +105,7 @@ internal sealed partial class MetalRenderHost
     // line implies passing for each word in it.
     private bool TryFillWordLine(ulong line, Span<byte> bytes)
     {
-        const ulong size = WordLineBytes;
+        ulong size = (ulong)WordLineBytes;
         if (_cpOverlay.Count != 0 &&
             _cpOverlay.Coverage(line, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None)
         {
