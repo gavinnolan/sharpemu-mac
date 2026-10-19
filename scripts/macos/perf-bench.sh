@@ -28,16 +28,25 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# The keyplan follows the game, not the clock (flips are counted from the title movie's AVPLAYER log line, so a
-# faster or slower build meets the same content). Scene flow, flips after that line, measured on main 021538538:
+# The keyplan follows the game, not the clock or the flip count (flip rate swings with scene and build: about 24 fps
+# on the title screen of a fast build, 10 on a slow one, 0 during loads, 2 in the cutscene, while the game's own
+# content runs on wall time). Each content point is a log line the Metal backend writes once, the first time the
+# scene draws a pass it has not drawn before, so every build reaches it at the same content (checked on six runs of
+# three builds; the times below are seconds since launch of a fast and a slow build):
 #   Konami / auto-save notice / content warning (Enter every 6 s until the title movie is opened)
-#   +0   title menu "NEW GAME"; Enter every 6 s: warning page 2, then the intro text "Seeking a connection..."
-#   +260 intro text (marker intro-text, Enter stops: more presses would open the cutscene's Skip prompt)
-#   +385 cutscene-start: shrine, Maya, the dark room with the phone in hand (heavy 3D, no input)
-#   +540 cutscene-end: the phone message "Maya: can you come to the villa?" is shown; Close is Circle, so Esc every 5 s
-#   +600 idle-start: the player stands still in the room, no input; idle-end 120 s later, then stop
-# perf_report.py --segment cutscene / idle reads the markers; a plan without them gets no segment reports.
-DEFAULT_KEYPLAN="0:rep:enter:6;@log=UI_TitleMovie01|0:mark:title,0:rep:enter:6;@flips=260|0:mark:intro-text;@flips=125|0:mark:cutscene-start;@flips=155|0:mark:cutscene-end,0:rep:esc:5;@flips=60|0:mark:idle-start;@after=120|0:mark:idle-end,1:mark:stop"
+#   title        UI_TitleMovie01 opened by AVPLAYER: title menu "NEW GAME"; Enter every 6 s: warning page 2, intro text
+#   intro-text   260 flips later: Enter stops (more presses would open the cutscene's Skip prompt)
+#   cutscene-start  4 s after the first 1024x1024 depth-only pass (a shadow map; ~210 s / ~240 s): the memorial with
+#                   flowers in fog, then Anita and Maya (heavy 3D, no input). The 64x64 depth pass that follows it
+#                   on some builds comes 45 s later on another (mid-cutscene), so it is not used.
+#   cutscene-end    3 s after the first 607x1020 pass (the phone message UI, ~290 s / ~320 s): "Maya: can you come to
+#                   the villa?" with the Close prompt. Close is Circle; Esc at +2 s, +6 s and +10 s covers the phone
+#                   becoming ready on any build (an Esc in the room afterwards does nothing visible)
+#   idle-start      24 s after the phone appears: the phone is closed, the player stands in the dark room (lamp,
+#                   shelf), no input; idle-end 120 s later, then stop
+# A log anchor that never appears leaves its phase waiting (no marker, no segment report) rather than measuring
+# the wrong content. perf_report.py --segment cutscene / idle reads the markers.
+DEFAULT_KEYPLAN="0:rep:enter:6;@log=UI_TitleMovie01|0:mark:title,0:rep:enter:6;@flips=260|0:mark:intro-text;@log=render pass 1024x1024 samples=1 layers=1 colors=0 format=0 clear=False depth=True|4:mark:cutscene-start;@log=render pass 607x1020 samples=1 layers=1 colors=1 format=44|2:esc,3:mark:cutscene-end,6:esc,10:esc;@after=24|0:mark:idle-start;@after=120|0:mark:idle-end,1:mark:stop"
 KEYPLAN="${PERF_BENCH_KEYPLAN:-$DEFAULT_KEYPLAN}"
 SECONDS_LIMIT=600
 
