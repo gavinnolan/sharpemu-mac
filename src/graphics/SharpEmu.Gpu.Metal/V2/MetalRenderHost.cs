@@ -2342,6 +2342,7 @@ internal sealed partial class MetalRenderHost :
             endOtherCount, targetlessCount) = TakePassBreakdown();
         var (clearPasses, clearDepthPasses, clearPixels) = TakeClearPasses();
         var (foldedClears, encodedClears) = TakeClearFolding();
+        var (depthJoins, depthJoinsSampled) = TakeDepthOnlyJoins();
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
@@ -2354,7 +2355,8 @@ internal sealed partial class MetalRenderHost :
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
             $"labels_deferred={TakeDeferredLabelWrites()} clears_folded={foldedClears} " +
-            $"clears_encoded={encodedClears} transfers=[{TakeTransferCauses()}]");
+            $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} " +
+            $"transfers=[{TakeTransferCauses()}]");
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");

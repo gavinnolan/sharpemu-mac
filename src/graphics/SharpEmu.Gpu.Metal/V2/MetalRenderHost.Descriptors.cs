@@ -894,6 +894,11 @@ internal sealed partial class MetalRenderHost
     public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
     {
         _ = RequirePipelineEntry(in pipeline);
+        if (bindPoint == GpuBindPoint.Graphics)
+        {
+            NoteJoinStages(stages);
+        }
+
         Span<uint> pushData = stackalloc uint[(int)PushData.DwordCount];
         pushData.Clear();
         var hasPushData = false;

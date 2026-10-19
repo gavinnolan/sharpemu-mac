@@ -806,6 +806,8 @@ internal sealed partial class MetalRenderHost
     public void BeginRendering(in RenderingState state)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.RenderPassBegin);
+        _joinedPipeline = null;
+        _joinedVariant = null;
         // Before anything else, because this runs ahead of every draw and is therefore
         // the last moment at which a waiting clear is still invisible. Whatever this
         // pass cannot perform itself is encoded below, where no encoder is open.
@@ -845,6 +847,12 @@ internal sealed partial class MetalRenderHost
         var continues = !foldedClear && _pendingClears.Count == 0 && !_imageCache.HasDeferredRefreshes &&
             CanContinuePass(in state);
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
+        {
+            return;
+        }
+
+        if (!continues && launch is null && !foldedClear && _pendingClears.Count == 0 &&
+            !_imageCache.HasDeferredRefreshes && TryJoinDepthOnly(in state, upcoming))
         {
             return;
         }
@@ -1302,7 +1310,11 @@ internal sealed partial class MetalRenderHost
         var entry = RequirePipelineEntry(in pipeline);
         if (bindPoint == GpuBindPoint.Graphics)
         {
-            _pendingGraphicsPipeline = entry;
+            // A depth-only draw BeginRendering joined to the open pass draws with the
+            // variant made for that pass's colour attachments.
+            _pendingGraphicsPipeline = ReferenceEquals(entry, _joinedPipeline) ? _joinedVariant : entry;
+            _joinedPipeline = null;
+            _joinedVariant = null;
             return;
         }
 

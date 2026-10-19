@@ -142,6 +142,13 @@ internal static class MetalV2Diagnostics
     public static readonly bool DccClaimPageIndex =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_CLAIM_INDEX"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_JOIN_DEPTH_ONLY=0 opens a pass of its own for every depth-only draw,
+    // as before. Otherwise a depth-only draw into the depth attachment of the open pass
+    // stays in that pass, drawn with a pipeline that writes none of its colour attachments
+    // (MetalRenderHost.DepthOnlyJoin.cs).
+    public static readonly bool JoinDepthOnlyDraws =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_DEPTH_ONLY"), "0", StringComparison.Ordinal);
+
     // Sampled-only textures are created with Apple GPU lossy compression (about half the
     // memory) where the device and the format allow it (MetalImageCache.Lossy.cs). Texels come
     // back approximated; SHARPEMU_METAL_V2_LOSSY_TEXTURES=0 keeps every texture exact.
