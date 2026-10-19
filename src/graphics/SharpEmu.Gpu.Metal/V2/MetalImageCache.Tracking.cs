@@ -127,7 +127,16 @@ internal sealed partial class MetalImageCache
         _unpublishedLinearWrites.Remove(image);
         if (_materializedDccSlices.Count != 0)
         {
-            _materializedDccSlices.RemoveWhere(entry => entry.Image == imageIdentifier);
+            _materializedDccSlices.RemoveWhere(entry =>
+            {
+                if (entry.Image != imageIdentifier)
+                {
+                    return false;
+                }
+
+                UnindexDccClaim(entry.Address);
+                return true;
+            });
         }
 
         if (_deferredDccSlices.Count != 0)
@@ -576,6 +585,72 @@ internal sealed partial class MetalImageCache
     // while the same surface looked up 24 times between clears (The Oregon Trail) is
     // cleared once.
     private readonly HashSet<(ResourceSlotIdentifier Image, ulong Address, byte Code)> _materializedDccSlices = new();
+
+    // The claims above, counted by the 4 KiB page their slice starts on. Every GPU store the
+    // stream records (each command-processor write, each writable buffer binding) re-arms
+    // the claims over its bytes, and walking every claim for each one cost the worker a
+    // scan per store; a store whose pages hold no claim start skips the walk. Exact: a
+    // claim is removed only when its slice start lies in the stored range, and that start
+    // is then on one of the range's pages. SHARPEMU_METAL_V2_DCC_CLAIM_INDEX=0 walks every
+    // claim on every store, as before.
+    private readonly Dictionary<ulong, int> _dccClaimPages = new();
+    private static readonly bool DccClaimIndexEnabled = MetalV2Diagnostics.DccClaimPageIndex;
+    private const int DccClaimPageShift = 12;
+    private const ulong DccClaimIndexMaxPages = 64;
+
+    // Caller holds the lock.
+    private void IndexDccClaim(ulong address)
+    {
+        System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(
+            _dccClaimPages, address >> DccClaimPageShift, out _)++;
+    }
+
+    // Caller holds the lock.
+    private void UnindexDccClaim(ulong address)
+    {
+        var page = address >> DccClaimPageShift;
+        ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(_dccClaimPages, page);
+        if (System.Runtime.CompilerServices.Unsafe.IsNullRef(ref count))
+        {
+            return;
+        }
+
+        if (--count <= 0)
+        {
+            _dccClaimPages.Remove(page);
+        }
+    }
+
+    // Whether a claim may start in the range; false only when none does. Caller holds the lock.
+    private bool MayHoldDccClaimStart(ulong address, ulong size)
+    {
+        if (!DccClaimIndexEnabled)
+        {
+            return true;
+        }
+
+        if (size == 0)
+        {
+            return false;
+        }
+
+        var first = address >> DccClaimPageShift;
+        var last = (address + (size - 1)) >> DccClaimPageShift;
+        if (address + (size - 1) < address || last - first >= DccClaimIndexMaxPages)
+        {
+            return true;
+        }
+
+        for (var page = first; page <= last; page++)
+        {
+            if (_dccClaimPages.ContainsKey(page))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
     private long _dccRepeatsSkipped;
     private long _dccSlicesCoalesced;
 
@@ -709,16 +784,25 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        IndexDccClaim(address);
         WatchMetadataLocked(address, size);
         return true;
     }
 
     private void ReArmMaterializedDccLocked(ulong address, ulong size)
     {
-        if (_materializedDccSlices.Count != 0)
+        if (_materializedDccSlices.Count != 0 && MayHoldDccClaimStart(address, size))
         {
-            var removed = _materializedDccSlices.RemoveWhere(
-                entry => entry.Address >= address && entry.Address - address < size);
+            var removed = _materializedDccSlices.RemoveWhere(entry =>
+            {
+                if (entry.Address < address || entry.Address - address >= size)
+                {
+                    return false;
+                }
+
+                UnindexDccClaim(entry.Address);
+                return true;
+            });
             if (DccTraceActive && removed != 0 && DccTraceCovers(address, size) && Interlocked.Increment(ref _dccTraceLines) <= DccTraceMax)
             {
                 Console.Error.WriteLine($"[METAL-V2][DCC] re-arm range=0x{address:X}+0x{size:X} claims={removed}");

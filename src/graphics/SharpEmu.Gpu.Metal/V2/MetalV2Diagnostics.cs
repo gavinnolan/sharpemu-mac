@@ -136,6 +136,12 @@ internal static class MetalV2Diagnostics
     public static readonly bool ElideLoads =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ELIDE_LOADS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_DCC_CLAIM_INDEX=0 walks every DCC clear claim on every recorded GPU
+    // store, as before, instead of skipping stores no claimed slice starts in
+    // (MetalImageCache.Tracking.cs).
+    public static readonly bool DccClaimPageIndex =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_CLAIM_INDEX"), "0", StringComparison.Ordinal);
+
     // Sampled-only textures are created with Apple GPU lossy compression (about half the
     // memory) where the device and the format allow it (MetalImageCache.Lossy.cs). Texels come
     // back approximated; SHARPEMU_METAL_V2_LOSSY_TEXTURES=0 keeps every texture exact.

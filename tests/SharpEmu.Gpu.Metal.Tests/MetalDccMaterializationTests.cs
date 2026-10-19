@@ -422,6 +422,30 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         Assert.Equal(0, rig.Cache.TakeDccClearsDropped());
     }
 
+    // Recorded GPU stores re-arm a claim only when they cover its slice's first byte; the
+    // page index that lets the others skip the walk over every claim keeps both answers.
+    [Theory]
+    [InlineData(MetadataAddress + 0x40, 8ul, false)]
+    [InlineData(MetadataAddress + SliceSize, 8ul, false)]
+    [InlineData(GuestBase + 0x30000, 64ul, false)]
+    [InlineData(MetadataAddress, 8ul, true)]
+    [InlineData(MetadataAddress - 8, 16ul, true)]
+    [InlineData(GuestBase, 0x20000ul, true)]
+    public void MaterializeDcc_GpuStoreReArmsOnlyOverTheSliceStart(ulong address, ulong size, bool rearms)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.FillMetadata(0x00);
+        rig.Lookup();
+        Assert.Equal(1, rig.Owner.Clears);
+
+        rig.Cache.InvalidateMemoryFromGpu(address, size);
+        rig.Lookup();
+
+        Assert.Equal(rearms ? 2 : 1, rig.Owner.Clears);
+    }
+
     // A deferral is per guest clear: a new clear of the metadata applies again.
     [Fact]
     public void MaterializeDcc_DroppedClearReArms()
