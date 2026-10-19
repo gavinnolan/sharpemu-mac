@@ -18,6 +18,7 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            _sixteenBitSdwaResult = false;
             if (instruction.Opcode == "VNop")
             {
                 return true;
@@ -745,9 +746,10 @@ public static partial class Gen5MslTranslator
 
             if (instruction.Control is Gen5SdwaControl { ScalarDestination: null } sdwaDestination)
             {
-                result = ApplySdwaDestination(sdwaDestination, result, $"v[{destination}]");
+                result = ApplySdwaDestination(sdwaDestination, result, $"v[{destination}]", _sixteenBitSdwaResult);
             }
 
+            _sixteenBitSdwaResult = false;
             StoreVector(destination, result);
             return true;
         }
@@ -1320,12 +1322,17 @@ public static partial class Gen5MslTranslator
 
         /// <summary>Writes the low 16 bits of a result into the op_sel-selected
         /// destination half, preserving the other half.</summary>
-        private static string Int16Result(
+        private string Int16Result(
             Gen5ShaderInstruction instruction,
             uint destination,
             string value)
         {
             var half = $"(({value}) & 0xFFFFu)";
+            if (instruction.Control is Gen5SdwaControl)
+            {
+                return SixteenBitSdwaResult(half);
+            }
+
             return ((instruction.Control as Gen5Vop3Control)?.OperandSelect ?? 0) switch
             {
                 var select when (select & 8) != 0 =>
@@ -1475,7 +1482,8 @@ public static partial class Gen5MslTranslator
         private string ApplySdwaDestination(
             Gen5SdwaControl control,
             string value,
-            string previous)
+            string previous,
+            bool sixteenBitResult = false)
         {
             var (shift, width) = control.DestinationSelect switch
             {
@@ -1485,6 +1493,12 @@ public static partial class Gen5MslTranslator
                 3 => (24u, 8u),
                 4 => (0u, 16u),
                 5 => (16u, 16u),
+                // A 16-bit result is the low word of a DWORD selection, and DST_UNUSED says
+                // what the high word becomes: UNUSED_PAD zeroes it. GFX10 code asks for a
+                // zero-extended half this way, since a plain 16-bit write keeps the high word
+                // (Black Myth: Wukong's BC6H encoder reads V_CVT_F16_F32's whole register as
+                // an integer next, and kept garbage endpoints from the high word otherwise).
+                _ when sixteenBitResult => (0u, 16u),
                 _ => (0u, 32u),
             };
             if (width == 32)
@@ -3197,6 +3211,11 @@ public static partial class Gen5MslTranslator
                 var nan = _request.Dx10Clamp ? "0u" : bits;
                 bits = Temp("uint", $"(({bits} & 0x7FFFu) > 0x7C00u ? {nan} : ({bits} & 0x8000u) != 0u ? 0u : min({bits}, 0x3C00u))");
             }
+            if (instruction.Control is Gen5SdwaControl)
+            {
+                return SixteenBitSdwaResult(bits);
+            }
+
             return ((control?.OperandSelect ?? 0) & 8) != 0
                 ? $"((v[{destination}] & 0x0000FFFFu) | ({bits} << 16))"
                 : $"((v[{destination}] & 0xFFFF0000u) | {bits})";
@@ -3212,9 +3231,24 @@ public static partial class Gen5MslTranslator
             expression = ApplyFloatOutputModifiers(instruction, expression, half: true);
 
             var packed = $"(uint)as_type<ushort>(half({expression}))";
+            if (instruction.Control is Gen5SdwaControl)
+            {
+                return SixteenBitSdwaResult($"({packed})");
+            }
+
             return ((control?.OperandSelect ?? 0) & 8) != 0
                 ? $"((v[{destination}] & 0x0000FFFFu) | (({packed}) << 16))"
                 : $"((v[{destination}] & 0xFFFF0000u) | ({packed}))";
+        }
+
+        // Set while an SDWA instruction's 16-bit result is being built: the result is the
+        // bare zero-extended half, and ApplySdwaDestination places it.
+        private bool _sixteenBitSdwaResult;
+
+        private string SixteenBitSdwaResult(string half)
+        {
+            _sixteenBitSdwaResult = true;
+            return half;
         }
 
         /// <summary>
