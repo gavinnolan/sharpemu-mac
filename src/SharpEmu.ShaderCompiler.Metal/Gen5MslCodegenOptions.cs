@@ -55,6 +55,11 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// the queue; a graphics program's runaway loop is ended by the GPU watchdog, and the counter
 /// is a register and a compare on every back edge. Compute and mesh programs keep the cap
 /// either way. <c>SHARPEMU_SHADER_MAX_STEPS_GRAPHICS=1</c> restores it.</param>
+/// <param name="LaneSpillCopies">Serve a wave64 V_READLANE_B32 that reloads an SGPR the
+/// guest compiler spilled to a VGPR lane from a per-thread copy taken at the spill, which
+/// saves the cross-simdgroup exchange and its barrier
+/// (see <see cref="Ir.Gen5LaneSpillAnalysis"/>). <c>SHARPEMU_MSL_SPILLCOPY=0</c> reads every
+/// lane through the exchange.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -67,7 +72,8 @@ public sealed record Gen5MslCodegenOptions(
     bool DeadMaskBallotElision = true,
     bool ElideByteBias = true,
     bool MipStatisticsFunctionConstant = true,
-    bool GraphicsLoopStepCap = false)
+    bool GraphicsLoopStepCap = false,
+    bool LaneSpillCopies = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -83,5 +89,6 @@ public sealed record Gen5MslCodegenOptions(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MASKBALLOT") != "0",
         ElideByteBias: Environment.GetEnvironmentVariable("SHARPEMU_MSL_BYTEBIAS") != "1",
         MipStatisticsFunctionConstant: Environment.GetEnvironmentVariable("SHARPEMU_LOD_STATS") != "always",
-        GraphicsLoopStepCap: Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MAX_STEPS_GRAPHICS") == "1");
+        GraphicsLoopStepCap: Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MAX_STEPS_GRAPHICS") == "1",
+        LaneSpillCopies: Environment.GetEnvironmentVariable("SHARPEMU_MSL_SPILLCOPY") != "0");
 }

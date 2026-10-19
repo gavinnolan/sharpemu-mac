@@ -374,6 +374,77 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 512);
 
+    private static readonly uint[] Wave64LaneSpillPark =
+    [
+        0xBE8203FF, 0x00001234, // s_mov_b32 s2, 0x1234
+        0xBE8303FF, 0x0000004D, // s_mov_b32 s3, 77
+        0x7E020300,             // v_mov_b32 v1, v0
+        0xD7610001, 0x00014A02, // v_writelane_b32 v1, s2, 37
+        0xD7610001, 0x00010603, // v_writelane_b32 v1, s3, 3
+        0xBE820380,             // s_mov_b32 s2, 0
+        0xBE830380,             // s_mov_b32 s3, 0
+    ];
+
+    private static readonly uint[] Wave64LaneSpillStore =
+    [
+        0x7E040200,             // v_mov_b32 v2, s0
+        0x7E060201,             // v_mov_b32 v3, s1
+        0x34080083,             // v_lshlrev_b32 v4, 3, v0
+        0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+        0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+        0xBF810000,             // s_endpgm
+    ];
+
+    // An SGPR spill and reload through VGPR lanes, the guest compiler's pattern: s2 and s3
+    // are parked in lanes 37 and 3 of v1 (which otherwise holds the lane index), clobbered,
+    // and read back. Every lane stores 0x1234 and 77.
+    public static readonly Gen5ComputeFixture Wave64LaneSpill = new(
+        "wave64-lane-spill",
+        [
+            .. Wave64LaneIndex,
+            .. Wave64LaneSpillPark,
+            0xD7600000, 0x00014B01, // v_readlane_b32 s0, v1, 37
+            0xD7600001, 0x00010701, // v_readlane_b32 s1, v1, 3
+            .. Wave64LaneSpillStore,
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // The same, but v1 is incremented between the spill and the reload, so the lanes no
+    // longer hold what was parked and the reload has to read them: 0x1235 and 78.
+    public static readonly Gen5ComputeFixture Wave64LaneSpillOverwritten = new(
+        "wave64-lane-spill-overwritten",
+        [
+            .. Wave64LaneIndex,
+            .. Wave64LaneSpillPark,
+            0x4A020281,             // v_add_nc_u32 v1, 1, v1
+            0xD7600000, 0x00014B01, // v_readlane_b32 s0, v1, 37
+            0xD7600001, 0x00010701, // v_readlane_b32 s1, v1, 3
+            .. Wave64LaneSpillStore,
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // A spill parked on one arm of a branch only: the path that skips the writelane would
+    // read a lane nothing defined, which a correct program never relies on, so the reload
+    // still reads the copy. At run time the branch falls through and every lane stores
+    // 0x1234 twice.
+    public static readonly Gen5ComputeFixture Wave64LaneSpillOneArm = new(
+        "wave64-lane-spill-one-arm",
+        [
+            .. Wave64LaneIndex,
+            0xBE8203FF, 0x00001234, // s_mov_b32 s2, 0x1234
+            0xBF068002,             // s_cmp_eq_u32 s2, 0
+            0xBF850002,             // s_cbranch_scc1 skip
+            0xD7610005, 0x00014A02, // v_writelane_b32 v5, s2, 37
+            0xBE820380,             // skip: s_mov_b32 s2, 0
+            0xD7600000, 0x00014B05, // v_readlane_b32 s0, v5, 37
+            0xBE810300,             // s_mov_b32 s1, s0
+            .. Wave64LaneSpillStore,
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
     // v1 = 3 * lane + 7. Two V_READFIRSTLANEs back to back under narrowed EXECs: the first
     // active lane is 44 (upper half only), then 8 (lower half only). Every lane, with EXEC
     // restored, stores both: 139 and 31.

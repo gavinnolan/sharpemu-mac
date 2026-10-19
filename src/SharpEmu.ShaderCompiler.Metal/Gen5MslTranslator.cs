@@ -806,6 +806,15 @@ public static partial class Gen5MslTranslator
                 {
                     source.AppendLine("    uint sharpemu_wave_set = 0u;");
                 }
+
+                if (LaneSpillPlan() is { } spills)
+                {
+                    // The per-thread copies of spilled SGPRs (see Ir.Gen5LaneSpillAnalysis).
+                    for (var copy = 0; copy < spills.CopyCount; copy++)
+                    {
+                        source.AppendLine($"    uint sharpemu_spill{copy} = 0u;");
+                    }
+                }
             }
             if (!HasRealWaveLanes)
             {
@@ -1373,6 +1382,26 @@ public static partial class Gen5MslTranslator
             _request.ComputeSystemRegisters is not { WorkGroupYRegister: not null } &&
             _request.ComputeSystemRegisters is not { WorkGroupZRegister: not null } &&
             Ir.Gen5PersistentThreadsAnalysis.IsPersistent(_request.Program);
+
+        private bool _laneSpillPlanBuilt;
+        private Ir.Gen5LaneSpillPlan? _laneSpillPlan;
+
+        /// <summary>The wave64 lane spills whose reloads read a per-thread copy instead of
+        /// the exchange; null when there are none or the option is off.</summary>
+        private Ir.Gen5LaneSpillPlan? LaneSpillPlan()
+        {
+            if (!_laneSpillPlanBuilt)
+            {
+                _laneSpillPlanBuilt = true;
+                if (_options.LaneSpillCopies && _stage == Gen5MslStage.Compute && IsWave64)
+                {
+                    // A compute launch loads the thread IDs into v0..v2.
+                    _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program, firstUndefinedVector: 3);
+                }
+            }
+
+            return _laneSpillPlan;
+        }
 
         private bool ProgramHasBarrier()
         {

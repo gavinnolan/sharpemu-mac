@@ -267,6 +267,63 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64SpillReloadsReadACopyInsteadOfTheExchange()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LaneSpill, waveLaneCount: 64, localSizeX: 64);
+        Assert.Contains("sharpemu_spill1", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("threadgroup_barrier", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LaneSpill, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(0x1234u, ReadDword(result, lane * 8));
+            Assert.Equal(77u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64SpillParkedOnOneArmIsStillReloadedFromTheCopy()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LaneSpillOneArm, waveLaneCount: 64, localSizeX: 64);
+        Assert.Contains("sharpemu_spill0", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("threadgroup_barrier", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LaneSpillOneArm, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(0x1234u, ReadDword(result, lane * 8));
+            Assert.Equal(0x1234u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64SpillReloadAfterTheVgprChangedReadsTheLane()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LaneSpillOverwritten, waveLaneCount: 64, localSizeX: 64);
+        Assert.DoesNotContain("sharpemu_spill", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("threadgroup_barrier", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LaneSpillOverwritten, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(0x1235u, ReadDword(result, lane * 8));
+            Assert.Equal(78u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
     public void Wave64ReadFirstLaneTakesTheFirstActiveLaneOfEitherHalf()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;

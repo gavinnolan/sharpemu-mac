@@ -100,6 +100,15 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
 
+                    if (LaneSpillPlan() is { } spills &&
+                        spills.CopyReads.TryGetValue(instruction.Pc, out var spillCopy))
+                    {
+                        // A reload of a spilled SGPR: every path parked it with a
+                        // constant-lane writelane, which kept a copy in every thread.
+                        StoreScalar(instruction.Destinations[0].Value, $"sharpemu_spill{spillCopy}");
+                        return true;
+                    }
+
                     var value = RawSource(instruction, 0);
                     if (IsWave64)
                     {
@@ -155,6 +164,13 @@ public static partial class Gen5MslTranslator
                         destination,
                         $"(sharpemu_lane == (({lane}) & {laneMask})) ? ({source}) : v[{destination}]",
                         guardWithExec: false);
+                    if (LaneSpillPlan() is { } spills &&
+                        spills.CopyWrites.TryGetValue(instruction.Pc, out var spillCopy))
+                    {
+                        // The parked value is scalar, so every thread keeps it.
+                        Line($"sharpemu_spill{spillCopy} = {source};");
+                    }
+
                     return true;
                 }
                 case "VCndmaskB32":
