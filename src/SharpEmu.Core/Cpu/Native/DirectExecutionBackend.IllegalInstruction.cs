@@ -66,6 +66,10 @@ public sealed partial class DirectExecutionBackend
         }
 
         WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instruction.Length);
+        if (instruction.Mnemonic is Mnemonic.Adcx or Mnemonic.Adox)
+        {
+            NoteHotSiteFault(rip, in instruction);
+        }
 
         Interlocked.Increment(ref _bmiInstructionsEmulated);
         if (Interlocked.Exchange(ref _bmiSoftwareFallbackAnnounced, 1) == 0)
