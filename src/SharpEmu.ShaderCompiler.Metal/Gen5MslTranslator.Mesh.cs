@@ -249,7 +249,8 @@ public static partial class Gen5MslTranslator
             var mesh = Mesh;
             source.AppendLine($"struct {MeshVertexStructName}");
             source.AppendLine("{");
-            source.AppendLine("    float4 sharpemu_position [[position]];");
+            // Invariant like the vertex stage's (see Gen5MslTranslator.EmitModule).
+            source.AppendLine("    float4 sharpemu_position [[position, invariant]];");
             EmitAuxPositionFields(source, perVertexLayer: false);
             foreach (var location in _vertexOutputs)
             {

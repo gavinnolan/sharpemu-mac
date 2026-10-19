@@ -663,6 +663,26 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 256);
 
+    // Legacy MAD rounds the product, FMA does not. With a = 1 + 2^-12 and c = -(1 + 2^-11),
+    // a*a = 1 + 2^-11 + 2^-24 rounds to 1 + 2^-11, so V_MAD_F32 gives exactly 0 while
+    // V_FMA_F32 keeps the 2^-24. Each lane stores both.
+    public static readonly Gen5ComputeFixture MadVersusFma = new(
+        "mad-versus-fma",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0xBE8003FF, 0x3F800800, // s_mov_b32 s0, 1 + 2^-12
+            0xBE8103FF, 0xBF801000, // s_mov_b32 s1, -(1 + 2^-11)
+            0x7E040200,             // v_mov_b32 v2, s0
+            0xD5410001, 0x00060502, // v_mad_f32 v1, v2, v2, s1
+            0xD54B0003, 0x00060502, // v_fma_f32 v3, v2, v2, s1
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
     // The wave32 form: the compare's mask is the single SGPR s4, so s5 keeps 0xa5a5a5a5.
     public static readonly Gen5ComputeFixture Wave32Vop3CompareSgpr = new(
         "wave32-vop3-compare-sgpr",

@@ -467,6 +467,24 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop).PersistentThreads);
     }
 
+    // V_MAD_F32 rounds its product like a separate multiply and add; V_FMA_F32 does not.
+    [Fact]
+    public void LegacyMadRoundsTheProductAndFmaDoesNot()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.MadVersusFma);
+        Assert.Contains("#pragma clang fp contract(off)", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.MadVersusFma, new byte[256],
+            waveLaneCount: 32, localSizeX: 32, threadsPerThreadgroup: 32);
+        for (var lane = 0; lane < 32; lane++)
+        {
+            Assert.Equal(0u, ReadDword(result, lane * 8));
+            Assert.Equal(0x33800000u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
     [Fact]
     public void Vop3CompareIntoNullWritesNothingAndIntoExecMasksTheWave()
     {

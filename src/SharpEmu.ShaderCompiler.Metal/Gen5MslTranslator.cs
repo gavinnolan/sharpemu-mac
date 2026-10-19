@@ -622,6 +622,13 @@ public static partial class Gen5MslTranslator
             source.AppendLine();
             source.AppendLine("using namespace metal;");
             source.AppendLine();
+            // Every guest float op rounds on its own: GCN fuses a multiply and an add only
+            // where the program says V_FMA, and its legacy V_MAD/V_MAC round the product
+            // first. Letting the compiler contract a*b+c makes one program compute a value a
+            // different way than another program that spells it the same, which a depth
+            // EQUAL pass against a prepass cannot survive.
+            source.AppendLine("#pragma clang fp contract(off)");
+            source.AppendLine();
 
             // Uniforms: dispatch bounds plus per-buffer byte lengths. Metal has
             // no OpArrayLength equivalent, so buffer extents travel with the
@@ -685,7 +692,12 @@ public static partial class Gen5MslTranslator
 
                 source.AppendLine("struct Gen5VsOut");
                 source.AppendLine("{");
-                source.AppendLine("    float4 sharpemu_position [[position]];");
+                // Invariant, so two programs that compute a position the same way get the same
+                // bits: UE's base pass draws with depth EQUAL against its depth prepass, and a
+                // position the compiler fused or scheduled differently in one of them fails
+                // the test on almost every pixel (the mesh never shows). Takes effect with
+                // MTLCompileOptions.preserveInvariance, which the host sets.
+                source.AppendLine("    float4 sharpemu_position [[position, invariant]];");
                 EmitAuxPositionFields(source, perVertexLayer: true);
                 foreach (var location in _vertexOutputs)
                 {

@@ -863,7 +863,7 @@ public sealed class MslTranslationTests
         Assert.Equal("gen5_vs", shader.EntryPoint);
         Assert.Equal(1u, shader.AttributeCount);
         Assert.Contains("vertex Gen5VsOut gen5_vs(", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("float4 sharpemu_position [[position]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 sharpemu_position [[position, invariant]];", shader.Source, StringComparison.Ordinal);
         Assert.Contains("float4 param0 [[user(locn0)]];", shader.Source, StringComparison.Ordinal);
         Assert.Contains("uint sharpemu_vertex_id [[vertex_id]],", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v5 = sharpemu_vertex_id;", shader.Source, StringComparison.Ordinal);
