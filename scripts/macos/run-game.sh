@@ -315,9 +315,9 @@ while :; do
   fi
   if (( ${#trace_at[@]} > 0 )) && (( now >= trace_at[0] )); then
     trace="$OUT/trace-$(printf %04d "$now")"
-    ( "$HOME/.dotnet/tools/dotnet-trace" collect -p "$GPID" \
+    ( DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}" "$HOME/.dotnet/tools/dotnet-trace" collect -p "$GPID" \
         --duration "00:00:$(printf %02d "${SHARPEMU_TRACE_SECONDS:-10}")" -o "$trace.nettrace" > "$trace.log" 2>&1
-      "$HOME/.dotnet/tools/dotnet-trace" convert "$trace.nettrace" --format Speedscope -o "$trace" >> "$trace.log" 2>&1 ) &
+      DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}" "$HOME/.dotnet/tools/dotnet-trace" convert "$trace.nettrace" --format Speedscope -o "$trace" >> "$trace.log" 2>&1 ) &
     EVIDENCE_PIDS+=($!)
     trace_at=("${trace_at[@]:1}")
   fi
