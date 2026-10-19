@@ -131,6 +131,25 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         return GuestMemory.TryRead(address, destination);
     }
 
+    // A host that hands over command blocks, as the Metal host does. BlockVersion stands for the
+    // counters of its token: a test bumps it where the real host would bump one.
+    public bool SupportsCommandBlocks { get; set; }
+
+    public long BlockVersion { get; set; }
+
+    public List<(ulong Address, int Size)> BlockReads { get; } = new();
+
+    public Func<ulong, int, bool>? RefusesBlock { get; set; }
+
+    public bool TryReadCommandBlock(ulong address, Span<byte> block, out CommandReadToken token)
+    {
+        token = new CommandReadToken(BlockVersion, 0, 0, 0);
+        BlockReads.Add((address, block.Length));
+        return RefusesBlock?.Invoke(address, block.Length) != true && GuestMemory.TryRead(address, block);
+    }
+
+    public bool IsCommandBlockCurrent(in CommandReadToken token) => token.First == BlockVersion;
+
     // Polls that asked the host to commit the recording buffer so a pending write can land.
     public List<ulong> PollCommits { get; } = new();
 
@@ -144,9 +163,13 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         return TryReadGuest(address, destination);
     }
 
+    // Called before every packet, where a real host runs what other threads posted.
+    public Action? OnRunPending { get; set; }
+
     public void RunPendingCommands()
     {
         PendingCommandRuns++;
+        OnRunPending?.Invoke();
         while (PendingCommands.Count != 0)
         {
             PendingCommands.Dequeue()();

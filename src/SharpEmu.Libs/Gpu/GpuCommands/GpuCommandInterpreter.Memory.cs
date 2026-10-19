@@ -67,6 +67,7 @@ public sealed partial class GpuCommandInterpreter
     /// </summary>
     internal void WriteCommandProcessorBytes(ulong destination, ReadOnlySpan<byte> source, string kind)
     {
+        NotePacketBlockWrite();
         if (!DefersCommandProcessorWrites)
         {
             WriteBytes(destination, source, kind);
@@ -160,6 +161,7 @@ public sealed partial class GpuCommandInterpreter
             }
         }
 
+        NotePacketBlockWrite();
         _host.RecordCommandProcessorQwords(destination, count, strideBytes, value, kind);
 
         _lastWriteAddress = destination + (ulong)(count - 1) * strideBytes;
@@ -231,7 +233,7 @@ public sealed partial class GpuCommandInterpreter
         CommandProcessorWriteHistory.Record(QueueId, destination, (int)byteCount, value, "COPY_DATA_CLOCK", deferred: true);
         PendingLabelRecorded?.Invoke(destination, (int)byteCount, value);
         _lastWriteLength = 0;
-        _host.RecordEndOfPipe(new EndOfPipeWrite(
+        RecordHostEndOfPipe(new EndOfPipeWrite(
             is64Bit ? EndOfPipeWriteKind.ClockWrite : EndOfPipeWriteKind.Write32, SubmitId, destination, value,
             ReferenceClock: true));
     }
@@ -301,6 +303,7 @@ public sealed partial class GpuCommandInterpreter
                     NotePendingBytes(destination, MemoryMarshal.AsBytes(pattern)[..(int)byteCount]);
                 }
 
+                NotePacketBlockWrite();
                 _host.FillBufferInOrder(destination, byteCount, fill);
                 return;
             }
@@ -311,6 +314,7 @@ public sealed partial class GpuCommandInterpreter
                     (uint)sourceOrImmediate, "DMA_FILL", deferred: false);
             }
 
+            NotePacketBlockWrite();
             _host.FillBuffer(destination, byteCount, (uint)sourceOrImmediate, destinationIsGds);
             if (!destinationIsGds)
             {
@@ -358,10 +362,12 @@ public sealed partial class GpuCommandInterpreter
                 PendingLabelRecorded?.Invoke(destination, (int)byteCount, pendingValue);
             }
 
+            NotePacketBlockWrite();
             _host.CopyBufferInOrder(destination, sourceOrImmediate, byteCount);
             return;
         }
 
+        NotePacketBlockWrite();
         _host.CopyBuffer(destination, sourceOrImmediate, byteCount, destinationIsGds, sourceIsGds);
         if (!destinationIsGds)
         {
@@ -618,6 +624,7 @@ public sealed partial class GpuCommandInterpreter
         // hands its counter ids to other textures every report (Demon's Souls passes
         // enable without reset) reads the min of unrelated textures otherwise.
         var resetCounters = (payload[3] & ((1u << 18) | (1u << 19))) != 0;
+        NotePacketBlockWrite();
         if (destination != 0 && bufferSize != 0 && _host.TryRecordLodStatistics(destination, bufferSize, resetCounters))
         {
             SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NotePacket(bufferSize, destination, hostRecorded: true, slotsBound);

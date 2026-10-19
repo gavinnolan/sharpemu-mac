@@ -231,7 +231,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (is64Bit) WriteEndOfPipeQword(write.Destination, write.Value, write.Kind);
         else WriteEndOfPipeDword(write.Destination, (uint)write.Value, write.Kind);
-        _host.RecordEndOfPipe(in write);
+        RecordHostEndOfPipe(in write);
     }
 
     // GDS words land after the work before them, which on the hardware is what makes them
@@ -245,7 +245,7 @@ public sealed partial class GpuCommandInterpreter
         var write = new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, SubmitId, destination, GdsWordOffset: wordOffset, GdsWordCount: wordCount);
         if (_host.WritesGdsAtEndOfPipe)
         {
-            _host.RecordEndOfPipe(in write);
+            RecordHostEndOfPipe(in write);
             _lastWriteLength = 0;
             if (withInterrupt)
             {
@@ -259,7 +259,7 @@ public sealed partial class GpuCommandInterpreter
         var words = new uint[wordCount];
         _host.ReadGds(words, wordOffset, wordCount);
         WriteBytes(destination, System.Runtime.InteropServices.MemoryMarshal.AsBytes<uint>(words));
-        _host.RecordEndOfPipe(in write);
+        RecordHostEndOfPipe(in write);
         if (withInterrupt)
         {
             _host.TriggerInterrupt(InterruptEventId, contextId);
@@ -279,12 +279,13 @@ public sealed partial class GpuCommandInterpreter
         var kind = EndOfPipeWriteKind.AtomicAdd32;
         if (!_host.DefersEndOfPipeLabel(kind))
         {
+            NotePacketBlockWrite();
             _host.ExecuteCommandMemoryOperation(CommandMemoryOperation.Atomic(Packets.AtomicMemoryPacket.Add32(destination, addend)));
             GuestMemoryWritten?.Invoke(destination, sizeof(uint));
         }
 
         _lastWriteLength = 0;
-        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, addend, eventId, contextId));
+        RecordHostEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, addend, eventId, contextId));
         if (withInterrupt)
         {
             QueueInterrupt(contextId);
@@ -311,7 +312,7 @@ public sealed partial class GpuCommandInterpreter
     internal void QueueInterrupt(uint interruptContextId)
     {
         var write = new EndOfPipeWrite(EndOfPipeWriteKind.InterruptOnly, SubmitId, EventId: InterruptEventId, ContextId: interruptContextId);
-        if (!_host.TryDeferEndOfPipe(QueueId, in write)) _host.RecordEndOfPipe(in write);
+        if (!_host.TryDeferEndOfPipe(QueueId, in write)) RecordHostEndOfPipe(in write);
     }
 
     private static bool ReleaseMemGcrNeedsBarrier(uint eopEventType, uint gcrControl) =>
@@ -519,6 +520,7 @@ public sealed partial class GpuCommandInterpreter
                     throw _host.Fatal($"The occlusion-counter dump is invalid: index=0x{eventIndex:X8} address=0x{eventAddress:X16}.");
                 }
 
+                NotePacketBlockWrite();
                 if (_selectedOcclusionCounter == 0 &&
                     _host.DumpOcclusionCounter(QueueId, eventAddress, _occlusionDumpInstanceMask, _occlusionDumpStrideBytes))
                 {
@@ -605,7 +607,7 @@ public sealed partial class GpuCommandInterpreter
         var requestId = _host.PrepareFlip(QueueId, flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         var write = new EndOfPipeWrite(
             EndOfPipeWriteKind.Flip, SubmitId, FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
-        if (!_host.TryDeferEndOfPipe(QueueId, in write)) _host.RecordEndOfPipe(in write);
+        if (!_host.TryDeferEndOfPipe(QueueId, in write)) RecordHostEndOfPipe(in write);
         _host.Flush();
     }
 
@@ -624,7 +626,7 @@ public sealed partial class GpuCommandInterpreter
             EndOfPipeWriteKind.FlipWithWrite32, SubmitId, destination, value,
             FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
         if (deferred) PublishLabel(in write, false);
-        else _host.RecordEndOfPipe(in write);
+        else RecordHostEndOfPipe(in write);
         _host.Flush();
     }
 
@@ -648,7 +650,7 @@ public sealed partial class GpuCommandInterpreter
             EndOfPipeWriteKind.FlipWithInterruptWriteBack32, SubmitId, destination, value, InterruptEventId,
             FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
         if (deferred) PublishLabel(in write, false);
-        else _host.RecordEndOfPipe(in write);
+        else RecordHostEndOfPipe(in write);
         _host.Flush();
     }
 

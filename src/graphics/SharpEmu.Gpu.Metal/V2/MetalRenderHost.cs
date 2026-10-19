@@ -191,7 +191,15 @@ internal sealed partial class MetalRenderHost :
         }
     }
 
-    public ulong CompletedSerial => MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+    public ulong CompletedSerial
+    {
+        get
+        {
+            var completed = MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+            _completions?.NoteSignaled(completed);
+            return completed;
+        }
+    }
 
     public RenderHostLimits Limits { get; } =
         new(MaxFramebufferDimension, MaxFramebufferDimension, MaxFramebufferDimension, MaxFramebufferDimension);
@@ -1641,7 +1649,7 @@ internal sealed partial class MetalRenderHost :
     // drawn into since owns its bytes, and only its writeback can say what they are.
     private MetalOverlayCoverage OverlayCoverage(ulong address, ulong size)
     {
-        var coverage = _cpOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial);
+        var coverage = OverlayCoverageHinted(address, size);
         if (coverage == MetalOverlayCoverage.Full &&
             _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size))
         {

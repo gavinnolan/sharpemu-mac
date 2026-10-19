@@ -140,7 +140,7 @@ internal sealed partial class MetalRenderHost
         }
 
         return _imageCache.HasGpuModifiedImageBytes(address, size) ||
-            _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0;
+            PendingSerialHinted(address, size) != 0;
     }
 
     public void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size)

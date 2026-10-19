@@ -33,6 +33,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var operation = CommandMemoryOperation.Atomic(atomic);
+        NotePacketBlockWrite();
         _host.ExecuteCommandMemoryOperation(operation);
         var priorValue = operation.PriorValue;
         var comparePassed = operation.ComparePassed;
@@ -92,6 +93,7 @@ public sealed partial class GpuCommandInterpreter
                 return 3;
             }
 
+            NotePacketBlockWrite();
             _host.ExecuteCommandMemoryOperation(CommandMemoryOperation.Semaphore(semaphore));
             GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
 
@@ -106,6 +108,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var consume = CommandMemoryOperation.Semaphore(semaphore);
+        NotePacketBlockWrite();
         _host.ExecuteCommandMemoryOperation(consume);
         var priorValue = consume.PriorValue;
 

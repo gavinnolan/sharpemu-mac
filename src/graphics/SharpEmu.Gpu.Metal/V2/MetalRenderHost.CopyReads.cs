@@ -126,11 +126,12 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        var completed = CompletedSerial;
-        if (!_gpuWrites.MayCover(address, size) || _gpuWrites.PendingSerial(address, size, completed) == 0)
+        if (!_gpuWrites.MayCover(address, size) || PendingSerialHinted(address, size) == 0)
         {
             return false;
         }
+
+        var completed = CompletedSerial;
 
         RetirePendingCopies(completed);
         var index = FindPendingCopy(address, size, -1);
@@ -266,7 +267,7 @@ internal sealed partial class MetalRenderHost
         !(_gpuWrites.MayCover(address, size) && _gpuWrites.PendingSerial(address, size, completed) != 0) &&
         !(_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size)) &&
         !(_cpOverlay.Count != 0 &&
-          _cpOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None);
+          OverlayCoverageHinted(address, size) != MetalOverlayCoverage.None);
 
     /// <summary>The copy read-through fields of the WAITS line; resets them.</summary>
     private string TakeCopyReadCounters() =>

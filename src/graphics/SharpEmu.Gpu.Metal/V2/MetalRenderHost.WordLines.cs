@@ -103,25 +103,8 @@ internal sealed partial class MetalRenderHost
     // True when every word of the line would be read straight from memory, without
     // overlay bytes and without a wait. Every test is an overlap test, so passing for the
     // line implies passing for each word in it.
-    private bool TryFillWordLine(ulong line, Span<byte> bytes)
-    {
-        ulong size = (ulong)WordLineBytes;
-        if (_cpOverlay.Count != 0 &&
-            _cpOverlay.Coverage(line, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None)
-        {
-            return false;
-        }
-
-        var mayCover = _gpuWrites.MayCover(line, size);
-        if ((mayCover || _imageCache.MayOwn(line, size)) &&
-            (_imageCache.HasGpuModifiedImageBytes(line, size) ||
-             (mayCover && _gpuWrites.PendingSerial(line, size, CompletedSerial) != 0)))
-        {
-            return false;
-        }
-
-        return _memory.TryRead(line, bytes);
-    }
+    private bool TryFillWordLine(ulong line, Span<byte> bytes) =>
+        TryReadUnownedBytes(line, (ulong)WordLineBytes, bytes);
 
     /// <summary>The word-line fields of the WAITS line; resets them.</summary>
     private string TakeWordLineCounters() =>

@@ -234,6 +234,8 @@ internal sealed class MetalCompletionQueue : IDisposable
     private void OnGpuCompleted()
     {
         Interlocked.Increment(ref _handlerWakeups);
+        // The submission that woke us has completed: publish it for the hint readers.
+        _ = SignaledValue;
         lock (_wakeGate)
         {
             Monitor.PulseAll(_wakeGate);
@@ -244,7 +246,38 @@ internal sealed class MetalCompletionQueue : IDisposable
         MetalV2Presenter.SignalFlipPacer();
     }
 
-    public ulong SignaledValue => MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+    public ulong SignaledValue
+    {
+        get
+        {
+            var signaled = MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+            NoteSignaled(signaled);
+            return signaled;
+        }
+    }
+
+    private ulong _completedHint;
+
+    /// <summary>
+    /// The newest value of the shared event any reader has seen: never above the event's own,
+    /// which only grows. Read without a message send.
+    /// </summary>
+    public ulong CompletedHint => Volatile.Read(ref _completedHint);
+
+    public void NoteSignaled(ulong value)
+    {
+        var seen = Volatile.Read(ref _completedHint);
+        while (value > seen)
+        {
+            var before = Interlocked.CompareExchange(ref _completedHint, value, seen);
+            if (before == seen)
+            {
+                return;
+            }
+
+            seen = before;
+        }
+    }
 
     /// <summary>Runs the work once the submission with this serial completes.</summary>
     public void Enqueue(ulong serial, Action work)

@@ -96,6 +96,10 @@ public readonly record struct EndOfPipeWrite(
     ulong FlipRequestId = 0,
     bool ReferenceClock = false);
 
+// The host state a command block (or a refusal to give one) was read under: four counters the
+// host bumps whenever bytes a packet read could return, or whether that read would wait, change.
+public readonly record struct CommandReadToken(long First, long Second, long Third, long Fourth);
+
 // Everything a packet handler needs from the renderer, the caches, the scheduler and video out.
 public interface ICommandStreamHost
 {
@@ -114,6 +118,32 @@ public interface ICommandStreamHost
 
     // Reads guest memory the GPU may have written; the host synchronizes GPU-owned pages first.
     bool TryReadGuest(ulong address, Span<byte> destination);
+
+    /// <summary>
+    /// Whether this host fills <see cref="TryReadCommandBlock"/> blocks. A host that does not
+    /// is read one packet at a time, as before.
+    /// </summary>
+    bool SupportsCommandBlocks => false;
+
+    /// <summary>
+    /// Reads <paramref name="block"/>.Length bytes of command memory in one go, for a stream
+    /// that serves its next packets from the copy. True only when every byte is what
+    /// <see cref="TryReadGuest"/> would return for it right now without waiting for the GPU
+    /// and without any pending command-processor bytes over it; otherwise false, and the
+    /// stream reads that region one packet at a time. <paramref name="token"/> names the
+    /// host state the answer (granted or refused) rests on, and is set either way.
+    /// </summary>
+    bool TryReadCommandBlock(ulong address, Span<byte> block, out CommandReadToken token)
+    {
+        token = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Whether nothing the host tracks has changed since <paramref name="token"/> was taken, so
+    /// a block read then, or a refusal given then, still holds.
+    /// </summary>
+    bool IsCommandBlockCurrent(in CommandReadToken token) => false;
 
     // Reads a packet operand (a label, a predicate, indirect arguments): memory earlier work may
     // write, unlike the packets themselves. A host that defers work completes it first.

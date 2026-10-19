@@ -287,7 +287,7 @@ public static class RenderPhaseProfile
         _frameTraceCount = 0;
         _previousFrameTimestamp = 0;
     }
-    internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Count }
+    internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Block, Count }
     private static readonly long[] _commandReadCalls = new long[(int)CommandReadKind.Count];
     private static readonly long[] _commandReadBytes = new long[(int)CommandReadKind.Count];
 

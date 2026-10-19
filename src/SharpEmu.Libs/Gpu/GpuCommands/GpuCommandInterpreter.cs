@@ -131,6 +131,7 @@ public sealed partial class GpuCommandInterpreter
         QueueId = queueId;
         InterruptEventId = interruptEventId;
         TypedRegisters = new RegisterBanks(host.Fatal);
+        UsePacketBlocks = PacketBlockReads.Enabled && host.SupportsCommandBlocks;
     }
 
     public int QueueId { get; }
@@ -279,6 +280,8 @@ public sealed partial class GpuCommandInterpreter
         execution.MadeProgress = false;
         // Forwarding is local to this slice, never a cached signal from an older submission.
         _lastWriteLength = 0;
+        // So is whatever was copied out of a command buffer: the guest may have stored into it since.
+        BeginPacketBlockSlice();
         _execution = execution;
         try
         {
@@ -526,7 +529,7 @@ public sealed partial class GpuCommandInterpreter
             {
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
                 {
-                    payload = ReadPayload(cursorIndex, packetAddress, length - 1);
+                    payload = ReadPayload(cursorIndex, packetAddress, length - 1, remaining);
                 }
             }
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
@@ -605,6 +608,12 @@ public sealed partial class GpuCommandInterpreter
     private ReadOnlySpan<uint> ReadPacketWindow(int depth, ulong packetAddress, uint remaining)
     {
         var dwords = Math.Min(remaining, PacketWindowDwords);
+        var blockWords = BlockWords(depth, packetAddress, remaining, dwords, dwords);
+        if (!blockWords.IsEmpty)
+        {
+            return blockWords;
+        }
+
         while (_payloadScratchByDepth.Count <= depth)
         {
             _payloadScratchByDepth.Add(new uint[PacketHeader.MaxLength]);
@@ -622,8 +631,14 @@ public sealed partial class GpuCommandInterpreter
         return scratch;
     }
 
-    private ReadOnlySpan<uint> ReadPayload(int depth, ulong packetAddress, uint payloadDwords)
+    private ReadOnlySpan<uint> ReadPayload(int depth, ulong packetAddress, uint payloadDwords, uint remaining)
     {
+        var blockWords = BlockWords(depth, packetAddress, remaining, payloadDwords + 1, payloadDwords + 1);
+        if (!blockWords.IsEmpty)
+        {
+            return blockWords[1..];
+        }
+
         while (_payloadScratchByDepth.Count <= depth)
         {
             _payloadScratchByDepth.Add(new uint[PacketHeader.MaxLength]);
@@ -867,6 +882,7 @@ public sealed partial class GpuCommandInterpreter
     // The caller name labels the packet handler in the image-clear trace.
     internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES", [CallerMemberName] string caller = "")
     {
+        NotePacketBlockWrite();
         if (_host.TryDeferOrderedWrite(QueueId, address, source))
         {
             _lastWriteLength = 0;
