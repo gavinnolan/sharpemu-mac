@@ -88,6 +88,13 @@ public static class AudioOut2Exports
     private const int DeviceCushionMilliseconds = 40;
     private const byte SpeakerTypeTv = 0;
 
+    // A non-blocking push (SCE_AUDIO_OUT2_BLOCKING_ASYNC) never waits, and the queue level counts the
+    // silent grains the context's clock holds as well as the audio the device holds. Wwise advances
+    // and pushes asynchronously under its global lock; a push that slept a grain held that lock for
+    // the whole grain. SHARPEMU_AUDIO_OUT2_ASYNC_PUSH=0 restores the sleeping push.
+    private static readonly bool _asyncPushNeverWaits = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_ASYNC_PUSH"), "0", StringComparison.Ordinal);
+
     // libSceAudioOut2 has its own error space (0x80268xxx);
     // the generic ORBIS_GEN2_* codes are not what a title compares against.
     private const int AudioOut2ErrorInvalidParam = unchecked((int)0x8026_8001);
@@ -153,11 +160,8 @@ public static class AudioOut2Exports
         // Grains reserved on the clock that have not started playing, at most QueueDepth.
         public uint ClockQueuedGrains()
         {
-            long ahead;
-            lock (_paceGate)
-            {
-                ahead = _nextAdvanceTimestamp - Stopwatch.GetTimestamp();
-            }
+            // A single aligned 64-bit read: the level is a snapshot either way, and this is polled.
+            var ahead = Volatile.Read(ref _nextAdvanceTimestamp) - Stopwatch.GetTimestamp();
 
             return ahead <= 0 ? 0 : (uint)Math.Min((ahead + GrainTicks - 1) / GrainTicks, QueueDepth);
         }
@@ -189,6 +193,40 @@ public static class AudioOut2Exports
                 var start = _nextAdvanceTimestamp;
                 _nextAdvanceTimestamp = checked(_nextAdvanceTimestamp + GrainTicks);
                 return start;
+            }
+        }
+
+        // Claims the next grain only while the queue has a slot for it, the way a non-blocking push
+        // is refused rather than waited for.
+        public bool TryReserveGrain()
+        {
+            lock (_paceGate)
+            {
+                var now = Stopwatch.GetTimestamp();
+                if (_nextAdvanceTimestamp < now)
+                {
+                    _nextAdvanceTimestamp = now;
+                }
+
+                if (QueueSlotFree(_nextAdvanceTimestamp) > now)
+                {
+                    return false;
+                }
+
+                _nextAdvanceTimestamp = checked(_nextAdvanceTimestamp + GrainTicks);
+                return true;
+            }
+        }
+
+        // Returns a grain claimed at grainStart to the clock when it is still the last one claimed.
+        public void ReleaseGrain(long grainStart)
+        {
+            lock (_paceGate)
+            {
+                if (_nextAdvanceTimestamp == grainStart + GrainTicks)
+                {
+                    _nextAdvanceTimestamp = grainStart;
+                }
             }
         }
 
@@ -575,6 +613,22 @@ public static class AudioOut2Exports
             if (blocking != 0)
             {
                 WaitForDeviceSlot(context);
+            }
+        }
+        else if (blocking == 0 && _asyncPushNeverWaits)
+        {
+            // A non-blocking push takes a slot when the queue has one and otherwise returns at once;
+            // a grain with no audio that finds the queue full is dropped instead of waited for.
+            if (advancedGrain != 0)
+            {
+                if (context.QueueSlotFree(advancedGrain) > Stopwatch.GetTimestamp())
+                {
+                    context.ReleaseGrain(advancedGrain);
+                }
+            }
+            else
+            {
+                _ = context.TryReserveGrain();
             }
         }
         else
@@ -1410,6 +1464,24 @@ public static class AudioOut2Exports
 
     private static uint QueuedGrains(ContextState context)
     {
+        if (_asyncPushNeverWaits)
+        {
+            // Polled millions of times by Wwise: read the stream the context last submitted to
+            // without the backend lock. Grains with no audio hold the queue on the context's clock
+            // and grains with audio hold it in the device, so both count.
+            var clockGrains = context.ClockQueuedGrains();
+            if (context.DevicePaced && context.DeviceBackend is { } deviceBackend)
+            {
+                var deviceMilliseconds = deviceBackend.QueuedMilliseconds;
+                if (deviceMilliseconds >= 0)
+                {
+                    return Math.Max(clockGrains, context.DeviceQueuedGrains(deviceMilliseconds));
+                }
+            }
+
+            return clockGrains;
+        }
+
         if (context.DevicePaced)
         {
             var backend = ResolveContextBackend(context, out _);
