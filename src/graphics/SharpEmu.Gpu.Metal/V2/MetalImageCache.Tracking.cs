@@ -788,6 +788,25 @@ internal sealed partial class MetalImageCache
         Volatile.Write(ref _standingDccClaimCount, _standingDccClaims.Count);
     }
 
+    // Whether an image the GPU has modified holds bytes of the slice. Caller holds the lock.
+    private bool GpuModifiedImageOverlapsLocked(ulong address, ulong size)
+    {
+        if (!_pageOwners.MayHaveOwners(address, size))
+        {
+            return false;
+        }
+
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(imageIdentifier) is { } image && image.GpuOverlaps(address, size))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // Whether any recorded fill reaches the slice. Caller holds the lock.
     private bool RecordedDccFillOverlapsLocked(ulong address, ulong size)
     {
@@ -805,8 +824,10 @@ internal sealed partial class MetalImageCache
     /// <summary>
     /// Marks in <paramref name="standing"/> the slices of one lookup whose claim stands, with
     /// the code it stands for in <paramref name="codes"/>, all under one hold of the lock. A
-    /// slice a recorded fill still reaches is left to the full path, which settles the fill.
-    /// Returns how many were marked.
+    /// slice a recorded fill still reaches is left to the full path, which settles the fill,
+    /// and so is one under a GPU-modified image: rendering into it records no guest write, so
+    /// the claim outlives it, and the full path's pending query defers the slice until the
+    /// image's bytes are written back. Returns how many were marked.
     /// </summary>
     private int ProbeStandingDccClaims(
         ResourceSlotIdentifier imageIdentifier, ulong firstAddress, ulong sliceSize, uint count,
@@ -823,7 +844,8 @@ internal sealed partial class MetalImageCache
         {
             var address = firstAddress + sliceSize * slice;
             if (!_standingDccClaims.TryGetValue((imageIdentifier, address), out var code) ||
-                (_recordedDccFills.Count != 0 && RecordedDccFillOverlapsLocked(address, sliceSize)))
+                (_recordedDccFills.Count != 0 && RecordedDccFillOverlapsLocked(address, sliceSize)) ||
+                GpuModifiedImageOverlapsLocked(address, sliceSize))
             {
                 continue;
             }

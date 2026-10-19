@@ -171,10 +171,10 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
             return bytes;
         }
 
-        public ImageRequest Request(ImageRole role)
+        public ImageRequest Request(ImageRole role, ulong address = ImageAddress)
         {
             var description = ImageDescription.Create();
-            description.Data = new GuestSpan(ImageAddress, 4 * 4 * 4);
+            description.Data = new GuestSpan(address, 4 * 4 * 4);
             description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
             description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
             description.Type = GuestImageType.Color2D;
@@ -185,9 +185,13 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
             description.Samples = 1;
             description.TileMode = GuestTileMode.Linear;
             description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 64, Pitch = 4, Height = 4 };
-            description.Metadata.Kind = MetadataKind.Dcc;
-            description.Metadata.Range = new GuestSpan(MetadataAddress, SliceSize);
-            description.Metadata.DccAlphaMsb = true;
+            // An image placed anywhere else is a plain surface over those bytes.
+            if (address == ImageAddress)
+            {
+                description.Metadata.Kind = MetadataKind.Dcc;
+                description.Metadata.Range = new GuestSpan(MetadataAddress, SliceSize);
+                description.Metadata.DccAlphaMsb = true;
+            }
             var view = ImageViewDescription.Default with
             {
                 Format = GpuFormat.R8G8B8A8Unorm,

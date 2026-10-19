@@ -183,6 +183,23 @@ public sealed unsafe partial class MetalDccMaterializationTests
         Assert.Equal(1, rig.Owner.PendingQueries);
     }
 
+    // Rendering into an image over the metadata records no guest write, so the claim
+    // outlives it; until the image's bytes are written back the slice takes the full path,
+    // whose pending query defers it.
+    [Fact]
+    public void ClaimFirst_SliceUnderAGpuModifiedImageTakesTheFullPath()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        ClaimClear(rig);
+
+        var request = rig.Request(ImageRole.ColorTarget, MetadataAddress);
+        rig.Cache.MarkGpuWritten(rig.Cache.FindImage(ref request));
+        rig.Lookup();
+
+        Assert.Equal(1, rig.Owner.PendingQueries);
+    }
+
     // A writeback encoded inside a lookup ends the encoders and records the staged stores
     // with the cache lock still held; forgetting the claims there must not take it again.
     [Fact]
