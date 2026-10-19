@@ -38,7 +38,8 @@ internal sealed partial class MetalRenderHost
         public Gen5MslMeshInfo? Mesh;
 
         // Set for a rectangle list: the pipeline state per control-point index type
-        // (none, 16-bit, 32-bit), and the stride of each vertex buffer the patch control
+        // (none, 16-bit, 32-bit; the indexed ones are built when a draw first uses them,
+        // RectangleState), and the stride of each vertex buffer the patch control
         // points step through (zero for a per-instance or constant one), which a draw
         // with a vertex offset rebinds at that offset.
         public nint[]? RectangleStates;
@@ -112,6 +113,12 @@ internal sealed partial class MetalRenderHost
         // with no archive): the pipeline made from them stores them under these.
         public UInt128 ArchiveKey;
         public UInt128 RectangleArchiveKey;
+
+        // The key of the MSL text each library was compiled from (MetalBinaryArchive.LibraryKey;
+        // zero with the dedupe off): modules of different permutations that translated to the
+        // same text share a library, and a pipeline state is told apart by it, not by module.
+        public UInt128 SourceKey;
+        public UInt128 RectangleSourceKey;
 
         // The stage it was built for, to build it again once the shader cache bound
         // released the library (Function zero) and a pipeline needs it.
@@ -218,7 +225,7 @@ internal sealed partial class MetalRenderHost
         // already compiled is taken from it instead.
         var library = CompileLibrary(
             shader.Source, module.Hash, shader.UsesPerVertexInputs, prewarmable: stage != ShaderStage.Compute,
-            out module.ArchiveKey);
+            out module.ArchiveKey, out module.SourceKey);
         Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -227,7 +234,7 @@ internal sealed partial class MetalRenderHost
                 library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(shader.EntryPoint));
             if (function == 0)
             {
-                MetalNative.SendVoid(library, SelRelease);
+                ReleaseLibrary(library);
                 throw Fatal(
                     $"The MSL library has no entry point: entry={shader.EntryPoint} hash=0x{module.Hash:X16}.");
             }
@@ -259,12 +266,12 @@ internal sealed partial class MetalRenderHost
 
             var library = CompileLibrary(
                 Gen5MslRectangleList.BuildSource(module.Compiled.AcquireShader()), module.Hash, usesPerVertexInputs: false, prewarmable: true,
-                out module.RectangleArchiveKey);
+                out module.RectangleArchiveKey, out module.RectangleSourceKey);
             var function = MetalNative.Send(
                 library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(Gen5MslRectangleList.EntryPoint));
             if (function == 0)
             {
-                MetalNative.SendVoid(library, SelRelease);
+                ReleaseLibrary(library);
                 throw Fatal(
                     $"The rectangle-list MSL library has no entry point: entry={Gen5MslRectangleList.EntryPoint} hash=0x{module.Hash:X16}.");
             }
@@ -275,8 +282,98 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    // Libraries by the key of their source text. Permutations of one program (a different
+    // resource specialization, a different vertex stride) often translate to the same MSL; the
+    // library of the first is then shared by the rest instead of compiled once each. Off with
+    // SHARPEMU_METAL_V2_PIPELINE_DEDUPE=0.
+    internal static readonly bool PipelineDedupe =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PIPELINE_DEDUPE") != "0";
+
+    private readonly MetalSharedHandleTable<UInt128> _libraries = new();
+    private readonly Dictionary<UInt128, ManualResetEventSlim> _librariesBuilding = new();
+    private readonly object _librariesGate = new();
+    private long _moduleSameSource;
+    private long _pipelineDedups;
+
+    // The library of this source, compiled by the first caller and shared with the rest. Any
+    // thread: modules compile on the module pool. The caller owns one reference to give back
+    // through ReleaseLibrary.
+    private nint CompileLibrary(
+        string source, ulong hash, bool usesPerVertexInputs, bool prewarmable, out UInt128 archiveKey, out UInt128 sourceKey)
+    {
+        if (!PipelineDedupe)
+        {
+            sourceKey = default;
+            return CompileLibraryUnshared(source, hash, usesPerVertexInputs, prewarmable, out archiveKey);
+        }
+
+        sourceKey = MetalBinaryArchive.LibraryKey(source, usesPerVertexInputs);
+        while (true)
+        {
+            ManualResetEventSlim? building;
+            var creator = false;
+            lock (_librariesGate)
+            {
+                if (_libraries.TryAcquire(sourceKey, out var shared, out var sharedArchiveKey))
+                {
+                    Interlocked.Increment(ref _moduleSameSource);
+                    archiveKey = sharedArchiveKey;
+                    return shared;
+                }
+
+                if (!_librariesBuilding.TryGetValue(sourceKey, out building))
+                {
+                    building = new ManualResetEventSlim(false);
+                    _librariesBuilding.Add(sourceKey, building);
+                    creator = true;
+                }
+            }
+
+            if (!creator)
+            {
+                // The same text is compiling on another thread; take its library once it is
+                // there, or compile it here if that compile failed.
+                building.Wait();
+                continue;
+            }
+
+            try
+            {
+                var library = CompileLibraryUnshared(source, hash, usesPerVertexInputs, prewarmable, out archiveKey);
+                lock (_librariesGate)
+                {
+                    if (!_libraries.Register(sourceKey, library, archiveKey, out var winner))
+                    {
+                        ReleaseLibrary(library);
+                        library = winner;
+                    }
+
+                    return library;
+                }
+            }
+            finally
+            {
+                lock (_librariesGate)
+                {
+                    _librariesBuilding.Remove(sourceKey);
+                }
+
+                building.Set();
+            }
+        }
+    }
+
+    // One owner of a shared library lets go; the library goes with the last.
+    private void ReleaseLibrary(nint library)
+    {
+        if (_libraries.Release(library))
+        {
+            MetalNative.SendVoid(library, SelRelease);
+        }
+    }
+
     // Computes are left to the compute prewarm, which compiles them before the game runs.
-    private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs, bool prewarmable, out UInt128 archiveKey)
+    private nint CompileLibraryUnshared(string source, ulong hash, bool usesPerVertexInputs, bool prewarmable, out UInt128 archiveKey)
     {
         // The background prewarm gives way while the game compiles (MetalCompileScheduler).
         using var runtime = MetalCompileScheduler.Shared.Runtime();
@@ -454,7 +551,7 @@ internal sealed partial class MetalRenderHost
         var mesh = vertexModule.Shader.Stage == Gen5MslStage.Mesh ? vertexModule.Shader.MeshInfo : null;
         // A rectangle list draws through the program's post-tessellation form (see
         // Gen5MslRectangleList); the index type of its control points is part of the
-        // pipeline state, so one state is built for each kind of draw.
+        // pipeline state, so there is one state for each kind of draw, built on first use.
         var rectangleList = mesh is null && parameters.Topology == GpuPrimitiveTopology.PatchList;
         if (mesh is not null)
         {
@@ -476,16 +573,7 @@ internal sealed partial class MetalRenderHost
 
         var state = CreateRenderPipelineState(
             description, vertexModule, pixelModule, mesh, rectangleList, Mtl.ControlPointIndexTypeNone, out var vertexLayout);
-        nint[]? rectangleStates = rectangleList
-            ?
-            [
-                state,
-                CreateRenderPipelineState(
-                    description, vertexModule, pixelModule, mesh, true, Mtl.ControlPointIndexTypeUInt16, out _),
-                CreateRenderPipelineState(
-                    description, vertexModule, pixelModule, mesh, true, Mtl.ControlPointIndexTypeUInt32, out _),
-            ]
-            : null;
+        nint[]? rectangleStates = rectangleList ? [state, 0, 0] : null;
 
         Interlocked.Increment(ref _pipelineCreations);
         var entry = new MetalPipelineEntry
@@ -700,6 +788,25 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendVoid(vertexDescriptor, SelRelease);
             }
 
+            // A state already made from an identical descriptor is shared (the table owns it,
+            // each pipeline entry is one of its owners).
+            MetalPipelineStateKey? shareKey = null;
+            if (PipelineDedupe && mesh is null)
+            {
+                shareKey = PipelineStateKeyOf(
+                    description,
+                    rectangleList ? vertexModule.RectangleSourceKey : vertexModule.SourceKey,
+                    pixelModule?.SourceKey,
+                    vertexModule.Shader.WritesLayer || vertexModule.Shader.WritesViewportIndex,
+                    rectangleList,
+                    controlPointIndexType);
+                if (_states.TryAcquire(shareKey, out var shared, out _))
+                {
+                    Interlocked.Increment(ref _pipelineDedups);
+                    return shared;
+                }
+            }
+
             nint error = 0;
             using var runtime = MetalCompileScheduler.Shared.Runtime();
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -741,6 +848,13 @@ internal sealed partial class MetalRenderHost
                     $"pixel=0x{description.PixelStage?.Hash ?? 0:X16} colors={description.Rendering.ColorCount} " +
                     $"{MetalNative.DescribeError(error)}");
             }
+
+            if (shareKey is not null && !_states.Register(shareKey, state, default, out var winner))
+            {
+                // Another thread made the same state first.
+                MetalNative.SendVoid(state, SelRelease);
+                state = winner;
+            }
         }
         finally
         {
@@ -748,6 +862,127 @@ internal sealed partial class MetalRenderHost
         }
 
         return state;
+    }
+
+    // Render pipeline states by what their descriptor holds. Pipelines the shared cache keeps
+    // apart for state Metal sets at encode time (cull, winding, depth clip, exact topology,
+    // restart, stencil operations) still build the same descriptor, and so share one state.
+    private readonly MetalSharedHandleTable<MetalPipelineStateKey> _states = new();
+
+    // The state of a rectangle-list pipeline for an index type of its control points
+    // (0 = non-indexed, 1 = 16-bit, 2 = 32-bit), made by the first draw that needs it. On the
+    // GPU worker, the only thread that draws with or releases a pipeline's states.
+    private nint RectangleState(MetalPipelineEntry entry, int variant)
+    {
+        var states = entry.RectangleStates!;
+        if (states[variant] != 0)
+        {
+            return states[variant];
+        }
+
+        var description = entry.GraphicsDescription ??
+            throw Fatal($"A rectangle-list pipeline has no description to build its indexed state from: pipeline={entry.Id}.");
+        var vertexModule = RequireModule(description.VertexProgram);
+        var pixelModule = description.PixelStage is not null && description.PixelProgram.IsValid
+            ? RequireModule(description.PixelProgram)
+            : null;
+        var state = CreateRenderPipelineState(
+            description, vertexModule, pixelModule, entry.Mesh, true,
+            variant == 2 ? Mtl.ControlPointIndexTypeUInt32 : Mtl.ControlPointIndexTypeUInt16, out _);
+        states[variant] = state;
+        return state;
+    }
+
+    // One owner of a shared pipeline state lets go; the state goes with the last.
+    private void ReleaseState(nint state)
+    {
+        if (_states.Release(state))
+        {
+            MetalNative.SendVoid(state, SelRelease);
+        }
+    }
+
+    /// <summary>
+    /// Everything CreateRenderPipelineState puts into a render descriptor as bytes: the source
+    /// of the vertex and pixel functions, the sample count, the topology class when the program
+    /// is layered, alpha to coverage, every attachment's format, write mask and effective
+    /// blend, the depth and stencil formats, and the vertex layout. Keep in step with it: a
+    /// field the descriptor reads that is not here would hand a pipeline another's state.
+    /// </summary>
+    internal static MetalPipelineStateKey PipelineStateKeyOf(
+        GraphicsPipelineDescription description,
+        UInt128 vertexSource,
+        UInt128? pixelSource,
+        bool layered,
+        bool rectangleList,
+        nuint controlPointIndexType)
+    {
+        var parameters = description.StaticParameters;
+        var key = new MetalPipelineStateKey.Builder()
+            .Add(vertexSource)
+            .Add(pixelSource is not null)
+            .Add(pixelSource ?? default)
+            .Add(rectangleList)
+            .Add(rectangleList ? controlPointIndexType : 0)
+            .Add(Math.Max(parameters.Samples, 1))
+            .Add(layered ? MetalV2Formats.TopologyClass(parameters.Topology) : ulong.MaxValue)
+            .Add(parameters.AlphaToCoverageEnable)
+            .Add(description.Rendering.ColorCount);
+        for (var index = 0; index < description.Rendering.ColorCount; index++)
+        {
+            var format = MetalV2Formats.PixelFormat(description.Rendering.ColorFormats[index]);
+            key.Add(format).Add((ulong)MetalV2Formats.ColorWriteMask(parameters.GetColorMask(index)));
+            var blends = parameters.GetBlendEnable(index) && !parameters.GetBlendBypass(index) && !IsIntegerFormat(format);
+            key.Add(blends);
+            if (!blends)
+            {
+                continue;
+            }
+
+            var separate = parameters.GetSeparateAlphaBlend(index);
+            key.Add((ulong)MetalV2Formats.BlendFactor(parameters.GetColorSourceBlend(index)))
+                .Add((ulong)MetalV2Formats.BlendFactor(parameters.GetColorDestinationBlend(index)))
+                .Add((ulong)MetalV2Formats.BlendOperation(parameters.GetColorBlendFunction(index)))
+                .Add((ulong)MetalV2Formats.BlendFactor(
+                    separate ? parameters.GetAlphaSourceBlend(index) : parameters.GetColorSourceBlend(index)))
+                .Add((ulong)MetalV2Formats.BlendFactor(
+                    separate ? parameters.GetAlphaDestinationBlend(index) : parameters.GetColorDestinationBlend(index)))
+                .Add((ulong)MetalV2Formats.BlendOperation(
+                    separate ? parameters.GetAlphaBlendFunction(index) : parameters.GetColorBlendFunction(index)));
+        }
+
+        var depthFormat = description.Rendering.DepthFormat != GpuFormat.Undefined
+            ? MetalV2Formats.PixelFormat(description.Rendering.DepthFormat)
+            : MtlFormat.Invalid;
+        var stencilFormat = description.Rendering.StencilFormat != GpuFormat.Undefined
+            ? MetalV2Formats.PixelFormat(description.Rendering.StencilFormat)
+            : MtlFormat.Invalid;
+        key.Add(depthFormat).Add(stencilFormat != MtlFormat.Invalid && MetalV2Formats.HasStencil(stencilFormat) ? stencilFormat : MtlFormat.Invalid);
+
+        // The vertex descriptor is only set with attributes (CreateVertexDescriptor).
+        var vertexInput = description.VertexInput;
+        key.Add((ulong)vertexInput.AttributeCount);
+        if (vertexInput.AttributeCount != 0)
+        {
+            for (var binding = 0; binding < vertexInput.BindingCount && binding < MaxVertexBufferSlots; binding++)
+            {
+                key.Add(vertexInput.Bindings[binding].Stride).Add(vertexInput.Bindings[binding].Instance);
+            }
+
+            for (var index = 0; index < vertexInput.AttributeCount; index++)
+            {
+                var binding = vertexInput.Attributes[index].Binding;
+                if (binding >= MaxVertexBufferSlots)
+                {
+                    continue;
+                }
+
+                key.Add((ulong)index).Add((ulong)VertexFormatOf(description, index, out _))
+                    .Add(vertexInput.Attributes[index].Offset).Add(binding);
+            }
+        }
+
+        return key.Build();
     }
 
     private static readonly nint SelSetBinaryArchives = MetalNative.Selector("setBinaryArchives:");
@@ -779,6 +1014,17 @@ internal sealed partial class MetalRenderHost
         }
 
         return strides;
+    }
+
+    // The Metal format of one vertex attribute, narrowed to the components the program fetches.
+    private static MtlVertexFormat VertexFormatOf(GraphicsPipelineDescription description, int index, out uint usedComponents)
+    {
+        var resource = description.VertexInfo.Attributes[index];
+        var compiledComponents = index < description.VertexStage.VertexFetchComponents.Length
+            ? description.VertexStage.VertexFetchComponents[index]
+            : (byte)0;
+        usedComponents = compiledComponents > 0 ? compiledComponents : (uint)resource.RegisterCount;
+        return MetalV2Formats.VertexFormat(resource.Descriptor, usedComponents);
     }
 
     // The vertex descriptor: one attribute per fetch, one layout per guest buffer. A
@@ -832,11 +1078,7 @@ internal sealed partial class MetalRenderHost
             }
 
             var resource = info.Attributes[index];
-            var compiledComponents = index < description.VertexStage.VertexFetchComponents.Length
-                ? description.VertexStage.VertexFetchComponents[index]
-                : (byte)0;
-            var usedComponents = compiledComponents > 0 ? compiledComponents : (uint)resource.RegisterCount;
-            var format = MetalV2Formats.VertexFormat(resource.Descriptor, usedComponents);
+            var format = VertexFormatOf(description, index, out var usedComponents);
             var attribute = MetalNative.SendAtIndex(attributes, SelObjectAtIndex, (nuint)index);
             MetalV2Native.SendVoidValue(attribute, MetalNative.Selector("setFormat:"), (nuint)format);
             MetalV2Native.SendVoidValue(
@@ -1308,7 +1550,7 @@ internal sealed partial class MetalRenderHost
         {
             if (entry.State != 0)
             {
-                MetalNative.SendVoid(entry.State, SelRelease);
+                ReleaseState(entry.State);
             }
 
             // The first rectangle state is entry.State itself.
@@ -1316,7 +1558,7 @@ internal sealed partial class MetalRenderHost
             {
                 if (entry.RectangleStates![index] != 0)
                 {
-                    MetalNative.SendVoid(entry.RectangleStates[index], SelRelease);
+                    ReleaseState(entry.RectangleStates[index]);
                 }
             }
         }
@@ -1346,13 +1588,13 @@ internal sealed partial class MetalRenderHost
 
             if (module.Library != 0)
             {
-                MetalNative.SendVoid(module.Library, SelRelease);
+                ReleaseLibrary(module.Library);
             }
 
             if (module.RectangleFunction != 0)
             {
                 MetalNative.SendVoid(module.RectangleFunction, SelRelease);
-                MetalNative.SendVoid(module.RectangleLibrary, SelRelease);
+                ReleaseLibrary(module.RectangleLibrary);
             }
         }
 

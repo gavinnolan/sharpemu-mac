@@ -252,6 +252,10 @@ internal sealed partial class MetalRenderHost :
     // implementation is a trap (brk #1), so the family decides, not the selector.
     public bool DepthBoundsTestSupported { get; }
 
+    // The bounds are encoder state a draw sets from the dynamic state (ApplyDepthBounds), never
+    // part of a pipeline state, so they stay out of the pipeline key.
+    public bool DepthBoundsInPipelineState => false;
+
     private const nint GpuFamilyApple10 = 1010;
 
     private static bool SupportsApple10Features(nint device)

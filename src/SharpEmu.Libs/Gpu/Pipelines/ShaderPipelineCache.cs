@@ -872,7 +872,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.VertexInput.Reset();
         lookup.StaticParameters.Reset();
         FillGraphicsState(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, lookup.Rendering, lookup.StaticParameters, lookup.VertexInput);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, lookup.Rendering, lookup.StaticParameters, lookup.VertexInput,
+            _host.DepthBoundsInPipelineState);
         lookup.VertexProgramId = vertexProgram.Id;
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
         lock (_pipelineGate)
@@ -885,7 +886,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsInPipelineState);
         var key = KeyOf(description);
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_gate)
@@ -931,13 +932,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        GpuSampleCount noAttachmentSampleCounts)
+        GpuSampleCount noAttachmentSampleCounts,
+        bool depthBoundsInPipelineState = true)
     {
         var renderingState = new PipelineRenderingState();
         var parameters = new PipelineStaticParameters();
         var vertexState = new PipelineVertexInputState();
         var (vertexStage, pixelStage) = FillGraphicsState(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
-            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, noAttachmentSampleCounts, renderingState, parameters, vertexState);
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, noAttachmentSampleCounts, renderingState, parameters, vertexState,
+            depthBoundsInPipelineState);
         return new GraphicsPipelineDescription
         {
             Rendering = renderingState,
@@ -968,7 +971,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         GpuSampleCount noAttachmentSampleCounts,
         PipelineRenderingState renderingState,
         PipelineStaticParameters parameters,
-        PipelineVertexInputState vertexState)
+        PipelineVertexInputState vertexState,
+        bool depthBoundsInPipelineState = true)
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
@@ -1079,8 +1083,52 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             parameters.SetBlendBypass(index, ((context.ColorTargets[slot].Info >> 16) & 0x1) != 0);
         }
 
+        NormalizeStaticParameters(parameters, depthBoundsInPipelineState);
         FillVertexInputState(vertexInput, vertexState);
         return (vertexStage, pixelStage);
+    }
+
+    // Zeroes the state no backend reads, so draws that differ only there share one pipeline:
+    // the depth bounds when the test is off (or the host keeps them out of its pipeline), the
+    // stencil operations when the stencil test is off, and the blend factors, functions and
+    // flags of an attachment that does not blend (disabled, bypassed, or writing no channel).
+    // Every field is either ignored by the host pipeline when its switch is off or, for the
+    // separate-alpha factors, replaced by the colour ones.
+    internal static void NormalizeStaticParameters(PipelineStaticParameters parameters, bool depthBoundsInPipelineState)
+    {
+        if (!depthBoundsInPipelineState || !parameters.DepthBoundsTestEnable)
+        {
+            parameters.DepthBoundsTestEnable = false;
+            parameters.DepthMinBounds = 0f;
+            parameters.DepthMaxBounds = 0f;
+        }
+
+        if (!parameters.StencilTestEnable)
+        {
+            parameters.StencilFront = StencilOperations.Default;
+            parameters.StencilBack = StencilOperations.Default;
+        }
+
+        for (var index = 0; index < (int)parameters.ColorCount; index++)
+        {
+            var blends = parameters.GetBlendEnable(index) && !parameters.GetBlendBypass(index) && parameters.GetColorMask(index) != 0;
+            if (!blends)
+            {
+                parameters.SetBlendEnable(index, false);
+                parameters.SetBlendBypass(index, false);
+                parameters.SetSeparateAlphaBlend(index, false);
+                parameters.SetColorSourceBlend(index, 0);
+                parameters.SetColorDestinationBlend(index, 0);
+                parameters.SetColorBlendFunction(index, 0);
+            }
+
+            if (!parameters.GetSeparateAlphaBlend(index))
+            {
+                parameters.SetAlphaSourceBlend(index, 0);
+                parameters.SetAlphaDestinationBlend(index, 0);
+                parameters.SetAlphaBlendFunction(index, 0);
+            }
+        }
     }
 
     // DB_ALPHA_TO_MASK turns the alpha of MRT0's export into sample coverage unless the pixel

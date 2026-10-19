@@ -29,7 +29,10 @@ public sealed class MetalShaderCacheBoundTests(ITestOutputHelper output) : Scene
     {
         Assert.Equal(MetalShaderCacheLimits.Default, MetalShaderCacheLimits.FromEnvironment(_ => null));
         Assert.True(MetalShaderCacheLimits.Default.Enabled);
-        // ~130 MB at the measured costs per object.
+        // Only the counts bound it by default: nothing a title compiled is dropped for being idle.
+        Assert.Equal(0, MetalShaderCacheLimits.Default.PipelineIdleSeconds);
+        Assert.Equal(0, MetalShaderCacheLimits.Default.ModuleIdleSeconds);
+        // ~224 MB at the measured costs per object.
         var bound = MetalShaderCacheLimits.DefaultModules * MetalShaderCacheLimits.EstimatedModuleBytes +
             MetalShaderCacheLimits.DefaultPipelines * MetalShaderCacheLimits.EstimatedPipelineBytes;
         Assert.InRange(bound, 128L << 20, 256L << 20);

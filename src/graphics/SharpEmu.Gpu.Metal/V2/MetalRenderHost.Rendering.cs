@@ -1833,7 +1833,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var index32 = _indexType == Mtl.IndexTypeUInt32;
-        var state = entry.RectangleStates![indexed ? index32 ? 2 : 1 : 0];
+        var state = RectangleState(entry, indexed ? index32 ? 2 : 1 : 0);
         if (_boundRenderState != state)
         {
             MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, state);

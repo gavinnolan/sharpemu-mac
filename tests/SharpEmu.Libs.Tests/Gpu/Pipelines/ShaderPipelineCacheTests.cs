@@ -392,7 +392,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     }
 
     [Fact]
-    public void DisableBlending_ClearsTheBlendEnableButKeepsTheFactors()
+    public void DisableBlending_ClearsTheBlendEnableAndTheFactorsNoBackendReadsWithoutIt()
     {
         var programs = Programs();
         var description = Describe(
@@ -400,7 +400,8 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             new GraphicsPrograms { Vertex = programs.Vertex, Pixel = programs.Pixel, VertexInput = programs.VertexInput, PixelInput = programs.PixelInput, DisableBlending = true });
 
         Assert.False(description.StaticParameters.GetBlendEnable(0));
-        Assert.Equal(4, description.StaticParameters.GetColorSourceBlend(0));
+        Assert.Equal(0, description.StaticParameters.GetColorSourceBlend(0));
+        Assert.Equal(0, description.StaticParameters.GetColorDestinationBlend(0));
     }
 
     [Fact]
@@ -657,6 +658,162 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             programs.Vertex, programs.Pixel, GpuSampleCount.Count1Bit);
 
         Assert.Equal(expectedMask, description.StaticParameters.GetColorMask(0));
+    }
+
+    private static PipelineStaticParameters NormalizableParameters(uint colorCount = 1)
+    {
+        var parameters = new PipelineStaticParameters { ColorCount = colorCount };
+        for (var index = 0; index < colorCount; index++)
+        {
+            parameters.SetColorMask(index, 0xF);
+        }
+
+        return parameters;
+    }
+
+    [Theory]
+    [InlineData(true, false, 0.25f, 0.75f, false, 0f, 0f)]
+    [InlineData(true, true, 0.25f, 0.75f, true, 0.25f, 0.75f)]
+    [InlineData(false, true, 0.25f, 0.75f, false, 0f, 0f)]
+    [InlineData(false, false, 0.25f, 0.75f, false, 0f, 0f)]
+    public void DepthBounds_AreKeyedOnlyWhileTheHostPipelineReadsThem(
+        bool inPipelineState, bool enabled, float min, float max, bool expectedEnable, float expectedMin, float expectedMax)
+    {
+        // Vulkan with the feature (inPipelineState) bakes the bounds into the pipeline; Metal
+        // sets them on the encoder, so a draw's bounds never split its pipeline.
+        var parameters = NormalizableParameters();
+        parameters.DepthBoundsTestEnable = enabled;
+        parameters.DepthMinBounds = min;
+        parameters.DepthMaxBounds = max;
+
+        ShaderPipelineCache.NormalizeStaticParameters(parameters, inPipelineState);
+
+        Assert.Equal(expectedEnable, parameters.DepthBoundsTestEnable);
+        Assert.Equal(expectedMin, parameters.DepthMinBounds);
+        Assert.Equal(expectedMax, parameters.DepthMaxBounds);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StencilOperations_AreKeyedOnlyWhileTheStencilTestIsOn(bool enabled)
+    {
+        var operations = new StencilOperations(GpuStencilOp.Replace, GpuStencilOp.IncrementAndClamp, GpuStencilOp.Invert, GpuCompareOp.Less);
+        var parameters = NormalizableParameters();
+        parameters.StencilTestEnable = enabled;
+        parameters.StencilFront = operations;
+        parameters.StencilBack = operations;
+
+        ShaderPipelineCache.NormalizeStaticParameters(parameters, true);
+
+        var expected = enabled ? operations : StencilOperations.Default;
+        Assert.Equal(expected, parameters.StencilFront);
+        Assert.Equal(expected, parameters.StencilBack);
+    }
+
+    [Theory]
+    [InlineData(true, false, 0xFu, false)]
+    [InlineData(false, false, 0xFu, true)]
+    [InlineData(true, true, 0xFu, true)]
+    [InlineData(true, false, 0x0u, true)]
+    public void BlendState_IsKeyedOnlyForAnAttachmentThatBlends(bool enable, bool bypass, uint mask, bool zeroed)
+    {
+        var parameters = NormalizableParameters(2);
+        for (var index = 0; index < 2; index++)
+        {
+            parameters.SetBlendEnable(index, enable);
+            parameters.SetBlendBypass(index, bypass);
+            parameters.SetColorMask(index, mask);
+            parameters.SetSeparateAlphaBlend(index, true);
+            parameters.SetColorSourceBlend(index, 5);
+            parameters.SetColorDestinationBlend(index, 6);
+            parameters.SetColorBlendFunction(index, 1);
+            parameters.SetAlphaSourceBlend(index, 7);
+            parameters.SetAlphaDestinationBlend(index, 8);
+            parameters.SetAlphaBlendFunction(index, 2);
+        }
+
+        ShaderPipelineCache.NormalizeStaticParameters(parameters, true);
+
+        for (var index = 0; index < 2; index++)
+        {
+            Assert.Equal(mask, parameters.GetColorMask(index));
+            Assert.Equal(zeroed ? (byte)0 : (byte)5, parameters.GetColorSourceBlend(index));
+            Assert.Equal(zeroed ? (byte)0 : (byte)6, parameters.GetColorDestinationBlend(index));
+            Assert.Equal(zeroed ? (byte)0 : (byte)1, parameters.GetColorBlendFunction(index));
+            Assert.Equal(zeroed ? (byte)0 : (byte)7, parameters.GetAlphaSourceBlend(index));
+            Assert.Equal(zeroed ? (byte)0 : (byte)8, parameters.GetAlphaDestinationBlend(index));
+            Assert.Equal(zeroed ? (byte)0 : (byte)2, parameters.GetAlphaBlendFunction(index));
+            Assert.Equal(!zeroed, parameters.GetBlendEnable(index));
+            Assert.Equal(!zeroed, parameters.GetSeparateAlphaBlend(index));
+            Assert.Equal(bypass && !zeroed, parameters.GetBlendBypass(index));
+        }
+    }
+
+    [Fact]
+    public void BlendState_TheAlphaFactorsOfAColorOnlyBlendAreNotKeyed()
+    {
+        var parameters = NormalizableParameters();
+        parameters.SetBlendEnable(0, true);
+        parameters.SetSeparateAlphaBlend(0, false);
+        parameters.SetColorSourceBlend(0, 5);
+        parameters.SetAlphaSourceBlend(0, 7);
+        parameters.SetAlphaDestinationBlend(0, 8);
+        parameters.SetAlphaBlendFunction(0, 2);
+
+        ShaderPipelineCache.NormalizeStaticParameters(parameters, true);
+
+        Assert.Equal((byte)5, parameters.GetColorSourceBlend(0));
+        Assert.Equal((byte)0, parameters.GetAlphaSourceBlend(0));
+        Assert.Equal((byte)0, parameters.GetAlphaDestinationBlend(0));
+        Assert.Equal((byte)0, parameters.GetAlphaBlendFunction(0));
+    }
+
+    [Fact]
+    public void NormalizedParameters_ThatDifferOnlyInIgnoredStateShareAKey()
+    {
+        PipelineStaticParameters Draw(float min, byte factor, GpuStencilOp stencil, bool depthBounds = false, bool blend = false)
+        {
+            var parameters = NormalizableParameters();
+            parameters.DepthBoundsTestEnable = depthBounds;
+            parameters.DepthMinBounds = min;
+            parameters.DepthMaxBounds = min + 0.5f;
+            parameters.SetBlendEnable(0, blend);
+            parameters.SetColorSourceBlend(0, factor);
+            parameters.StencilFront = StencilOperations.Default with { FailOperation = stencil };
+            ShaderPipelineCache.NormalizeStaticParameters(parameters, true);
+            return parameters;
+        }
+
+        Assert.Equal(Draw(0.1f, 4, GpuStencilOp.Keep), Draw(0.3f, 9, GpuStencilOp.Replace));
+        // What is switched on still tells draws apart.
+        Assert.NotEqual(Draw(0.1f, 4, GpuStencilOp.Keep, depthBounds: true), Draw(0.3f, 4, GpuStencilOp.Keep, depthBounds: true));
+        Assert.NotEqual(Draw(0.1f, 4, GpuStencilOp.Keep, blend: true), Draw(0.1f, 9, GpuStencilOp.Keep, blend: true));
+    }
+
+    [Fact]
+    public void GraphicsDescription_OfDrawsThatDifferOnlyInDisabledBlendFactors_IsOneKey()
+    {
+        PipelineStaticParameters Parameters(bool enable, byte sourceFactor)
+        {
+            var banks = Banks();
+            banks.Context.RenderTargetMask = 0xF;
+            banks.Context.BlendControls[0] = new BlendRegisters { Enable = enable, ColorSourceFactor = sourceFactor };
+            var programs = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = 0xF }));
+            var resolution = new ColorTargetResolution(
+                default, 0x1000, 0x10000, new GpuExtent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
+            ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
+            var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
+            rendering.ColorAttachments[0] = new RenderingAttachment(
+                default, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
+            return ShaderPipelineCache.BuildGraphicsDescription(
+                colors, default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+                programs.Vertex, programs.Pixel, GpuSampleCount.Count1Bit).StaticParameters;
+        }
+
+        Assert.Equal(Parameters(false, 5), Parameters(false, 9));
+        Assert.NotEqual(Parameters(true, 5), Parameters(true, 9));
+        Assert.NotEqual(Parameters(true, 5), Parameters(false, 5));
     }
 
     [Fact]

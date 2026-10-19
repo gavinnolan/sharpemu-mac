@@ -13,7 +13,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// (MetalShaderObjectCostTests): a Demon's Souls library is ~48 KB of footprint, its function
 /// ~1 KB, and a pipeline state ~10 KB of malloc for a small kernel (its binary, which the
 /// state keeps while either it or the function lives). The defaults bound the two to about
-/// 2048 x 48 KB + 2048 x 16 KB, ~130 MB, where they used to grow for as long as a title ran.
+/// 2048 x 48 KB + 8192 x 16 KB, ~224 MB, where they used to grow for as long as a title ran.
+/// Only the counts bound them by default: a UE5 title (Silent Hill) that was cut on idle time
+/// rebuilt 178 modules and 213 pipeline states on the GPU worker for ~35 MB of memory.
 /// </summary>
 /// <remarks>
 /// A released object is made again on its next use through the path that made it: a module
@@ -25,7 +27,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// <see cref="MinimumIdleSeconds"/> is released even over a limit, so a working set larger
 /// than the limit is kept rather than rebuilt every frame.
 /// SHARPEMU_METAL_V2_PIPELINE_LIMIT / _MODULE_LIMIT (count, 0 = no limit),
-/// SHARPEMU_METAL_V2_PIPELINE_IDLE_S / _MODULE_IDLE_S (seconds, 0 = kept however long idle);
+/// SHARPEMU_METAL_V2_PIPELINE_IDLE_S / _MODULE_IDLE_S (seconds, 0 = kept however long idle, the default);
 /// SHARPEMU_METAL_V2_SHADER_EVICTION=0 keeps everything, as before.
 /// </remarks>
 internal readonly record struct MetalShaderCacheLimits(
@@ -35,11 +37,14 @@ internal readonly record struct MetalShaderCacheLimits(
     double ModuleIdleSeconds,
     double MinimumIdleSeconds)
 {
-    public const int DefaultPipelines = 2048;
-    public const double DefaultPipelineIdleSeconds = 300;
+    public const int DefaultPipelines = 8192;
+    public const double DefaultPipelineIdleSeconds = 0;
     public const int DefaultModules = 2048;
-    public const double DefaultModuleIdleSeconds = 180;
+    public const double DefaultModuleIdleSeconds = 0;
     public const double DefaultMinimumIdleSeconds = 10;
+
+    // How long a prewarmed library no module took is held when the module idle time is off.
+    public const double PrewarmLibraryIdleSeconds = 180;
 
     // What the telemetry's estimate counts per resident object (the measurements above).
     public const long EstimatedModuleBytes = 48 * 1024;
@@ -99,6 +104,10 @@ internal sealed partial class MetalRenderHost
             Interlocked.Read(ref _pipelineEvictions), Interlocked.Read(ref _moduleEvictions),
             Interlocked.Read(ref _pipelineRebuilds), Interlocked.Read(ref _moduleRebuilds));
 
+    /// <summary>What the dedupe shared, and the distinct pipeline states and libraries alive, for tests.</summary>
+    internal (long PipelineDedups, long ModuleSameSource, int SharedStates, int SharedLibraries) DedupeCounters =>
+        (Interlocked.Read(ref _pipelineDedups), Interlocked.Read(ref _moduleSameSource), _states.Count, _libraries.Count);
+
     /// <summary>The newest command buffer that encoded a resident pipeline state, for tests.</summary>
     internal ulong NewestPipelineUseSerial =>
         _pipelineEntries.Values.Where(entry => entry.State != 0).Select(entry => entry.LastUsedSerial).DefaultIfEmpty().Max();
@@ -141,9 +150,11 @@ internal sealed partial class MetalRenderHost
         var pipelines = TrimPipelineStates(completed, now, limits);
         // A pipeline compiling on the pool reads its module's function there.
         var modules = PipelinesCompiling == 0 ? TrimModules(now, limits) : 0;
-        if (limits.ModuleIdleSeconds > 0)
+        if (limits.Enabled)
         {
-            MetalLibraryPrewarm.ReleaseIdle(now - SecondsToTicks(limits.ModuleIdleSeconds));
+            // A library the prewarm made and no module took is not a shader in use.
+            var prewarmIdle = limits.ModuleIdleSeconds > 0 ? limits.ModuleIdleSeconds : MetalShaderCacheLimits.PrewarmLibraryIdleSeconds;
+            MetalLibraryPrewarm.ReleaseIdle(now - SecondsToTicks(prewarmIdle));
         }
 
         return (pipelines, modules);
@@ -245,7 +256,7 @@ internal sealed partial class MetalRenderHost
 
     private void ReleasePipelineState(MetalPipelineEntry entry)
     {
-        MetalNative.SendVoid(entry.State, SelRelease);
+        ReleaseState(entry.State);
         if (entry.RectangleStates is { } rectangles)
         {
             // The first rectangle state is entry.State itself.
@@ -253,7 +264,7 @@ internal sealed partial class MetalRenderHost
             {
                 if (rectangles[index] != 0)
                 {
-                    MetalNative.SendVoid(rectangles[index], SelRelease);
+                    ReleaseState(rectangles[index]);
                 }
             }
 
@@ -275,11 +286,11 @@ internal sealed partial class MetalRenderHost
             }
 
             MetalNative.SendVoid(module.Function, SelRelease);
-            MetalNative.SendVoid(module.Library, SelRelease);
+            ReleaseLibrary(module.Library);
             if (module.RectangleFunction != 0)
             {
                 MetalNative.SendVoid(module.RectangleFunction, SelRelease);
-                MetalNative.SendVoid(module.RectangleLibrary, SelRelease);
+                ReleaseLibrary(module.RectangleLibrary);
             }
 
             Volatile.Write(ref module.Function, 0);
@@ -325,11 +336,8 @@ internal sealed partial class MetalRenderHost
                 description, vertexModule, pixelModule, entry.Mesh, rectangleList, Mtl.ControlPointIndexTypeNone, out _);
             if (rectangleList)
             {
+                // The indexed variants are made again when a draw asks for them.
                 entry.RectangleStates![0] = state;
-                entry.RectangleStates[1] = CreateRenderPipelineState(
-                    description, vertexModule, pixelModule, entry.Mesh, true, Mtl.ControlPointIndexTypeUInt16, out _);
-                entry.RectangleStates[2] = CreateRenderPipelineState(
-                    description, vertexModule, pixelModule, entry.Mesh, true, Mtl.ControlPointIndexTypeUInt32, out _);
             }
 
             entry.State = state;
@@ -364,7 +372,8 @@ internal sealed partial class MetalRenderHost
         return string.Create(CultureInfo.InvariantCulture,
             $"shader_modules={residentModules}/{modules} module_evictions={moduleEvictions} module_rebuilds={moduleRebuilds} " +
             $"pipeline_states={pipelines}/{_pipelineEntries.Count} pipeline_evictions={pipelineEvictions} " +
-            $"pipeline_rebuilds={pipelineRebuilds} depth_stencil_states={_depthStencilStates.Count} " +
+            $"pipeline_rebuilds={pipelineRebuilds} pipeline_dedup={Interlocked.Read(ref _pipelineDedups)} " +
+            $"module_same_source={Interlocked.Read(ref _moduleSameSource)} depth_stencil_states={_depthStencilStates.Count} " +
             $"prewarm_libraries={prewarmHeld} shader_cache_est_mb={estimated / Mb:F0}");
     }
 }

@@ -80,6 +80,11 @@ public interface IShaderPipelineHost
     // The device can blend with a second fragment output (dualSrcBlend).
     bool SupportsDualSourceBlend => false;
 
+    // The depth bounds test is part of the host's pipeline object (min, max and enable). A host
+    // that sets it as encoder state, or has no such test, answers false, and the bounds then stay
+    // out of the pipeline key instead of splitting one pipeline per bounds a draw happens to use.
+    bool DepthBoundsInPipelineState => true;
+
     // The sample counts a pipeline without attachments can rasterize at.
     GpuSampleCount NoAttachmentSampleCounts { get; }
 

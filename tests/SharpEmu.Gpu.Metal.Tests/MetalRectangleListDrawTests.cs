@@ -120,6 +120,77 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
         AssertHalf(pixels, 1, false);
     }
 
+    // The states for an indexed draw's control points are built by the first draw that uses
+    // them; an automatic rectangle list only ever builds the plain one.
+    [Fact]
+    public void AnIndexedRectangleStateIsBuiltByTheFirstDrawThatUsesIt()
+    {
+        if (!RequireDevice() || !MetalRenderHost.PipelineDedupe) return;
+        using var rig = new Rig(Device.Value, fetched: false);
+        Assert.Equal(0, rig.Host.DedupeCounters.SharedStates);
+
+        void Indexed(MetalRenderHost host)
+        {
+            rig.BindIndices(host, [4, 5, 3, 1, 2, 0]);
+            ((IRenderHost)host).DrawIndexed(6, 1, 0, 0, 0);
+        }
+
+        var automatic = rig.Render(host => host.Draw(6, 1, 0, 0));
+        AssertHalf(automatic, 0, true);
+        AssertHalf(automatic, 1, true);
+        Assert.Equal(1, rig.Host.DedupeCounters.SharedStates);
+
+        var indexed = rig.Render(Indexed);
+        AssertHalf(indexed, 0, true);
+        AssertHalf(indexed, 1, true);
+        Assert.Equal(2, rig.Host.DedupeCounters.SharedStates);
+
+        rig.Render(Indexed);
+        Assert.Equal(2, rig.Host.DedupeCounters.SharedStates);
+    }
+
+    // Pipelines that differ only in state Metal sets on the encoder build one descriptor: the
+    // second takes the first's state, and each library is compiled once for its source.
+    // Evicting one pipeline leaves the state the other draws with alive.
+    [Fact]
+    public void PipelinesOfOneDescriptorShareAStateThatOutlivesAnEvictedOwner()
+    {
+        if (!RequireDevice() || !MetalRenderHost.PipelineDedupe) return;
+        using var rig = new Rig(Device.Value, fetched: false, GpuPrimitiveTopology.TriangleList);
+        var clipped = rig.CreatePipeline();
+        var clamped = rig.CreatePipeline(depthClip: false);
+        var made = rig.Host.DedupeCounters;
+        Assert.Equal(2, made.SharedLibraries);
+        Assert.Equal(2, made.ModuleSameSource);
+        Assert.Equal(1, made.SharedStates);
+        Assert.Equal(1, made.PipelineDedups);
+        Assert.Equal(2, rig.Host.ShaderCacheCounters.ResidentPipelines);
+
+        void Draw(MetalRenderHost host) => host.Draw(3, 1, 0, 0);
+        var first = rig.Render(Draw, clipped);
+        Assert.Equal(first, rig.Render(Draw, clamped));
+        Assert.Equal(0xFF, first[(int)((((Height - 1) * Width) + 0) * 4) + 3]);
+
+        long AnHourFromNow() => System.Diagnostics.Stopwatch.GetTimestamp() + 3600 * System.Diagnostics.Stopwatch.Frequency;
+        var (evicted, _) = rig.Host.TrimShaderCache(rig.Host.CompletedSerial, AnHourFromNow(), new MetalShaderCacheLimits(1, 0, 0, 0, 0));
+        Assert.Equal(1, evicted);
+        Assert.Equal(1, rig.Host.ShaderCacheCounters.ResidentPipelines);
+        Assert.Equal(1, rig.Host.DedupeCounters.SharedStates);
+
+        // The survivor still draws, and the evicted one is made again from the same state.
+        Assert.Equal(first, rig.Render(Draw, clipped));
+        Assert.Equal(first, rig.Render(Draw, clamped));
+        Assert.Equal(2, rig.Host.ShaderCacheCounters.ResidentPipelines);
+        Assert.Equal(1, rig.Host.DedupeCounters.SharedStates);
+        Assert.Equal(2, rig.Host.DedupeCounters.PipelineDedups);
+
+        // Only the last owner's release lets the state go.
+        var (released, _) = rig.Host.TrimShaderCache(rig.Host.CompletedSerial, AnHourFromNow(), new MetalShaderCacheLimits(0, 1, 0, 1, 0));
+        Assert.Equal(2, released);
+        Assert.Equal(0, rig.Host.DedupeCounters.SharedStates);
+        Assert.Equal(0, rig.Host.DedupeCounters.SharedLibraries);
+    }
+
     private static void AssertHalf(byte[] pixels, uint half, bool filled)
     {
         for (var y = 0u; y < Height; y++)
@@ -272,7 +343,7 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
 
         public MetalRenderHost Host { get; }
 
-        public byte[] Render(Action<MetalRenderHost> draw)
+        public byte[] Render(Action<MetalRenderHost> draw, PipelineHandle? use = null)
         {
             var host = Host;
             using (host.BeginPreparation())
@@ -283,7 +354,7 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
                     request, TargetAddress, ImageBytes, new GpuExtent2D(Width, Height), 0, 0, 1, default, false, false, default);
                 var target = new ColorTargetState(in resolution, 0, image);
                 var attachment = ((IRenderHost)host).AcquireColorAttachment(in target);
-                var pipeline = _pipeline ??= CreatePipeline();
+                var pipeline = use ?? (_pipeline ??= CreatePipeline());
                 var rendering = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 1, Samples = 1 };
                 rendering.ColorAttachments[0] = new RenderingAttachment(
                     attachment.View, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
@@ -328,7 +399,7 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
             }
         }
 
-        private PipelineHandle CreatePipeline()
+        public PipelineHandle CreatePipeline(bool depthClip = true)
         {
             var vertex = new ShaderProgram(1, Host.CreateShaderModule(
                 new MetalCompiledGuestShader(new Gen5MslShader(VertexSource(_fetched), "gen5_vs", Gen5MslStage.Vertex, 1)),
@@ -341,6 +412,7 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
                 ColorCount = 1,
                 Topology = _topology,
                 Samples = 1,
+                DepthClipEnable = depthClip,
             };
             parameters.SetColorMask(0, 0xF);
             var rendering = new PipelineRenderingState { ColorCount = 1 };
