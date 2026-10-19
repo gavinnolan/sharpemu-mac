@@ -19,6 +19,11 @@ namespace SharpEmu.Gpu.Metal.V2;
 // completes, and a guest store that faults there waits for that completion before it lands.
 // The store then follows the writeback, as it followed the GPU's write on the hardware.
 //
+// A range written back again before the GPU reached the last writeback - a target flushed for
+// a binding on every draw - extends its fence to the newer submission rather than adding one,
+// and the fenced ranges share one page-guard watch per page (MetalPageWatchSet): the guard
+// counts at most 127 watches a page, and Silent Hill, 400 ms behind on the GPU, reached that.
+//
 // The wait never runs on the GPU worker (it would be waiting for itself), holds no cache lock,
 // asks the worker to commit a submission it is still recording, and gives up after
 // SHARPEMU_METAL_V2_WRITEBACK_FENCE_TIMEOUT_MS (250 ms) with a warning - a store that cannot
@@ -37,6 +42,7 @@ internal sealed partial class MetalImageCache
 
     private readonly object _fenceGate = new();
     private readonly List<FencedWriteback> _fencedWritebacks = [];
+    private MetalPageWatchSet? _fencedPages;
     private int _fencedWritebackCount;
     private long _fencedWritebacksAdded;
     private long _fenceWaits;
@@ -58,6 +64,13 @@ internal sealed partial class MetalImageCache
     /// <summary>Guest stores that waited for a writeback, and the waits that gave up.</summary>
     internal (long Waits, long Timeouts) FenceWaitCounts =>
         (Interlocked.Read(ref _fenceWaits), Interlocked.Read(ref _fenceTimeouts));
+
+    /// <summary>
+    /// The page guard's write watches held now (every watcher's, one per page each), and the
+    /// highest count one page reached since the last call; the guard fails past 127.
+    /// </summary>
+    public (long Live, int PeakPerPage) TakePageWatchCounters() =>
+        (_pages.LiveWriteWatches, _pages.TakePeakPageWriteWatches());
 
     /// <summary>The CHURN line's fence counters since the last call.</summary>
     public string TakeWritebackFenceCounters()
@@ -83,9 +96,24 @@ internal sealed partial class MetalImageCache
         lock (_fenceGate)
         {
             PruneFencedWritebacksLocked(_owner.CompletedSerial);
-            _pages.AddWatch(address, size, blockReads: false);
-            _fencedWritebacks.Add(new FencedWriteback(address, size, serial, cause));
-            Volatile.Write(ref _fencedWritebackCount, _fencedWritebacks.Count);
+            // Serials complete in order, so waiting for the newer writeback covers the older.
+            var index = _fencedWritebacks.Count - 1;
+            while (index >= 0 && (_fencedWritebacks[index].Address != address || _fencedWritebacks[index].Size != size))
+            {
+                index--;
+            }
+
+            if (index >= 0)
+            {
+                var entry = _fencedWritebacks[index];
+                _fencedWritebacks[index] = entry with { Serial = Math.Max(entry.Serial, serial), Cause = cause };
+            }
+            else
+            {
+                (_fencedPages ??= new MetalPageWatchSet(_pages)).Add(address, size);
+                _fencedWritebacks.Add(new FencedWriteback(address, size, serial, cause));
+                Volatile.Write(ref _fencedWritebackCount, _fencedWritebacks.Count);
+            }
         }
 
         Interlocked.Increment(ref _fencedWritebacksAdded);
@@ -113,7 +141,7 @@ internal sealed partial class MetalImageCache
             var entry = _fencedWritebacks[index];
             if (entry.Serial <= completed)
             {
-                _pages.RemoveWatch(entry.Address, entry.Size, blockReads: false);
+                _fencedPages!.Remove(entry.Address, entry.Size);
                 continue;
             }
 
@@ -135,7 +163,7 @@ internal sealed partial class MetalImageCache
             var entry = _fencedWritebacks[index];
             if (entry.Serial <= upToSerial && GuestRangeOverlap.Pages(entry.Address, entry.Size, address, size))
             {
-                _pages.RemoveWatch(entry.Address, entry.Size, blockReads: false);
+                _fencedPages!.Remove(entry.Address, entry.Size);
                 continue;
             }
 
@@ -216,11 +244,7 @@ internal sealed partial class MetalImageCache
     {
         lock (_fenceGate)
         {
-            foreach (var entry in _fencedWritebacks)
-            {
-                _pages.RemoveWatch(entry.Address, entry.Size, blockReads: false);
-            }
-
+            _fencedPages?.Clear();
             _fencedWritebacks.Clear();
             Volatile.Write(ref _fencedWritebackCount, 0);
         }

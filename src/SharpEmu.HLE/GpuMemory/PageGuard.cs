@@ -44,7 +44,7 @@ public sealed class PageGuard : IDisposable
             return GuestPageProtection.Read | GuestPageProtection.Write;
         }
 
-        public int ChangeWatchCount(int delta, bool isRead, ulong address)
+        public int ChangeWatchCount(int delta, bool isRead, ulong address, int writeWatchLimit)
         {
             if (isRead)
             {
@@ -72,7 +72,7 @@ public sealed class PageGuard : IDisposable
 
             if (delta == 1)
             {
-                if (WriteWatchCount == 0x7f)
+                if (WriteWatchCount >= writeWatchLimit)
                 {
                     OnFatal($"Cannot add a write watch. The count is at its limit at 0x{address:X16}.");
                 }
@@ -136,6 +136,21 @@ public sealed class PageGuard : IDisposable
     }
 
     public GuestPermissionLedger Permissions { get; } = new();
+
+    /// <summary>The most write watches one page holds: 7 bits of its count byte.</summary>
+    public const int MaxWriteWatchesPerPage = 0x7f;
+
+    // A test lowers it to reach the limit in a few watches.
+    internal int WriteWatchLimit { get; init; } = MaxWriteWatchesPerPage;
+
+    private long _liveWriteWatches;
+    private int _peakPageWriteWatches;
+
+    /// <summary>Write watches held now, one per watcher per page.</summary>
+    public long LiveWriteWatches => Interlocked.Read(ref _liveWriteWatches);
+
+    /// <summary>The highest write-watch count an add left on one page since the last call.</summary>
+    public int TakePeakPageWriteWatches() => Interlocked.Exchange(ref _peakPageWriteWatches, 0);
 
     public void Dispose()
     {
@@ -330,6 +345,8 @@ public sealed class PageGuard : IDisposable
         var rangeBegin = 0;
         var rangeBytes = 0UL;
         var potentialRangeBytes = 0UL;
+        var writeWatchDelta = 0L;
+        var peakWriteWatches = 0;
 
         void ReleasePending()
         {
@@ -349,7 +366,13 @@ public sealed class PageGuard : IDisposable
 
             var guest = Permissions.Lookup(address);
             var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
-            var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address);
+            var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address, WriteWatchLimit);
+            if (update && !isRead)
+            {
+                writeWatchDelta += track ? 1 : -1;
+                if (track) peakWriteWatches = Math.Max(peakWriteWatches, newCount);
+            }
+
             var newAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
             if (update && block.WriteRestorations is { } restorations)
             {
@@ -398,6 +421,20 @@ public sealed class PageGuard : IDisposable
         }
 
         ReleasePending();
+        if (writeWatchDelta != 0)
+        {
+            Interlocked.Add(ref _liveWriteWatches, writeWatchDelta);
+        }
+
+        for (var peak = Volatile.Read(ref _peakPageWriteWatches);
+             peakWriteWatches > peak;
+             peak = Volatile.Read(ref _peakPageWriteWatches))
+        {
+            if (Interlocked.CompareExchange(ref _peakPageWriteWatches, peakWriteWatches, peak) == peak)
+            {
+                break;
+            }
+        }
     }
 
     private void UpdatePages(ulong address, ulong size, bool track, bool isRead)

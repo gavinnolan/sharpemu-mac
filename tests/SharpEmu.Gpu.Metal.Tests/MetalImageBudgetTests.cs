@@ -438,7 +438,11 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
     {
         public nint Device => harness.Device;
         public ulong CurrentSerial => harness.SubmissionSerial;
-        public ulong CompletedSerial => harness.CompletedSerial;
+        public ulong CompletedSerial => CompletedOverride ?? harness.CompletedSerial;
+
+        // A GPU running behind: submissions past this serial have not completed yet.
+        public ulong? CompletedOverride { get; set; }
+
         public IMetalSubmissionContext BeginTransfer(MetalTransferCause cause) => harness;
         public bool HasPendingGpuWrite(ulong address, ulong size) => false;
         public void FillGuestRange(ulong address, ulong size, uint value) { }
@@ -467,12 +471,12 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         private readonly bool _savedLinearViews = MetalLinearWindowView.Enabled;
         private long _now = 1000 * Stopwatch.Frequency;
 
-        public Rig(nint device)
+        public Rig(nint device, int writeWatchLimit = PageGuard.MaxWriteWatchesPerPage)
         {
             MetalLinearWindowView.Enabled = false;
             Harness = new MetalTransferHarness(device);
             Harness.Begin();
-            _pages = new PageGuard(_space);
+            _pages = NewPageGuard(_space, writeWatchLimit);
             _memory = new MetalGuestMemory(device, _backing, new NoMemory());
             CacheOwner = new Owner(Harness);
             Cache = new MetalImageCache(CacheOwner, Harness.Transfer, _memory, _pages, _backing);
