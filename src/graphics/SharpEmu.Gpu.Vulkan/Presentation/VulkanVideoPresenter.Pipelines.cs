@@ -125,6 +125,9 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.ClipDistanceEnabled => _supportsShaderClipDistance;
         bool IShaderPipelineHost.SupportsDualSourceBlend => _supportsDualSourceBlend;
 
+        // The pipeline's depth bounds state is only read with the feature (CreateRenderPipeline).
+        bool IShaderPipelineHost.DepthBoundsInPipelineState => _supportsDepthBounds;
+
         bool IShaderPipelineHost.MeshShadersSupported => _supportsMeshShader;
 
         MeshShaderLimits IShaderPipelineHost.MeshLimits => _meshShaderLimits;
