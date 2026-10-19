@@ -704,7 +704,9 @@ internal sealed partial class MetalRenderHost
             using var runtime = MetalCompileScheduler.Shared.Runtime();
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var archive = MetalBinaryArchive.For(_device);
-            var archives = archive?.AcquirePipelineArchives() ?? 0;
+            var vertexArchiveKey = rectangleList ? vertexModule.RectangleArchiveKey : vertexModule.ArchiveKey;
+            var pixelArchiveKey = pixelModule?.ArchiveKey ?? default;
+            var archives = archive?.AcquirePipelineArchives(vertexArchiveKey, pixelArchiveKey) ?? 0;
             state = 0;
             if (archives != 0)
             {
@@ -715,6 +717,11 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendVoid(archives, SelRelease);
                 archive!.NotePipelineLookup(state != 0);
                 error = 0;
+            }
+            else
+            {
+                // No segment holds the shader pair.
+                archive?.NotePipelineLookup(false);
             }
 
             var missed = state == 0;
@@ -729,8 +736,8 @@ internal sealed partial class MetalRenderHost
                 archive.NoteRenderPipeline(
                     descriptor,
                     mesh is null ? MetalBinaryArchive.PipelineKind.Render : MetalBinaryArchive.PipelineKind.Mesh,
-                    rectangleList ? vertexModule.RectangleArchiveKey : vertexModule.ArchiveKey,
-                    pixelModule?.ArchiveKey ?? default,
+                    vertexArchiveKey,
+                    pixelArchiveKey,
                     missed);
             }
 

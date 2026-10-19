@@ -34,19 +34,28 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// change only misses the libraries whose MSL it changed.</item>
 /// <item>Render pipelines. Pipelines no loaded archive had are added to a segment
 /// (pipelines-STAMP-SEQ.mtla, a new one every <see cref="SegmentBytes"/>) that is serialized
-/// off the GPU worker, every <see cref="FlushInterval"/> and at shutdown. The next start
-/// loads the newest segments of the same translator stamp, up to
-/// <see cref="ResidentSegmentBytes"/>: an open archive is read into memory whole (33 MB of
-/// footprint for a 28 MB file). Pipeline creation asks them first with
-/// FailOnBinaryArchiveMiss and compiles only on a miss: 0.2-0.6 ms against 7-21 ms.</item>
+/// off the GPU worker, every <see cref="FlushInterval"/> and at shutdown. An open archive is
+/// read into memory whole (33 MB of footprint for a 28 MB file) and a title's segments add up
+/// to hundreds of MB, so the next start opens none of them: each segment ends in the list of
+/// shader pairs (vertex or mesh library key, pixel library key) of its pipelines, read from
+/// the file's tail, and a pipeline creation opens the segments of its pair when it asks, the
+/// least recently used closing again past <see cref="ResidentSegmentBytes"/>. It asks them
+/// with FailOnBinaryArchiveMiss and compiles only on a miss: 0.2-0.6 ms against 7-21 ms.</item>
 /// </list>
 ///
 /// Every file ends in a trailer (magic, format, payload length, XxHash64 of the payload);
 /// Metal ignores bytes past the slices, and a file whose trailer does not match is deleted
 /// unread: a truncated archive still opens as a library, and a flipped byte goes unnoticed
 /// by Metal. A directory written for another device, OS or format is removed at start. The
-/// files are bounded to <see cref="DiskBudgetBytes"/>, least recently used first.
+/// files are bounded to <see cref="DiskBudgetBytes"/>, least recently used first (a segment
+/// is used when it is opened).
 /// SHARPEMU_METAL_V2_BINARY_ARCHIVE=0 turns it off.
+///
+/// The archiver packs a whole archive or none: one pipeline it refuses fails the
+/// serialization of every pipeline in the segment, so a failed segment is searched for the
+/// pipelines it refuses (<see cref="RebuildWithoutRefused"/>) and written without them.
+/// serializeToURL also reports success and writes nothing when an archive is unchanged since
+/// its last serialization, which is what adding a pipeline it already holds leaves it.
 /// </summary>
 internal sealed partial class MetalBinaryArchive : IDisposable
 {
@@ -59,6 +68,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     internal const int TrailerBytes = 24;
     internal static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(15);
     private const uint TrailerMagic = 0x41424553; // "SEBA"
+    private const uint IndexMagic = 0x58444953; // "SIDX"
     private const int FlushAfterPipelines = 64;
 
     // A queued capture keeps its descriptor's functions alive; past this many the newest
@@ -91,7 +101,20 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     private readonly record struct Job(
         JobKind Kind, PipelineKind Pipeline, nint Descriptor, UInt128 Key0, UInt128 Key1, bool AddToSegment,
-        ManualResetEventSlim? Done);
+        ManualResetEventSlim? Done, ulong Pair = 0);
+
+    // A pipeline of the current segment, retained to search the segment when the archiver
+    // refuses one of them.
+    private readonly record struct SegmentEntry(PipelineKind Kind, nint Descriptor, ulong Pair);
+
+    private sealed class ResidentSegment(nint archive, long bytes)
+    {
+        public nint Archive { get; } = archive;
+
+        public long Bytes { get; } = bytes;
+
+        public long Tick { get; set; }
+    }
 
     private static MetalBinaryArchive? _current;
     private static int _exitHooked;
@@ -109,13 +132,24 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private readonly ManualResetEventSlim _loaded = new(false);
     private readonly object _archivesLock = new();
     private readonly object _trimLock = new();
-    private nint _pipelineArchives;
+
+    // The segments on disk by shader pair, newest first, and the ones open now; under
+    // _archivesLock.
+    private readonly Dictionary<ulong, List<int>> _segmentsByPair = new();
+    private readonly Dictionary<int, ResidentSegment> _resident = new();
+    private long _residentBytes;
+    private long _residentTick;
     private int _disposed;
 
     // The writer thread's own.
     private nint _segment;
     private int _segmentSequence;
     private int _segmentDirty;
+    private int _segmentPipelines;
+    private long _segmentBytes;
+    private long _bytesPerPipeline;
+    private readonly List<SegmentEntry> _segmentEntries = [];
+    private readonly HashSet<ulong> _segmentPairs = [];
     private long _lastFlushTicks;
     private long _writtenSinceTrim;
 
@@ -127,6 +161,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private int _pipelineMisses;
     private int _pipelinesAdded;
     private int _loadedSegments;
+    private int _segmentsOpened;
+    private int _pipelinesRefused;
     private int _librariesStored;
     private long _libraryBytesStored;
     private long _loadedSegmentBytes;
@@ -157,6 +193,17 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     /// <summary>The device, OS and format directory, for tests.</summary>
     internal string Directory => _directory;
+
+    /// <summary>What the open segments may add up to; for tests.</summary>
+    internal long ResidentLimit { get; set; } = ResidentSegmentBytes;
+
+    /// <summary>Segments opened for a pipeline lookup and pipelines the archiver refused, for tests.</summary>
+    internal (int SegmentsOpened, int PipelinesRefused) SegmentCounters =>
+        (Volatile.Read(ref _segmentsOpened), Volatile.Read(ref _pipelinesRefused));
+
+    /// <summary>The descriptors the archiver is taken to refuse, for tests: the real refusals
+    /// cannot be made on demand.</summary>
+    internal Func<nint, bool>? RefusedByArchiver { get; set; }
 
     public (int LibraryHits, int LibraryMisses, int Rejected, int LibrariesWritten,
         int PipelineHits, int PipelineMisses, int PipelinesAdded, int LoadedSegments) Counters =>
@@ -315,21 +362,52 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         key != default && _known.ContainsKey(key) ? OpenArchive(LibraryPath(key)) : 0;
 
     /// <summary>
-    /// The loaded pipeline segments as an NSArray for a descriptor's binaryArchives,
-    /// retained for the caller, or zero before they are loaded or when there are none.
+    /// The segments holding pipelines of the shader pair as an NSArray for a descriptor's
+    /// binaryArchives, retained for the caller, or zero before the segments are listed or
+    /// when none holds the pair. Opens the ones that are closed (reading each whole).
     /// </summary>
-    public nint AcquirePipelineArchives()
+    public nint AcquirePipelineArchives(UInt128 vertexKey, UInt128 pixelKey)
     {
+        if (!_loaded.IsSet)
+        {
+            return 0;
+        }
+
+        var pair = PairKey(vertexKey, pixelKey);
         lock (_archivesLock)
         {
-            if (_pipelineArchives == 0)
+            if (Volatile.Read(ref _disposed) != 0 || !_segmentsByPair.TryGetValue(pair, out var sequences))
             {
                 return 0;
             }
 
-            MetalNative.Send(_pipelineArchives, SelRetain);
-            return _pipelineArchives;
+            var array = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSMutableArray"), SelAlloc), SelInit);
+            var added = 0;
+            foreach (var sequence in sequences.ToArray())
+            {
+                var archive = OpenSegment(sequence, sequences);
+                if (archive != 0)
+                {
+                    MetalNative.SendVoid(array, MetalNative.Selector("addObject:"), archive);
+                    added++;
+                }
+            }
+
+            if (added == 0)
+            {
+                MetalNative.SendVoid(array, SelRelease);
+                return 0;
+            }
+
+            return array;
         }
+    }
+
+    /// <summary>The key a shader pair is listed under in a segment's tail.</summary>
+    internal static ulong PairKey(UInt128 vertexKey, UInt128 pixelKey)
+    {
+        Span<UInt128> keys = [vertexKey, pixelKey];
+        return XxHash3.HashToUInt64(MemoryMarshal.AsBytes(keys));
     }
 
     /// <summary>Counts a pipeline created from (or missed by) an archive.</summary>
@@ -445,7 +523,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         MetalNative.Send(descriptor, SelRetain);
-        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null)))
+        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelKey))))
         {
             MetalNative.SendVoid(descriptor, SelRelease);
             Forget(vertex);
@@ -486,18 +564,22 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
         lock (_archivesLock)
         {
-            if (_pipelineArchives != 0)
+            foreach (var segment in _resident.Values)
             {
-                MetalNative.SendVoid(_pipelineArchives, SelRelease);
-                _pipelineArchives = 0;
+                MetalNative.SendVoid(segment.Archive, SelRelease);
             }
+
+            _resident.Clear();
+            _residentBytes = 0;
+            _segmentsByPair.Clear();
         }
 
         var (hits, misses, rejected, written, pipelineHits, pipelineMisses, added, segments) = Counters;
         Console.Error.WriteLine(
             $"[METAL-V2][ARCHIVE] closed library_hits={hits} library_misses={misses} rejected={rejected} " +
             $"libraries_written={written} pipeline_hits={pipelineHits} pipeline_misses={pipelineMisses} " +
-            $"pipelines_added={added} segments_loaded={segments}");
+            $"pipelines_added={added} pipelines_refused={Volatile.Read(ref _pipelinesRefused)} " +
+            $"segments_listed={segments} segments_opened={Volatile.Read(ref _segmentsOpened)}");
     }
 
     private bool NeedsLibrary(UInt128 key) =>
@@ -608,7 +690,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                 }
 
                 if (_segmentDirty != 0 &&
-                    (_segmentDirty >= FlushAfterPipelines ||
+                    (_segmentDirty >= FlushThreshold() ||
                      Stopwatch.GetElapsedTime(_lastFlushTicks) >= FlushInterval))
                 {
                     using (MetalAutoreleasePool.Enter())
@@ -628,8 +710,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             FlushSegment();
             if (_segment != 0)
             {
-                MetalNative.SendVoid(_segment, SelRelease);
-                _segment = 0;
+                CloseSegment();
             }
         }
     }
@@ -646,7 +727,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
             if (job.AddToSegment)
             {
-                AddToSegment(job.Pipeline, job.Descriptor);
+                AddToSegment(job.Pipeline, job.Descriptor, job.Pair);
             }
 
             if (job.Key0 != default || job.Key1 != default)
@@ -671,7 +752,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
-    private void AddToSegment(PipelineKind kind, nint descriptor)
+    private void AddToSegment(PipelineKind kind, nint descriptor, ulong pair)
     {
         if (_segment == 0)
         {
@@ -684,10 +765,22 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
         if (Add(_segment, kind, descriptor))
         {
+            MetalNative.Send(descriptor, SelRetain);
+            _segmentEntries.Add(new SegmentEntry(kind, descriptor, pair));
+            _segmentPairs.Add(pair);
+            _segmentPipelines++;
             _segmentDirty++;
             Interlocked.Increment(ref _pipelinesAdded);
         }
     }
+
+    // A flush also serializes what was added since the last one, so it is sized by what the
+    // pipelines took so far: a segment ends within a few pipelines of SegmentBytes instead of
+    // a flush interval's worth past it.
+    private int FlushThreshold() =>
+        _bytesPerPipeline <= 0
+            ? FlushAfterPipelines
+            : (int)Math.Clamp((SegmentBytes - _segmentBytes) / _bytesPerPipeline, 1, FlushAfterPipelines);
 
     private void FlushSegment()
     {
@@ -699,17 +792,197 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
         _segmentDirty = 0;
         var path = SegmentPath(_segmentSequence);
-        var bytes = Serialize(_segment, path);
+        var bytes = WriteSegment(_segment, _segmentEntries, path);
+        if (bytes < 0)
+        {
+            bytes = RebuildWithoutRefused(path);
+        }
+
         if (bytes < 0 || bytes >= SegmentBytes)
         {
             // Full (or unwritable): the next pipeline starts the next segment, and this
             // one's memory goes with its archive.
-            MetalNative.SendVoid(_segment, SelRelease);
-            _segment = 0;
-            _segmentSequence++;
+            CloseSegment();
+        }
+        else
+        {
+            _segmentBytes = bytes;
+            _bytesPerPipeline = Math.Max(bytes / Math.Max(_segmentPipelines, 1), 1);
         }
 
         NoteWritten(Math.Max(bytes, 0));
+    }
+
+    private void CloseSegment()
+    {
+        MetalNative.SendVoid(_segment, SelRelease);
+        _segment = 0;
+        ReleaseEntries(_segmentEntries);
+        _segmentEntries.Clear();
+        _segmentPairs.Clear();
+        _segmentPipelines = 0;
+        _segmentBytes = 0;
+        _segmentSequence++;
+    }
+
+    private static void ReleaseEntries(List<SegmentEntry> entries)
+    {
+        foreach (var entry in entries)
+        {
+            MetalNative.SendVoid(entry.Descriptor, SelRelease);
+        }
+    }
+
+    // The archiver packs all the pipelines of an archive or none. Tests stand in for the
+    // pipelines it refuses.
+    private long WriteSegment(nint archive, List<SegmentEntry> entries, string path)
+    {
+        if (RefusedByArchiver is { } refused && entries.Exists(entry => refused(entry.Descriptor)))
+        {
+            Console.Error.WriteLine("[METAL-V2][ARCHIVE][WARN] An archive could not be written: a pipeline was refused.");
+            return -1;
+        }
+
+        return Serialize(archive, path, entries.Select(static entry => entry.Pair).Distinct().ToArray());
+    }
+
+    /// <summary>
+    /// Writes the current segment again without the pipelines the archiver refuses, found by
+    /// halves: the pipelines of the other half are archived again (the driver has them cached)
+    /// into archives of their own and written to a scratch file. The refused are described once
+    /// and dropped; the segment goes on from the archive made without them. The segment's
+    /// length, or -1 when none of it could be written.
+    /// </summary>
+    private long RebuildWithoutRefused(string path)
+    {
+        var entries = _segmentEntries.ToArray();
+        var refused = new List<SegmentEntry>();
+        FindRefused(entries, 0, entries.Length, path + ".probe", refused);
+        TryDelete(path + ".probe");
+        if (refused.Count == 0)
+        {
+            return -1;
+        }
+
+        var good = entries.Where(entry => !refused.Contains(entry)).ToList();
+        foreach (var entry in refused)
+        {
+            Console.Error.WriteLine($"[METAL-V2][ARCHIVE][WARN] The archiver refused a pipeline, which is not stored: {Describe(entry)}");
+        }
+
+        Interlocked.Add(ref _pipelinesRefused, refused.Count);
+        var archive = good.Count == 0 ? 0 : NewArchive(null);
+        long bytes = -1;
+        if (archive != 0)
+        {
+            foreach (var entry in good)
+            {
+                Add(archive, entry.Kind, entry.Descriptor);
+            }
+
+            bytes = WriteSegment(archive, good, path);
+        }
+
+        if (bytes < 0)
+        {
+            if (archive != 0)
+            {
+                MetalNative.SendVoid(archive, SelRelease);
+            }
+
+            return -1;
+        }
+
+        MetalNative.SendVoid(_segment, SelRelease);
+        _segment = archive;
+        ReleaseEntries(refused);
+        _segmentEntries.Clear();
+        _segmentEntries.AddRange(good);
+        _segmentPairs.Clear();
+        _segmentPairs.UnionWith(good.Select(static entry => entry.Pair));
+        _segmentPipelines = good.Count;
+        return bytes;
+    }
+
+    // Narrows entries[start..start + count], which do not archive as a whole, to the ones
+    // that do not archive alone.
+    private void FindRefused(SegmentEntry[] entries, int start, int count, string probe, List<SegmentEntry> refused)
+    {
+        if (count == 1)
+        {
+            refused.Add(entries[start]);
+            return;
+        }
+
+        var half = count / 2;
+        if (!Archives(entries, start, half, probe))
+        {
+            FindRefused(entries, start, half, probe, refused);
+        }
+
+        if (!Archives(entries, start + half, count - half, probe))
+        {
+            FindRefused(entries, start + half, count - half, probe, refused);
+        }
+    }
+
+    private bool Archives(SegmentEntry[] entries, int start, int count, string probe)
+    {
+        if (RefusedByArchiver is { } refused && entries.Skip(start).Take(count).Any(entry => refused(entry.Descriptor)))
+        {
+            return false;
+        }
+
+        var archive = NewArchive(null);
+        if (archive == 0)
+        {
+            return true;
+        }
+
+        try
+        {
+            for (var index = start; index < start + count; index++)
+            {
+                Add(archive, entries[index].Kind, entries[index].Descriptor);
+            }
+
+            return Serialize(archive, probe, null, quiet: true) >= 0;
+        }
+        finally
+        {
+            MetalNative.SendVoid(archive, SelRelease);
+        }
+    }
+
+    // What tells a refused pipeline apart: its stages and the attachments it draws to.
+    private static string Describe(SegmentEntry entry)
+    {
+        static string Name(nint descriptor, string selector)
+        {
+            var function = MetalNative.Send(descriptor, MetalNative.Selector(selector));
+            return function == 0 ? "none" : MetalNative.ReadNsString(MetalNative.Send(function, MetalNative.Selector("name"))) ?? "?";
+        }
+
+        var descriptor = entry.Descriptor;
+        var colors = MetalNative.Send(descriptor, MetalNative.Selector("colorAttachments"));
+        var formats = new List<string>();
+        for (nuint index = 0; index < 8; index++)
+        {
+            var format = MetalNative.SendUInteger(
+                MetalNative.SendAtIndex(colors, MetalNative.Selector("objectAtIndexedSubscript:"), index),
+                MetalNative.Selector("pixelFormat"));
+            if (format != 0)
+            {
+                formats.Add($"{index}:{format}");
+            }
+        }
+
+        return $"{entry.Kind} {(entry.Kind == PipelineKind.Mesh ? "mesh" : "vertex")}=" +
+               $"{Name(descriptor, entry.Kind == PipelineKind.Mesh ? "meshFunction" : "vertexFunction")} " +
+               $"fragment={Name(descriptor, "fragmentFunction")} colors=[{string.Join(' ', formats)}] " +
+               $"depth={MetalNative.SendUInteger(descriptor, MetalNative.Selector("depthAttachmentPixelFormat"))} " +
+               $"stencil={MetalNative.SendUInteger(descriptor, MetalNative.Selector("stencilAttachmentPixelFormat"))} " +
+               $"samples={MetalNative.SendUInteger(descriptor, MetalNative.Selector(entry.Kind == PipelineKind.Mesh ? "rasterSampleCount" : "sampleCount"))}";
     }
 
     private void WriteLibraries(PipelineKind kind, nint descriptor, UInt128 first, UInt128 second)
@@ -813,56 +1086,112 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
         segments.Sort(static (left, right) => right.Sequence.CompareTo(left.Sequence));
         _segmentSequence = segments.Count == 0 ? 0 : segments[0].Sequence + 1;
-        var array = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSMutableArray"), SelAlloc), SelInit);
-        long resident = 0;
-        var loaded = 0;
-        foreach (var (_, path) in segments)
+        long listedBytes = 0;
+        var listed = 0;
+        foreach (var (sequence, path) in segments)
         {
-            if (!TryVerify(path, out var length))
+            if (!TryReadPairs(path, out var pairs, out var length))
             {
+                // Not a segment of this format, or one written before segments listed their
+                // pairs: nothing says what it holds.
                 Interlocked.Increment(ref _rejected);
                 TryDelete(path);
                 continue;
             }
 
-            if (resident + length > ResidentSegmentBytes)
-            {
-                // Past what is kept open: the oldest go first.
-                TryDelete(path);
-                continue;
-            }
-
-            var archive = OpenArchive(path);
-            if (archive == 0)
-            {
-                Interlocked.Increment(ref _rejected);
-                TryDelete(path);
-                continue;
-            }
-
-            MetalNative.SendVoid(array, MetalNative.Selector("addObject:"), archive);
-            MetalNative.SendVoid(archive, SelRelease);
-            resident += length;
-            loaded++;
-        }
-
-        _loadedSegments = loaded;
-        _loadedSegmentBytes = resident;
-        if (loaded == 0)
-        {
-            MetalNative.SendVoid(array, SelRelease);
-        }
-        else
-        {
             lock (_archivesLock)
             {
-                _pipelineArchives = array;
+                foreach (var pair in pairs)
+                {
+                    if (!_segmentsByPair.TryGetValue(pair, out var sequences))
+                    {
+                        _segmentsByPair[pair] = sequences = [];
+                    }
+
+                    // Newest first, as the segments are taken.
+                    sequences.Add(sequence);
+                }
             }
+
+            listedBytes += length;
+            listed++;
         }
 
+        _loadedSegments = listed;
+        _loadedSegmentBytes = listedBytes;
         Console.Error.WriteLine(
-            $"[METAL-V2][ARCHIVE] opened {_directory} libraries={_known.Count} segments={loaded} " +
-            $"segment_mb={resident / 1048576.0:F1}");
+            $"[METAL-V2][ARCHIVE] opened {_directory} libraries={_known.Count} segments={listed} " +
+            $"segment_mb={listedBytes / 1048576.0:F1}");
+    }
+
+    // Under _archivesLock. Opens a segment for a lookup, closing the least recently used
+    // past ResidentLimit (never the ones of the lookup: they are in wanted); zero when its
+    // file does not check out any more.
+    private nint OpenSegment(int sequence, List<int> wanted)
+    {
+        if (_resident.TryGetValue(sequence, out var open))
+        {
+            open.Tick = ++_residentTick;
+            return open.Archive;
+        }
+
+        var path = SegmentPath(sequence);
+        if (!TryVerify(path, out var length))
+        {
+            Interlocked.Increment(ref _rejected);
+            DropSegment(sequence, path);
+            return 0;
+        }
+
+        while (_residentBytes + length > ResidentLimit)
+        {
+            var victim = -1;
+            var oldest = long.MaxValue;
+            foreach (var (key, segment) in _resident)
+            {
+                if (segment.Tick < oldest && !wanted.Contains(key))
+                {
+                    victim = key;
+                    oldest = segment.Tick;
+                }
+            }
+
+            if (victim < 0)
+            {
+                break;
+            }
+
+            MetalNative.SendVoid(_resident[victim].Archive, SelRelease);
+            _residentBytes -= _resident[victim].Bytes;
+            _resident.Remove(victim);
+        }
+
+        var archive = OpenArchive(path);
+        if (archive == 0)
+        {
+            Interlocked.Increment(ref _rejected);
+            DropSegment(sequence, path);
+            return 0;
+        }
+
+        _resident[sequence] = new ResidentSegment(archive, length) { Tick = ++_residentTick };
+        _residentBytes += length;
+        Interlocked.Increment(ref _segmentsOpened);
+        Touch(path);
+        return archive;
+    }
+
+    private void DropSegment(int sequence, string path)
+    {
+        TryDelete(path);
+        foreach (var pair in _segmentsByPair.Where(entry => entry.Value.Contains(sequence)).Select(static entry => entry.Key).ToArray())
+        {
+            _segmentsByPair[pair].Remove(sequence);
+            if (_segmentsByPair[pair].Count == 0)
+            {
+                _segmentsByPair.Remove(pair);
+            }
+        }
     }
 
     // The writer's and the static precompile's threads (StoreLibrary).
@@ -960,22 +1289,34 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
-    // Serializes to a temporary name, appends the trailer and moves it into place, so a
-    // reader never sees a half-written file. The final length, or -1.
-    private long Serialize(nint archive, string path)
+    // Serializes to a temporary name, appends the trailer (and the pairs of a segment) and
+    // moves it into place, so a reader never sees a half-written file. The final length, or -1.
+    private long Serialize(nint archive, string path, ulong[]? pairs = null, bool quiet = false)
     {
         var temporary = $"{path}.{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}.tmp";
         nint error = 0;
         if (!SendBoolError(archive, MetalNative.Selector("serializeToURL:error:"), FileUrl(temporary), ref error))
         {
-            Console.Error.WriteLine($"[METAL-V2][ARCHIVE][WARN] An archive could not be written: {MetalNative.DescribeError(error)}");
+            if (!quiet)
+            {
+                Console.Error.WriteLine($"[METAL-V2][ARCHIVE][WARN] An archive could not be written: {MetalNative.DescribeError(error)}");
+            }
+
             TryDelete(temporary);
             return -1;
         }
 
+        if (!File.Exists(temporary))
+        {
+            // Success with no file: the archive holds what it held when it was last
+            // serialized (the pipeline it was given again was in it already), and that file
+            // is still there.
+            return File.Exists(path) ? new FileInfo(path).Length : -1;
+        }
+
         try
         {
-            AppendTrailer(temporary);
+            AppendTrailer(temporary, pairs);
             File.Move(temporary, path, overwrite: true);
             return new FileInfo(path).Length;
         }
@@ -987,14 +1328,89 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
-    /// <summary>Appends the trailer that <see cref="TryVerify"/> checks to a serialized archive.</summary>
-    internal static void AppendTrailer(string path)
+    /// <summary>
+    /// Appends the trailer that <see cref="TryVerify"/> checks to a serialized archive; a
+    /// segment's first lists the shader pairs of its pipelines (<see cref="TryReadPairs"/>) in
+    /// the bytes the trailer covers.
+    /// </summary>
+    internal static void AppendTrailer(string path, IReadOnlyCollection<ulong>? pairs = null)
     {
-        var payload = File.ReadAllBytes(path);
+        var file = File.ReadAllBytes(path);
+        var payload = file;
+        if (pairs is { Count: > 0 })
+        {
+            payload = new byte[file.Length + pairs.Count * 8 + 8];
+            file.CopyTo(payload, 0);
+            var tail = payload.AsSpan(file.Length);
+            var offset = 0;
+            foreach (var pair in pairs)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(tail[offset..], pair);
+                offset += 8;
+            }
+
+            BinaryPrimitives.WriteUInt32LittleEndian(tail[offset..], (uint)pairs.Count);
+            BinaryPrimitives.WriteUInt32LittleEndian(tail[(offset + 4)..], IndexMagic);
+        }
+
         Span<byte> trailer = stackalloc byte[TrailerBytes];
         WriteTrailer(payload, trailer);
         using var stream = new FileStream(path, FileMode.Append, FileAccess.Write);
+        stream.Write(payload.AsSpan(file.Length));
         stream.Write(trailer);
+    }
+
+    /// <summary>
+    /// The shader pairs a segment lists, read from the end of the file without checking the
+    /// rest (<see cref="TryVerify"/> does when the segment is opened); false when the tail is
+    /// not a trailer after a list.
+    /// </summary>
+    internal static bool TryReadPairs(string path, out ulong[] pairs, out long length)
+    {
+        pairs = [];
+        length = 0;
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            length = stream.Length;
+            Span<byte> tail = stackalloc byte[TrailerBytes + 8];
+            if (length < tail.Length)
+            {
+                return false;
+            }
+
+            stream.Seek(-tail.Length, SeekOrigin.End);
+            stream.ReadExactly(tail);
+            var trailer = tail[8..];
+            if (BinaryPrimitives.ReadUInt32LittleEndian(trailer) != TrailerMagic ||
+                BinaryPrimitives.ReadUInt32LittleEndian(trailer[4..]) != FormatVersion ||
+                BinaryPrimitives.ReadInt64LittleEndian(trailer[8..]) != length - TrailerBytes ||
+                BinaryPrimitives.ReadUInt32LittleEndian(tail[4..]) != IndexMagic)
+            {
+                return false;
+            }
+
+            var count = BinaryPrimitives.ReadUInt32LittleEndian(tail);
+            if (count == 0 || count * 8L + tail.Length > length)
+            {
+                return false;
+            }
+
+            var keys = new byte[count * 8];
+            stream.Seek(-(tail.Length + keys.Length), SeekOrigin.End);
+            stream.ReadExactly(keys);
+            pairs = new ulong[count];
+            for (var index = 0; index < pairs.Length; index++)
+            {
+                pairs[index] = BinaryPrimitives.ReadUInt64LittleEndian(keys.AsSpan(index * 8));
+            }
+
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     internal static void WriteTrailer(ReadOnlySpan<byte> payload, Span<byte> trailer)
