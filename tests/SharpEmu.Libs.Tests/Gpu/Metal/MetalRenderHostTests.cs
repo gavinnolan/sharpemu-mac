@@ -5,10 +5,11 @@ using System.Reflection;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.Libs.Gpu.Metal;
+using SharpEmu.Gpu.Metal;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Images;
@@ -26,7 +27,7 @@ namespace SharpEmu.Libs.Tests.Gpu.Metal;
 // The executor over the Metal host with a recording backend: the copied draw record, its stage bindings,
 // the device-address ranges and the global data share transfers it submits.
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalRenderHostTests : IDisposable
+public sealed partial class MetalRenderHostTests : IDisposable
 {
     private const ulong MemoryBase = 0x1_0000_0000;
     private const int MemorySize = 0x10_0000;
@@ -104,7 +105,7 @@ public sealed class MetalRenderHostTests : IDisposable
 
     private static uint[] BufferWords(ulong address, uint bytes) => [unchecked((uint)address), (uint)(address >> 32), bytes, 0];
 
-    private static uint[] NullImageWords() => [0, 0, 0, 9u << 28, 0, 0, 0, 0];
+    private static uint[] NullImageWords() => new uint[8];
 
     private static uint[] SamplerWords() => [0x7u << 12, 0, 0, 0];
 
@@ -117,6 +118,7 @@ public sealed class MetalRenderHostTests : IDisposable
             UserDataBase = 0,
             UserDataCount = (uint)(userDataRegisters?.Count ?? 0),
             UsesDeviceAddresses = info.UsesDeviceAddresses,
+            WritesDeviceAddresses = info.WritesDeviceAddresses,
             Buffers = info.Buffers.Select(buffer => new BufferResourceInfo(buffer.Read, buffer.Written, buffer.Atomic, buffer.Formatted, buffer.Scalar, buffer.MaxByteExtent, buffer.PackedStride)).ToArray(),
             Images = info.Images.Select(image => new ImageResourceInfo(image.ResourceClass == ImageResourceClass.Storage ? Libs.Gpu.Rendering.ImageResourceClass.Storage : Libs.Gpu.Rendering.ImageResourceClass.Sampled, image.Written)).ToArray(),
             SamplerCount = info.Samplers.Count,
@@ -161,7 +163,7 @@ public sealed class MetalRenderHostTests : IDisposable
         private ShaderProgram _pixelProgram;
         private ShaderProgram _computeProgram;
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound)
+        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound, bool depthAspectBound, bool stencilAspectBound = false)
         {
             if (!_vertexProgram.IsValid)
             {
@@ -193,7 +195,7 @@ public sealed class MetalRenderHostTests : IDisposable
             };
         }
 
-        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
+        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, GpuPrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
         {
             if (ReuseGraphicsPipeline && _graphicsPipeline is { } cached) return cached;
             var pipeline = host.CreateGraphicsPipeline(ShaderPipelineCache.BuildGraphicsDescription(
@@ -437,7 +439,7 @@ public sealed class MetalRenderHostTests : IDisposable
     {
         var executor = Executor(out var provider);
         var input = provider.GetGraphicsPrograms(_banks.Shader.Vertex, _banks.Shader.Pixel,
-            _banks.Context.ShaderInterface, _banks.Context, [], true, false).VertexInput;
+            _banks.Context.ShaderInterface, _banks.Context, [], true, false, false).VertexInput;
         var original = Floats(-1f, -1f, 3f, -1f, -1f, 3f);
         Assert.True(_memory.TryWrite(VertexBase, original));
         if (changedLayout) input.Attributes[0] = input.Attributes[0] with { OffsetBytes = 4 };
@@ -464,7 +466,7 @@ public sealed class MetalRenderHostTests : IDisposable
         var executor = Executor(out var provider);
         provider.ReuseGraphicsPipeline = true;
         var first = provider.GetGraphicsPrograms(_banks.Shader.Vertex, _banks.Shader.Pixel,
-            _banks.Context.ShaderInterface, _banks.Context, [], true, false).VertexInput;
+            _banks.Context.ShaderInterface, _banks.Context, [], true, false, false).VertexInput;
         Assert.True(_memory.TryWrite(VertexBase, new byte[24]));
         executor.DrawAuto(1, _banks, new DrawAutoArguments(0, 0, 3, 1, 0, 0, DrawOffsetSource.Packet));
         var address = VertexBase + 64;
@@ -763,7 +765,7 @@ public sealed class MetalRenderHostTests : IDisposable
     [Fact]
     public void RangeTableOverflow_IsFatalWithTheHash()
     {
-        using var wide = new MetalRenderHostTests(0x80_0000);
+        using var wide = new MetalRenderHostTests((int)(((Gen5MslTranslator.MaxAddressRangeCount + 2) * 2) * PageSize));
         var executor = wide.Executor(out var provider);
         var ranges = Enumerable.Range(0, (int)Gen5MslTranslator.MaxAddressRangeCount + 1)
             .Select(index => new DeviceAddressRange((uint)index, MemoryBase + ((ulong)index * 2 * PageSize), 0x10, Planned: true, Written: false))

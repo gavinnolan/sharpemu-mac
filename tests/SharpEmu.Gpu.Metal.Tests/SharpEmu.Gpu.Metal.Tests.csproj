@@ -1,0 +1,40 @@
+<!-- Copyright (C) 2026 SharpEmu Emulator Project -->
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- These tests drive the Metal runtime through libobjc, which only exists on macOS;
+         elsewhere the project still builds but `dotnet test` skips it. -->
+    <IsTestProject Condition="!$([MSBuild]::IsOSPlatform('OSX'))">false</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Compile the existing synthetic guest-program and device helpers in this
+         test assembly; no production friend or dependency on another test assembly. -->
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ImageFixtures.cs" Link="Fixtures/Gen5ImageFixtures.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ComputeFixtures.cs" Link="Fixtures/Gen5ComputeFixtures.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/FakeGuestMemory.cs" Link="Fixtures/FakeGuestMemory.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/MetalNative.cs" Link="Fixtures/MetalNative.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/MetalNative.DeviceMemory.cs" Link="Fixtures/MetalNative.DeviceMemory.cs" />
+    <ProjectReference Include="../../src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj" />
+    <!-- Fresh device workers need the same plain host-memory startup as the
+         application before tracker Configure/Query; no guest CPU/UI is created. -->
+    <ProjectReference Include="../../src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Fixtures/Tile5Volume/Tile5VolumeOracle.cs" Link="Fixtures/Tile5VolumeOracle.cs" />
+    <EmbeddedResource Include="../Fixtures/Tile5Volume/offsets.csv" LogicalName="Tile5Volume.offsets.csv" />
+    <EmbeddedResource Include="../Fixtures/R8SampledVolume/offsets.csv" LogicalName="R8SampledVolume.offsets.csv" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Fixtures/Bgra1024Array/Bgra1024Oracle.cs" Link="Fixtures/Bgra1024Oracle.cs" />
+    <Compile Include="../Fixtures/R8FourKArray/R8FourKOracle.cs" Link="Fixtures/R8FourKOracle.cs" />
+    <Compile Include="../Fixtures/R16SelectedMip/R16SelectedMipOracle.cs" Link="Fixtures/R16SelectedMipOracle.cs" />
+    <EmbeddedResource Include="../Fixtures/R16SelectedMip/block-offsets.bin" LogicalName="R16SelectedMip.block-offsets.bin" />
+    <EmbeddedResource Include="../Fixtures/R16SelectedMip/block-origins.bin" LogicalName="R16SelectedMip.block-origins.bin" />
+  </ItemGroup>
+</Project>
