@@ -195,23 +195,18 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         var target = PlanFor(targetDescription);
         // One plane of equally sized texels, one mip, the same grid, and no multisampling:
         // anything else is a reinterpretation this cannot claim to preserve.
-        // Only the direction that was measured to matter: a depth target read through a
-        // single-channel float alias. Depth is the side with no blit to a colour texture,
-        // which is why the pair costs a round trip through guest memory at all; every
-        // other pair either already has a texture view or is not what anything spends its
-        // time on, and claiming them without a device test behind each one is how a
-        // sampled surface quietly comes back wrong.
+        // Only the pairs that were measured to matter: a depth target read through a
+        // single-channel float alias, and a 16-bit shadow map and its R16 alias in either
+        // direction. Depth is the side with no blit to a colour texture, which is why the
+        // pair costs a round trip through guest memory at all; every other pair either
+        // already has a texture view or is not what anything spends its time on, and
+        // claiming them without a device test behind each one is how a sampled surface
+        // quietly comes back wrong.
         if (!SameTransferGrid(sourceDescription, targetDescription) ||
-            !sourceDescription.IsDepth || targetDescription.IsDepth ||
-            source.TransferBytes != sizeof(float) ||
-            // A depth surface the tiler widens or narrows on its way through guest memory
-            // does not hold the guest's bits in its texels, so the alias reading those
-            // bits cannot be handed the texture's.
-            source.TransferBytes != sourceDescription.BytesPerBlock ||
-            // The colour side uploads guest bytes into its texels untouched only for a
-            // single 32-bit channel; every other format reorders or reinterprets them.
-            !IsRawSingleChannel32(target.Format) || targetDescription.BytesPerBlock != sizeof(float) ||
-            target.Swap ||
+            !(IsDepth32ToColorAlias(sourceDescription, source, targetDescription, target) ||
+              (Depth16AliasOnDevice &&
+               (IsDepth16ColorAlias(sourceDescription, source, targetDescription, target) ||
+                IsDepth16ColorAlias(targetDescription, target, sourceDescription, source)))) ||
             // Texel (x, y) of each surface has to come from the same guest bytes, which
             // takes the same tile mode and the same pitch over the same footprint.
             sourceDescription.TileMode != targetDescription.TileMode ||
@@ -223,8 +218,9 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             return false;
         }
 
+        var texelBytes = targetDescription.BytesPerBlock;
         var layers = targetDescription.TransferLayers;
-        var rowBytes = (ulong)targetDescription.Extent.Width * source.TransferBytes;
+        var rowBytes = (ulong)targetDescription.Extent.Width * texelBytes;
         var sliceBytes = rowBytes * targetDescription.Extent.Height;
         if (layers == 0 || rowBytes == 0 || sliceBytes == 0 ||
             sliceBytes > ulong.MaxValue / layers)
@@ -299,6 +295,54 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
     private static bool IsRawSingleChannel32(MtlPixelFormat format) =>
         format is MtlPixelFormat.R32Float or MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint;
+
+    private static bool IsRawSingleChannel16(MtlPixelFormat format) =>
+        format is MtlPixelFormat.R16Unorm or MtlPixelFormat.R16Uint or MtlPixelFormat.R16Sint;
+
+    // SHARPEMU_METAL_V2_D16_ALIAS_DEVICE=0 sends a 16-bit depth plane and its R16 alias
+    // through guest memory again, in both directions.
+    private static readonly bool Depth16AliasDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_D16_ALIAS_DEVICE") != "0";
+
+    /// <summary>Whether a 16-bit depth plane and its R16 alias are handed over on the device.</summary>
+    public bool Depth16AliasOnDevice { get; set; } = Depth16AliasDefault;
+
+    // A 32-bit depth plane (D32, or the depth of D32S8) into a single 32-bit channel. The
+    // other way is not claimed: nothing was measured spending time on it.
+    private static bool IsDepth32ToColorAlias(
+        in ImageDescription depthDescription, TransferPlan depth,
+        in ImageDescription colorDescription, TransferPlan color) =>
+        depthDescription.IsDepth && !colorDescription.IsDepth &&
+        depth.TransferBytes == sizeof(float) &&
+        // A depth surface the tiler widens or narrows on its way through guest memory
+        // does not hold the guest's bits in its texels, so the alias reading those bits
+        // cannot be handed the texture's.
+        depth.TransferBytes == depthDescription.BytesPerBlock &&
+        // The colour side uploads guest bytes into its texels untouched only for a single
+        // 32-bit channel; every other format reorders or reinterprets them.
+        IsRawSingleChannel32(color.Format) && colorDescription.BytesPerBlock == sizeof(float) &&
+        !color.Swap;
+
+    // A 16-bit depth plane and a single 16-bit channel over the same bytes, either of them
+    // the source. SILENT HILL renders its shadow maps as D16 and also reads and writes them
+    // through an R16 alias, and the round trip moved the whole map through guest memory on
+    // every switch: 32 MiB out and 32 MiB back in for the 4096x4096 map, hundreds of times
+    // a minute. Both sides take their texels from the guest bytes untouched - Depth16Unorm
+    // is never widened here, an R16 upload swaps nothing - and both are addressed by the
+    // 64 KiB depth block of their 2-byte elements, so texel (x, y) of one is texel (x, y)
+    // of the other (MetalImageTransferTests.Depth16Alias proves it against the round trip,
+    // both ways). Any other tile mode is left to the round trip, untested. The depth side
+    // carries no stencil plane, so a copy into it replaces everything the texture holds,
+    // and a DCC colour side is refused: its guest bytes mean nothing without the metadata.
+    private static bool IsDepth16ColorAlias(
+        in ImageDescription depthDescription, TransferPlan depth,
+        in ImageDescription colorDescription, TransferPlan color) =>
+        depthDescription.IsDepth && !colorDescription.IsDepth &&
+        depthDescription.PixelFormat == GpuFormat.D16Unorm && !depthDescription.HasStencil &&
+        depth.TransferBytes == sizeof(ushort) && depthDescription.BytesPerBlock == sizeof(ushort) &&
+        IsRawSingleChannel16(color.Format) && colorDescription.BytesPerBlock == sizeof(ushort) &&
+        !color.Swap && !colorDescription.HasMetadata &&
+        depthDescription.TileMode == GuestTileMode.Depth && colorDescription.TileMode == GuestTileMode.Depth;
 
     // The two surfaces cover the same texel grid, so a copy between them is a copy and
     // not a resample.

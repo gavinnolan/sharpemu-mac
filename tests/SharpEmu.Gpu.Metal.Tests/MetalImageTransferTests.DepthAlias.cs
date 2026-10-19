@@ -99,6 +99,8 @@ public sealed partial class MetalImageTransferTests
 
         harness.Begin();
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, alias, aliasTexture, depth, depthTexture));
+        // The 16-bit pair has its own switch (MetalImageTransferTests.Depth16Alias).
+        harness.Transfer.Depth16AliasOnDevice = false;
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, z16, z16Texture, r16, r16Texture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, depth, depthTexture, rgba8, rgba8Texture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, depth, depthTexture, otherTile, aliasTexture));

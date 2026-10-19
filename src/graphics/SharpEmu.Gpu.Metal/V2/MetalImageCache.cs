@@ -1214,7 +1214,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // device, with guest memory left out of it entirely. The pair that costs the most is
     // a depth-stencil target and the single-channel float alias something samples it
     // through: the round trip retiles the depth plane out to guest memory and detiles it
-    // straight back, and the device can copy it instead.
+    // straight back, and the device can copy it instead. A 16-bit depth plane and its R16
+    // alias go both ways, so the colour side can be the source and the depth the target.
     //
     // Guest memory is not updated, and does not need to be: the written image stays
     // GPU-modified, so the lazy writeback rules still publish it the moment the CPU, a
@@ -1274,10 +1275,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public long TakeDeviceAliasPublishes() => Interlocked.Exchange(ref _deviceAliasPublishes, 0);
 
     // SHARPEMU_METAL_V2_ALIAS_ON_DEVICE=0 sends every alias through guest memory again.
-    // The device copy only claims a 32-bit depth plane and an R32 colour alias with the
-    // same tile mode, pitch and footprint (MetalImageTransfer.TryEncodeTextureToTexture):
-    // the depth upload converts nothing for that pair, so texel for texel the alias gets
-    // exactly the bits the round trip would have detiled into it.
+    // The device copy only claims a 32-bit depth plane and an R32 colour alias, and a
+    // 16-bit depth plane and an R16 colour alias either way round (switched off alone by
+    // SHARPEMU_METAL_V2_D16_ALIAS_DEVICE=0), with the same tile mode, pitch and footprint
+    // (MetalImageTransfer.TryEncodeTextureToTexture): neither transfer converts anything
+    // for those pairs, so texel for texel the target gets exactly the bits the round trip
+    // would have detiled into it.
     private static readonly bool DeviceAliasPublishEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_ON_DEVICE") != "0";
 
@@ -1393,10 +1396,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             $"{held.PixelFormat}:{held.Extent.Width}x{held.Extent.Height}",
             "Two cached images share guest bytes, so every use of one publishes the other and " +
             "reloads itself whole: " +
-            $"requested={wanted.PixelFormat} {wanted.Extent.Width}x{wanted.Extent.Height} " +
-            $"0x{wanted.Data.Address:X16}+0x{wanted.Data.Size:X}, " +
-            $"overlapped={held.PixelFormat} {held.Extent.Width}x{held.Extent.Height} " +
-            $"0x{held.Data.Address:X16}+0x{held.Data.Size:X}, " +
+            $"requested=<{AliasImageText(in wanted)}>, overlapped=<{AliasImageText(in held)}>, " +
             $"shared=0x{shared:X} of 0x{wanted.Data.Size:X}/0x{held.Data.Size:X}.");
     }
 
