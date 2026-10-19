@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -38,7 +39,7 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public List<ComputePipelineDescription> ComputePipelines { get; } = new();
 
-    public SampleCountFlags NoAttachmentSampleCounts { get; set; } = SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit;
+    public GpuSampleCount NoAttachmentSampleCounts { get; set; } = GpuSampleCount.Count1Bit | GpuSampleCount.Count4Bit;
 
     public uint MaxPushDescriptors => 32;
 
@@ -54,6 +55,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public uint MeshSubgroupSize { get; set; } = 32;
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
+
+    public GraphicsPrewarmList? GraphicsPrewarm { get; set; }
 
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
@@ -104,6 +107,31 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     // standing in for the host shader compiler running on a worker thread.
     public Dictionary<ulong, int> PendingComputeCompiles { get; } = new();
 
+    // How many graphics requests report "still compiling" before one is handed over.
+    public int PendingGraphicsCompiles { get; set; }
+
+    public int GraphicsCompileRequests { get; private set; }
+
+    public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        GraphicsCompileRequests++;
+        handle = default;
+        if (PendingGraphicsCompiles > 0)
+        {
+            PendingGraphicsCompiles--;
+            return false;
+        }
+
+        handle = CreateGraphicsPipeline(description);
+        return true;
+    }
+
+    // Answers resident reads from the fake memory, as a host whose GPU owns nothing does.
+    public bool ResidentReadsEnabled { get; set; }
+
+    public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) =>
+        ResidentReadsEnabled && memory.TryRead(address, destination);
+
     public bool TryCreateComputePipeline(ComputePipelineDescription description, out PipelineHandle handle)
     {
         handle = default;
@@ -133,6 +161,8 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
 
     public string BackendName => "Fake";
 
+    // Stands in for a backend with mesh pipelines (Metal v2); Vulkan leaves it false.
+    public bool SupportsPrimitiveShaderMeshPipelines { get; set; }
     public bool LinkedShaderCallsSupported { get; set; } = true;
 
 
@@ -199,6 +229,7 @@ internal sealed class PipelineTestGuest
     public static readonly uint[] FormatLoadProgram = [0xE0000000, 0x80000000, 0xBF810000];
 
     private readonly Dictionary<ulong, ulong> _headers = new();
+    private readonly Dictionary<ulong, FusedProgramParts> _fused = new();
 
     public PipelineTestGuest(Func<ShaderCompileRequest, byte[]>? compile = null)
     {
@@ -206,7 +237,8 @@ internal sealed class PipelineTestGuest
         Context = new CpuContext(Memory, Generation.Gen5);
         Host = new FakePipelineHost(Memory);
         Compiler = new FakeShaderCompiler(compile);
-        Registry = new ShaderHeaderRegistry(Context, code => _headers.TryGetValue(code, out var header) ? header : 0, _ => null);
+        Registry = new ShaderHeaderRegistry(Context, code => _headers.TryGetValue(code, out var header) ? header : 0,
+            code => _fused.TryGetValue(code, out var parts) ? parts : null);
         Programs = new ShaderProgramCache(Context, Compiler, Host);
     }
 
@@ -239,6 +271,18 @@ internal sealed class PipelineTestGuest
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan((int)InputSemanticsCountOffset), inputSemanticsCount);
         Write(headerAddress, header);
         _headers[codeAddress] = headerAddress;
+    }
+
+    // Two registered code objects joined the way sceAgcFuseShaderHalves joins them: the
+    // entry ends in S_SETPC_B64 and the decoder continues at the continuation.
+    public void RegisterFusedProgram(ulong entryAddress, ulong entryHeaderAddress, uint[] entryWords,
+        ulong continuationAddress, ulong continuationHeaderAddress, uint[] continuationWords, ulong entryUserDataAddress = 0)
+    {
+        RegisterProgram(entryAddress, entryHeaderAddress, entryWords, entryUserDataAddress);
+        RegisterProgram(continuationAddress, continuationHeaderAddress, continuationWords);
+        _fused[entryAddress] = new FusedProgramParts(continuationAddress, continuationHeaderAddress);
+        Gen5ShaderTranslator.RegisterFusedProgram(Context, entryAddress, entryHeaderAddress,
+            continuationAddress, continuationHeaderAddress);
     }
 
     public void Write(ulong address, byte[] bytes)

@@ -65,4 +65,23 @@ public sealed class SubmittedVertexDataTests
         input.Attributes[0] = input.Attributes[0] with { OffsetBytes = 4 };
         Assert.False(snapshot!.Matches(input));
     }
+    [Fact]
+    public void PrefixCopiesKeepFullSubmissionAndReplayOwnershipIndependent()
+    {
+        var memory = new FakeCpuMemory(Address, 64);
+        var original = Enumerable.Range(0, 64).Select(static index => (byte)index).ToArray();
+        Assert.True(memory.TryWrite(Address, original));
+        var input = new VertexInputInfo { Buffers = [new(Address, 16, 4)] };
+        Assert.True(SubmittedVertexData.TryCapture(memory, input, 64, out var snapshot));
+        Assert.True(memory.TryWrite(Address, new byte[64]));
+        var prefix = snapshot!.CopyBufferPrefix(0, 28);
+        Assert.Equal(original[..28], prefix);
+        prefix[0] = 201;
+        Assert.Equal(original[..28], snapshot.CopyBufferPrefix(0, 28));
+        Assert.Equal(original, snapshot.CopyBuffer(0));
+        Assert.Equal(64, snapshot.ByteCount);
+        Assert.Throws<ArgumentOutOfRangeException>(() => snapshot.CopyBufferPrefix(0, 65));
+        Assert.Equal(original, snapshot.CopyBuffer(0));
+    }
+
 }

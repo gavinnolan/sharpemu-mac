@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Tests.Agc;
 using Xunit;
@@ -124,9 +125,9 @@ public sealed class EndOfPipeTests
     [InlineData(5UL, 0UL, false, 0UL)]
     public void ScaleReferenceClockRejectsOverflow(ulong ticks, ulong frequency, bool expected, ulong value)
     {
-        Assert.Equal(expected, EndOfPipe.TryScaleReferenceClock(ticks, frequency, out var scaled));
+        Assert.Equal(expected, GpuReferenceClock.TryScale(ticks, frequency, out var scaled));
         Assert.Equal(value, scaled);
-        Assert.True(EndOfPipe.ReadReferenceClock() > 0);
+        Assert.True(GpuReferenceClock.Read() > 0);
     }
 
     [Fact]
@@ -159,11 +160,11 @@ public sealed class EndOfPipeTests
         }
 
         var destination = new uint[2];
-        EndOfPipe.ReadGdsWords(gds, destination, 1, 2);
+        GlobalDataShare.ReadWords(gds, destination, 1, 2);
         Assert.Equal(new uint[] { 2, 3 }, destination);
 
-        Assert.Throws<SchedulerFatalException>(() => EndOfPipe.ReadGdsWords(gds, destination, 3, 2));
-        Assert.Throws<SchedulerFatalException>(() => EndOfPipe.ReadGdsWords(ReadOnlySpan<byte>.Empty, destination, 0, 0));
+        Assert.Throws<SchedulerFatalException>(() => GlobalDataShare.ReadWords(gds, destination, 3, 2));
+        Assert.Throws<SchedulerFatalException>(() => GlobalDataShare.ReadWords(ReadOnlySpan<byte>.Empty, destination, 0, 0));
     }
 }
 

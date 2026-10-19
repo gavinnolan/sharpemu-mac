@@ -24,10 +24,10 @@ public static partial class AgcExports
     internal sealed record RetainedTargetlessDraw(RegisterBanks Banks, TargetlessDrawArguments Arguments);
 
     // A draw or dispatch the translation deferred, with the banks it was issued under.
-    internal abstract record DeferredWork;
+    public abstract record DeferredWork;
 
     // Takes the deferred work of a command stream interpreted on its own thread.
-    internal interface IDeferredWorkSink
+    public interface IDeferredWorkSink
     {
         // True on the thread that interprets the stream; elsewhere the translation runs work itself.
         bool IsProducerThread { get; }
@@ -125,6 +125,13 @@ public static partial class AgcExports
             return false;
         }
 
+        // Checked per draw: the usual match is decided without building the live list; a
+        // mismatch takes the path below, which names the rejection.
+        if (ShaderRegistersMatch(state.ShRegisters, capture.ShaderRegisters))
+        {
+            return true;
+        }
+
         var live = RecordShaderRegisters(state.ShRegisters);
         if (live.Length != capture.ShaderRegisters.Length)
         {
@@ -156,7 +163,7 @@ public static partial class AgcExports
         new(memory, host);
 
     // Translates the draws, dispatches, resets and flips of one interpreter host thread.
-    internal sealed class CommandStreamTranslation
+    public sealed class CommandStreamTranslation
     {
         private readonly ICommandStreamHost _host;
         private readonly CpuContext _context;
@@ -188,9 +195,9 @@ public static partial class AgcExports
         private readonly ParallelProgramPrefetch? _parallel;
 
         // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
-        internal ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
+        public ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
 
-        internal SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
+        public SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
         {
             var snapshot = _current?.CurrentVertexSnapshot;
             if (snapshot?.Data is not { } data || snapshot.ExportShaderAddress != input.Stage.ShaderBase || !data.Matches(input))
@@ -243,7 +250,7 @@ public static partial class AgcExports
 
         // With the command stream on its own thread, its draws and dispatches reach the render
         // thread through the sink, which runs them with RunDeferred in stream order.
-        internal IDeferredWorkSink? Sink { get; set; }
+        public IDeferredWorkSink? Sink { get; set; }
 
         private bool Producing => Sink is { IsProducerThread: true };
 
@@ -305,7 +312,7 @@ public static partial class AgcExports
         }
 
         // The resolution worker, so the render thread can order it with the stream's other work.
-        internal ParallelProgramPrefetch? Prefetch => _parallel;
+        public ParallelProgramPrefetch? Prefetch => _parallel;
 
         private readonly Queue<PendingDraw> _pendingDraws = new();
 
@@ -435,7 +442,7 @@ public static partial class AgcExports
         }
 
         // Keeps the banks the draw was issued under; the flip replays it into the display buffer.
-        internal void RetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
+        public void RetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
         {
             var state = _executing ?? RequireCurrent();
             if (RenderTrace.Enabled)
@@ -560,6 +567,14 @@ public static partial class AgcExports
             LastGeometrySnapshotDecisionForTests = decision;
         }
 
+
+        // Runs where the draws run: a host that defers fragment-write pass ends interprets its
+        // stream on the render thread, so no deferred work can be ahead of this.
+        public void ReleaseShaderWrites()
+        {
+            System.Diagnostics.Debug.Assert(!Producing, "Shader writes are released on the thread that records the draws.");
+            _executor?.ReleaseShaderWrites();
+        }
 
         public void Dispatch(ulong submitId, uint endX, uint endY, uint endZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
         {
@@ -694,8 +709,8 @@ public static partial class AgcExports
         state.FrameDispatchCount = 0;
     }
 
-    // A host without a GPU: managed transfers, immediate completions, video-out flip requests.
-    internal class TranslatingCommandStreamHost : ManagedCommandStreamHost
+    // Shared AGC translation host; backends override native draw/dispatch and presentation operations.
+    public class TranslatingCommandStreamHost : ManagedCommandStreamHost
     {
         private CommandStreamTranslation? _translation;
         private CommandStreamQueue? _queue;
@@ -738,7 +753,7 @@ public static partial class AgcExports
     }
 
     // The inline command stream of a backend without a presenter thread (test and startup path).
-    internal sealed class HeadlessCommandStream
+    internal sealed class HeadlessCommandStream : IGuestCommandStream
     {
         // Command-state tests record packet state; render tests use the executor's recording host.
         private sealed class CommandStateHost(ICpuMemory memory) : TranslatingCommandStreamHost(memory)
@@ -791,6 +806,8 @@ public static partial class AgcExports
                 RunRunnable();
             }
         }
+
+        public BlockedSnapshot SnapshotBlocked() => Queue.SnapshotBlocked();
 
         public IdleOutcome Done()
         {

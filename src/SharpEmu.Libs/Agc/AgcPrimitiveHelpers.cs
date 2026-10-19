@@ -6,10 +6,10 @@ namespace SharpEmu.Libs.Agc;
 /// <summary>
 /// Shared Prospero/AGC primitive-type helpers (renderDraw / gpu_defs).
 /// </summary>
-internal static class AgcPrimitiveHelpers
+public static class AgcPrimitiveHelpers
 {
-    internal const uint PrimitiveRectList = 7;
-    internal const uint PrimitiveRectListLegacy = 0x11;
+    public const uint PrimitiveRectList = 7;
+    public const uint PrimitiveRectListLegacy = 0x11;
 
     internal enum GsOutputPrimitiveType : uint
     {
@@ -56,7 +56,7 @@ internal static class AgcPrimitiveHelpers
     /// vertex-buffer fetches (those still show up as host VBs). Indexed and
     /// larger auto counts stay triangle list so the loading video is safe.
     /// </summary>
-    internal static bool ShouldDrawRectListAsTriangleStrip(
+    public static bool ShouldDrawRectListAsTriangleStrip(
         uint primitiveType,
         bool indexed,
         uint vertexCount,
@@ -82,7 +82,7 @@ internal static class AgcPrimitiveHelpers
     /// Host vertex count for auto rect-list draws that expand to a strip.
     /// NGG single-rect: always 4. Legacy 0x11: 3 -> 4.
     /// </summary>
-    internal static uint GetRectListDrawVertexCount(
+    public static uint GetRectListDrawVertexCount(
         uint primitiveType,
         uint vertexCount,
         bool indexed,

@@ -100,11 +100,12 @@ public sealed class RegisterBanks
     private bool _blendControlsShared;
     private bool _colorTargetsShared;
     private bool _colorClearWord1Shared;
+    private bool _userClipPlanesShared;
     private bool _unmodeledShared;
 
     private void SetContextPartsShared(bool shared) =>
         _screenViewportShared = _viewportsShared = _sampleLocationsShared = _shaderInterfaceShared =
-            _blendControlsShared = _colorTargetsShared = _colorClearWord1Shared = _unmodeledShared = shared;
+            _blendControlsShared = _colorTargetsShared = _colorClearWord1Shared = _userClipPlanesShared = _unmodeledShared = shared;
 
     private void OwnContext(ContextRegisters context)
     {
@@ -215,6 +216,21 @@ public sealed class RegisterBanks
             }
 
             return Context.ColorClearWord1;
+        }
+    }
+
+    public float[] UserClipPlanesForWrite
+    {
+        get
+        {
+            PrepareContextWrite();
+            if (_userClipPlanesShared)
+            {
+                Context.UserClipPlanes = (float[])Context.UserClipPlanes.Clone();
+                _userClipPlanesShared = false;
+            }
+
+            return Context.UserClipPlanes;
         }
     }
 

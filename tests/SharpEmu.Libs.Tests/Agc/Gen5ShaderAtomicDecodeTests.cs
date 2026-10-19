@@ -181,14 +181,14 @@ public sealed class Gen5ShaderAtomicDecodeTests
     [Theory]
     [InlineData(0xD8480004u, "DsMinF32")]
     [InlineData(0xD84C0008u, "DsMaxF32")]
-    public void DsFloatMinMax_UseTheAddressAndOneDataRegister(uint word, string opcode)
+    public void DsFloatMinMax_UseAddressReplacementAndCompareRegisters(uint word, string opcode)
     {
-        // ds_min_f32 and ds_max_f32 reduce DATA0 into memory; the DATA1 field is not an operand.
+        // GFX10 DS float min/max takes DATA0 as replacement and DATA1 as comparison.
         var instruction = DecodeSingle(word, 0x00010907);
 
         Assert.Equal(opcode, instruction.Opcode);
         Assert.Equal(
-            new[] { Gen5Operand.Vector(7), Gen5Operand.Vector(9) },
+            new[] { Gen5Operand.Vector(7), Gen5Operand.Vector(9), Gen5Operand.Vector(1) },
             instruction.Sources);
         Assert.Empty(instruction.Destinations);
     }

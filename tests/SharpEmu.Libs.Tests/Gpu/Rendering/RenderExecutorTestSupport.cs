@@ -1,10 +1,12 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Images;
@@ -27,9 +29,9 @@ internal sealed class RecordedBindings(ShaderStageResources stage, int id) : IPr
 // Accepts every image format the depth builder asks about.
 internal sealed class AcceptingFormatSupport : IImageFormatSupport
 {
-    public bool TryGetImageFormatProperties(Format format, ImageType type, ImageTiling tiling, ImageUsageFlags usage, ImageCreateFlags flags, out ImageFormatProperties properties)
+    public bool TryGetImageFormatProperties(GpuFormat format, GpuImageType type, GpuImageTiling tiling, GpuImageUsage usage, GpuImageCreateFlags flags, out GpuImageFormatProperties properties)
     {
-        properties = new ImageFormatProperties { SampleCounts = SampleCountFlags.Count1Bit | SampleCountFlags.Count2Bit | SampleCountFlags.Count4Bit | SampleCountFlags.Count8Bit };
+        properties = new GpuImageFormatProperties { SampleCounts = GpuSampleCount.Count1Bit | GpuSampleCount.Count2Bit | GpuSampleCount.Count4Bit | GpuSampleCount.Count8Bit };
         return true;
     }
 }
@@ -121,11 +123,11 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool IsRecording => Recording;
 
-    public ImageLayout ColorLayout { get; set; } = ImageLayout.ColorAttachmentOptimal;
+    public GpuImageLayout ColorLayout { get; set; } = GpuImageLayout.ColorAttachmentOptimal;
 
     public Dictionary<ulong, uint> ImageSamples { get; } = new();
 
-    public Dictionary<ulong, ClearColorValue> ColorMetadataClears { get; } = new();
+    public Dictionary<ulong, GpuClearColor> ColorMetadataClears { get; } = new();
 
     public bool DepthMetadataClear { get; set; }
 
@@ -219,6 +221,21 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void ResetBindings() => Calls.Add("reset_bindings");
 
+    public bool SupportsPipelineSuspend { get; set; }
+
+    public void NotePipelineNotReady() => Calls.Add("pipeline_not_ready");
+
+    public bool LeavesOutDrawsWhileCompiling { get; set; }
+
+    // The host's say on the targets: true stands in for targets rebuilt every frame.
+    public bool TargetsRebuiltEveryFrame { get; set; } = true;
+
+    public bool MayLeaveOutWhileCompiling(in RenderingState rendering)
+    {
+        Calls.Add("may_leave_out");
+        return TargetsRebuiltEveryFrame;
+    }
+
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
     {
         var address = target.Resolution.BaseAddress;
@@ -227,7 +244,7 @@ internal sealed class RecordingRenderHost : IRenderHost
         var metadataClear = ColorMetadataClears.TryGetValue(address, out var clearValue);
         return new ColorAttachmentAcquisition(
             target.Image,
-            new ImageView(0x1000 + target.Image.Index),
+            new GpuImageHandle(0x1000 + target.Image.Index),
             ColorLayout,
             ImageSamples.TryGetValue(address, out var samples) ? samples : target.Resolution.Samples,
             metadataClear,
@@ -239,12 +256,12 @@ internal sealed class RecordingRenderHost : IRenderHost
         var target = depth.Target.Target;
         Calls.Add($"acquire_depth {target.DepthAddress:X} image={depth.Image.Index} clear={depth.Target.State.DepthClearEnabled}");
         return new DepthAttachmentAcquisition(
-            new ImageView(0x2000 + depth.Image.Index),
+            new GpuImageHandle(0x2000 + depth.Image.Index),
             ImageSamples.TryGetValue(target.DepthAddress, out var samples) ? samples : target.Samples,
             DepthMetadataClear);
     }
 
-    public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects) =>
+    public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects) =>
         Calls.Add($"transition_depth {depth.Image.Index} {layout} {writeAspects} loadClear={depth.LoadClear}");
 
     // Marks the pages the guest wrote so the next obtain re-uploads them.
@@ -310,7 +327,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input) =>
         Calls.Add($"bind_vertex {string.Join(",", bindings.ToArray().Select(b => $"{b.Handle:X}:{b.Offset:X}"))}");
 
-    public void BindIndexBuffer(BufferBinding binding, IndexType type) => Calls.Add($"bind_index {binding.Handle:X}:{binding.Offset:X} {type}");
+    public void BindIndexBuffer(BufferBinding binding, GpuIndexType type) => Calls.Add($"bind_index {binding.Handle:X}:{binding.Offset:X} {type}");
 
     public bool FailPrepareBindings { get; set; }
 
@@ -337,7 +354,7 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void BindResources(IPreparedBindings prepared) => Calls.Add($"bind_resources {((RecordedBindings)prepared).Id}");
 
-    public void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages) =>
+    public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages) =>
         Calls.Add($"commit {bindPoint} {pipeline.Pipeline:X} [{string.Join(",", stages.ToArray().Select(s => ((RecordedBindings)s).Id))}]");
 
     public void SetDynamicState(in DynamicDrawState state)
@@ -349,12 +366,27 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void BeginRendering(in RenderingState state)
     {
         BegunRenderings.Add(state);
+        _renderingOpen = true;
         Calls.Add($"begin_rendering {state.Width}x{state.Height}x{state.Layers} colors={state.ColorAttachmentCount} samples={state.Samples}");
     }
 
-    public void EndRendering() => Calls.Add("end_rendering");
+    private bool _renderingOpen;
 
-    public void BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline) => Calls.Add($"bind_pipeline {bindPoint} {pipeline.Pipeline:X}");
+    public void EndRendering()
+    {
+        Calls.Add("end_rendering");
+        if (_renderingOpen)
+        {
+            _renderingOpen = false;
+            RenderPassSerial++;
+        }
+    }
+
+    public bool DefersFragmentWritePassEnd { get; set; }
+
+    public long RenderPassSerial { get; set; }
+
+    public void BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline) => Calls.Add($"bind_pipeline {bindPoint} {pipeline.Pipeline:X}");
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance) =>
         Calls.Add($"draw {vertexCount} {instanceCount} {firstVertex} {firstInstance}");
@@ -362,8 +394,30 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance) =>
         Calls.Add($"draw_indexed {indexCount} {instanceCount} {firstIndex} {vertexOffset} {firstInstance}");
 
+    public void PrepareIndirectDraw(in PipelineHandle pipeline, ulong argumentsAddress, BufferBinding arguments, bool indexed, uint indexLimit) =>
+        Calls.Add($"prepare_indirect {argumentsAddress:X} {arguments.Handle:X}:{arguments.Offset:X} indexed={indexed} limit={indexLimit}");
+
+    public void DrawIndirect(BufferBinding arguments) =>
+        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
+    /// <summary>Set to false for a backend that runs the program as a mesh pipeline.</summary>
+    public bool IndirectDrawArgumentsTaken { get; set; } = true;
+
+    public bool TakesIndirectDrawArguments(ShaderProgram vertexProgram, ulong argumentsAddress, ulong argumentsSize)
+    {
+        Calls.Add($"takes_indirect {vertexProgram.Id} {argumentsAddress:X} {argumentsSize}");
+        return IndirectDrawArgumentsTaken;
+    }
+
+    /// <summary>Set to false for a backend that draws a rectangle list as patches.</summary>
+    public bool TakesIndirectRectangleListArguments { get; set; } = true;
+
+    public bool TakesTargetlessIndirectDrawArguments { get; set; }
+
+    public void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size) => Calls.Add($"indirect_cpu {address:X} {size}");
 
     public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
         Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
@@ -372,13 +426,15 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool TryDispatchIndirect(ulong argumentsAddress) => false;
 
-    public void ShaderWriteBarrier(PipelineStageFlags sourceStages) => Calls.Add($"write_barrier {sourceStages}");
+    public void ShaderWriteBarrier(GpuPipelineStage sourceStages) => Calls.Add($"write_barrier {sourceStages}");
 
     public void ShaderWriteHazardBarrier() => Calls.Add("write_hazard_barrier");
 
     public void ShaderAccessBarrier() => Calls.Add("access_barrier");
 
     public bool RetainTargetlessDraws { get; set; }
+
+    public bool OrdersVertexWritesInsidePass { get; set; }
 
     public List<(RegisterBanks Banks, GraphicsPrograms Programs, TargetlessDrawArguments Arguments)> RetainedDraws { get; } = new();
 
@@ -404,7 +460,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void ResolveImage(ResourceSlotIdentifier source, uint sourceMip, uint sourceLayer, ResourceSlotIdentifier destination, uint destinationMip, uint destinationLayer) =>
         Calls.Add($"resolve {source.Index}:{sourceMip}:{sourceLayer} -> {destination.Index}:{destinationMip}:{destinationLayer}");
 
-    public void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects) =>
+    public void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in GpuExtent3D extent, GpuImageAspect aspects) =>
         Calls.Add($"copy_depth_stencil {source.Index} -> {destination.Index} {aspects}");
 
     public bool IsMetadata(ulong address)
@@ -445,6 +501,16 @@ internal sealed class RecordingRenderHost : IRenderHost
         return HostCopyAccepted;
     }
 
+    public bool KernelFillAccepted { get; set; }
+
+    public bool TryClearImageFromKernelFill(ulong address, ulong size, ReadOnlySpan<uint> pattern)
+    {
+        Calls.Add($"kernel_fill {address:X} {size:X} {string.Join(',', pattern.ToArray().Select(word => word.ToString("X8")))}");
+        return KernelFillAccepted;
+    }
+
+    public void NoteKernelFillFallback(string reason) => Calls.Add($"kernel_fill_fallback {reason}");
+
     public Exception Fatal(string message) => new RenderExecutorFatalException(message);
 }
 
@@ -479,6 +545,9 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
+    // Stands in for a backend with mesh pipelines (Metal); Vulkan leaves it false.
+    public bool SupportsPrimitiveShaderMeshPipelines { get; set; }
+
     public bool MeshShadersSupported { get; set; }
 
     public uint MeshPrimitiveType { get; private set; }
@@ -505,9 +574,17 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 
     public List<string> Calls { get; } = new();
 
+    public List<(VertexStageRegisters Vertex, ContextRegisters Context, UserConfigRegisters UserConfig,
+        TargetlessDrawArguments Draw, DrawIndexedArguments? OriginalIndirect)> UnsupportedGraphics { get; } = new();
+
+    public void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context,
+        UserConfigRegisters userConfig, in TargetlessDrawArguments draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null) =>
+        UnsupportedGraphics.Add((vertex, context, userConfig, draw, originalIndirectIndexedDraw));
+
     public List<RenderingState> PipelineRenderings { get; } = new();
 
-    public List<(PrimitiveTopology Topology, bool Restart, bool PixelActive)> PipelineRequests { get; } = new();
+    public List<(GpuPrimitiveTopology Topology, bool Restart, bool PixelActive)> PipelineRequests { get; } = new();
 
     public bool LastDispatchThreadDimensions { get; private set; }
 
@@ -520,7 +597,9 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         ContextRegisters context,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
-        bool depthBound)
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound = false)
     {
         Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
         ExportMappings.Add(targetExportMapping.ToArray());
@@ -534,7 +613,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,
@@ -548,6 +627,57 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     }
 
     public List<bool> DisableBlendingRequests { get; } = new();
+
+    // How many left-out-able graphics requests report "still compiling" before one is handed over.
+    public int PendingGraphicsCompiles { get; set; }
+
+    public bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle)
+    {
+        Calls.Add("try_create_graphics_pipeline");
+        handle = default;
+        if (PendingGraphicsCompiles > 0)
+        {
+            PendingGraphicsCompiles--;
+            return false;
+        }
+
+        handle = CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);
+        return true;
+    }
+
+    // The retries the executor handed over, and whether the provider takes their kept program
+    // back (standing in for ShaderPipelineCache, whose own tests check when it may).
+    public List<ComputeProgramRetry> ComputeRetries { get; } = new();
+
+    public bool ReuseRetries { get; set; }
+
+    public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, ComputeProgramRetry retry)
+    {
+        ComputeRetries.Add(retry);
+        if (ReuseRetries && retry.Program is { } kept)
+        {
+            retry.Reused = true;
+            return kept;
+        }
+
+        retry.Reset();
+        var prepared = GetComputeProgram(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+        retry.Program = prepared;
+        return prepared;
+    }
 
     public (uint X, uint Y, uint Z) LastDispatchDimensions { get; private set; }
 
@@ -611,6 +741,7 @@ internal static class RenderExecutorFixtures
     public const ulong ComputeShader = 0x2_0002_0000;
     public const uint PrimitiveTriangleList = 4;
     public const uint PrimitiveTriangleStrip = 6;
+    public const uint PrimitiveRectangleList = 7;
 
     private static Exception Fatal(string message) => new RenderExecutorFatalException(message);
 
@@ -637,7 +768,7 @@ internal static class RenderExecutorFixtures
         return banks;
     }
 
-    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1) =>
+    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool writesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1) =>
         new()
         {
             Stage = stage,
@@ -647,6 +778,7 @@ internal static class RenderExecutorFixtures
             Buffers = buffers ?? [],
             Images = images ?? [],
             UsesDeviceAddresses = usesDeviceAddresses,
+            WritesDeviceAddresses = writesDeviceAddresses,
             HasBitwiseExclusiveOr = exclusiveOr,
             VertexOffsetScalarRegister = vertexOffsetScalar,
             InstanceOffsetScalarRegister = instanceOffsetScalar,

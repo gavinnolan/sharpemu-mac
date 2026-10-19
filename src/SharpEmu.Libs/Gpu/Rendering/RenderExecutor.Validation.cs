@@ -12,6 +12,8 @@ public sealed partial class RenderExecutor
     private const uint DccControlOverwriteCombinerDisable = 1u << 0;
     private const uint DccControlKeyClearEnable = 1u << 1;
 
+    private static int _wideLineWarningShown;
+
     // The register state a draw cannot run with; the target builders check the rest when they resolve.
     private void ValidateDrawRegisters(RegisterBanks banks)
     {
@@ -29,13 +31,33 @@ public sealed partial class RenderExecutor
             throw _host.Fatal("Line stipple is not supported.");
         }
 
+        // Metal rasterises lines one pixel wide, the nearest it has to a wider guest line; the
+        // first such draw says so. (A polygon mode drawing lines is refused below.)
+        if ((GuestPrimitiveType)banks.UserConfig.PrimitiveType is GuestPrimitiveType.LineList or GuestPrimitiveType.LineStrip &&
+            context.LineWidth != 1f && Interlocked.Exchange(ref _wideLineWarningShown, 1) == 0)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][WARN] Wide lines are drawn one pixel wide: PA_SU_LINE_CNTL width={context.LineWidth:R} pixels " +
+                "(Metal has no wide lines; reported once).");
+        }
+
         var clip = context.Clip;
-        if (clip.UserClipPlanes != 0 || clip.UserClipPlaneMode != 0 || clip.VertexKillAny || clip.UserClipPlaneNegateY ||
-            clip.UserClipPlaneCullOnly || clip.CullOnClippingErrorDisable || clip.ForceViewportIndexFromVertexShader)
+        if (clip.VertexKillAny || clip.CullOnClippingErrorDisable || clip.ForceViewportIndexFromVertexShader)
         {
             throw _host.Fatal(
-                $"The clip control state is not supported: planes={clip.UserClipPlanes} mode={clip.UserClipPlaneMode} killAny={clip.VertexKillAny} " +
-                $"negateY={clip.UserClipPlaneNegateY} cullOnly={clip.UserClipPlaneCullOnly} cullOnError={clip.CullOnClippingErrorDisable} viewportIndex={clip.ForceViewportIndexFromVertexShader}.");
+                $"The clip control state is not supported: killAny={clip.VertexKillAny} " +
+                $"cullOnError={clip.CullOnClippingErrorDisable} viewportIndex={clip.ForceViewportIndexFromVertexShader}.");
+        }
+
+        // User clip planes are clip distances, which cull a point by its vertex: PS_UCP_MODE
+        // 0. The other modes clip or cull the expanded sprite (PS_UCP_Y_SCALE_NEG orients it).
+        if (!clip.ClipDisable && clip.UserClipPlanes != 0 &&
+            (GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.PointList &&
+            (clip.UserClipPlaneMode != 0 || clip.UserClipPlaneNegateY))
+        {
+            throw _host.Fatal(
+                $"User clip planes on point sprites are not supported: planes=0x{clip.UserClipPlanes:X2} mode={clip.UserClipPlaneMode} " +
+                $"negateY={clip.UserClipPlaneNegateY}.");
         }
 
         var depth = context.DepthTarget;

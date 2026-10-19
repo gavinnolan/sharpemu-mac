@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
@@ -29,16 +30,100 @@ public sealed partial class GpuCommandInterpreter
     public const uint ConstantRamDwords = 0x3000;
     public const uint RingChunkBytes = 0x10000;
 
+    // SHARPEMU_GPU_STRICT_HEADERS: fail at the first header that is not a type-3 packet.
+    internal bool StrictHeaders { get; set; } = GpuStreamDiagnostics.StrictHeaders;
+
     private readonly ICommandStreamHost _host;
     private readonly List<uint[]> _payloadScratchByDepth = new();
     private readonly uint[] _constantRam = new uint[ConstantRamDwords];
     private PacketCursorStack? _execution;
     private bool _chainRequested;
     private ulong _packetSerial;
+
+    // DSTRACE §4.7 SLICE: packets run so far, read by the queue around a slice.
+    internal ulong DsPacketSerial => _packetSerial;
     private ulong _lastWriteAddress;
     private ulong _lastWriteValue;
     private int _lastWriteLength;
     private ulong _lastWritePacket;
+
+    // The last packets this interpreter walked, so a stream that leaves its
+    // packet boundaries says how it got there instead of only where it stopped.
+    private readonly PacketTraceEntry[] _packetTrace = new PacketTraceEntry[32];
+    private int _packetTraceCount;
+
+    private struct PacketTraceEntry
+    {
+        public ulong Serial;
+        public ulong Address;
+        public uint Offset;
+        public uint Header;
+        public uint Length;
+        public uint Consumed;
+        public int Depth;
+        public PacketTraceOutcome Outcome;
+    }
+
+    private enum PacketTraceOutcome : byte
+    {
+        Advanced,
+        Filler,
+        Predicated,
+        DeferredAdvance,
+        Suspended,
+        Chained,
+        Popped,
+    }
+
+    private void Trace(PacketTraceOutcome outcome, in PacketCursor cursor, uint offset,
+        uint header, uint length, uint consumed, int depth)
+    {
+        _packetTrace[_packetTraceCount++ % _packetTrace.Length] = new PacketTraceEntry
+        {
+            Serial = _packetSerial,
+            Address = cursor.Address,
+            Offset = offset,
+            Header = header,
+            Length = length,
+            Consumed = consumed,
+            Depth = depth,
+            Outcome = outcome,
+        };
+    }
+
+    // An unknown opcode means either this interpreter walked off the packet grid
+    // or the words under the cursor are not the ones it was handed. Reading the
+    // header again separates the two: a guest that rebuilds a command buffer it
+    // has already submitted changes it between two reads microseconds apart, and
+    // the trace above then describes a stream that no longer exists.
+    private string DescribeConcurrentRewrite(ulong packetAddress, uint header)
+    {
+        Span<byte> word = stackalloc byte[sizeof(uint)];
+        if (!_host.TryReadGuest(packetAddress, word))
+        {
+            return string.Empty;
+        }
+
+        var reread = BinaryPrimitives.ReadUInt32LittleEndian(word);
+        return reread == header
+            ? string.Empty
+            : $" The guest rewrote this packet while it was being read: header=0x{header:X8} is now 0x{reread:X8}.";
+    }
+
+    private void DumpPacketTrace()
+    {
+        var count = Math.Min(_packetTraceCount, _packetTrace.Length);
+        Console.Error.WriteLine($"[GPU][FATAL] The last {count} packets this queue walked, oldest first:");
+        var first = _packetTraceCount - count;
+        for (var index = first; index < _packetTraceCount; index++)
+        {
+            ref var entry = ref _packetTrace[index % _packetTrace.Length];
+            Console.Error.WriteLine(
+                $"\tserial={entry.Serial} depth={entry.Depth} buffer=0x{entry.Address:X16} " +
+                $"offset=0x{entry.Offset:X5} header=0x{entry.Header:X8} length={entry.Length} " +
+                $"consumed={entry.Consumed} {entry.Outcome}");
+        }
+    }
 
     public GpuCommandInterpreter(ICommandStreamHost host, int queueId, int interruptEventId)
     {
@@ -46,6 +131,7 @@ public sealed partial class GpuCommandInterpreter
         QueueId = queueId;
         InterruptEventId = interruptEventId;
         TypedRegisters = new RegisterBanks(host.Fatal);
+        UsePacketBlocks = PacketBlockReads.Enabled && host.SupportsCommandBlocks;
     }
 
     public int QueueId { get; }
@@ -112,7 +198,21 @@ public sealed partial class GpuCommandInterpreter
 
     public bool ConstantEngineComplete { get; set; }
 
+    // One bank for every command processor of a queue set: a query's begin and end dumps may run
+    // on different queues, and the end must still read later than the begin or the pair counts no
+    // samples. CommandStreamQueue shares one bank across its interpreters; a lone one owns its own.
     private readonly ulong[] _syntheticOcclusionCounters = new ulong[4];
+
+    // The counter of a host with no occlusion counter: one for every interpreter, never reset.
+    private static long _hostlessOcclusionCounter;
+
+    internal ulong[] SyntheticOcclusionCounterBank
+    {
+        init => _syntheticOcclusionCounters = value.Length == 4
+            ? value
+            : throw new ArgumentException("The occlusion counter bank holds four counters.", nameof(value));
+    }
+
     private ulong _occlusionCounterStart;
     private int _selectedOcclusionCounter;
     private uint _occlusionDumpStrideBytes = 16;
@@ -179,9 +279,12 @@ public sealed partial class GpuCommandInterpreter
         }
 
         execution.Suspended = false;
+        execution.SuspendCondition = CommandWaitCondition.Unknown;
         execution.MadeProgress = false;
         // Forwarding is local to this slice, never a cached signal from an older submission.
         _lastWriteLength = 0;
+        // So is whatever was copied out of a command buffer: the guest may have stored into it since.
+        BeginPacketBlockSlice();
         _execution = execution;
         try
         {
@@ -238,7 +341,59 @@ public sealed partial class GpuCommandInterpreter
         _ = _host.TryReadGuestOperand(address, first);
     }
 
-    public void Suspend() => RequireExecution().Suspended = true;
+    public void Suspend() => SuspendOn(CommandWaitCondition.Unknown);
+
+    /// <summary>
+    /// Suspends this submission and records what it is waiting for, so the queue can
+    /// wake it when that alone changes instead of re-running every blocked head.
+    /// </summary>
+    public void SuspendOn(in CommandWaitCondition condition)
+    {
+        var execution = RequireExecution();
+        execution.Suspended = true;
+        execution.SuspendCondition = condition;
+        if (DsTrace.Gpu)
+        {
+            DsEmitSuspend(in condition);
+        }
+    }
+
+    // DSTRACE §4.7 CPS: the compare operands of the memory wait about to suspend. Only the
+    // queue's own (worker) thread runs this interpreter, so plain fields suffice.
+    private bool _dsHasWaitOperands;
+    private ulong _dsWaitReference;
+    private ulong _dsWaitMask;
+    private uint _dsWaitFunction;
+    private ulong _dsWaitCurrent;
+
+    private void DsNoteWaitOperands(ulong reference, ulong mask, uint function, ulong current)
+    {
+        _dsWaitReference = reference;
+        _dsWaitMask = mask;
+        _dsWaitFunction = function;
+        _dsWaitCurrent = current;
+        _dsHasWaitOperands = true;
+    }
+
+    private void DsEmitSuspend(in CommandWaitCondition condition)
+    {
+        var hasOperands = _dsHasWaitOperands;
+        _dsHasWaitOperands = false;
+        if (!DsTrace.Armed)
+        {
+            return;
+        }
+
+        DsTrace.Emit(
+            DsEv.CPS,
+            (ulong)QueueId,
+            (ulong)condition.Kind,
+            condition.Address,
+            hasOperands ? _dsWaitReference : 0,
+            hasOperands ? _dsWaitMask : 0,
+            hasOperands ? _dsWaitFunction : 0,
+            hasOperands ? _dsWaitCurrent : 0);
+    }
 
     // A paired wait must still observe this queue's immediate label store when the CPU
     // resets the live address for the next frame between the two packets (Dead Cells).
@@ -266,6 +421,7 @@ public sealed partial class GpuCommandInterpreter
             ref var cursor = ref execution.At(cursorIndex);
             if (cursor.Offset > cursor.DwordCount)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The packet cursor is past its buffer: offset={cursor.Offset} dwords={cursor.DwordCount} address=0x{cursor.Address:X16}.");
             }
 
@@ -273,9 +429,12 @@ public sealed partial class GpuCommandInterpreter
             {
                 if (cursor.DeferredAdvance > cursor.Remaining)
                 {
+                    DumpPacketTrace();
                     throw _host.Fatal($"The deferred advance is past the buffer: advance={cursor.DeferredAdvance} remaining={cursor.Remaining} address=0x{cursor.Address:X16}.");
                 }
 
+                Trace(PacketTraceOutcome.DeferredAdvance, in cursor, cursor.Offset, 0, 0,
+                    cursor.DeferredAdvance, cursorIndex);
                 cursor.Offset += cursor.DeferredAdvance;
                 cursor.DeferredAdvance = 0;
                 execution.MadeProgress = true;
@@ -284,12 +443,28 @@ public sealed partial class GpuCommandInterpreter
 
             if (cursor.Offset == cursor.DwordCount)
             {
+                Trace(PacketTraceOutcome.Popped, in cursor, cursor.Offset, 0, 0, 0, cursorIndex);
                 execution.Pop();
                 continue;
             }
 
             var packetAddress = cursor.Address + ((ulong)cursor.Offset * sizeof(uint));
-            var header = ReadDword(packetAddress, RenderPhaseProfile.CommandReadKind.Header);
+            // The header and the body of a packet are consecutive, and almost every
+            // packet is short, so one read of a small window covers both. Reading the
+            // header on its own first doubled the number of guest reads the command
+            // stream makes, and a guest read is not free: the backend has to decide
+            // whether the GPU may still be writing those bytes.
+            ReadOnlySpan<uint> window;
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+            {
+                window = ReadPacketWindow(cursorIndex, packetAddress, cursor.Remaining);
+            }
+
+            var header = window[0];
+            if (PacketProfile.Enabled)
+            {
+                PacketProfile.RecordHeaderRead();
+            }
             _packetSerial++;
             var total = cursor.DwordCount;
             var remaining = cursor.Remaining;
@@ -297,6 +472,7 @@ public sealed partial class GpuCommandInterpreter
 
             if (header == PacketHeader.FillerHeader)
             {
+                Trace(PacketTraceOutcome.Filler, in cursor, offset, header, 1, 1, cursorIndex);
                 cursor.Offset++;
                 execution.MadeProgress = true;
                 continue;
@@ -305,23 +481,36 @@ public sealed partial class GpuCommandInterpreter
             // Ring memory the guest has not written yet; retry after it appends more.
             if (header == 0 && cursor.FollowedChunkAdvance)
             {
+                GpuStreamDiagnostics.RecordRingSuspend();
                 execution.Suspended = true;
+                execution.SuspendCondition = new CommandWaitCondition(CommandWaitKind.RingAppend);
                 return;
+            }
+
+            if (StrictHeaders && PacketHeader.PacketType(header) != 3)
+            {
+                ReportStreamContext("Strict header check");
+                throw _host.Fatal(
+                    $"The packet header is not type 3: offset=0x{offset:X5} header=0x{header:X8} " +
+                    $"type={PacketHeader.PacketType(header)} address=0x{packetAddress:X16}.");
             }
 
             if (remaining < 2)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The packet is shorter than two dwords: offset=0x{offset:X5} header=0x{header:X8} address=0x{packetAddress:X16}.");
             }
 
             var length = PacketHeader.Length(header);
             if (length > remaining)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The packet is longer than the buffer: offset=0x{offset:X5} header=0x{header:X8} length={length} remaining={remaining} address=0x{packetAddress:X16}.");
             }
 
             if (PacketHeader.IsPredicated(header) && PredicateSkip)
             {
+                Trace(PacketTraceOutcome.Predicated, in cursor, offset, header, length, length, cursorIndex);
                 TraceSkippedPackets("predicated", packetAddress, length, PacketHeader.Opcode(header));
                 cursor.Offset += length;
                 execution.MadeProgress = true;
@@ -342,19 +531,62 @@ public sealed partial class GpuCommandInterpreter
             if (handler is null)
             {
                 DumpUnknownPacket(cursor, offset);
-                throw _host.Fatal($"The packet opcode is unknown: offset=0x{offset:X5} header=0x{header:X8} opcode=0x{opcode:X2} address=0x{packetAddress:X16}.");
+                DumpPacketTrace();
+                throw _host.Fatal(
+                    $"The packet opcode is unknown: offset=0x{offset:X5} header=0x{header:X8} " +
+                    $"opcode=0x{opcode:X2} address=0x{packetAddress:X16}.{DescribeConcurrentRewrite(packetAddress, header)}");
             }
 
-            var payload = ReadPayload(cursorIndex, packetAddress, length - 1);
+            // The window already holds the body unless the packet is a long one.
+            ReadOnlySpan<uint> payload;
+            if (length <= (uint)window.Length)
+            {
+                payload = window.Slice(1, (int)(length - 1));
+            }
+            else
+            {
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+                {
+                    payload = ReadPayload(cursorIndex, packetAddress, length - 1, remaining);
+                }
+            }
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
-            var consumed = handler(this, in packet, payload) + 1;
+            uint consumed;
+            if (PacketProfile.Enabled)
+            {
+                var packetStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                consumed = handler(this, in packet, payload) + 1;
+                PacketProfile.RecordPacket(opcode, System.Diagnostics.Stopwatch.GetTimestamp() - packetStarted);
+            }
+            else
+            {
+                consumed = handler(this, in packet, payload) + 1;
+            }
+
+            // The header's count is the size of the packet, so a handler that
+            // reports fewer dwords than its own header declares has not consumed
+            // the whole packet: advancing by its count would resume inside the
+            // body and read an operand as the next header. Several handlers
+            // return a fixed size for the variant they know (the register NOP
+            // offsets, the semaphore, the atomic), and a longer encoding of the
+            // same packet would walk the stream off its boundaries from there on.
+            // COND_EXEC is the one packet that reports more on purpose, because
+            // it skips the packets it covers.
+            if (consumed < length)
+            {
+                consumed = length;
+            }
+
             if (consumed > remaining)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The handler consumed more than the buffer holds: consumed={consumed} remaining={remaining} header=0x{header:X8} address=0x{packetAddress:X16}.");
             }
 
             if (execution.Suspended)
             {
+                Trace(PacketTraceOutcome.Suspended, in execution.At(cursorIndex), offset, header,
+                    length, consumed, cursorIndex);
                 if (execution.Depth > cursorIndex + 1 && !_chainRequested)
                 {
                     execution.At(cursorIndex).DeferredAdvance = consumed;
@@ -366,6 +598,8 @@ public sealed partial class GpuCommandInterpreter
 
             if (_chainRequested)
             {
+                Trace(PacketTraceOutcome.Chained, in execution.At(cursorIndex), offset, header,
+                    length, consumed, cursorIndex);
                 _chainRequested = false;
                 execution.MadeProgress = true;
                 continue;
@@ -376,20 +610,64 @@ public sealed partial class GpuCommandInterpreter
                 throw _host.Fatal($"The cursor stack changed under a packet: depth={execution.Depth} expected={cursorIndex + 1} header=0x{header:X8}.");
             }
 
+            Trace(PacketTraceOutcome.Advanced, in execution.At(cursorIndex), offset, header,
+                length, consumed, cursorIndex);
             execution.At(cursorIndex).Offset += consumed;
             execution.MadeProgress = true;
         }
     }
 
     // The payload lives in a per-depth scratch buffer for the handler call only.
-    private ReadOnlySpan<uint> ReadPayload(int depth, ulong packetAddress, uint payloadDwords)
+    // How much of a packet is read in one go. Long packets (large register writes,
+    // constant-RAM dumps) fall back to a second read for the rest of their body.
+    private const uint PacketWindowDwords = 16;
+
+    // The header and as much of the body as the window holds, in one guest read.
+    private ReadOnlySpan<uint> ReadPacketWindow(int depth, ulong packetAddress, uint remaining)
     {
+        var dwords = Math.Min(remaining, PacketWindowDwords);
+        var blockWords = BlockWords(depth, packetAddress, remaining, dwords, dwords);
+        if (!blockWords.IsEmpty)
+        {
+            return blockWords;
+        }
+
+        while (_payloadScratchByDepth.Count <= depth)
+        {
+            _payloadScratchByDepth.Add(new uint[PacketHeader.MaxLength]);
+        }
+
+        var scratch = _payloadScratchByDepth[depth].AsSpan(0, (int)dwords);
+        RenderPhaseProfile.RecordCommandRead(
+            RenderPhaseProfile.CommandReadKind.Header, scratch.Length * sizeof(uint));
+        if (!_host.TryReadGuest(packetAddress, MemoryMarshal.AsBytes(scratch)))
+        {
+            throw _host.Fatal(
+                $"The command stream cannot read a packet header: address=0x{packetAddress:X16} dwords={dwords}.");
+        }
+
+        return scratch;
+    }
+
+    private ReadOnlySpan<uint> ReadPayload(int depth, ulong packetAddress, uint payloadDwords, uint remaining)
+    {
+        var blockWords = BlockWords(depth, packetAddress, remaining, payloadDwords + 1, payloadDwords + 1);
+        if (!blockWords.IsEmpty)
+        {
+            return blockWords[1..];
+        }
+
         while (_payloadScratchByDepth.Count <= depth)
         {
             _payloadScratchByDepth.Add(new uint[PacketHeader.MaxLength]);
         }
 
         var scratch = _payloadScratchByDepth[depth].AsSpan(0, (int)payloadDwords);
+        if (payloadDwords != 0 && PacketProfile.Enabled)
+        {
+            PacketProfile.RecordPayloadRead(payloadDwords);
+        }
+
         if (payloadDwords != 0)
         {
             RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Payload, scratch.Length * sizeof(uint));
@@ -446,19 +724,74 @@ public sealed partial class GpuCommandInterpreter
         return BinaryPrimitives.ReadUInt64LittleEndian(bytes);
     }
 
-    private ulong ReadWaitOperand(ulong address, bool is64Bit)
+    /// <summary>
+    /// Reads the bytes a wait packet polls, as they are in memory right now.
+    /// </summary>
+    /// <remarks>
+    /// A poll is not an ordinary read: the hardware's command processor reads what memory
+    /// holds and stalls on the value it finds, so waiting here for work that may be about
+    /// to write those bytes only moves the stall onto the worker thread. An unmet compare
+    /// suspends the submission instead, and the host wakes it when the write lands.
+    /// </remarks>
+    private ulong ReadWaitOperand(ulong address, bool is64Bit, bool commitPendingWrite)
     {
         RenderPhaseProfile.RecordCommandRead(is64Bit ? RenderPhaseProfile.CommandReadKind.Operand64 : RenderPhaseProfile.CommandReadKind.Operand32,
             is64Bit ? sizeof(ulong) : sizeof(uint));
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         var size = is64Bit ? sizeof(ulong) : sizeof(uint);
-        if (!_host.TryReadGuestWaitOperand(address, bytes[..size]))
+        if (!_host.TryReadGuestWaitOperand(address, bytes[..size], commitPendingWrite))
         {
             throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={size}.");
         }
 
         return is64Bit ? BinaryPrimitives.ReadUInt64LittleEndian(bytes) : BinaryPrimitives.ReadUInt32LittleEndian(bytes);
     }
+
+    /// <summary>
+    /// Reads an operand earlier work on this queue may still be writing, or suspends the
+    /// submission at this packet while that work finishes.
+    /// </summary>
+    /// <remarks>
+    /// The command processor reads such an operand after the work ahead of it retires, and
+    /// stalls in the meantime. Stalling the worker until the GPU drains holds every other
+    /// queue behind this one, so the host commits the owing work and the submission parks on
+    /// the bytes instead; the packet runs again, from its start, once they land. A host that
+    /// cannot tell reads the bytes as they are now.
+    /// </remarks>
+    internal bool TryReadOperandOrSuspend(ulong address, Span<byte> destination)
+    {
+        // A label this queue recorded ahead of the packet is what the operand holds once the
+        // work before it retires, which is when the command processor would read it.
+        if (destination.Length is sizeof(uint) or sizeof(ulong) && PendingLabelLookup is { } pending &&
+            pending(address, destination.Length == sizeof(ulong), out var labelValue))
+        {
+            if (destination.Length == sizeof(ulong))
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(destination, labelValue);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)labelValue);
+            }
+
+            return true;
+        }
+
+        if (_host.CommitPendingOperandWrite(address, (ulong)destination.Length))
+        {
+            Interlocked.Increment(ref _operandSuspends);
+            SuspendOn(CommandWaitCondition.Memory(address, (ulong)destination.Length));
+            return false;
+        }
+
+        ReadBytes(address, destination);
+        return true;
+    }
+
+    private static long _operandSuspends;
+
+    /// <summary>Packets since startup that parked on an operand earlier work still owed instead of draining the GPU.</summary>
+    public static long OperandSuspends => Interlocked.Read(ref _operandSuspends);
 
     internal void ReadBytes(ulong address, Span<byte> destination)
     {
@@ -533,32 +866,62 @@ public sealed partial class GpuCommandInterpreter
         Console.Error.WriteLine($"[GPU][TRACE] CommandSkipTarget target=0x{address:X16} dwords={dwords} packets={string.Join(',', packets)}");
     }
 
-    internal void WriteDword(ulong address, uint value, [CallerMemberName] string caller = "")
+    internal void WriteDword(ulong address, uint value, string kind = "WRITE32", [CallerMemberName] string caller = "")
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
-        WriteBytes(address, bytes, caller);
+        WriteBytes(address, bytes, kind, caller);
     }
 
-    internal void WriteQword(ulong address, ulong value, [CallerMemberName] string caller = "")
+    internal void WriteQword(ulong address, ulong value, string kind = "WRITE64", [CallerMemberName] string caller = "")
     {
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
-        WriteBytes(address, bytes, caller);
+        WriteBytes(address, bytes, kind, caller);
     }
 
+    /// <summary>
+    /// Told when this interpreter writes guest memory, so the queue can wake exactly
+    /// the submissions whose compare reads those bytes. The queue sets it.
+    /// </summary>
+    internal Action<ulong, ulong>? GuestMemoryWritten { get; init; }
+
+    /// <summary>Told when this interpreter defers a label to the GPU; the queue keeps it
+    /// visible to other queues' waits until it lands.</summary>
+    internal Action<ulong, int, ulong>? PendingLabelRecorded { get; init; }
+
+    /// <summary>The same for a run of eight-byte labels of one value at a fixed stride, as one call.</summary>
+    internal Action<ulong, int, ulong, ulong>? PendingQwordsRecorded { get; init; }
+
+    internal PendingLabelReader? PendingLabelLookup { get; init; }
+
+    internal delegate bool PendingLabelReader(ulong address, bool is64Bit, out ulong value);
+
     // The caller name labels the packet handler in the image-clear trace.
-    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, [CallerMemberName] string caller = "")
+    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES", [CallerMemberName] string caller = "")
     {
+        NotePacketBlockWrite();
         if (_host.TryDeferOrderedWrite(QueueId, address, source))
         {
             _lastWriteLength = 0;
             return;
         }
-        if (!_host.Memory.TryWrite(address, source))
+
+        if (!_host.TryWriteGuest(address, source, kind))
         {
             throw _host.Fatal($"The command stream cannot write guest memory: address=0x{address:X16} size={source.Length}.");
         }
+
+        GuestMemoryWritten?.Invoke(address, (ulong)source.Length);
+        if (source.Length is sizeof(uint) or sizeof(ulong))
+        {
+            CommandProcessorWriteHistory.Record(QueueId, address, source.Length,
+                source.Length == sizeof(uint)
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(source)
+                    : BinaryPrimitives.ReadUInt64LittleEndian(source),
+                kind, deferred: false);
+        }
+
         _lastWriteLength = 0;
         if (source.Length is sizeof(uint) or sizeof(ulong))
         {

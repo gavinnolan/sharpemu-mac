@@ -16,6 +16,29 @@ public sealed class VertexTableMetadata
     public int VertexAttributeRegister { get; init; } = NoRegister;
     public uint[] InputSemantics { get; init; } = [];
 }
+
+// The header-derived tables of vertex programs already read, keyed by the registered header
+// and the code hash so a different binary at the same address never reuses an entry.
+// Used under the pipeline cache's resolve lock; entries are never mutated after they are stored.
+public sealed class VertexTableMetadataCache
+{
+    private const int MaxEntries = 4096;
+    private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), VertexTableMetadata> _entries = new();
+
+    internal bool TryGet(RegisteredShader shader, ulong codeHash, out VertexTableMetadata? metadata) =>
+        _entries.TryGetValue((shader, codeHash), out metadata);
+
+    internal void Add(RegisteredShader shader, ulong codeHash, VertexTableMetadata metadata)
+    {
+        if (_entries.Count >= MaxEntries)
+        {
+            _entries.Clear();
+        }
+
+        _entries[(shader, codeHash)] = metadata;
+    }
+}
+
 // One packed input semantic word of a shader header.
 public readonly record struct ShaderInputSemantic(uint Word)
 {
@@ -32,14 +55,21 @@ public readonly record struct ShaderInputSemantic(uint Word)
 public static class VertexInputResolver
 {
     public static VertexInputInfo ResolveVertexInputs(CpuContext context, RegisteredShader shader, ReadOnlySpan<uint> userData,
-        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default)
+        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default,
+        VertexTableMetadataCache? metadataCache = null, ulong codeHash = 0)
     {
-        if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out var metadata, out var error))
+        VertexTableMetadata? metadata = null;
+        if (metadataCache is null || !metadataCache.TryGet(shader, codeHash, out metadata))
         {
-            throw SubmissionScheduler.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
+            if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out metadata, out var error))
+            {
+                throw GpuFatal.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
+            }
+
+            metadataCache?.Add(shader, codeHash, metadata);
         }
 
-        var attributes = new List<VertexAttributeResource>();
+        VertexAttributeResource[] attributes = [];
         VertexInputBuffer[] buffers = [];
         // A shader without input semantics never reads its vertex tables, which may be null.
         if (metadata.VertexAttributeRegister >= 0 && metadata.InputSemantics.Length != 0)
@@ -48,20 +78,25 @@ public static class VertexInputResolver
             var bufferTable = ReadTablePointer(userData, metadata.VertexBufferRegister);
             if (attributeTable == 0 || bufferTable == 0)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The vertex table pointer is null: shader=0x{shader.CodeAddress:X16} attributes=0x{attributeTable:X16} buffers=0x{bufferTable:X16} " +
                     $"attributeRegister={metadata.VertexAttributeRegister} bufferRegister={metadata.VertexBufferRegister} " +
                     $"user_data=[{string.Join(",", userData.ToArray().Select(word => $"{word:X8}"))}].");
             }
 
-            attributes = ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress);
-            buffers = MergeBuffers(attributes, shader.CodeAddress);
+            // Per-thread scratch: the list never outlives the call; the draw keeps the array.
+            var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
+            resources.Clear();
+            ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress, resources);
+            buffers = MergeBuffers(resources, shader.CodeAddress);
+            attributes = resources.ToArray();
+            resources.Clear();
         }
 
         return new VertexInputInfo
         {
             Buffers = buffers,
-            Attributes = attributes.ToArray(),
+            Attributes = attributes,
             FetchEmbedded = metadata.VertexAttributeRegister >= 0,
             FetchAttributeRegister = Math.Max(metadata.VertexAttributeRegister, 0),
             FetchBufferRegister = Math.Max(metadata.VertexBufferRegister, 0),
@@ -85,6 +120,15 @@ public static class VertexInputResolver
         ((channels > 1 ? 5u : 0u) << 3) |
         ((channels > 2 ? 6u : 0u) << 6) |
         ((channels > 3 ? 7u : 1u) << 9);
+
+    [ThreadStatic]
+    private static List<ResolvedBuffer>? _mergeScratch;
+
+    [ThreadStatic]
+    private static List<VertexAttributeResource>? _attributeScratch;
+
+    [ThreadStatic]
+    private static Stack<ResolvedBuffer>? _spareBuffers;
 
     private sealed class ResolvedBuffer
     {
@@ -225,19 +269,32 @@ public static class VertexInputResolver
         ulong shaderAddress)
     {
         var resources = new List<VertexAttributeResource>(semantics.Length);
+        ApplySemantics(context, semantics, attributeTable, bufferTable, shaderAddress, resources);
+        return resources;
+    }
+
+    // ApplySemantics into a list the caller owns.
+    private static void ApplySemantics(
+        CpuContext context,
+        ReadOnlySpan<uint> semantics,
+        ulong attributeTable,
+        ulong bufferTable,
+        ulong shaderAddress,
+        List<VertexAttributeResource> resources)
+    {
         Span<uint> descriptorWords = stackalloc uint[4];
         foreach (var word in semantics)
         {
             var semantic = new ShaderInputSemantic(word);
             if (semantic.StaticBufferIndex || semantic.StaticAttribute)
             {
-                throw SubmissionScheduler.Fatal($"A static vertex attribute is not supported: shader=0x{shaderAddress:X16} semantic=0x{word:X8}.");
+                throw GpuFatal.Fatal($"A static vertex attribute is not supported: shader=0x{shaderAddress:X16} semantic=0x{word:X8}.");
             }
 
             var attributeAddress = attributeTable + semantic.Semantic * sizeof(uint);
             if (!context.TryReadUInt32(attributeAddress, out var attribute))
             {
-                throw SubmissionScheduler.Fatal($"The vertex attribute table is unreadable: shader=0x{shaderAddress:X16} address=0x{attributeAddress:X16}.");
+                throw GpuFatal.Fatal($"The vertex attribute table is unreadable: shader=0x{shaderAddress:X16} address=0x{attributeAddress:X16}.");
             }
 
             var index = attribute & 0x1Fu;
@@ -246,12 +303,12 @@ public static class VertexInputResolver
             var fetchIndex = (attribute >> 26) & 0x1u;
             if (index >= VertexInputInfo.MaxBuffers)
             {
-                throw SubmissionScheduler.Fatal($"The vertex attribute names a buffer outside the table: shader=0x{shaderAddress:X16} index={index}.");
+                throw GpuFatal.Fatal($"The vertex attribute names a buffer outside the table: shader=0x{shaderAddress:X16} index={index}.");
             }
 
             if (resources.Count >= VertexInputInfo.MaxBuffers)
             {
-                throw SubmissionScheduler.Fatal($"The vertex program has too many attributes: shader=0x{shaderAddress:X16} count={resources.Count + 1}.");
+                throw GpuFatal.Fatal($"The vertex program has too many attributes: shader=0x{shaderAddress:X16} count={resources.Count + 1}.");
             }
 
             var descriptorAddress = bufferTable + index * 16u;
@@ -259,7 +316,7 @@ public static class VertexInputResolver
             {
                 if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptorWords[component]))
                 {
-                    throw SubmissionScheduler.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
+                    throw GpuFatal.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
                 }
             }
 
@@ -290,14 +347,21 @@ public static class VertexInputResolver
                 BufferIndex: -1,
                 OffsetBytes: 0));
         }
-
-        return resources;
     }
 
     // Attributes with one stride and fetch rate whose bases lie within one record share a buffer.
     public static VertexInputBuffer[] MergeBuffers(List<VertexAttributeResource> resources, ulong shaderAddress)
     {
-        var buffers = new List<ResolvedBuffer>();
+        // Per-thread scratch: this runs for every draw, and the buffers never outlive the call.
+        var buffers = _mergeScratch ??= new List<ResolvedBuffer>(VertexInputInfo.MaxBuffers);
+        var spares = _spareBuffers ??= new Stack<ResolvedBuffer>(VertexInputInfo.MaxBuffers);
+        foreach (var buffer in buffers)
+        {
+            buffer.AttributeIndices.Clear();
+            spares.Push(buffer);
+        }
+
+        buffers.Clear();
         for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
         {
             var resource = resources[resourceIndex];
@@ -319,14 +383,14 @@ public static class VertexInputResolver
                 {
                     if (buffer.RecordCount != descriptor.RecordCount)
                     {
-                        throw SubmissionScheduler.Fatal(
+                        throw GpuFatal.Fatal(
                             $"Two attributes of one vertex buffer disagree on the record count: shader=0x{shaderAddress:X16} records={buffer.RecordCount}/{descriptor.RecordCount}.");
                     }
 
                     buffer.Address = lowest;
                     if (buffer.AttributeIndices.Count >= VertexInputInfo.MaxBuffers)
                     {
-                        throw SubmissionScheduler.Fatal($"A vertex buffer has too many attributes: shader=0x{shaderAddress:X16}.");
+                        throw GpuFatal.Fatal($"A vertex buffer has too many attributes: shader=0x{shaderAddress:X16}.");
                     }
 
                     buffer.AttributeIndices.Add(resourceIndex);
@@ -342,16 +406,14 @@ public static class VertexInputResolver
 
             if (buffers.Count >= VertexInputInfo.MaxBuffers)
             {
-                throw SubmissionScheduler.Fatal($"The vertex program has too many buffers: shader=0x{shaderAddress:X16}.");
+                throw GpuFatal.Fatal($"The vertex program has too many buffers: shader=0x{shaderAddress:X16}.");
             }
 
-            var created = new ResolvedBuffer
-            {
-                Address = descriptor.Address,
-                Stride = descriptor.Stride,
-                RecordCount = descriptor.RecordCount,
-                FetchIndex = resource.FetchIndex,
-            };
+            var created = spares.Count != 0 ? spares.Pop() : new ResolvedBuffer();
+            created.Address = descriptor.Address;
+            created.Stride = descriptor.Stride;
+            created.RecordCount = descriptor.RecordCount;
+            created.FetchIndex = resource.FetchIndex;
             created.AttributeIndices.Add(resourceIndex);
             buffers.Add(created);
         }

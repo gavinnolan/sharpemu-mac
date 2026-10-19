@@ -6,12 +6,12 @@ using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
-internal static class VisibilityResultTrace
+public static class VisibilityResultTrace
 {
-    internal delegate bool ReadBacking(ulong address, Span<byte> destination);
+    public delegate bool ReadBacking(ulong address, Span<byte> destination);
     private readonly record struct Publication(ulong Address, ulong Value, int Queue, ulong Submission, uint InstanceMask, uint StrideBytes, bool Aggregate);
 
-    internal static bool Enabled { get; } = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VISIBILITY") == "1";
+    public static bool Enabled { get; } = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VISIBILITY") == "1";
     private static readonly object _gate = new();
     private static readonly Queue<Publication> _publications = new();
     private static long _writes, _readFailures, _mismatches, _predicates, _skips, _downloads;
@@ -19,7 +19,7 @@ internal static class VisibilityResultTrace
     private static Publication _lastWrite;
     private static (int Queue, ulong Submission, ulong Address, ulong Value, uint Condition, uint Wait, bool Skip) _lastPredicate;
 
-    internal static void Published(int queue, ulong submission, ulong address, ulong value,
+    public static void Published(int queue, ulong submission, ulong address, ulong value,
         uint instanceMask, uint strideBytes, IGuestBackedSpace? memory, bool aggregate = false)
     {
         if (!Enabled) return;
@@ -51,7 +51,7 @@ internal static class VisibilityResultTrace
         }
     }
 
-    internal static void Predicate(int queue, ulong submission, ulong address, ulong value, uint condition, uint wait, bool skip)
+    public static void Predicate(int queue, ulong submission, ulong address, ulong value, uint condition, uint wait, bool skip)
     {
         if (!Enabled) return;
         lock (_gate)
@@ -63,7 +63,7 @@ internal static class VisibilityResultTrace
         }
     }
 
-    internal static void Download(ulong address, ReadOnlySpan<byte> data, ReadBacking read)
+    public static void Download(ulong address, ReadOnlySpan<byte> data, ReadBacking read)
     {
         if (!Enabled) return;
         lock (_gate)
@@ -81,7 +81,7 @@ internal static class VisibilityResultTrace
         }
     }
 
-    internal static uint DifferentSlots(ulong resultAddress, ulong expected, ulong dataAddress, ReadOnlySpan<byte> data,
+    public static uint DifferentSlots(ulong resultAddress, ulong expected, ulong dataAddress, ReadOnlySpan<byte> data,
         uint instanceMask = 0xFFFF, uint strideBytes = 16, bool aggregate = false)
     {
         uint mask = 0;
@@ -98,7 +98,7 @@ internal static class VisibilityResultTrace
         return mask;
     }
 
-    internal static uint ReplacedSlots(ulong resultAddress, ulong expected, ulong dataAddress, ReadOnlySpan<byte> data,
+    public static uint ReplacedSlots(ulong resultAddress, ulong expected, ulong dataAddress, ReadOnlySpan<byte> data,
         uint instanceMask, uint strideBytes, ReadBacking read, bool aggregate = false)
     {
         var changed = DifferentSlots(resultAddress, expected, dataAddress, data, instanceMask, strideBytes, aggregate);
@@ -133,7 +133,7 @@ internal static class VisibilityResultTrace
             : current;
     }
 
-    internal static void OnFlip(long version)
+    public static void OnFlip(long version)
     {
         if (!Enabled) return;
         lock (_gate)
@@ -147,7 +147,7 @@ internal static class VisibilityResultTrace
         }
     }
 
-    internal static void Occlusion(string message)
+    public static void Occlusion(string message)
     {
         if (!Enabled) return;
         lock (_gate) Detail($"occlusion {message}");

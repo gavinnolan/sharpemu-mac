@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -26,7 +26,22 @@ public sealed partial class RenderExecutor
         public readonly ulong RequestedSize => RequestedEnd - BaseAddress;
     }
 
-    private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, IndexType Type);
+    private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, GpuIndexType Type);
+
+    // The bytes one fetch of a descriptor format reads (formats 113 and 121 are the two the
+    // vertex input accepts outside the unified table).
+    private uint ConstantAttributeByteSize(in BufferDescriptorWords descriptor)
+    {
+        if (descriptor.Format == 113) return 16;
+        if (descriptor.Format == 121) return 4;
+        if (SharpEmu.ShaderCompiler.Gfx10UnifiedFormat.TryDecode(descriptor.Format, out var dataFormat, out _))
+        {
+            var bytes = SharpEmu.ShaderCompiler.Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, 4);
+            if (bytes != 0) return bytes;
+        }
+
+        throw _host.Fatal($"The vertex buffer format is unknown: format={descriptor.Format}.");
+    }
 
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
     private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
@@ -49,7 +64,7 @@ public sealed partial class RenderExecutor
             if (buffers[slot].Stride != 0 || descriptor.RecordCount == 0 || descriptor.OutOfBounds != 2) continue;
             // This bounds mode tests only whether the record count is nonzero.
             // Constant attributes still need the full format extent.
-            sizes[slot] = Math.Max(sizes[slot], (ulong)attribute.OffsetBytes + VertexAttributeFormats.StorageByteSize(descriptor));
+            sizes[slot] = Math.Max(sizes[slot], (ulong)attribute.OffsetBytes + ConstantAttributeByteSize(descriptor));
         }
         var rangeCount = 0;
         for (var slot = 0; slot < buffers.Length; slot++)
@@ -156,10 +171,12 @@ public sealed partial class RenderExecutor
     }
 
     // A written buffer resource with an address and a footprint needs a barrier after the stage.
-    // Device-address accesses are not split into reads and writes, so they count as stores.
+    // Only a store or an atomic through the device-address page table counts: a program that
+    // merely reads through it writes nothing, and ending the pass after it would store and
+    // reload every attachment on a tile-based GPU for no reason.
     private bool DrawWritesMemory(ShaderStageResources stage) =>
         stage.Program is { } program &&
-        (program.UsesDeviceAddresses || WritesStorageImage(program) || HasBufferWrites(stage));
+        (program.WritesDeviceAddresses || WritesStorageImage(program) || HasBufferWrites(stage));
 
     private bool HasBufferWrites(ShaderStageResources stage)
     {
@@ -188,6 +205,113 @@ public sealed partial class RenderExecutor
             if (descriptor.Address != 0 && footprint != 0)
             {
                 return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Set from the draw packet: predicated, or inside an occlusion query (DrawsMustExecute).
+    private bool _drawMustExecute;
+
+    /// <summary>
+    /// Whether this draw may be left out of the frame while its pipeline compiles, rather than
+    /// the command stream waiting for the compile. Leaving a draw out is only safe when the frame
+    /// it belongs to is the only thing that misses it: the next frame draws it again into
+    /// targets that are rebuilt from nothing every frame. So, when in doubt, it is not:
+    /// <list type="bullet">
+    /// <item>a program that writes memory (storage buffers or images, atomics, device-address
+    /// stores), uses the GDS (ordered counts, append and consume), or writes mip statistics:
+    /// what it writes outlives the frame and later work reads it;</item>
+    /// <item>a predicated draw, or one inside an occlusion query: the guest decides on the
+    /// count it produces (the interpreter's DrawsMustExecute);</item>
+    /// <item>an indirect mesh draw, whose launch was prepared before the pipeline;</item>
+    /// <item>a draw whose attachments carry a clear (a fast clear consumed at their
+    /// acquire, a load clear): leaving it out would lose the clear;</item>
+    /// <item>a draw that writes depth or stencil: the depth target is what the rest of the
+    /// frame tests and samples, and a missing occluder there shows in every later pass;</item>
+    /// <item>and the host's own say on the targets (IRenderHost.MayLeaveOutWhileCompiling),
+    /// which leaves out only draws into targets it saw cleared or overwritten whole in this
+    /// frame and in the frames before it, so a look-up table, a shadow or virtual-texture
+    /// cache, a capture or a history buffer is never one of them.</item>
+    /// </list>
+    /// This executor has no stream-out; a host that adds it treats such a draw as writing memory.
+    /// </summary>
+    private bool MayLeaveOutWhileCompiling(
+        ref DrawState state, ShaderStageResources vertexStage, ShaderStageResources? pixelStage, bool indirectMesh)
+    {
+        if (_drawMustExecute || indirectMesh || !_host.LeavesOutDrawsWhileCompiling)
+        {
+            return false;
+        }
+
+        if (WritesOutsideTargets(vertexStage) || (pixelStage is { } pixel && WritesOutsideTargets(pixel)))
+        {
+            return false;
+        }
+
+        ref readonly var rendering = ref state.Rendering;
+        for (var index = 0; index < rendering.ColorAttachmentCount; index++)
+        {
+            if (rendering.ColorAttachments[index].IsClear)
+            {
+                return false;
+            }
+        }
+
+        if (state.Depth.HasTarget)
+        {
+            var depth = state.Depth.Target;
+            if (state.Depth.LoadClear || depth.State.StencilClearEnabled || rendering.DepthStencilAttachment.DepthClear ||
+                rendering.DepthStencilAttachment.StencilClear || !state.Depth.LoadState.IsReadOnly(depth.Target.Format) ||
+                depth.State.DepthWriteEnabled)
+            {
+                return false;
+            }
+        }
+
+        return _host.MayLeaveOutWhileCompiling(in rendering);
+    }
+
+    // Any write a draw makes other than through its attachments, as the conservative reading of
+    // the program's resource use: a written or atomic buffer whatever its descriptor holds, any
+    // storage image, the GDS, mip statistics and device-address stores.
+    internal static bool WritesOutsideTargets(ShaderStageResources stage)
+    {
+        if (stage.Program is not { } program)
+        {
+            return false;
+        }
+
+        if (program.WritesDeviceAddresses || (program.Bindings?.MipStatisticsCount ?? 0) != 0)
+        {
+            return true;
+        }
+
+        foreach (var buffer in program.Buffers)
+        {
+            if (buffer.Written || buffer.Atomic)
+            {
+                return true;
+            }
+        }
+
+        foreach (var image in program.Images)
+        {
+            if (image.Written || image.Class == ImageResourceClass.Storage)
+            {
+                return true;
+            }
+        }
+
+        if (program.Bindings is { } bindings)
+        {
+            foreach (var descriptor in bindings.Descriptors)
+            {
+                if (descriptor.Kind == SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare)
+                {
+                    return true;
+                }
             }
         }
 
@@ -227,7 +351,7 @@ public sealed partial class RenderExecutor
         RegisterBanks banks,
         in DrawCall draw,
         ref DrawState state,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         in DrawEmission emission,
         in IndexSource indexSource,
         bool primitiveRestart,
@@ -237,22 +361,37 @@ public sealed partial class RenderExecutor
         ulong packetAddress = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
+        if (emission.IndirectArgumentsAddress != 0)
+        {
+            // The GPU reads the arguments, which a deferred fragment store may have written.
+            ReleaseFragmentWrites();
+        }
+
         var context = banks.Context;
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
+        if (state.PixelActive && (pixelInput.Stage.Program?.UsesDeviceAddresses ?? false))
+        {
+            _host.BeforeDeviceAddressPreparation([vertexInput.Stage, pixelInput.Stage]);
+        }
+        else if (vertexInput.Stage.Program?.UsesDeviceAddresses ?? false)
+        {
+            _host.BeforeDeviceAddressPreparation([vertexInput.Stage]);
+        }
+
         using var preparation = _host.BeginPreparation();
         using var indirectMesh = meshInput is not null && emission.IndirectArgumentsAddress != 0
             ? _host.PrepareIndirectMeshDraw(new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
-                indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
-                topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
+                indexSource.Address, draw.Count, indexSource.Type == GpuIndexType.Uint16 ? 2u : 4u,
+                topology == GpuPrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
             : null;
         var meshVertexCount = draw.Count;
         if (MeshDrawTrace.Active)
             MeshDrawTrace.Write("programs", $"mesh={meshInput is not null} vertexHash=0x{vertexInput.Stage.Program?.Hash:X16} pixelHash=0x{pixelInput.Stage.Program?.Hash:X16} pixelActive={state.PixelActive}");
         if (meshInput is not null)
         {
-            if (topology is not (PrimitiveTopology.PointList or PrimitiveTopology.LineList or PrimitiveTopology.TriangleList or PrimitiveTopology.TriangleStrip))
+            if (topology is not (GpuPrimitiveTopology.PointList or GpuPrimitiveTopology.LineList or GpuPrimitiveTopology.TriangleList or GpuPrimitiveTopology.TriangleStrip))
             {
                 throw _host.Fatal("The mesh draw input topology is not supported.");
             }
@@ -261,10 +400,10 @@ public sealed partial class RenderExecutor
             if (emission.Indexed && indirectMesh is null)
             {
                 var byteCount = checked((int)indexSource.Size);
-                var elementSize = indexSource.Type == IndexType.Uint16 ? 2u : 4u;
-                var triangleStrip = topology == PrimitiveTopology.TriangleStrip;
-                var lineList = topology == PrimitiveTopology.LineList;
-                var pointList = lineList || topology == PrimitiveTopology.PointList;
+                var elementSize = indexSource.Type == GpuIndexType.Uint16 ? 2u : 4u;
+                var triangleStrip = topology == GpuPrimitiveTopology.TriangleStrip;
+                var lineList = topology == GpuPrimitiveTopology.LineList;
+                var pointList = lineList || topology == GpuPrimitiveTopology.PointList;
                 var capacity = pointList ? byteCount / (int)elementSize
                     : MeshIndexAssembly.GetMaximumCount(byteCount, elementSize, triangleStrip);
                 if (capacity == 0) return "no-primitives";
@@ -342,23 +481,54 @@ public sealed partial class RenderExecutor
         var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : [];
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
-            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
+            ? _host.ObtainBuffer(
+                emission.IndirectArgumentsAddress,
+                emission.Indexed ? IndexedIndirectArgumentsSize : AutoIndirectArgumentsSize,
+                isWritten: false)
             : default;
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
-        state.Rendering = AcquireAttachments(ref state);
-        // Nothing after the pipeline touches guest memory.
-        var pipeline = _pipelines.CreateGraphicsPipeline(
-            BoundColors(ref state),
-            in state.Depth,
-            vertexInput,
-            state.PixelActive ? pixelInput : null,
-            context,
-            in state.Rendering,
-            topology,
-            primitiveRestart,
-            state.Programs.DisableBlending,
-            state.Programs.Vertex,
-            state.Programs.Pixel);
+        state.Rendering = AcquireAttachments(context, ref state);
+        // Nothing after the pipeline touches guest memory. A draw that may be left out while its
+        // pipeline compiles is left out here, before anything of it is recorded: what came before
+        // only bound state the caller's ResetBindings drops, and uploaded what it reads.
+        PipelineHandle pipeline;
+        if (MayLeaveOutWhileCompiling(ref state, vertexInput.Stage, pixelBindings is not null ? pixelInput.Stage : null,
+                indirectMesh is not null))
+        {
+            if (!_pipelines.TryCreateGraphicsPipeline(
+                    BoundColors(ref state),
+                    in state.Depth,
+                    vertexInput,
+                    state.PixelActive ? pixelInput : null,
+                    context,
+                    in state.Rendering,
+                    topology,
+                    primitiveRestart,
+                    state.Programs.DisableBlending,
+                    state.Programs.Vertex,
+                    state.Programs.Pixel,
+                    out pipeline))
+            {
+                IndexedDrawTrace.Write(indexedTrace, "pipeline-compiling", submitId, packetAddress);
+                return "pipeline-compiling";
+            }
+        }
+        else
+        {
+            pipeline = _pipelines.CreateGraphicsPipeline(
+                BoundColors(ref state),
+                in state.Depth,
+                vertexInput,
+                state.PixelActive ? pixelInput : null,
+                context,
+                in state.Rendering,
+                topology,
+                primitiveRestart,
+                state.Programs.DisableBlending,
+                state.Programs.Vertex,
+                state.Programs.Pixel);
+        }
+
         if (setBindDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x100);
@@ -380,13 +550,23 @@ public sealed partial class RenderExecutor
         }
 
         Span<IPreparedBindings> stages = pixelBindings is null ? [vertexBindings] : [vertexBindings, pixelBindings];
-        _host.CommitBindings(PipelineBindPoint.Graphics, in pipeline, stages);
+        _host.CommitBindings(GpuBindPoint.Graphics, in pipeline, stages);
         if (indexBuffer.Size != 0)
         {
             _host.BindIndexBuffer(indexBuffer.Binding, indexBuffer.Type);
+            _host.NoteIndexSource(indexSource.HostData is null ? indexSource.Address : 0, indexSource.Size);
         }
 
-        _host.SetDynamicState(BuildDynamicState(banks, in state, submitId, packetAddress));
+        var dynamicState = BuildDynamicState(banks, in state, submitId, packetAddress);
+        if (dynamicState.DepthBiasPerFace && DrawWritesMemory(vertexInput.Stage))
+        {
+            // The host draws each face separately, which runs the vertex stage twice.
+            throw _host.Fatal(
+                "A draw whose front and back faces take different polygon offsets writes memory from its vertex stage: " +
+                $"vertex=0x{vertexInput.Stage.Program?.Hash ?? 0:X16}.");
+        }
+
+        _host.SetDynamicState(dynamicState);
         if (setAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x400);
@@ -399,9 +579,17 @@ public sealed partial class RenderExecutor
 
         var imageSnapshot = _host.BeginImageSnapshot(pixelBindings);
         indirectMesh?.Prepare();
+        if (meshInput is null && emission.IndirectArgumentsAddress != 0)
+        {
+            _host.PrepareIndirectDraw(
+                in pipeline, emission.IndirectArgumentsAddress, indirectArguments, emission.Indexed, emission.IndirectIndexLimit);
+        }
+
+        var (upcomingCount, upcomingFirst) = UpcomingVertices(banks.UserConfig, in draw, in emission);
+        _host.NoteUpcomingDraw(in pipeline, upcomingCount, upcomingFirst);
         _host.BeginRendering(in state.Rendering);
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("rendering", $"width={state.Rendering.Width} height={state.Rendering.Height} layers={state.Rendering.Layers} colors={state.ColorCount}");
-        _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
+        _host.BindPipeline(GpuBindPoint.Graphics, in pipeline);
         if (setAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x500);
@@ -446,7 +634,14 @@ public sealed partial class RenderExecutor
         {
             // Uploads and shader writes end with barriers to all commands, so the
             // indirect read sees them.
-            _host.DrawIndexedIndirect(indirectArguments);
+            if (emission.Indexed)
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
+            else
+            {
+                _host.DrawIndirect(indirectArguments);
+            }
         }
         else
         {
@@ -459,21 +654,38 @@ public sealed partial class RenderExecutor
             SetDrawDebugPhase(submitId, in draw, 0x600);
         }
 
-        var writeStages = PipelineStageFlags.None;
+        var writeStages = GpuPipelineStage.None;
         if (HasBufferWrites(vertexInput.Stage))
         {
-            writeStages |= meshInput is null ? PipelineStageFlags.VertexShaderBit : PipelineStageFlags.MeshShaderBitExt;
+            writeStages |= meshInput is null ? GpuPipelineStage.VertexShaderBit : GpuPipelineStage.MeshShaderBitExt;
         }
 
-        if (state.PixelActive && HasBufferWrites(pixelInput.Stage))
+        if (state.PixelActive && DrawWritesMemory(pixelInput.Stage))
         {
-            writeStages |= PipelineStageFlags.FragmentShaderBit;
+            writeStages |= GpuPipelineStage.FragmentShaderBit;
         }
 
-        if (writeStages != PipelineStageFlags.None)
+        if ((writeStages & GpuPipelineStage.FragmentShaderBit) != 0 && _host.DefersFragmentWritePassEnd &&
+            ((writeStages & GpuPipelineStage.VertexShaderBit) == 0 || _host.OrdersVertexWritesInsidePass))
+        {
+            // Fragment stores cannot be made visible mid-pass on a tile-based GPU, but nothing
+            // in this pass reads them before the guest says so; the pass end and the barrier
+            // wait for the first consumer (ReleaseFragmentWrites).
+            writeStages &= ~GpuPipelineStage.FragmentShaderBit;
+            _fragmentWritesPending = true;
+            _fragmentWritesPass = _host.RenderPassSerial;
+        }
+
+        if (writeStages != GpuPipelineStage.None)
         {
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("write-barrier", $"sourceStages={writeStages}");
-            _host.EndRendering();
+            // Vertex-stage stores can be ordered inside the pass by a host that supports it;
+            // ending the pass would store and reload every attachment for each such draw.
+            if ((writeStages & GpuPipelineStage.FragmentShaderBit) != 0 || !_host.OrdersVertexWritesInsidePass)
+            {
+                _host.EndRendering("barrier");
+            }
+
             _host.ShaderWriteBarrier(writeStages);
         }
 
@@ -487,8 +699,31 @@ public sealed partial class RenderExecutor
 
     private const ulong IndexedIndirectArgumentsSize = 20;
 
+    // The vertices of the first host draw call EmitDraw makes; a zero count for an indexed or
+    // indirect draw, whose vertices are not known before it runs.
+    private static (uint Count, uint First) UpcomingVertices(
+        UserConfigRegisters userConfig, in DrawCall draw, in DrawEmission emission)
+    {
+        if (emission.Indexed || emission.IndirectArgumentsAddress != 0)
+        {
+            return (0, 0);
+        }
+
+        return (GuestPrimitiveType)userConfig.PrimitiveType switch
+        {
+            GuestPrimitiveType.QuadListLegacy => (4, emission.FirstVertex),
+            _ => (draw.Count, emission.FirstVertex),
+        };
+    }
+
     private void EmitDraw(UserConfigRegisters userConfig, VertexInputInfo vertexInput, in DrawCall draw, in DrawEmission emission)
     {
+        if (emission.TriangleListIndices != 0)
+        {
+            _host.DrawIndexed(emission.TriangleListIndices, draw.InstanceCount, 0, emission.VertexOffset, emission.FirstInstance);
+            return;
+        }
+
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
         {
             case GuestPrimitiveType.PointList:
@@ -499,6 +734,7 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.TriangleStrip:
             case GuestPrimitiveType.Polygon:
             case GuestPrimitiveType.RectangleList:
+            case GuestPrimitiveType.RectangleListLegacy:
                 if (emission.Indexed)
                 {
                     _host.DrawIndexed(draw.Count, draw.InstanceCount, 0, emission.VertexOffset, emission.FirstInstance);
@@ -508,26 +744,6 @@ public sealed partial class RenderExecutor
                     _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                 }
 
-                break;
-            case GuestPrimitiveType.RectangleListLegacy:
-                if (emission.Indexed)
-                {
-                    throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
-                }
-
-                if (_host.SupportsNativeRectangles)
-                {
-                    // Keep guest vertex IDs unchanged; the host fills each three-vertex rectangle.
-                    _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
-                    break;
-                }
-
-                if (draw.Count != 3 || vertexInput.Buffers.Length != 0)
-                {
-                    throw _host.Fatal($"A legacy rectangle list needs three vertices and no vertex buffers: count={draw.Count} buffers={vertexInput.Buffers.Length}.");
-                }
-
-                _host.Draw(4, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                 break;
             case GuestPrimitiveType.QuadListLegacy:
                 if ((draw.Count & 0x3) != 0)

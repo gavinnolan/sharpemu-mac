@@ -205,7 +205,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private void Run()
     {
-        SubmissionScheduler.ThrowOnFatal = true;
+        GpuFatal.ThrowOnFatal = true;
         while (true)
         {
             Job job;

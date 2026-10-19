@@ -1,10 +1,12 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -33,11 +35,159 @@ public sealed partial class GpuCommandInterpreter
 
         if (writeOneAddress)
         {
-            WriteDword(destination, source[^1]);
+            WriteCommandProcessorBytes(destination, MemoryMarshal.AsBytes(source[^1..]), "WRITE_DATA");
             return;
         }
 
-        WriteBytes(destination, MemoryMarshal.AsBytes(source));
+        WriteCommandProcessorBytes(destination, MemoryMarshal.AsBytes(source), "WRITE_DATA");
+    }
+
+    /// <summary>
+    /// Whether this queue's command-processor writes land in record order with its deferred
+    /// labels and the work recorded before them, rather than as parsed. Every queue: a compute
+    /// queue's write made at parse time reached guest memory while dispatches recorded ahead
+    /// of it were still running, and GTA V's culling queue rewrites a descriptor table with
+    /// WRITE_DATA in memory an earlier dispatch of the same queue stores vertices into. The
+    /// stores then landed over the table, and the next dispatch read floats as its V#.
+    /// </summary>
+    private bool DefersCommandProcessorWrites => _host.DefersCommandProcessorWrites;
+
+    // Pending values noted for waits are capped: a wait polls a fence, not a table.
+    private const int MaxNotedPendingBytes = 64;
+
+    /// <summary>
+    /// A command-processor store. On a host that defers labels the queue hands it to the host
+    /// to land in record order: written as parsed, it reached the guest ahead of
+    /// labels recorded before it, and Demon's Souls recycled command memory on such a write
+    /// while a label into that memory was still owed (a WAIT_REG_MEM between them is met at
+    /// parse by the pending label, so the parser runs on past it). This queue's own waits see
+    /// the value through the pending lookup and the own-write check; every other read of the
+    /// bytes is a read of a recorded GPU write, which the host waits for.
+    /// SHARPEMU_METAL_V2_CP_WRITES=parse writes them as parsed again.
+    /// </summary>
+    internal void WriteCommandProcessorBytes(ulong destination, ReadOnlySpan<byte> source, string kind)
+    {
+        NotePacketBlockWrite();
+        if (!DefersCommandProcessorWrites)
+        {
+            WriteBytes(destination, source, kind);
+            return;
+        }
+
+        var first = source.Length >= sizeof(ulong)
+            ? BinaryPrimitives.ReadUInt64LittleEndian(source)
+            : source.Length >= sizeof(uint) ? BinaryPrimitives.ReadUInt32LittleEndian(source) : 0UL;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping))
+        {
+            CommandProcessorWriteHistory.Record(QueueId, destination, source.Length,
+                source.Length == sizeof(uint) ? (uint)first : first, kind, deferred: true);
+            NotePendingBytes(destination, source);
+        }
+
+        _host.RecordCommandProcessorWrite(destination, source, kind);
+
+        using var trailingScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping);
+        _lastWriteLength = 0;
+        if (source.Length is sizeof(uint) or sizeof(ulong))
+        {
+            _lastWriteAddress = destination;
+            _lastWriteValue = source.Length == sizeof(uint) ? (uint)first : first;
+            _lastWriteLength = source.Length;
+            _lastWritePacket = _packetSerial;
+        }
+    }
+
+    private void WriteCommandProcessorDword(ulong destination, uint value, string kind)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        WriteCommandProcessorBytes(destination, bytes, kind);
+    }
+
+    private void WriteCommandProcessorQword(ulong destination, ulong value, string kind)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        WriteCommandProcessorBytes(destination, bytes, kind);
+    }
+
+    /// <summary>
+    /// Whether runs of identical qword stores (the synthetic occlusion dump) are handed to the host
+    /// as one call. SHARPEMU_GPU_CP_WRITE_BATCH=0 records each store on its own again.
+    /// </summary>
+    internal bool BatchCommandProcessorWrites { get; set; } = CommandProcessorWriteBatching.Enabled;
+
+    /// <summary>
+    /// <paramref name="count"/> qword stores of <paramref name="value"/>, <paramref name="strideBytes"/>
+    /// apart. They land exactly as <paramref name="count"/> calls to
+    /// <see cref="WriteCommandProcessorQword"/> would: in order, with nothing recorded between them.
+    /// </summary>
+    private void WriteCommandProcessorQwords(ulong destination, int count, ulong strideBytes, ulong value, string kind)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        if (!BatchCommandProcessorWrites || !DefersCommandProcessorWrites || strideBytes < sizeof(ulong) ||
+            count == 1 || PendingLabelRecorded is null)
+        {
+            for (var index = 0; index < count; index++)
+            {
+                WriteCommandProcessorQword(destination + (ulong)index * strideBytes, value, kind);
+            }
+
+            return;
+        }
+
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping))
+        {
+            for (var index = 0; index < count; index++)
+            {
+                CommandProcessorWriteHistory.Record(QueueId, destination + (ulong)index * strideBytes,
+                    sizeof(ulong), value, kind, deferred: true);
+            }
+
+            if (PendingQwordsRecorded is { } noteRun)
+            {
+                noteRun(destination, count, strideBytes, value);
+            }
+            else
+            {
+                for (var index = 0; index < count; index++)
+                {
+                    PendingLabelRecorded(destination + (ulong)index * strideBytes, sizeof(ulong), value);
+                }
+            }
+        }
+
+        NotePacketBlockWrite();
+        _host.RecordCommandProcessorQwords(destination, count, strideBytes, value, kind);
+
+        _lastWriteAddress = destination + (ulong)(count - 1) * strideBytes;
+        _lastWriteValue = value;
+        _lastWriteLength = sizeof(ulong);
+        _lastWritePacket = _packetSerial;
+    }
+
+    // Tells the queue what the bytes will hold once they land, so a wait on them - this
+    // queue's or another's - reads them as written, as it does a deferred label.
+    private void NotePendingBytes(ulong destination, ReadOnlySpan<byte> bytes)
+    {
+        if (PendingLabelRecorded is not { } note)
+        {
+            return;
+        }
+
+        var length = Math.Min(bytes.Length, MaxNotedPendingBytes);
+        var unit = bytes.Length % sizeof(ulong) == 0 ? sizeof(ulong) : sizeof(uint);
+        for (var offset = 0; offset + unit <= length; offset += unit)
+        {
+            var value = unit == sizeof(ulong)
+                ? BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..])
+                : BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]);
+            note(destination + (ulong)offset, unit, value);
+        }
     }
 
     internal void WriteReferenceClock(ulong destination, uint byteCount)
@@ -47,7 +197,14 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The reference-clock copy is invalid: destination=0x{destination:X16} size={byteCount}.");
         }
 
-        var clock = EndOfPipe.ReadReferenceClock();
+        var clock = GpuReferenceClock.Read();
+        if (_host.DefersEndOfPipeLabel(EndOfPipeWriteKind.ClockWrite) &&
+            (byteCount == sizeof(ulong) || _host.DefersEndOfPipeLabel(EndOfPipeWriteKind.Write32)))
+        {
+            RecordReferenceClock(destination, byteCount, clock);
+            return;
+        }
+
         if (byteCount == sizeof(uint))
         {
             WriteDword(destination, (uint)clock);
@@ -56,6 +213,29 @@ public sealed partial class GpuCommandInterpreter
         {
             WriteQword(destination, clock);
         }
+    }
+
+    /// <summary>
+    /// Hands a reference-clock copy to the host like an end-of-pipe clock: the value is the
+    /// clock as the packet was parsed, and it lands after the labels recorded before it.
+    /// </summary>
+    /// <remarks>
+    /// Demon's Souls recycles command memory once a GPU timestamp it reads back passes the
+    /// one it recorded. Written at parse time, the timestamp overtook end-of-pipe labels the
+    /// GPU still owed, and a late 64-bit label then landed in a recycled command buffer.
+    /// Same gate as end-of-pipe clocks: SHARPEMU_METAL_V2_EOP_CLOCKS=parse writes it at parse.
+    /// A four-byte copy rides a 32-bit label so the host writes exactly the bytes asked for.
+    /// </remarks>
+    private void RecordReferenceClock(ulong destination, uint byteCount, ulong clock)
+    {
+        var is64Bit = byteCount == sizeof(ulong);
+        var value = is64Bit ? clock : (uint)clock;
+        CommandProcessorWriteHistory.Record(QueueId, destination, (int)byteCount, value, "COPY_DATA_CLOCK", deferred: true);
+        PendingLabelRecorded?.Invoke(destination, (int)byteCount, value);
+        _lastWriteLength = 0;
+        RecordHostEndOfPipe(new EndOfPipeWrite(
+            is64Bit ? EndOfPipeWriteKind.ClockWrite : EndOfPipeWriteKind.Write32, SubmitId, destination, value,
+            ReferenceClock: true));
     }
 
     // Selectors 0 and 3 are memory, 1 is GDS, 2 is immediate data (source) or nowhere (destination).
@@ -111,7 +291,35 @@ public sealed partial class GpuCommandInterpreter
 
         if (sourceSelect == 2)
         {
+            if (!destinationIsGds && DefersCommandProcessorWrites)
+            {
+                var fill = (uint)sourceOrImmediate;
+                CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
+                    fill, "DMA_FILL", deferred: true);
+                if (byteCount <= MaxNotedPendingBytes && byteCount % sizeof(uint) == 0)
+                {
+                    Span<uint> pattern = stackalloc uint[MaxNotedPendingBytes / sizeof(uint)];
+                    pattern.Fill(fill);
+                    NotePendingBytes(destination, MemoryMarshal.AsBytes(pattern)[..(int)byteCount]);
+                }
+
+                NotePacketBlockWrite();
+                _host.FillBufferInOrder(destination, byteCount, fill);
+                return;
+            }
+
+            if (!destinationIsGds)
+            {
+                CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
+                    (uint)sourceOrImmediate, "DMA_FILL", deferred: false);
+            }
+
+            NotePacketBlockWrite();
             _host.FillBuffer(destination, byteCount, (uint)sourceOrImmediate, destinationIsGds);
+            if (!destinationIsGds)
+            {
+                GuestMemoryWritten?.Invoke(destination, byteCount);
+            }
             return;
         }
 
@@ -125,7 +333,46 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"A GDS-to-GDS DMA copy is not supported: destination=0x{destination:X16} source=0x{sourceOrImmediate:X16} size={byteCount}.");
         }
 
+        var deferredCopy = !destinationIsGds && !sourceIsGds && DefersCommandProcessorWrites;
+        if (!destinationIsGds)
+        {
+            // The value is the source's, read now for the record only: a copy may land later.
+            ulong copied = 0;
+            if (!sourceIsGds && byteCount is 4 or 8)
+            {
+                Span<byte> bytes = stackalloc byte[8];
+                if (_host.Memory.TryRead(sourceOrImmediate, bytes[..(int)byteCount]))
+                {
+                    copied = byteCount == 4 ? BinaryPrimitives.ReadUInt32LittleEndian(bytes) : BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+                }
+            }
+
+            CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
+                copied, $"DMA_COPY from=0x{sourceOrImmediate:X}", deferred: deferredCopy);
+        }
+
+        if (deferredCopy)
+        {
+            // A copy of a value a wait could also read as pending - a label or another
+            // deferred store - is pending at its destination too. Anything else is read by
+            // the GPU when it gets there, and a wait on it waits for that.
+            if (byteCount is sizeof(uint) or sizeof(ulong) && PendingLabelLookup is { } lookup &&
+                lookup(sourceOrImmediate, byteCount == sizeof(ulong), out var pendingValue))
+            {
+                PendingLabelRecorded?.Invoke(destination, (int)byteCount, pendingValue);
+            }
+
+            NotePacketBlockWrite();
+            _host.CopyBufferInOrder(destination, sourceOrImmediate, byteCount);
+            return;
+        }
+
+        NotePacketBlockWrite();
         _host.CopyBuffer(destination, sourceOrImmediate, byteCount, destinationIsGds, sourceIsGds);
+        if (!destinationIsGds)
+        {
+            GuestMemoryWritten?.Invoke(destination, byteCount);
+        }
     }
 
     private static bool TryDecodeGds(uint selector, out bool isGds)
@@ -256,7 +503,7 @@ public sealed partial class GpuCommandInterpreter
         if (dmaSource == 2 && byteCount == 8)
         {
             // An 8-byte immediate is a plain label store, not a 32-bit fill.
-            WriteQword(destination, source);
+            WriteCommandProcessorQword(destination, source, "COPY_DATA_IMM");
             return 5;
         }
 
@@ -317,11 +564,11 @@ public sealed partial class GpuCommandInterpreter
         var data = usePfp ? AtomicReturnPfpData : AtomicReturnMeData;
         if (byteCount == 8)
         {
-            WriteQword(destination, data);
+            WriteCommandProcessorQword(destination, data, "COPY_DATA_ATOMIC");
         }
         else
         {
-            WriteDword(destination, (uint)data);
+            WriteCommandProcessorDword(destination, (uint)data, "COPY_DATA_ATOMIC");
         }
     }
 
@@ -364,17 +611,33 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The LOD statistics header is not supported: header=0x{packet.Header:X8}.");
         }
 
+        // The title reads LOD statistics: a host that left the counters out of its pipelines
+        // until now compiles them in from the next pipeline on.
+        MipStatistics.NoteTitleUsesCounters();
         var bufferSize = payload[0];
         var destination = (payload[1] & 0xFFFF_FFC0u) | ((ulong)payload[2] << 32);
-        if (destination != 0 && bufferSize != 0 && _host.TryRecordLodStatistics(destination, bufferSize))
+        var slotsBound = SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.Enabled
+            ? MipStatistics.Shared.BoundSlotCount
+            : 0;
+        // Control bit 18 asks for a reset and bit 19 enables the counters again
+        // (sceAgcDcbGetLodStats). Either one starts a new measurement window: a title that
+        // hands its counter ids to other textures every report (Demon's Souls passes
+        // enable without reset) reads the min of unrelated textures otherwise.
+        var resetCounters = (payload[3] & ((1u << 18) | (1u << 19))) != 0;
+        NotePacketBlockWrite();
+        if (destination != 0 && bufferSize != 0 && _host.TryRecordLodStatistics(destination, bufferSize, resetCounters))
         {
+            SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NotePacket(bufferSize, destination, hostRecorded: true, slotsBound);
             return 4;
         }
+
+        SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NotePacket(bufferSize, destination, hostRecorded: false, slotsBound);
 
         if (destination != 0 && bufferSize != 0)
         {
             var report = new byte[bufferSize];
             MipStatistics.Shared.WriteReport(report);
+            SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NoteReport(report);
             WriteBytes(destination, report);
         }
 

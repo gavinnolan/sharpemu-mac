@@ -21,7 +21,7 @@ internal static partial class RegisterWriters
         foreach (var offset in new[]
                  {
                      DbRenderOverride2, DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl,
-                     TaBcBaseAddr, TaBcBaseAddrHi, CbDccControl, PaSuPointSize, PaSuPointMinMax, DbAlphaToMask, VgtDrawPayloadCntl,
+                     TaBcBaseAddr, TaBcBaseAddrHi, CbDccControl, PaSuPointSize, PaSuPointMinMax, VgtDrawPayloadCntl,
                      VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaSuVtxCntl, PaScFovWindowLr, PaScFovWindowTb, PaScModeCntl1,
                      PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PsShaderSampleExclusionMask, PaScBinnerCntl0, PaScBinnerCntl1,
                      PaScConservativeRasterizationCntl,
@@ -43,6 +43,7 @@ internal static partial class RegisterWriters
         }
 
         direct[CbTargetMask] = RenderTargetMaskPacket;
+        direct[DbAlphaToMask] = AlphaToMaskPacket;
         direct[PaScGenericScissorTl] = GenericScissorPacket;
         direct[DbStencilControl] = StencilControlPacket;
         direct[DbStencilRefMask] = StencilMaskPacket;
@@ -141,7 +142,7 @@ internal static partial class RegisterWriters
 
         for (var offset = PaClUserClipPlane0X; offset <= PaClUserClipPlane5W; offset++)
         {
-            indirect[offset] = DisabledUserClipPlaneEntry;
+            indirect[offset] = UserClipPlaneEntry;
         }
 
         for (var offset = PaClGbVertClipAdj; offset <= PaClGbHorzDiscAdj; offset++)
@@ -170,7 +171,7 @@ internal static partial class RegisterWriters
                      DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl, TaBcBaseAddr, TaBcBaseAddrHi, PaSuPointSize, PaSuPointMinMax,
                      SpiTmpringSize, VgtDrawPayloadCntl, VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaScFovWindowLr, PaScFovWindowTb, PaScFsrEnable,
                      FsrRecursions0, FsrRecursions1, PaScModeCntl1, PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PaSuVtxCntl, PsShaderSampleExclusionMask,
-                     PaScBinnerCntl0, PaScBinnerCntl1, PaScConservativeRasterizationCntl, DbAlphaToMask,
+                     PaScBinnerCntl0, PaScBinnerCntl1, PaScConservativeRasterizationCntl,
                  })
         {
             indirect[offset] = IgnoreEntry;
@@ -208,6 +209,7 @@ internal static partial class RegisterWriters
         indirect[CbShaderMask] = static (banks, _, value) => banks.ShaderInterfaceForWrite.ColorShaderMask = value;
         indirect[PaScShaderControl] = static (banks, _, value) => banks.ShaderInterfaceForWrite.ScanShaderControl = value;
         indirect[CbTargetMask] = static (banks, _, value) => banks.Context.RenderTargetMask = value;
+        indirect[DbAlphaToMask] = static (banks, _, value) => banks.Context.AlphaToMask = value;
         indirect[PaScScreenScissorTl] = ScreenScissorTopLeftEntry;
         indirect[PaScScreenScissorBr] = ScreenScissorBottomRightEntry;
         indirect[PaScGenericScissorTl] = GenericScissorTopLeftEntry;
@@ -351,6 +353,9 @@ internal static partial class RegisterWriters
 
         return EachValue(banks, in packet, offset, values, ClipRectangleEntry);
     }
+
+    private static uint AlphaToMaskPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
+        SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[DbAlphaToMask]!);
 
     private static uint RenderTargetMaskPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[CbTargetMask]!);
@@ -713,13 +718,9 @@ internal static partial class RegisterWriters
         }
     }
 
-    private static void DisabledUserClipPlaneEntry(RegisterBanks banks, uint offset, uint value)
-    {
-        if (value != 0 || banks.Context.Clip.UserClipPlanes != 0)
-        {
-            throw banks.Fatal($"User clip planes are not supported: offset=0x{offset:X4} value=0x{value:X8} enabled=0x{banks.Context.Clip.UserClipPlanes:X2}.");
-        }
-    }
+    // A plane only clips while PA_CL_CLIP_CNTL.UCP_ENA_n enables it; the draw reads it then.
+    private static void UserClipPlaneEntry(RegisterBanks banks, uint offset, uint value) =>
+        banks.UserClipPlanesForWrite[offset - PaClUserClipPlane0X] = RegisterField.AsFloat(value);
 
     private static void GuardBandEntry(RegisterBanks banks, uint offset, uint value)
     {

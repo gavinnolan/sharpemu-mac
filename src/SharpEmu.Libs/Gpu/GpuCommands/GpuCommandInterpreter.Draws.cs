@@ -38,7 +38,10 @@ public sealed partial class GpuCommandInterpreter
         }
         if (Rendering.ScissorTrace.Instance is { Active: true } trace)
             trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
-        _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource));
+        _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource)
+        {
+            MustExecute = DrawsMustExecute,
+        });
     }
 
     internal void DrawIndexedOffset(ulong packetAddress, uint indexOffset, uint indexCount)
@@ -56,13 +59,25 @@ public sealed partial class GpuCommandInterpreter
 
         if (Rendering.ScissorTrace.Instance is { Active: true } trace)
             trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
-        _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource));
+        _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource)
+        {
+            MustExecute = DrawsMustExecute,
+        });
+    }
+
+    // VGT_DRAW_INITIATOR.SOURCE_SELECT: an indexed indirect draw fetches its indices by DMA (0),
+    // as PAL and radeonsi program it, or names auto-index (2); a non-indexed one is auto-index.
+    // NOT_EOP (bit 5) is the only other bit accepted.
+    private static bool IsSupportedIndirectInitiator(uint drawInitiator, bool indexed)
+    {
+        var initiator = drawInitiator & ~0x20u;
+        return initiator == 2u || (indexed && initiator == 0u);
     }
 
     // Indirect arguments are read from guest memory now, as the packet executes.
     internal void DrawIndirect(ulong packetAddress, uint opcode, uint dataOffset, uint drawInitiator, bool indexed)
     {
-        if ((drawInitiator & ~0x20u) != 2u)
+        if (!IsSupportedIndirectInitiator(drawInitiator, indexed))
         {
             throw _host.Fatal($"The indirect draw initiator is not supported: initiator=0x{drawInitiator:X8} address=0x{packetAddress:X16}.");
         }
@@ -77,7 +92,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal void DrawIndirectMulti(ulong packetAddress, uint opcode, uint dataOffset, uint maxCountOrCount, ulong countAddress, uint strideInBytes, uint drawInitiator, bool indexed)
     {
-        if ((drawInitiator & ~0x20u) != 2u)
+        if (!IsSupportedIndirectInitiator(drawInitiator, indexed))
         {
             throw _host.Fatal($"The indirect draw initiator is not supported: initiator=0x{drawInitiator:X8} address=0x{packetAddress:X16}.");
         }
@@ -114,6 +129,21 @@ public sealed partial class GpuCommandInterpreter
     {
         if (!indexed)
         {
+            if (_host.ResolvesIndirectAutoDrawOnGpu && _host.HasPendingGpuWrite(argumentsAddress, DrawIndirectArgumentsSize))
+            {
+                // GPU work still writes the arguments, so reading them here would wait for it.
+                // The host reads the four arguments on the GPU, or itself when the draw needs
+                // the counts; the instance count is read only if a later draw needs it.
+                _deferredInstanceCountAddress = argumentsAddress + 4;
+                _host.DrawAuto(SubmitId, new DrawAutoArguments(
+                    packetAddress, opcode, uint.MaxValue, 1, 0, 0, DrawOffsetSource.IndirectArguments, argumentsAddress)
+                {
+                    MustExecute = DrawsMustExecute,
+                });
+                return;
+            }
+
+            _host.NoteIndirectArgumentsReadOnCpu(argumentsAddress, DrawIndirectArgumentsSize);
             var vertexCount = ReadDword(argumentsAddress);
             var instanceCount = ReadDword(argumentsAddress + 4);
             var startVertex = ReadDword(argumentsAddress + 8);
@@ -133,10 +163,14 @@ public sealed partial class GpuCommandInterpreter
                 trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
             _host.DrawIndexed(SubmitId, new DrawIndexedArguments(
                 packetAddress, opcode, gpuIndexCount, IndexBaseAddress, IndexTypeAndSize, 1, 0, 0,
-                DrawOffsetSource.IndirectArguments, argumentsAddress, UnboundedIndexBuffer: IndexBufferSize == 0));
+                DrawOffsetSource.IndirectArguments, argumentsAddress, UnboundedIndexBuffer: IndexBufferSize == 0)
+            {
+                MustExecute = DrawsMustExecute,
+            });
             return;
         }
 
+        _host.NoteIndirectArgumentsReadOnCpu(argumentsAddress, DrawIndexedIndirectArgumentsSize);
         var indexCountPerInstance = ReadDword(argumentsAddress);
         var indexedInstanceCount = ReadDword(argumentsAddress + 4);
         var startIndex = ReadDword(argumentsAddress + 8);
@@ -210,8 +244,22 @@ public sealed partial class GpuCommandInterpreter
         _indexExtents[IndexBaseAddress] = extentBytes;
     }
 
-    internal void DispatchDirect(uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0) =>
+    internal void DispatchDirect(uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
+    {
         _host.DispatchDirect(SubmitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+        SuspendIfPipelineNotReady();
+    }
+
+    // A draw or dispatch whose pipeline is still compiling runs again from this same
+    // packet once the backend says the pipeline is ready. Nothing is skipped: the
+    // packet has not advanced, and the host touched nothing before it gave up.
+    private void SuspendIfPipelineNotReady()
+    {
+        if (_host.ConsumePipelineNotReady())
+        {
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.Pipeline));
+        }
+    }
 
     internal void DispatchIndirect(uint dataOffset, uint dispatchInitiator)
     {

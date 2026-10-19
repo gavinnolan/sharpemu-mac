@@ -17,14 +17,26 @@ public static partial class AgcExports
     // This partial preserves submitted guest geometry until translated draws execute.
 
     // Keep submitted geometry stable after the guest reuses its memory.
-    // Set either variable to 0 only for a comparison test.
-    private static readonly bool _retainSubmittedIndexData = !string.Equals(
+    // Set the vertex variable to 0 only for a comparison test.
+    // No draw path reads the retained index bytes: a snapshot is only matched against
+    // the draw, and its Data is never consumed. Copying them anyway cost a managed array
+    // of every indexed draw's indices (up to 64 MiB a submission) for each queued
+    // submission, on every backend. SHARPEMU_RETAIN_SUBMITTED_INDEX_DATA=1 restores it.
+    private static readonly bool _retainSubmittedIndexData = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_INDEX_DATA"),
-        "0",
+        "1",
         StringComparison.Ordinal);
     private static readonly bool _retainSubmittedVertexData = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_VERTEX_DATA"),
         "0",
+        StringComparison.Ordinal);
+
+    // The capture walks every submitted command buffer on the guest thread, under the submission
+    // gates. Only a host that reads the snapshots (IGuestGpuBackend.ConsumesSubmittedGeometrySnapshots)
+    // gets it; SHARPEMU_CAPTURE_SUBMITTED_GEOMETRY=1 walks for every backend as before.
+    private static readonly bool _forceSubmittedGeometryCapture = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_CAPTURE_SUBMITTED_GEOMETRY"),
+        "1",
         StringComparison.Ordinal);
 
     // The state a snapshot was captured under; the draw validates it against the live banks.
@@ -74,6 +86,47 @@ public static partial class AgcExports
         return recorded.ToArray();
     }
 
+    // Whether RecordShaderRegisters(registers) would equal recorded, without building it.
+    private static bool ShaderRegistersMatch(IReadOnlyDictionary<uint, uint> registers, KeyValuePair<uint, uint>[] recorded)
+    {
+        Span<uint> offsets = stackalloc uint[(int)(3 * ShaderRegisterWindowLength + UserDataRegisterWindowLength)];
+        var count = 0;
+        foreach (var start in (ReadOnlySpan<uint>)[SpiShaderPgmLoVs, SpiShaderPgmLoGs, SpiShaderPgmLoEs])
+        {
+            for (var offset = start; offset < start + ShaderRegisterWindowLength; offset++)
+            {
+                offsets[count++] = offset;
+            }
+        }
+
+        var userData = SelectExportUserDataRegister(registers);
+        for (var offset = userData; offset < userData + UserDataRegisterWindowLength; offset++)
+        {
+            offsets[count++] = offset;
+        }
+
+        offsets = offsets[..count];
+        offsets.Sort();
+        var matched = 0;
+        for (var index = 0; index < offsets.Length; index++)
+        {
+            var offset = offsets[index];
+            if ((index != 0 && offset == offsets[index - 1]) || !registers.TryGetValue(offset, out var value))
+            {
+                continue;
+            }
+
+            if (matched >= recorded.Length || recorded[matched].Key != offset || recorded[matched].Value != value)
+            {
+                return false;
+            }
+
+            matched++;
+        }
+
+        return matched == recorded.Length;
+    }
+
     private static GeometryCaptureFingerprint CreateCaptureFingerprint(
         SubmittedDcbState captureState,
         ulong indexAddress,
@@ -98,6 +151,11 @@ public static partial class AgcExports
         ulong commandAddress,
         uint dwordCount)
     {
+        if (!_forceSubmittedGeometryCapture && !GuestGpu.Current.ConsumesSubmittedGeometrySnapshots)
+        {
+            return null;
+        }
+
         var indexSnapshots = CaptureSubmittedIndexPackets(
             ctx,
             gpuState.GeometryCapture,
@@ -392,7 +450,7 @@ public static partial class AgcExports
         var userDataCount = declaredCount == 0 ? writtenCount : declaredCount;
         if (userDataCount > userData.Length)
         {
-            throw Gpu.Scheduling.SubmissionScheduler.Fatal($"The vertex program declares too many user registers: shader=0x{exportShaderAddress:X16} count={userDataCount}.");
+            throw Gpu.Scheduling.GpuFatal.Fatal($"The vertex program declares too many user registers: shader=0x{exportShaderAddress:X16} count={userDataCount}.");
         }
 
         VertexInputInfo input;

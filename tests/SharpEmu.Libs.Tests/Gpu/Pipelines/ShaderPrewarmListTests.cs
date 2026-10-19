@@ -38,6 +38,8 @@ public sealed class ShaderPrewarmListTests : IDisposable
         var guest = new PipelineTestGuest(request =>
         {
             Assert.Equal(ieeeMode, request.IeeeMode);
+            Assert.Equal(FloatModeFor(ieeeMode), request.FloatMode);
+            Assert.Equal(!ieeeMode, request.Dx10Clamp);
             Assert.Equal(imageInt64Atomics, request.SupportsImageInt64Atomics);
             return Compile(request);
         });
@@ -48,10 +50,15 @@ public sealed class ShaderPrewarmListTests : IDisposable
         var cursor = 0u;
         var options = PipelineTestGuest.ComputeOptions(threadsX: 64);
         options.ComputeInfo!.IeeeMode = ieeeMode;
+        options.ComputeInfo.FloatMode = FloatModeFor(ieeeMode);
+        options.ComputeInfo.Dx10Clamp = !ieeeMode;
         guest.Programs.GetOrCompile(
             guest.Source(CodeAddress, ShaderStage.Compute, userData), options, ref cursor, out _);
         return (guest.Host, Assert.Single(guest.Compiler.Shaders).Spirv);
     }
+
+    // The IEEE case also records a non-default FLOAT_MODE and a clear DX10_CLAMP.
+    private static uint FloatModeFor(bool ieeeMode) => ieeeMode ? 0x30u : ShaderCompileRequest.DefaultFloatMode;
 
     private ShaderPrewarmList Open() => ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
 
@@ -71,9 +78,13 @@ public sealed class ShaderPrewarmListTests : IDisposable
         using var reloaded = Open();
         var (record, code) = Assert.Single(reloaded.LoadedComputes());
         Assert.Equal(ieeeMode, record.Info.IeeeMode);
+        Assert.Equal(FloatModeFor(ieeeMode), record.Info.FloatMode);
+        Assert.Equal(!ieeeMode, record.Info.Dx10Clamp);
         var compiler = new FakeShaderCompiler(request =>
         {
             Assert.Equal(ieeeMode, request.IeeeMode);
+            Assert.Equal(FloatModeFor(ieeeMode), request.FloatMode);
+            Assert.Equal(!ieeeMode, request.Dx10Clamp);
             Assert.Equal(imageInt64Atomics, request.SupportsImageInt64Atomics);
             return Compile(request);
         });
@@ -304,5 +315,63 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.True(replay.TryRead(PipelineTestGuest.MemoryBase + 0x102, word));
         Assert.Equal(new byte[] { 3, 4, 5, 6 }, word.ToArray());
         Assert.False(replay.TryRead(PipelineTestGuest.MemoryBase + 0x106, word));
+    }
+
+    [Fact]
+    public void AListOfAnotherSchemaIsLeftAlone()
+    {
+        Directory.CreateDirectory(_directory);
+        var other = Path.Combine(_directory, "shader-prewarm-deadbeef.bin");
+        File.WriteAllBytes(other, [1, 2, 3, 4]);
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+
+        using var reloaded = Open();
+        Assert.Equal(1, reloaded.LoadedComputeCount);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, File.ReadAllBytes(other));
+        Assert.NotEqual("shader-prewarm.bin", ShaderPrewarmList.FileName);
+    }
+
+    [Fact]
+    public void AnUnkeyedListOfThisSchemaIsAdoptedWithItsStamp()
+    {
+        using (var list = Open())
+        {
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            list.WriteStamp("build-a");
+        }
+
+        File.Move(Path.Combine(_directory, ShaderPrewarmList.FileName), Path.Combine(_directory, "shader-prewarm.bin"));
+        File.Move(Path.Combine(_directory, ShaderPrewarmList.StampFileName), Path.Combine(_directory, "shader-prewarm.stamp"));
+        using var reloaded = Open();
+        Assert.Equal(1, reloaded.LoadedComputeCount);
+        Assert.True(reloaded.IsStampCurrent("build-a"));
+        Assert.True(File.Exists(Path.Combine(_directory, "shader-prewarm.bin")));
+    }
+
+    [Fact]
+    public void OnlyTheMostRecentlyWrittenListsOfOtherSchemasAreKept()
+    {
+        Directory.CreateDirectory(_directory);
+        var now = DateTime.UtcNow;
+        var others = Enumerable.Range(0, ShaderPrewarmList.MaxOtherLists + 2)
+            .Select(index => Path.Combine(_directory, $"shader-prewarm-{index:x8}"))
+            .ToArray();
+        for (var index = 0; index < others.Length; index++)
+        {
+            File.WriteAllBytes(others[index] + ".bin", [1]);
+            File.WriteAllText(others[index] + ".stamp", "stamp");
+            File.SetLastWriteTimeUtc(others[index] + ".bin", now.AddMinutes(-index));
+        }
+
+        using var list = Open();
+        for (var index = 0; index < others.Length; index++)
+        {
+            var kept = index < ShaderPrewarmList.MaxOtherLists;
+            Assert.Equal(kept, File.Exists(others[index] + ".bin"));
+            Assert.Equal(kept, File.Exists(others[index] + ".stamp"));
+        }
+
+        Assert.True(File.Exists(Path.Combine(_directory, ShaderPrewarmList.FileName)));
     }
 }

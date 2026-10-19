@@ -418,6 +418,7 @@ public static partial class AgcExports
     {
         var counterCount = (uint)ctx[CpuRegister.Rdi];
         ctx[CpuRegister.Rax] = 0x10u + (counterCount * sizeof(uint));
+        SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NoteGetSize(counterCount, (uint)ctx[CpuRegister.Rax]);
         return (int)ctx[CpuRegister.Rax];
     }
 
@@ -443,6 +444,7 @@ public static partial class AgcExports
 
         var enable = (uint)enableRaw & 0x1u;
         var counterSelect = (uint)counterSelectRaw & 0xFFu;
+        SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.NoteEmit(counterMask);
         var packetControl =
             (cachePolicy << 28) |
             (enable << 19) |

@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Rendering;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
-// The fixed pipeline state packed into 166 bytes; two draws with equal bytes share a pipeline.
+// The fixed pipeline state packed into 167 bytes; two draws with equal bytes share a pipeline.
 public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParameters>
 {
-    public const int ByteSize = 166;
+    public const int ByteSize = 167;
     public const int ColorAttachmentCount = 8;
 
     private const int NegativeOneToOneOffset = 0;
@@ -40,6 +40,7 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     private const int SeparateAlphaBlendOffset = 142;
     private const int BlendEnableOffset = 150;
     private const int BlendBypassOffset = 158;
+    private const int AlphaToCoverageOffset = 166;
 
     private readonly byte[] _bytes = new byte[ByteSize];
 
@@ -81,10 +82,10 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     private void SetFloat(int offset, float value) => BinaryPrimitives.WriteSingleLittleEndian(_bytes.AsSpan(offset), value);
 
     private StencilOperations GetStencil(int offset) => new(
-        (StencilOp)GetUInt(offset),
-        (StencilOp)GetUInt(offset + 4),
-        (StencilOp)GetUInt(offset + 8),
-        (CompareOp)GetUInt(offset + 12));
+        (GpuStencilOp)GetUInt(offset),
+        (GpuStencilOp)GetUInt(offset + 4),
+        (GpuStencilOp)GetUInt(offset + 8),
+        (GpuCompareOp)GetUInt(offset + 12));
 
     private void SetStencil(int offset, in StencilOperations operations)
     {
@@ -96,7 +97,7 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
 
     public bool NegativeOneToOne { get => GetBool(NegativeOneToOneOffset); set => SetBool(NegativeOneToOneOffset, value); }
     public bool DepthClipEnable { get => GetBool(DepthClipEnableOffset); set => SetBool(DepthClipEnableOffset, value); }
-    public PrimitiveTopology Topology { get => (PrimitiveTopology)GetUInt(TopologyOffset); set => SetUInt(TopologyOffset, (uint)value); }
+    public GpuPrimitiveTopology Topology { get => (GpuPrimitiveTopology)GetUInt(TopologyOffset); set => SetUInt(TopologyOffset, (uint)value); }
     public bool PrimitiveRestartEnable { get => GetBool(PrimitiveRestartOffset); set => SetBool(PrimitiveRestartOffset, value); }
     public uint Samples { get => GetUInt(SamplesOffset); set => SetUInt(SamplesOffset, value); }
     public bool SampleShadingEnable { get => GetBool(SampleShadingOffset); set => SetBool(SampleShadingOffset, value); }
@@ -111,6 +112,7 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     public bool CullFront { get => GetBool(CullFrontOffset); set => SetBool(CullFrontOffset, value); }
     public bool CullBack { get => GetBool(CullBackOffset); set => SetBool(CullBackOffset, value); }
     public bool FrontFaceClockwise { get => GetBool(FaceOffset); set => SetBool(FaceOffset, value); }
+    public bool AlphaToCoverageEnable { get => GetBool(AlphaToCoverageOffset); set => SetBool(AlphaToCoverageOffset, value); }
 
     public uint GetColorMask(int index) => GetUInt(ColorMaskOffset + index * 4);
     public void SetColorMask(int index, uint value) => SetUInt(ColorMaskOffset + index * 4, value);
@@ -148,17 +150,17 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
 // The attachment formats a graphics pipeline renders into.
 public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
 {
-    public Format[] ColorFormats { get; } = new Format[PipelineStaticParameters.ColorAttachmentCount];
-    public Format DepthFormat { get; set; } = Format.Undefined;
-    public Format StencilFormat { get; set; } = Format.Undefined;
+    public GpuFormat[] ColorFormats { get; } = new GpuFormat[PipelineStaticParameters.ColorAttachmentCount];
+    public GpuFormat DepthFormat { get; set; } = GpuFormat.Undefined;
+    public GpuFormat StencilFormat { get; set; } = GpuFormat.Undefined;
     public uint ColorCount { get; set; }
 
     // The state of a new instance, for a lookup object reused across draws.
     public void Reset()
     {
         Array.Clear(ColorFormats);
-        DepthFormat = Format.Undefined;
-        StencilFormat = Format.Undefined;
+        DepthFormat = GpuFormat.Undefined;
+        StencilFormat = GpuFormat.Undefined;
         ColorCount = 0;
     }
 
@@ -235,16 +237,18 @@ public sealed class GraphicsPipelineKey : IEquatable<GraphicsPipelineKey>
     // Settable for the lookup key reused across draws; a key in the cache is never changed.
     public ulong VertexProgramId { get; set; }
     public ulong PixelProgramId { get; set; }
+    // The pixel program carries its LOD statistics counters (GraphicsPipelineDescription.LodStatistics).
+    public bool LodStatistics { get; set; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
 
     public bool Equals(GraphicsPipelineKey? other) =>
         other is not null && Rendering.Equals(other.Rendering) && VertexProgramId == other.VertexProgramId && PixelProgramId == other.PixelProgramId &&
-        VertexInput.Equals(other.VertexInput) && StaticParameters.Equals(other.StaticParameters);
+        LodStatistics == other.LodStatistics && VertexInput.Equals(other.VertexInput) && StaticParameters.Equals(other.StaticParameters);
 
     public override bool Equals(object? obj) => Equals(obj as GraphicsPipelineKey);
 
-    public override int GetHashCode() => HashCode.Combine(Rendering, VertexProgramId, PixelProgramId, VertexInput, StaticParameters);
+    public override int GetHashCode() => HashCode.Combine(Rendering, VertexProgramId, PixelProgramId, VertexInput, StaticParameters, LodStatistics);
 }
 
 public readonly record struct ComputePipelineKey(ulong ComputeProgramId);

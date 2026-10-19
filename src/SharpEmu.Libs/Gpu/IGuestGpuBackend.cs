@@ -17,10 +17,10 @@ namespace SharpEmu.Libs.Gpu;
 /// Shader compilation also lives behind the seam: the backend owns its codegen and
 /// returns opaque <see cref="IGuestCompiledShader"/> handles that only it can submit.
 /// </summary>
-internal interface IGuestGpuBackend
+public interface IGuestGpuBackend
 {
     /// <summary>Human-readable name of this backend ("Metal", "Vulkan"), shown in
-    /// the window title on macOS where either backend can run.</summary>
+    /// the window title. macOS builds link only Metal.</summary>
     string BackendName { get; }
 
     bool LinkedShaderCallsSupported => false;
@@ -30,6 +30,18 @@ internal interface IGuestGpuBackend
 
     // Compiles one permutation of a program over its resource plan and binding layout.
     bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error);
+
+    /// <summary>True when this backend can run an NGG primitive shader as the merged ES/GS
+    /// workgroup stage it really is - a mesh pipeline whose threadgroup is one NGG subgroup.
+    /// A backend that says no keeps getting such programs translated per-vertex, which only
+    /// works for passthrough ones, and the executor keeps skipping the rest.</summary>
+    bool SupportsPrimitiveShaderMeshPipelines => false;
+
+    /// <summary>True when this backend's command-stream host reads the geometry snapshots that
+    /// the AGC submit prepass captures (the <c>geometrySnapshots</c> argument of
+    /// <see cref="SubmitCommandStream"/>). A backend that says no is handed none, and the guest
+    /// submit skips the walk of the command buffer that builds them.</summary>
+    bool ConsumesSubmittedGeometrySnapshots => false;
 
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();
@@ -81,7 +93,7 @@ internal interface IGuestGpuBackend
 
 // A backend that keeps CPU snapshots of guest images; the AGC layer feeds it pixels and
 // mirrored writes. A backend with a guest image store reads guest memory itself.
-internal interface IGuestImageSnapshotBackend
+public interface IGuestImageSnapshotBackend
 {
     bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination);
     void SubmitTranslatedDraw(

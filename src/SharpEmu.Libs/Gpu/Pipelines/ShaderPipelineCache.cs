@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -9,7 +10,6 @@ using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
@@ -18,16 +18,33 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 {
     private const uint VertexUserDataBase = 8;
     private const uint MaxPixelInputs = 32;
-    private const uint MaxViewportDimension = 16384;
+
+    // The geometry stage programs its LDS allocation in 128-dword granules, like compute.
+    private const uint LocalDataShareGranuleDwords = 128;
 
     private readonly CpuContext _context;
+    private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
+    private readonly VertexTableMetadataCache _vertexTables = new();
+    // The last user data array of each graphics stage, kept under _resolveGate.
+    private uint[]? _vertexUserData;
+    private uint[]? _pixelUserData;
+    private uint[]? _computeUserData;
+    private readonly List<Gen5PixelOutputBinding> _boundOutputs = new(ContextRegisters.ColorTargetCount);
+    // What the last draw resolved, shared by a draw that resolves equal ones; kept under _resolveGate.
+    // Nothing writes a resolved draw's arrays.
+    private Gen5PixelOutputBinding[] _lastBoundOutputs = [];
+    private readonly PixelInputArrays _pixelInputArrays = new();
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _gate = new();
+    // The options of each stage's lookup, refilled under _gate (StageCompileOptions.Detached).
+    private readonly StageCompileOptions _vertexOptions = StageCompileOptions.CreateReusable();
+    private readonly StageCompileOptions _pixelOptions = StageCompileOptions.CreateReusable();
+    private readonly StageCompileOptions _computeOptions = StageCompileOptions.CreateReusable();
     // The pipeline maps: a lookup takes this lock or _gate, an addition both; a cached draw so does
     // not wait for the program preparation a resolving thread holds _gate for.
     private readonly object _pipelineGate = new();
@@ -39,9 +56,83 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry)
     {
         _context = context;
+        _compiler = compiler;
         _host = host;
         _registry = registry;
         _programs = new ShaderProgramCache(context, compiler, host);
+    }
+
+    public bool SupportsPrimitiveShaderMeshPipelines => _compiler.SupportsPrimitiveShaderMeshPipelines;
+
+    // The geometry-engine state one NGG subgroup runs under, for a draw the backend will
+    // compile as the merged ES/GS workgroup stage. Null keeps the per-vertex path, which is
+    // what every backend without mesh pipelines gets.
+    private Gen5NggStageInfo? PrimitiveShaderStageInfo(
+        VertexStageRegisters vertex,
+        ShaderInterfaceRegisters shaderInterface,
+        uint shaderStages) =>
+        PrimitiveShaderStageInfo(SupportsPrimitiveShaderMeshPipelines, vertex, shaderInterface, shaderStages);
+
+    internal static Gen5NggStageInfo? PrimitiveShaderStageInfo(
+        bool supportsPrimitiveShaderMeshPipelines,
+        VertexStageRegisters vertex,
+        ShaderInterfaceRegisters shaderInterface,
+        uint shaderStages)
+    {
+        // Exactly the draws the executor admits as mesh draws, or a program would be
+        // compiled as the merged ES/GS stage with no mesh pipeline to run it - and an
+        // ordinary vertex program that happens to touch LDS would have its workgroup sized
+        // from geometry-engine registers the draw never programmed.
+        if (!supportsPrimitiveShaderMeshPipelines || !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
+        {
+            return null;
+        }
+
+        return new Gen5NggStageInfo(
+            VerticesPerSubgroup: shaderInterface.ExportVerticesPerSubgroup,
+            PrimitivesPerSubgroup: shaderInterface.GeometryPrimitivesPerSubgroup,
+            MaxOutputPerSubgroup: shaderInterface.MaxOutputPerSubgroup,
+            OutputPrimitiveType: shaderInterface.GeometryOutputPrimitiveType,
+            PrimitiveAmplificationFactor: shaderInterface.PrimitiveShaderSubgroupControl,
+            LocalDataShareBytes: vertex.GeometryResource2.LocalDataShareSize *
+                LocalDataShareGranuleDwords * sizeof(uint),
+
+            // GE_CNTL's group sizes live in the user-config bank, which this lookup does not
+            // see; they are per-draw launch state and travel in the mesh draw-info block.
+            VertexGroupSize: 0,
+            PrimitiveGroupSize: 0)
+        {
+            IsWave64 = VgtShaderStages.IsGeometryWave64(shaderStages),
+            Passthrough = VgtShaderStages.IsPrimitivePassthrough(shaderStages),
+        };
+    }
+
+    // s2..s7 of the merged stage: the launch state the geometry engine loads, never user data.
+    private const ulong MergedStageSystemScalars = 0xFCUL;
+
+    // Every merged ES/GS wave starts with SPI_SHADER_USER_DATA_ADDR_LO/HI_GS in s[0:1]. The
+    // GS half of a fused program reads its own user data through that pointer, so a fused
+    // program compiled as the merged workgroup stage takes the pointer as user data: its
+    // user data starts at s0, the pointer fills s[0:1], and s2..s7 stay the system scalars
+    // the mesh prologue seeds. Any other program keeps its user data at s8.
+    internal ShaderSource WithGeometryUserDataAddress(ShaderSource source, ulong geometryUserDataAddress)
+    {
+        if (!source.Registered.IsFused || source.UserDataBase != VertexUserDataBase ||
+            !ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(_programs.Decode(source)))
+        {
+            return source;
+        }
+
+        var userData = new uint[VertexUserDataBase + source.UserData.Length];
+        userData[0] = (uint)geometryUserDataAddress;
+        userData[1] = (uint)(geometryUserDataAddress >> 32);
+        source.UserData.CopyTo(userData, (int)VertexUserDataBase);
+        return source with
+        {
+            UserData = userData,
+            UserDataBase = 0,
+            ExcludedUserDataRegisters = MergedStageSystemScalars,
+        };
     }
 
     public ShaderProgramCache Programs => _programs;
@@ -53,8 +144,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     public int ComputePipelineCount => _computePipelines.Count;
 
     // The user data of one stage: the count from its resource register, else the registers the guest wrote.
-    private static uint[] UserData(UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, ulong shaderAddress, string label,
-        bool includeGeometryPointer = false, ulong geometryPointer = 0)
+    private static uint[] UserData(UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, ulong shaderAddress, string label, ref uint[]? previous)
     {
         var count = declaredCount;
         if (count == 0 && probeWrittenRegisters)
@@ -64,30 +154,60 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         if (count > UserScalarRegisters.Capacity)
         {
-            throw SubmissionScheduler.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
+            throw GpuFatal.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
         }
 
-        var prefix = includeGeometryPointer ? (int)VertexUserDataBase : 0;
-        var values = new uint[prefix + (int)count];
-        registers.Values.AsSpan(0, (int)count).CopyTo(values.AsSpan(prefix));
-        if (includeGeometryPointer)
+        // Nothing mutates a source's user data, so a draw whose registers match the last one's shares its array.
+        var words = registers.Values.AsSpan(0, (int)count);
+        if (previous is not null && words.SequenceEqual(previous))
         {
-            values[0] = (uint)geometryPointer;
-            values[1] = (uint)(geometryPointer >> 32);
+            return previous;
         }
-        return values;
+
+        return previous = words.ToArray();
     }
 
-    private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, uint userDataBase,
+    private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, uint userDataBase, ref uint[]? userDataMemo,
         ulong geometryPointer = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
         var registered = _registry.Require(codeAddress, label);
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, registered.CodeRanges, label);
-        var includeGeometryPointer = stage == ShaderStage.Mesh && registered.IsFused;
-        var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, includeGeometryPointer, geometryPointer);
-        return new ShaderSource(registered, hash, userData, includeGeometryPointer ? 0 : userDataBase, stage);
+        Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
+        ranges = ranges[..registered.CopyCodeRanges(ranges)];
+        foreach (var (address, sizeBytes) in ranges)
+        {
+            _host.SynchronizeShaderCode(address, sizeBytes);
+        }
+
+        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, ranges, label);
+        var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, ref userDataMemo);
+        if (stage == ShaderStage.Mesh && registered.IsFused)
+        {
+            // A fused program compiled as a mesh program takes the GS user-data pointer in
+            // s[0:1] as user data, as WithGeometryUserDataAddress does for the primitive-shader
+            // path: its user data starts at s0 and the registers follow at s8.
+            var prefixed = new uint[VertexUserDataBase + userData.Length];
+            prefixed[0] = (uint)geometryPointer;
+            prefixed[1] = (uint)(geometryPointer >> 32);
+            userData.CopyTo(prefixed, (int)VertexUserDataBase);
+            return new ShaderSource(registered, hash, prefixed, 0, stage);
+        }
+
+        // A source is immutable, so a draw that resolves to the same one as the last draw of its
+        // stage shares it instead of allocating another.
+        ref var last = ref _lastSources[(int)stage];
+        if (last is not null && ReferenceEquals(last.Registered, registered) && last.Hash == hash &&
+            ReferenceEquals(last.UserData, userData) && last.UserDataBase == userDataBase && last.Stage == stage &&
+            last.ExcludedUserDataRegisters == 0)
+        {
+            return last;
+        }
+
+        return last = new ShaderSource(registered, hash, userData, userDataBase, stage);
     }
+
+    // The last source of each stage, kept under _resolveGate like the user data memos.
+    private readonly ShaderSource?[] _lastSources = new ShaderSource?[Enum.GetValues<ShaderStage>().Length];
 
     // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
     // the program, decode and materialization caches it updates are used under this lock only.
@@ -101,10 +221,29 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ContextRegisters context,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
-        bool depthBound)
-        => GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context,
-            targetExportMapping, pixelActive, depthBound, null);
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound = false) =>
+        GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
+            depthAspectBound, stencilAspectBound, triangleList: false);
 
+    public GraphicsPrograms GetGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList) =>
+        GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
+            depthAspectBound, stencilAspectBound, triangleList, null);
+
+    // A primitive-shader draw compiled as a ShaderStage.Mesh program (hosts with mesh shaders,
+    // MeshShadersSupported). The depth target's aspects are not passed in, so a bound depth
+    // target stands for its depth aspect.
     public GraphicsPrograms GetMeshGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
@@ -141,8 +280,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
             return new GraphicsPrograms { Available = false };
         }
-        return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context,
-            targetExportMapping, pixelActive, depthBound, mesh);
+        return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
+            depthAspectBound: depthBound, stencilAspectBound: false, triangleList: false, mesh);
     }
 
     private GraphicsPrograms GetGraphicsProgramsCore(
@@ -153,13 +292,17 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList,
         MeshDrawConfiguration? mesh)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound, mesh);
+            return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
+                depthAspectBound, stencilAspectBound, triangleList, mesh);
         }
     }
 
@@ -171,17 +314,23 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList,
         MeshDrawConfiguration? mesh)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var vertexSource = PrepareSource(
             vertex.ExportAddress, mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh,
             mesh is null ? "vertex" : "mesh", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
-            probeWrittenRegisters: true, VertexUserDataBase, vertex.GeometryUserDataAddress);
+            probeWrittenRegisters: true, VertexUserDataBase, ref _vertexUserData, vertex.GeometryUserDataAddress);
         var vertexInfo = mesh is null ? PrepareVertexInput(vertexSource, shaderInterface, context) : new VertexInputInfo();
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
+        vertexInfo.FloatMode = vertex.GeometryResource1.FloatMode;
+        vertexInfo.Dx10Clamp = vertex.GeometryResource1.Dx10Clamp;
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
+        Gen5ShaderProgram? decodedPixelProgram = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
         var dropUnwritten = false;
         var attributeCount = 0u;
@@ -189,12 +338,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             pixelSource = PrepareSource(
                 pixel.Address, ShaderStage.Pixel, "pixel", pixel.UserScalars, pixel.Resource2.UserScalarCount,
-                probeWrittenRegisters: true, userDataBase: 0);
+                probeWrittenRegisters: true, userDataBase: 0, ref _pixelUserData);
             if (RenderTrace.Enabled)
                 RenderTrace.Write($"PixelDrawState shader=0x{pixelSource.Address:X16} hash=0x{pixelSource.Hash:X16} " +
                     $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
             using var pixelProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PixelInputResolution);
             var pixelProgram = _programs.Decode(pixelSource);
+            decodedPixelProgram = pixelProgram;
             var attributes = GetPixelAttributes(pixelProgram);
             attributeCount = attributes.Length == 0 ? 0 : attributes[^1] + 1;
             var inputCount = shaderInterface.PixelInputControl & 0x3Fu;
@@ -205,21 +355,54 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             if (inputCount > MaxPixelInputs)
             {
-                throw SubmissionScheduler.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
+                throw GpuFatal.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
             }
 
             dropUnwritten = depthBound ||
                 LeavesSingleDualSourceTarget(context, targetExportMapping, pixelProgram.PixelColorExportMasks) ||
                 UnwrittenTargetBoundsRenderArea(context, targetExportMapping, pixelProgram.PixelColorExportMasks);
+            Span<byte> outputModes = stackalloc byte[PixelInputInfo.TargetCount];
+            Span<ColorComponentMap> outputMappings = stackalloc ColorComponentMap[PixelInputInfo.TargetCount];
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
-                out var outputModes, out var outputMappings);
-            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
+                outputModes, outputMappings);
+            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount,
+                depthAspectBound, stencilAspectBound, _pixelInputArrays);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(attributes, pixelInfo));
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
+            pixelInfo.FloatMode = pixel.Resource1.FloatMode;
+            pixelInfo.Dx10Clamp = pixel.Resource1.Dx10Clamp;
+            pixelInfo.GuestWave32 = (shaderInterface.PixelInputControl & (1u << 15)) != 0;
         }
 
+        // A ShaderStage.Mesh draw replaces the vertex stage outright; the primitive-shader
+        // workgroup path is for the vertex stage only.
+        var primitiveShader = mesh is null ? PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages) : null;
+        if (primitiveShader is { } ngg && vertexSource.Registered.IsFused)
+        {
+            // The GS half of a fused program assembles its input primitives from LDS, so the
+            // mesh prologue needs to know there is one and how much each primitive can emit.
+            primitiveShader = ngg with { GeometryVerticesOut = Math.Max(shaderInterface.GeometryMaxVerticesOut, 1u) };
+        }
+
+        // A pixel program that reads the three vertex values of an input on a host that cannot
+        // declare per-vertex pixel inputs gets host interpolants instead when it only
+        // interpolates them by hand, or else them from the primitive shader, run as a mesh
+        // function whose primitives carry them. The mesh path assembles a triangle list.
+        var perVertexParameters = 0u;
+        Gen5ManualInterpolationPlan? manualInterpolation = null;
+        if (decodedPixelProgram is not null && pixelInfo is not null && pixelSource is not null &&
+            !_host.PerVertexPixelInputsSupported)
+        {
+            perVertexParameters = ResolvePerVertexInputs(pixelSource, decodedPixelProgram, pixelInfo,
+                shaderInterface.PixelInputAddress, attributeCount, primitiveShader is not null && triangleList,
+                out manualInterpolation);
+        }
+
+        var vertexCompileSource = primitiveShader is null
+            ? vertexSource
+            : WithGeometryUserDataAddress(vertexSource, vertex.GeometryUserDataAddress);
         ShaderProgram vertexProgram;
         ShaderProgram pixelProgramHandle = default;
         ShaderStageResources vertexStage;
@@ -228,33 +411,38 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_gate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
+            using var lockedScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrepareLocked);
             var pushDataCursor = 0u;
             if (pixelSource is not null)
             {
+                // Each stage refills its own reusable options; a miss keeps a copy.
+                var pixelOptions = _pixelOptions;
+                pixelOptions.PixelInfo = pixelInfo;
+                pixelOptions.PixelOutputs = pixelOutputs;
+                pixelOptions.PixelInputEnable = shaderInterface.PixelInputEnable;
+                pixelOptions.PixelInputAddress = shaderInterface.PixelInputAddress;
+                pixelOptions.PerVertexInputsFromPrimitive = perVertexParameters != 0;
+                pixelOptions.ManualInterpolation = manualInterpolation is not null;
                 if (!TryPrepareProgram(
                     pixelSource,
-                    new StageCompileOptions
-                    {
-                        PixelInfo = pixelInfo,
-                        PixelOutputs = pixelOutputs,
-                        PixelInputEnable = shaderInterface.PixelInputEnable,
-                        PixelInputAddress = shaderInterface.PixelInputAddress,
-                    },
+                    pixelOptions,
                     ref pushDataCursor,
                     out pixelProgramHandle,
                     out pixelStage))
                     return new GraphicsPrograms { Available = false };
             }
 
+            var vertexOptions = _vertexOptions;
+            vertexOptions.VertexInfo = vertexInfo;
+            vertexOptions.RequiredVertexOutputCount = (int)attributeCount;
+            vertexOptions.PrimitiveShader = primitiveShader;
+            vertexOptions.MeshPerVertexParameterMask = perVertexParameters;
+            vertexOptions.VertexInterpolants = manualInterpolation is null ? [] : EncodedInterpolantsOf(manualInterpolation);
+            vertexOptions.MeshInfo = mesh;
+            vertexOptions.MeshOutputLocationMask = mesh is null ? null : pixelSource is null ? 0u : pixelStage.Program?.InputLocationMask;
             if (!TryPrepareProgram(
-                vertexSource,
-                mesh is null
-                    ? new StageCompileOptions { VertexInfo = vertexInfo, RequiredVertexOutputCount = (int)attributeCount }
-                    : new StageCompileOptions
-                    {
-                        MeshInfo = mesh, RequiredVertexOutputCount = (int)attributeCount,
-                        MeshOutputLocationMask = pixelSource is null ? 0u : pixelStage.Program?.InputLocationMask,
-                    },
+                vertexCompileSource,
+                vertexOptions,
                 ref pushDataCursor,
                 out vertexProgram,
                 out vertexStage))
@@ -267,32 +455,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo.Stage = pixelStage;
         }
 
-        SolidColorClear? solidClear = null;
-        var disableBlending = false;
-        if (mesh is null && pixelInfo is not null)
-        {
-            var vertexProgramWords = _programs.Decode(vertexSource);
-            var pixelProgramWords = _programs.Decode(pixelSource!);
-            if (IsProceduralFullscreenClearPair(vertexProgramWords, vertexInfo, vertexStage, pixelProgramWords, pixelStage))
-            {
-                var color = DecodeSolidClearColor(pixelStage.Resources.UserData);
-                solidClear = new SolidColorClear(color.Red, color.Green, color.Blue, color.Alpha);
-            }
-            else
-            {
-                disableBlending = IsTransparentPremultipliedFill(context, pixelOutputs, vertexInfo, vertexStage, pixelStage);
-            }
-        }
-
         return new GraphicsPrograms
         {
             Vertex = vertexProgram,
             Pixel = pixelProgramHandle,
             VertexInput = vertexInfo,
             MeshInput = mesh,
-            PixelInput = pixelInfo ?? new PixelInputInfo(),
-            SolidClear = solidClear,
-            DisableBlending = disableBlending,
+            PixelInput = pixelInfo ?? InactivePixelInput,
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = mesh is null ? FindPositionStream(vertexInfo) : null,
         };
@@ -313,35 +482,51 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             {
                 IeeeMode = vertex.GeometryResource1.IeeeMode,
                 ScratchDwords = Math.Max(registered.ScratchDwords, registered.ContinuationScratchDwords),
-                ClipSpace = ResolveClipSpace(context),
+                // The program's half of the viewport transform, as for a vertex program.
+                ClipSpace = HostViewport(context).ClipSpace,
             },
         };
     }
 
-    private ClipSpaceTransform ResolveClipSpace(ContextRegisters context)
+    // The pixel input of a draw without a pixel stage. Nothing writes a resolved draw's inputs
+    // but the resolver, which sets the stage of a pixel input it resolved, so draws share one.
+    private static readonly PixelInputInfo InactivePixelInput = new()
     {
-        if (!context.Clip.ClipDisable) return default;
-        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
-        var limits = _host.Limits;
-        return new ClipSpaceTransform(true, viewport.XScale, viewport.YScale,
-            viewport.XOffset, viewport.YOffset,
-            Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
-            Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
-    }
+        InterpolatorSettings = new uint[PixelInputInfo.InterpolatorCount],
+        TargetOutputModes = new byte[PixelInputInfo.TargetCount],
+        TargetExportMappings = new ColorComponentMap[PixelInputInfo.TargetCount],
+    };
 
-    // The vertex tables of the draw and the clip-space transform when clipping is off.
+    // A plan is cached per program and inputs (ResolvePerVertexInputs), and so are its encoded interpolants.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ManualInterpolationPlan, uint[]> EncodedInterpolants = new();
+
+    private static uint[] EncodedInterpolantsOf(Gen5ManualInterpolationPlan plan) =>
+        EncodedInterpolants.GetValue(plan, static plan => plan.Interpolants.Select(interpolant => interpolant.Encoded).ToArray());
+
+    // The vertex tables of the draw, the clip-space transform when clipping is off and the
+    // draw's clip-space conventions.
     private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderInterfaceRegisters shaderInterface, ContextRegisters context)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputResolution);
+        // The program's half of the viewport transform the draw state sets the rest of.
+        var clipSpace = HostViewport(context).ClipSpace;
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
-            shaderInterface.VertexOutputControl, ResolveClipSpace(context));
+            shaderInterface.VertexOutputControl, clipSpace, _vertexTables, source.Hash);
+    }
+
+    private HostViewportTransform HostViewport(ContextRegisters context)
+    {
+        var limits = _host.Limits;
+        return HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
     }
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
     // was rebuilt with LINQ on every draw.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, uint[]> InterpolatedAttributeCache = new();
 
-    internal uint[] GetPixelAttributes(Gen5ShaderProgram program) =>
+    internal uint[] GetPixelAttributes(Gen5ShaderProgram program) => InterpolatedAttributesOf(program);
+
+    internal static uint[] InterpolatedAttributesOf(Gen5ShaderProgram program) =>
         InterpolatedAttributeCache.GetValue(program, static program => program.Instructions
             .Select(static instruction => instruction.Control)
             .OfType<Gen5InterpolationControl>()
@@ -378,17 +563,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return highest + 1;
     }
 
+    // The attribute list is ascending, so its last entry is the highest.
+    internal static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
+    {
+        var attributes = InterpolatedAttributesOf(program);
+        return attributes.Length == 0 ? 0 : attributes[^1] + 1;
+    }
 
     // The bound colour slots in order; each output mode names the kind the pixel program exports.
     // With a depth target bound, a slot the draw never writes is dropped here and from the
     // attachments alike (RenderExecutor.DropUnwrittenColorTargets): unwrittenExportMasks is the
     // pixel program's export mask then, null otherwise.
     private Gen5PixelOutputBinding[] ResolveBoundTargets(ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        uint? unwrittenExportMasks, out byte[] outputModes, out ColorComponentMap[] outputMappings)
+        uint? unwrittenExportMasks, Span<byte> outputModes, Span<ColorComponentMap> outputMappings)
     {
-        outputModes = new byte[PixelInputInfo.TargetCount];
-        outputMappings = new ColorComponentMap[PixelInputInfo.TargetCount];
-        var outputs = new List<Gen5PixelOutputBinding>(ContextRegisters.ColorTargetCount);
+        var outputs = _boundOutputs;
+        outputs.Clear();
         var location = 0u;
         for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
         {
@@ -411,61 +601,113 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var words = context.ColorTargets[slot];
             if (!_host.TryResolveColorOutput((uint)words.Layout, (uint)words.NumberType, (uint)words.Order, out var kind, out var mapping))
             {
-                throw SubmissionScheduler.Fatal($"The color target format has no pixel output kind: slot={slot} layout={(uint)words.Layout} numberType={(uint)words.NumberType} order={(uint)words.Order}.");
+                throw GpuFatal.Fatal($"The color target format has no pixel output kind: slot={slot} layout={(uint)words.Layout} numberType={(uint)words.NumberType} order={(uint)words.Order}.");
             }
 
             // A bound slot that no export reaches keeps its contents: its color write mask is zero.
             var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
             // The high nibble keys the compiled program by the export that feeds the slot.
-            outputModes[slot] = (byte)(((uint)kind + 1) | (uint)((exportTarget + 1) << 4));
-            outputMappings[slot] = new ColorComponentMap(mapping.Packed);
+            outputModes[(int)slot] = (byte)(((uint)kind + 1) | (uint)((exportTarget + 1) << 4));
+            outputMappings[(int)slot] = new ColorComponentMap(mapping.Packed);
             // No EXP target reaches 8 and above, so an unfed slot is declared but never written.
             outputs.Add(new Gen5PixelOutputBinding(slot, location++, kind, mapping)
             {
                 ExportTarget = exportTarget >= 0 ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
                 ExportFormat = ExportFormatOf(context.ShaderInterface, exportTarget),
+                ClampToUnit = ClampsFloatOutput(context, slot),
             });
         }
 
         if (context.BlendControls[0].UsesSecondarySource && (context.ColorTargets[0].Info & (1u << 16)) == 0 &&
-            outputs.Any(output => output.GuestSlot == 0))
+            HasGuestSlotZero(outputs))
         {
             if (outputs.Count != 1 || outputs[0].Kind != Gen5PixelOutputKind.Float)
             {
-                throw SubmissionScheduler.Fatal("Dual-source blending requires one floating-point color output.");
-            }
-            if (NeedsDualSourceAlpha(context, 0, outputMappings[0]))
-            {
-                throw SubmissionScheduler.Fatal("Dual-source blending cannot also export an unmapped source alpha.");
+                throw GpuFatal.Fatal("Dual-source blending requires one floating-point color output.");
             }
 
-            // EXP1 supplies the second source for target zero, not a second attachment.
+            // The second export feeds target zero's blend unit, not another attachment.
             outputs[0] = outputs[0] with { ExportTarget = 0, ExportFormat = ExportFormatOf(context.ShaderInterface, 0) };
-            outputs.Add(outputs[0] with { GuestSlot = 1, ExportTarget = 1, Index = 1, ExportFormat = ExportFormatOf(context.ShaderInterface, 1) });
+            outputs.Add(outputs[0] with
+            {
+                GuestSlot = 1,
+                ExportTarget = 1,
+                BlendSourceIndex = 1,
+                ExportFormat = ExportFormatOf(context.ShaderInterface, 1),
+            });
             outputModes[0] = (byte)(((uint)outputs[0].Kind + 1) | 0x10u);
             outputModes[1] = DualSourceOutputMode;
         }
 
-        // Dual-source blending is limited to a single attachment.
-        if (outputs.Count == 1 &&
-            _host.SupportsDualSourceBlend &&
-            outputs[0].Kind == Gen5PixelOutputKind.Float &&
-            NeedsDualSourceAlpha(context, outputs[0].GuestSlot, outputMappings[outputs[0].GuestSlot]))
+        if (System.Runtime.InteropServices.CollectionsMarshal.AsSpan(outputs).SequenceEqual(_lastBoundOutputs))
         {
-            outputs[0] = outputs[0] with { DualSourceAlpha = true };
-            outputModes[outputs[0].GuestSlot] |= DualSourceAlphaOutputMode;
+            return _lastBoundOutputs;
         }
 
-        return outputs.ToArray();
+        return _lastBoundOutputs = outputs.ToArray();
     }
 
     private const byte DualSourceOutputMode = 0xFF;
 
-    // SPI_SHADER_COL_FORMAT of an EXP target; a slot no export feeds keeps the default.
-    private static Gen5PixelExportFormat ExportFormatOf(ShaderInterfaceRegisters shaderInterface, int exportTarget) =>
-        exportTarget >= 0 && exportTarget < shaderInterface.TargetOutputModes.Length
-            ? (Gen5PixelExportFormat)shaderInterface.TargetOutputModes[exportTarget]
-            : Gen5PixelExportFormat.Float16;
+    // CB_COLOR_INFO.BLEND_CLAMP on a FLOAT target clamps the colour to [0, 1]; normalized
+    // targets clamp by their encoding. Without blending the program saturates its output.
+    // With blending the CB also clamps the destination and the blend result, which the host's
+    // fixed-function blend cannot do: documented deviation, only the source is clamped.
+    private static bool ClampsFloatOutput(ContextRegisters context, uint slot)
+    {
+        const uint BlendClamp = 1u << 15, BlendBypass = 1u << 16, NumberTypeFloat = 7;
+        ref readonly var words = ref context.ColorTargets[slot];
+        if ((words.Info & BlendClamp) == 0 || (uint)words.NumberType != NumberTypeFloat)
+        {
+            return false;
+        }
+
+        if (context.BlendControls[slot].Enable && (words.Info & BlendBypass) == 0 &&
+            !ShaderCompilerWarnings.WasReported("blend-clamp-blended-float"))
+        {
+            ShaderCompilerWarnings.WarnOnce(
+                "blend-clamp-blended-float",
+                $"BLEND_CLAMP on a blended float color target clamps the source only, not the blend result: " +
+                $"slot={slot} layout={(uint)words.Layout}.");
+        }
+
+        return true;
+    }
+
+    // SPI_SHADER_COL_FORMAT of one export. With no format written for any export, the
+    // routing pairs exports and slots by number (PixelExportRouting) and the translator reads
+    // each export by its own layout.
+    private static Gen5ColorExportFormat? ExportFormatOf(ShaderInterfaceRegisters registers, int exportTarget)
+    {
+        if (exportTarget < 0 || exportTarget >= registers.TargetOutputModes.Length)
+        {
+            return null;
+        }
+
+        foreach (var mode in registers.TargetOutputModes)
+        {
+            if ((mode & 0xF) != 0)
+            {
+                var format = registers.TargetOutputModes[exportTarget] & 0xFu;
+                return format <= (uint)Gen5ColorExportFormat.Abgr32 ? (Gen5ColorExportFormat)format : null;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool HasGuestSlotZero(List<Gen5PixelOutputBinding> outputs)
+    {
+        foreach (var output in outputs)
+        {
+            if (output.GuestSlot == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     // BLEND_SRC1_COLOR, BLEND_ONE_MINUS_SRC1_COLOR, BLEND_SRC1_ALPHA, BLEND_ONE_MINUS_SRC1_ALPHA.
     internal static bool UsesSecondBlendSource(in BlendRegisters blend)
@@ -647,7 +889,27 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null);
+        }
+    }
+
+    // The same for a dispatch that may suspend on its pipeline: the program the retry kept from
+    // the last attempt at it is handed back while it still holds (ComputeProgramRetry);
+    // otherwise the program is prepared and kept in it for the next attempt.
+    public ComputeProgram GetComputeProgram(
+        ComputeStageRegisters compute,
+        ShaderInterfaceRegisters shaderInterface,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ,
+        ComputeProgramRetry retry)
+    {
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
+        lock (_resolveGate)
+        {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
         }
     }
 
@@ -657,10 +919,24 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dispatchInitiator,
         uint dimensionX,
         uint dimensionY,
-        uint dimensionZ)
+        uint dimensionZ,
+        ComputeProgramRetry? retry)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-        var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0);
+        var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0, ref _computeUserData);
+        if (retry is not null)
+        {
+            // The source is read again (the code hash and the user data), the rest only checked.
+            if (retry.Matches(source, dispatchInitiator, dimensionX, dimensionY, dimensionZ) &&
+                retry.Reads.Holds(_host.TryReadResidentGuestBytes))
+            {
+                retry.Reused = true;
+                return retry.Program!;
+            }
+
+            retry.Reset();
+        }
+
         var program = _programs.Decode(source);
         if (_skipRayTracing)
         {
@@ -699,20 +975,34 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_gate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
+            using var lockedScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrepareLocked);
             var pushDataCursor = 0u;
-            if (!TryPrepareProgram(
-                source,
-                new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
-                ref pushDataCursor,
-                out handle,
-                out stage))
+            var computeOptions = _computeOptions;
+            computeOptions.ComputeInfo = input;
+            computeOptions.ComputeSystemRegisters = systemRegisters;
+            _programs.ReadLog = retry?.Reads;
+            try
             {
-                return new ComputeProgram { Available = false };
+                if (!TryPrepareProgram(
+                    source,
+                    computeOptions,
+                    ref pushDataCursor,
+                    out handle,
+                    out stage))
+                {
+                    return new ComputeProgram { Available = false };
+                }
+            }
+            finally
+            {
+                _programs.ReadLog = null;
             }
         }
 
         input.Stage = stage;
-        return new ComputeProgram { Program = handle, Input = input };
+        var prepared = new ComputeProgram { Program = handle, Input = input };
+        retry?.Keep(prepared, source, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+        return prepared;
     }
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
@@ -768,12 +1058,52 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram)
     {
+        _ = CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, wait: true, out var created);
+        return created;
+    }
+
+    // The pipeline of a draw the executor may leave out while it compiles: false while the
+    // host is still building it (the build carries on), and nothing is cached until it is
+    // handed over, so a later draw asks again and finds it then.
+    public bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle) =>
+        CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, wait: false, out handle);
+
+    private bool CreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        bool wait,
+        out PipelineHandle handle)
+    {
+        handle = default;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         // The lookup fills objects this thread reuses for every draw; only a new pipeline gets its own.
         var lookup = _graphicsLookup ??= new GraphicsPipelineKey
@@ -786,28 +1116,31 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.VertexInput.Reset();
         lookup.StaticParameters.Reset();
         FillGraphicsState(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, lookup.Rendering, lookup.StaticParameters, lookup.VertexInput);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, lookup.Rendering, lookup.StaticParameters, lookup.VertexInput,
+            _host.DepthBoundsInPipelineState);
         lookup.VertexProgramId = vertexProgram.Id;
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
+        var lodStatistics = pixelInput is not null && _host.PixelPipelinesFollowLodStatistics && MipStatistics.TitleUsesCounters;
+        lookup.LodStatistics = lodStatistics;
         lock (_pipelineGate)
         {
-            if (_graphicsPipelines.TryGetValue(lookup, out var cached))
+            if (_graphicsPipelines.TryGetValue(lookup, out handle))
             {
-                return cached;
+                return true;
             }
         }
 
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsInPipelineState, lodStatistics);
         var key = KeyOf(description);
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_gate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
-            if (_graphicsPipelines.TryGetValue(key, out var cached))
+            if (_graphicsPipelines.TryGetValue(key, out handle))
             {
-                return cached;
+                return true;
             }
 
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -818,14 +1151,24 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             }
 
-            var created = _host.CreateGraphicsPipeline(description);
+            PipelineHandle created;
+            if (wait)
+            {
+                created = _host.CreateGraphicsPipeline(description);
+            }
+            else if (!_host.TryCreateGraphicsPipeline(description, out created))
+            {
+                return false;
+            }
+
             lock (_pipelineGate)
             {
                 _graphicsPipelines.Add(key, created);
             }
 
             ShaderCacheCounters.CountGraphicsPipeline();
-            return created;
+            handle = created;
+            return true;
         }
     }
 
@@ -840,18 +1183,21 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        SampleCountFlags noAttachmentSampleCounts)
+        GpuSampleCount noAttachmentSampleCounts,
+        bool depthBoundsInPipelineState = true,
+        bool lodStatistics = false)
     {
         var renderingState = new PipelineRenderingState();
         var parameters = new PipelineStaticParameters();
         var vertexState = new PipelineVertexInputState();
         var (vertexStage, pixelStage) = FillGraphicsState(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
-            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, noAttachmentSampleCounts, renderingState, parameters, vertexState);
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, noAttachmentSampleCounts, renderingState, parameters, vertexState,
+            depthBoundsInPipelineState);
         return new GraphicsPipelineDescription
         {
             Rendering = renderingState,
@@ -863,6 +1209,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             PixelProgram = pixelProgram,
             PixelStage = pixelStage,
             StaticParameters = parameters,
+            LodStatistics = lodStatistics,
         };
     }
 
@@ -874,34 +1221,35 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        SampleCountFlags noAttachmentSampleCounts,
+        GpuSampleCount noAttachmentSampleCounts,
         PipelineRenderingState renderingState,
         PipelineStaticParameters parameters,
-        PipelineVertexInputState vertexState)
+        PipelineVertexInputState vertexState,
+        bool depthBoundsInPipelineState = true)
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
-            throw SubmissionScheduler.Fatal($"The draw binds more color attachments than a pipeline holds: count={colors.Length}.");
+            throw GpuFatal.Fatal($"The draw binds more color attachments than a pipeline holds: count={colors.Length}.");
         }
 
         if (!vertexProgram.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The draw has no vertex program.");
+            throw GpuFatal.Fatal("The draw has no vertex program.");
         }
 
         var pixelActive = pixelInput is not null;
         if (pixelActive && !pixelProgram.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The draw has an active pixel stage without a pixel program.");
+            throw GpuFatal.Fatal("The draw has an active pixel stage without a pixel program.");
         }
 
-        var vertexStage = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The vertex stage has no program.");
-        var pixelStage = pixelActive ? pixelInput!.Stage.Program ?? throw SubmissionScheduler.Fatal("The pixel stage has no program.") : null;
+        var vertexStage = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The vertex stage has no program.");
+        var pixelStage = pixelActive ? pixelInput!.Stage.Program ?? throw GpuFatal.Fatal("The pixel stage has no program.") : null;
         var colorCount = (uint)colors.Length;
         parameters.ColorCount = colorCount;
         renderingState.ColorCount = colorCount;
@@ -909,9 +1257,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             ref readonly var color = ref colors[index];
             var format = rendering.ColorAttachments[index].Format;
-            if (!color.Image.IsValid || format == Format.Undefined)
+            if (!color.Image.IsValid || format == GpuFormat.Undefined)
             {
-                throw SubmissionScheduler.Fatal($"A color attachment has no image or format: slot={color.Slot} format={format}.");
+                throw GpuFatal.Fatal($"A color attachment has no image or format: slot={color.Slot} format={format}.");
             }
 
             renderingState.ColorFormats[index] = format;
@@ -923,13 +1271,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 ? 0 : PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
             var exported = pixelStage is not null &&
                 (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
-            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;
+            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.ColorWriteMaskForSlot(color.Slot)) : 0;
             parameters.SetColorMask(index, colorMask);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
             {
                 RenderTrace.Write(
                     $"PipelineCache output slot={color.Slot} export={exportTarget} " +
-                    $"guestMask=0x{context.RenderTargetMaskForSlot(color.Slot):X} " +
+                    $"guestMask=0x{context.ColorWriteMaskForSlot(color.Slot):X} " +
                     $"exported={(exported ? 1 : 0)} shaderMask=0x{pixelStage?.PixelColorExportMasks ?? 0:X8} " +
                     $"mapping=0x{color.Resolution.ExportMapping.Packed:X2} hostMask=0x{colorMask:X} format={(int)format}");
             }
@@ -949,20 +1297,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var flag = ImageDescription.VulkanSampleCount(samples);
             if (flag == 0 || (noAttachmentSampleCounts & flag) == 0)
             {
-                throw SubmissionScheduler.Fatal($"The device cannot rasterize without attachments at the draw's sample count: samples={samples}.");
+                throw GpuFatal.Fatal($"The device cannot rasterize without attachments at the draw's sample count: samples={samples}.");
             }
         }
 
         if (samples == 0 || ImageDescription.VulkanSampleCount(samples) == 0)
         {
-            throw SubmissionScheduler.Fatal($"The draw's sample count is invalid: samples={samples}.");
+            throw GpuFatal.Fatal($"The draw's sample count is invalid: samples={samples}.");
         }
 
         var depthState = withDepth ? depth.Target.State : default;
-        var rectangleList = topology == PrimitiveTopology.PatchList;
+        var rectangleList = topology == GpuPrimitiveTopology.PatchList;
         var mode = context.RasterMode;
         parameters.NegativeOneToOne = !context.Clip.DirectXClipSpace;
-        parameters.DepthClipEnable = context.Clip.IsZClipEnabled;
+        parameters.DepthClipEnable = HostViewportTransform.DepthClipOf(context);
         parameters.Topology = topology;
         parameters.PrimitiveRestartEnable = primitiveRestartEnabled;
         parameters.Samples = samples;
@@ -977,26 +1325,92 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         parameters.CullBack = !rectangleList && mode.CullBack;
         parameters.CullFront = !rectangleList && mode.CullFront;
         parameters.FrontFaceClockwise = mode.FrontFaceClockwise;
+        parameters.AlphaToCoverageEnable = AlphaToCoverageEnabled(colors, context, pixelActive);
         for (var index = 0; index < colors.Length; index++)
         {
             var slot = colors[index].Slot;
             var blend = context.BlendControls[slot];
-            var dualSource = colors.Length == 1 && pixelActive &&
-                (pixelInput!.TargetOutputModes[slot] & DualSourceAlphaOutputMode) != 0;
-            byte Factor(byte factor) => dualSource ? ToDualSourceFactor(factor) : factor;
-            parameters.SetColorSourceBlend(index, Factor(blend.ColorSourceFactor));
+            parameters.SetColorSourceBlend(index, (byte)blend.ColorSourceFactor);
             parameters.SetColorBlendFunction(index, (byte)blend.ColorFunction);
-            parameters.SetColorDestinationBlend(index, Factor(blend.ColorDestinationFactor));
-            parameters.SetAlphaSourceBlend(index, Factor(blend.AlphaSourceFactor));
+            parameters.SetColorDestinationBlend(index, (byte)blend.ColorDestinationFactor);
+            parameters.SetAlphaSourceBlend(index, (byte)blend.AlphaSourceFactor);
             parameters.SetAlphaBlendFunction(index, (byte)blend.AlphaFunction);
-            parameters.SetAlphaDestinationBlend(index, Factor(blend.AlphaDestinationFactor));
+            parameters.SetAlphaDestinationBlend(index, (byte)blend.AlphaDestinationFactor);
             parameters.SetSeparateAlphaBlend(index, blend.SeparateAlpha);
             parameters.SetBlendEnable(index, blend.Enable && !disableBlending);
             parameters.SetBlendBypass(index, ((context.ColorTargets[slot].Info >> 16) & 0x1) != 0);
         }
 
+        NormalizeStaticParameters(parameters, depthBoundsInPipelineState);
         FillVertexInputState(vertexInput, vertexState);
         return (vertexStage, pixelStage);
+    }
+
+    // Zeroes the state no backend reads, so draws that differ only there share one pipeline:
+    // the depth bounds when the test is off (or the host keeps them out of its pipeline), the
+    // stencil operations when the stencil test is off, and the blend factors, functions and
+    // flags of an attachment that does not blend (disabled, bypassed, or writing no channel).
+    // Every field is either ignored by the host pipeline when its switch is off or, for the
+    // separate-alpha factors, replaced by the colour ones.
+    internal static void NormalizeStaticParameters(PipelineStaticParameters parameters, bool depthBoundsInPipelineState)
+    {
+        if (!depthBoundsInPipelineState || !parameters.DepthBoundsTestEnable)
+        {
+            parameters.DepthBoundsTestEnable = false;
+            parameters.DepthMinBounds = 0f;
+            parameters.DepthMaxBounds = 0f;
+        }
+
+        if (!parameters.StencilTestEnable)
+        {
+            parameters.StencilFront = StencilOperations.Default;
+            parameters.StencilBack = StencilOperations.Default;
+        }
+
+        for (var index = 0; index < (int)parameters.ColorCount; index++)
+        {
+            var blends = parameters.GetBlendEnable(index) && !parameters.GetBlendBypass(index) && parameters.GetColorMask(index) != 0;
+            if (!blends)
+            {
+                parameters.SetBlendEnable(index, false);
+                parameters.SetBlendBypass(index, false);
+                parameters.SetSeparateAlphaBlend(index, false);
+                parameters.SetColorSourceBlend(index, 0);
+                parameters.SetColorDestinationBlend(index, 0);
+                parameters.SetColorBlendFunction(index, 0);
+            }
+
+            if (!parameters.GetSeparateAlphaBlend(index))
+            {
+                parameters.SetAlphaSourceBlend(index, 0);
+                parameters.SetAlphaDestinationBlend(index, 0);
+                parameters.SetAlphaBlendFunction(index, 0);
+            }
+        }
+    }
+
+    // DB_ALPHA_TO_MASK turns the alpha of MRT0's export into sample coverage unless the pixel
+    // program opts out (DB_SHADER_CONTROL.ALPHA_TO_MASK_DISABLE). The host takes the alpha of
+    // its first color output, so that output has to be the one export 0 feeds; otherwise the
+    // draw runs without alpha to coverage (documented deviation, warned once).
+    private static bool AlphaToCoverageEnabled(ReadOnlySpan<ColorTargetState> colors, ContextRegisters context, bool pixelActive)
+    {
+        if (!pixelActive || (context.AlphaToMask & 1u) == 0 || context.ShaderInterface.DepthShaderControl.AlphaToMaskDisable)
+        {
+            return false;
+        }
+
+        if (colors.Length == 0 || PixelExportRouting.ExportForSlot(context.ShaderInterface, colors[0].Slot) != 0)
+        {
+            ShaderCompilerWarnings.WarnOnce(
+                "alpha-to-coverage-without-mrt0",
+                $"Alpha to coverage without MRT0's export at the first color attachment runs without coverage: " +
+                $"attachments={colors.Length} firstSlot={(colors.Length == 0 ? -1 : (int)colors[0].Slot)} " +
+                $"dbAlphaToMask=0x{context.AlphaToMask:X8}.");
+            return false;
+        }
+
+        return true;
     }
 
     internal static GraphicsPipelineKey KeyOf(GraphicsPipelineDescription description) => new()
@@ -1004,6 +1418,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         Rendering = description.Rendering,
         VertexProgramId = description.VertexProgram.Id,
         PixelProgramId = description.PixelInfo is not null ? description.PixelProgram.Id : 0,
+        LodStatistics = description.LodStatistics,
         VertexInput = description.VertexInput,
         StaticParameters = description.StaticParameters,
     };
@@ -1012,7 +1427,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         if (info.Buffers.Length > VertexInputInfo.MaxBuffers || info.Attributes.Length > VertexInputInfo.MaxBuffers)
         {
-            throw SubmissionScheduler.Fatal($"The vertex input is too large: buffers={info.Buffers.Length} attributes={info.Attributes.Length}.");
+            throw GpuFatal.Fatal($"The vertex input is too large: buffers={info.Buffers.Length} attributes={info.Attributes.Length}.");
         }
 
         state.BindingCount = (byte)info.Buffers.Length;
@@ -1028,7 +1443,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var attribute = info.Attributes[index];
             if (attribute.BufferIndex < 0 || attribute.BufferIndex >= info.Buffers.Length)
             {
-                throw SubmissionScheduler.Fatal($"The vertex attribute names a buffer outside the input: attribute={index} buffer={attribute.BufferIndex} buffers={info.Buffers.Length}.");
+                throw GpuFatal.Fatal($"The vertex attribute names a buffer outside the input: attribute={index} buffer={attribute.BufferIndex} buffers={info.Buffers.Length}.");
             }
 
             state.Attributes[index] = new PipelineVertexAttribute(attribute.OffsetBytes, (byte)attribute.BufferIndex);
@@ -1040,10 +1455,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         if (!program.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The dispatch has no compute program.");
+            throw GpuFatal.Fatal("The dispatch has no compute program.");
         }
 
-        var stage = input.Stage.Program ?? throw SubmissionScheduler.Fatal("The compute stage has no program.");
+        var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
         lock (_pipelineGate)
         {
@@ -1084,10 +1499,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         handle = default;
         if (!program.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The dispatch has no compute program.");
+            throw GpuFatal.Fatal("The dispatch has no compute program.");
         }
 
-        var stage = input.Stage.Program ?? throw SubmissionScheduler.Fatal("The compute stage has no program.");
+        var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
         lock (_pipelineGate)
         {

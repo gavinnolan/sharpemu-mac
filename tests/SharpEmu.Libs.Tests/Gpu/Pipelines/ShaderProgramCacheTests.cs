@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
@@ -49,6 +50,70 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal("SNop", request.Program.Instructions[0].Opcode);
     }
 
+    // Same program with an S_BARRIER appended: that makes it the merged ES/GS workgroup
+    // stage, which a mesh backend runs as a mesh function.
+    [Fact]
+    public void PrimitiveShaderWorkgroupKeepsItsOwnVertexFetch()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA,
+            [0xF4080303, 0xFA000000, 0x02020B08, 0xE00C2000, 0x80030401, 0xBF8A0000, 0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Vertex, new uint[8]);
+        var descriptor = PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Float);
+        var options = new StageCompileOptions
+        {
+            VertexInfo = new VertexInputInfo
+            {
+                FetchEmbedded = true,
+                FetchAttributeRegister = 4,
+                FetchBufferRegister = 6,
+                Attributes = [new VertexAttributeResource(new(descriptor[0], descriptor[1], descriptor[2], descriptor[3]), 4, 4, 0, 0, 0, 0)],
+                Buffers = [new VertexInputBuffer(DataBase, 16, 4)],
+            },
+
+            // The draw selected the NGG primitive-shader stage and the backend has mesh
+            // pipelines, so the program compiles as the workgroup stage.
+            PrimitiveShader = new Gen5NggStageInfo(64, 64, 64, 2, 1, 1024, 64, 64),
+        };
+        var cursor = 0u;
+        _ = _guest.Programs.GetOrCompile(source, options, ref cursor, out _);
+        var request = Assert.Single(_guest.Compiler.Requests);
+
+        // A mesh function has no [[stage_in]], so no attribute may be substituted, the
+        // program's own fetch must survive, and the scalar load behind its V# must still be
+        // planned - otherwise the fetch has no buffer binding and cannot be emitted.
+        Assert.Empty(request.VertexInputs);
+        Assert.NotEqual("SNop", request.Program.Instructions[0].Opcode);
+        Assert.NotEmpty(request.Memory.Entries);
+    }
+
+    // Without the draw's primitive-shader state the same program is an ordinary vertex
+    // shader, and the substitution still applies.
+    [Fact]
+    public void WorkgroupProgramWithoutPrimitiveShaderStateStillGetsTheSubstitution()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA,
+            [0xF4080303, 0xFA000000, 0x02020B08, 0xE00C2000, 0x80030401, 0xBF8A0000, 0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Vertex, new uint[8]);
+        var descriptor = PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Float);
+        var options = new StageCompileOptions
+        {
+            VertexInfo = new VertexInputInfo
+            {
+                FetchEmbedded = true,
+                FetchAttributeRegister = 4,
+                FetchBufferRegister = 6,
+                Attributes = [new VertexAttributeResource(new(descriptor[0], descriptor[1], descriptor[2], descriptor[3]), 4, 4, 0, 0, 0, 0)],
+                Buffers = [new VertexInputBuffer(DataBase, 16, 4)],
+            },
+        };
+        var cursor = 0u;
+        _ = _guest.Programs.GetOrCompile(source, options, ref cursor, out _);
+        var request = Assert.Single(_guest.Compiler.Requests);
+        Assert.Single(request.VertexInputs);
+        Assert.Equal("SNop", request.Program.Instructions[0].Opcode);
+        Assert.Empty(request.Memory.Entries);
+    }
+
     private readonly FatalScope _fatal = new();
     private readonly PipelineTestGuest _guest = new();
 
@@ -67,7 +132,7 @@ public sealed class ShaderProgramCacheTests : IDisposable
             SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float);
         var ordinary = CompileOutput(primary);
         var synthetic = CompileOutput(primary with { DualSourceAlpha = true });
-        var explicitPair = CompileOutput(primary, primary with { GuestSlot = 1, ExportTarget = 1, Index = 1 });
+        var explicitPair = CompileOutput(primary, primary with { GuestSlot = 1, ExportTarget = 1, BlendSourceIndex = 1 });
         Assert.NotEqual(ordinary, synthetic);
         Assert.NotEqual(ordinary, explicitPair);
         Assert.NotEqual(synthetic, explicitPair);

@@ -1,13 +1,17 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
-// Program inputs include target mappings, stage activity, and indexed draw mode.
+// What a draw's program resolution reads besides the stage and context registers: the export
+// mapping of every bound color slot, whether the pixel stage runs, whether a depth target is
+// bound and whether that target has a depth aspect, and whether the draw is indexed. All
+// follow from the register banks and the draw packet alone.
 public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 {
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]
@@ -19,6 +23,11 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     public ExportMappings Mapping;
     public bool PixelActive;
     public bool DepthBound;
+    public bool DepthAspectBound;
+    public bool StencilAspectBound;
+
+    // VGT_PRIMITIVE_TYPE is a triangle list (see IShaderPipelineProvider.GetGraphicsPrograms).
+    public bool TriangleList;
     public bool Indexed;
 
     public static GraphicsProgramInputs Create()
@@ -29,7 +38,8 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     }
 
     public readonly bool Equals(GraphicsProgramInputs other) =>
-        PixelActive == other.PixelActive && DepthBound == other.DepthBound && Indexed == other.Indexed &&
+        PixelActive == other.PixelActive && DepthBound == other.DepthBound && DepthAspectBound == other.DepthAspectBound &&
+        StencilAspectBound == other.StencilAspectBound && TriangleList == other.TriangleList && Indexed == other.Indexed &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -44,6 +54,9 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 
         hash.Add(PixelActive);
         hash.Add(DepthBound);
+        hash.Add(DepthAspectBound);
+        hash.Add(StencilAspectBound);
+        hash.Add(TriangleList);
         hash.Add(Indexed);
         return hash.ToHashCode();
     }
@@ -94,8 +107,15 @@ public sealed partial class RenderExecutor
             }
         }
 
-        inputs.DepthBound = DepthTargetResolver.Resolve(context, formats, fatal) is not null;
+        var depth = DepthTargetResolver.Resolve(context, formats, fatal);
+        inputs.DepthBound = depth is not null;
+        inputs.DepthAspectBound = depth is { } target &&
+            (ViewFormatRules.FullAspects(target.Target.Format) & GpuImageAspect.DepthBit) != 0;
+        // The aspect the attachment binds (RenderExecutor.AcquireAttachments).
+        inputs.StencilAspectBound = depth is { } stencilTarget &&
+            (ViewFormatRules.DepthAspects(stencilTarget.Target.Format) & GpuImageAspect.StencilBit) != 0;
         inputs.PixelActive = HasActivePixelShader(banks);
+        inputs.TriangleList = AssemblesTriangleList(banks);
         inputs.Indexed = indexed;
         return inputs;
     }
@@ -126,6 +146,12 @@ public sealed partial class RenderExecutor
             context,
             inputs.Mapping,
             inputs.PixelActive,
-            inputs.DepthBound);
+            inputs.DepthBound,
+            inputs.DepthAspectBound,
+            inputs.StencilAspectBound,
+            inputs.TriangleList);
     }
+
+    private static bool AssemblesTriangleList(RegisterBanks banks) =>
+        (GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.TriangleList;
 }

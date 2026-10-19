@@ -26,6 +26,21 @@ public sealed record RegisteredShader(
     public (ulong Address, uint SizeBytes)[] CodeRanges =>
         IsFused ? [(CodeAddress, CodeSizeBytes), (ContinuationAddress, ContinuationSizeBytes)] : [(CodeAddress, CodeSizeBytes)];
 
+    public const int MaxCodeRanges = 2;
+
+    // CodeRanges without the array, for the per-draw path: the number of ranges written.
+    public int CopyCodeRanges(Span<(ulong Address, uint SizeBytes)> destination)
+    {
+        destination[0] = (CodeAddress, CodeSizeBytes);
+        if (!IsFused)
+        {
+            return 1;
+        }
+
+        destination[1] = (ContinuationAddress, ContinuationSizeBytes);
+        return 2;
+    }
+
     public uint TotalCodeSizeBytes => CodeSizeBytes + ContinuationSizeBytes;
 }
 
@@ -76,10 +91,11 @@ public sealed class ShaderHeaderRegistry
 
     public RegisteredShader Require(ulong codeAddress, string label)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ShaderHeaderLookup);
         var headerAddress = _headerOf(codeAddress);
         if (headerAddress == 0)
         {
-            throw SubmissionScheduler.Fatal($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
+            throw GpuFatal.Fatal($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
         }
 
         var codeSize = RequireCodeSize(headerAddress, codeAddress, label);
@@ -88,7 +104,7 @@ public sealed class ShaderHeaderRegistry
             !_context.TryReadUInt64(headerAddress + InputSemanticsOffset, out var inputSemanticsAddress) ||
             !_context.TryReadUInt32(headerAddress + InputSemanticsCountOffset, out var inputSemanticsCount))
         {
-            throw SubmissionScheduler.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+            throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
         }
 
         var continuationAddress = 0ul;
@@ -101,35 +117,86 @@ public sealed class ShaderHeaderRegistry
             if (!_context.TryReadUInt16(parts.ContinuationHeaderAddress + ScratchDwordsPerThreadOffset,
                     out continuationScratchDwords))
             {
-                throw SubmissionScheduler.Fatal($"The continuation shader scratch size is unreadable: label={label} shader=0x{parts.ContinuationAddress:X16}.");
+                throw GpuFatal.Fatal($"The continuation shader scratch size is unreadable: label={label} shader=0x{parts.ContinuationAddress:X16}.");
             }
         }
 
-        return new RegisteredShader(
-            codeAddress,
-            headerAddress,
-            codeSize,
-            scratchDwords,
-            userDataAddress,
-            inputSemanticsAddress,
-            inputSemanticsCount,
-            continuationAddress,
-            continuationSize)
+        // Every draw resolves its shaders again, so an unchanged header hands back the record
+        // it made last time instead of a new one. The header is still read and compared above
+        // and here, so a guest that rewrites it gets a fresh record as before.
+        lock (_recent)
         {
-            ContinuationScratchDwords = continuationScratchDwords,
-        };
+            if (_recent.TryGetValue(codeAddress, out var recent) &&
+                recent.HeaderAddress == headerAddress && recent.CodeSizeBytes == codeSize &&
+                recent.ScratchDwords == scratchDwords && recent.UserDataAddress == userDataAddress &&
+                recent.InputSemanticsAddress == inputSemanticsAddress && recent.InputSemanticsCount == inputSemanticsCount &&
+                recent.ContinuationAddress == continuationAddress && recent.ContinuationSizeBytes == continuationSize &&
+                recent.ContinuationScratchDwords == continuationScratchDwords)
+            {
+                return recent;
+            }
+
+            var registered = new RegisteredShader(
+                codeAddress,
+                headerAddress,
+                codeSize,
+                scratchDwords,
+                userDataAddress,
+                inputSemanticsAddress,
+                inputSemanticsCount,
+                continuationAddress,
+                continuationSize)
+            {
+                ContinuationScratchDwords = continuationScratchDwords,
+            };
+
+            // Bounded: dropping the records only costs rebuilding them.
+            if (_recent.Count >= MaxRecent && !_recent.ContainsKey(codeAddress))
+            {
+                _recent.Clear();
+            }
+
+            _recent[codeAddress] = registered;
+            return registered;
+        }
+    }
+
+    private const int MaxRecent = 4096;
+    private readonly Dictionary<ulong, RegisteredShader> _recent = new();
+
+    // A bounded, nonfatal description for diagnostics of draws that remain rejected.
+    internal bool TryGetDiagnosticCodeRanges(ulong address, out (ulong Address, uint SizeBytes)[] ranges)
+    {
+        ranges = [];
+        bool ReadSize(ulong header, out uint size)
+        {
+            size = 0;
+            return header != 0 && header <= ulong.MaxValue - ShaderSizeOffset - sizeof(uint) &&
+                _context.TryReadUInt32(header + ShaderSizeOffset, out size) &&
+                size != 0 && size % sizeof(uint) == 0 && size <= 1024 * 1024;
+        }
+        if (!ReadSize(_headerOf(address), out var size) || address > ulong.MaxValue - size) return false;
+        if (_fusedPartsOf(address) is { } parts)
+        {
+            if (!ReadSize(parts.ContinuationHeaderAddress, out var continuationSize) ||
+                parts.ContinuationAddress == 0 || parts.ContinuationAddress > ulong.MaxValue - continuationSize ||
+                (ulong)size + continuationSize > 1024 * 1024) return false;
+            ranges = [(address, size), (parts.ContinuationAddress, continuationSize)];
+        }
+        else ranges = [(address, size)];
+        return true;
     }
 
     private uint RequireCodeSize(ulong headerAddress, ulong codeAddress, string label)
     {
         if (!_context.TryReadUInt32(headerAddress + ShaderSizeOffset, out var codeSize))
         {
-            throw SubmissionScheduler.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+            throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
         }
 
         if (codeSize == 0 || codeSize % sizeof(uint) != 0)
         {
-            throw SubmissionScheduler.Fatal($"The shader header carries an invalid code size: label={label} shader=0x{codeAddress:X16} size=0x{codeSize:X8}.");
+            throw GpuFatal.Fatal($"The shader header carries an invalid code size: label={label} shader=0x{codeAddress:X16} size=0x{codeSize:X8}.");
         }
 
         return codeSize;

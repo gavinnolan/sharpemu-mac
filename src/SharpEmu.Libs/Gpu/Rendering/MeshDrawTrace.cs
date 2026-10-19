@@ -3,9 +3,9 @@
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
-internal static class MeshDrawTrace
+public static class MeshDrawTrace
 {
-    internal static readonly bool Enabled = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_MESH") == "1";
+    public static readonly bool Enabled = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_MESH") == "1";
     [ThreadStatic] private static Scope? _current;
     private static long _nextDraw;
     private static long _nextEvent;
@@ -15,7 +15,7 @@ internal static class MeshDrawTrace
     private static readonly (ulong Address, ulong Size, Scope? Owner)[] Ranges = new (ulong, ulong, Scope?)[1024];
     private static int _nextRange;
     private static readonly Dictionary<ulong, (Scope First, Scope Last, long Count)> Commands = new();
-    internal static bool Active => Enabled && _current is not null;
+    public static bool Active => Enabled && _current is not null;
 
     static MeshDrawTrace()
     {
@@ -24,7 +24,7 @@ internal static class MeshDrawTrace
         AppDomain.CurrentDomain.UnhandledException += (_, _) => Flush();
     }
 
-    internal static Scope? Begin(ulong submission, ulong shader, uint stages)
+    public static Scope? Begin(ulong submission, ulong shader, uint stages)
     {
         if (!Enabled || (stages & 0x20u) == 0) return null;
         var scope = new Scope(Interlocked.Increment(ref _nextDraw), submission, shader, _current);
@@ -33,13 +33,13 @@ internal static class MeshDrawTrace
         return scope;
     }
 
-    internal static void Write(string operation, string details)
+    public static void Write(string operation, string details)
     {
         if (!Active) return;
         Write(_current!, operation, details);
     }
 
-    internal static void Range(string operation, ulong address, ulong size, string details, bool remember = false)
+    public static void Range(string operation, ulong address, ulong size, string details, bool remember = false)
     {
         if (!Enabled) return;
         Scope? scope = _current;
@@ -68,11 +68,11 @@ internal static class MeshDrawTrace
         Write(scope, operation, $"address=0x{address:X16} size=0x{size:X} historicalMatch={historical} {details}");
     }
 
-    internal static bool Overlaps(ulong first, ulong firstSize, ulong second, ulong secondSize) =>
+    public static bool Overlaps(ulong first, ulong firstSize, ulong second, ulong secondSize) =>
         firstSize != 0 && secondSize != 0 &&
         (first <= second ? second - first < firstSize : first - second < secondSize);
 
-    internal static void RecordedCommand(ulong command)
+    public static void RecordedCommand(ulong command)
     {
         if (!Active) return;
         lock (Gate)
@@ -85,7 +85,7 @@ internal static class MeshDrawTrace
         Write("command-buffer", $"handle=0x{command:X16}");
     }
 
-    internal static void Submitted(ulong command, ulong tick, bool accepted, string failure)
+    public static void Submitted(ulong command, ulong tick, bool accepted, string failure)
     {
         if (!Enabled) return;
         (Scope First, Scope Last, long Count) entry;
@@ -122,13 +122,13 @@ internal static class MeshDrawTrace
         Console.Error.WriteLine("[MESH][HISTORY] Recent mesh events end.");
     }
 
-    internal sealed class Scope(long draw, ulong submission, ulong shader, Scope? previous) : IDisposable
+    public sealed class Scope(long draw, ulong submission, ulong shader, Scope? previous) : IDisposable
     {
-        internal long Draw => draw;
-        internal ulong Submission => submission;
-        internal ulong Shader => shader;
+        public long Draw => draw;
+        public ulong Submission => submission;
+        public ulong Shader => shader;
         private string _outcome = "returned-or-unwound-before-recording";
-        internal void Complete(string outcome) => _outcome = outcome;
+        public void Complete(string outcome) => _outcome = outcome;
         public void Dispose()
         {
             Write("end", $"outcome={_outcome}");
@@ -136,17 +136,17 @@ internal static class MeshDrawTrace
         }
     }
 
-    internal static void Recorded() => _current?.Complete("recorded-not-yet-completed");
+    public static void Recorded() => _current?.Complete("recorded-not-yet-completed");
 
-    internal sealed class EventWindow(int historyCapacity, int keyCapacity, int outputCapacity)
+    public sealed class EventWindow(int historyCapacity, int keyCapacity, int outputCapacity)
     {
         private readonly Dictionary<string, long> _occurrences = new();
         private readonly Queue<string> _history = new();
         private int _written;
-        internal IEnumerable<string> Recent => _history;
-        internal int KeyCount => _occurrences.Count;
+        public IEnumerable<string> Recent => _history;
+        public int KeyCount => _occurrences.Count;
 
-        internal (string Line, bool Emit, bool LimitReached) Record(string key, string text)
+        public (string Line, bool Emit, bool LimitReached) Record(string key, string text)
         {
             var count = _occurrences.GetValueOrDefault(key) + 1;
             var tracked = _occurrences.ContainsKey(key) || _occurrences.Count < keyCapacity;

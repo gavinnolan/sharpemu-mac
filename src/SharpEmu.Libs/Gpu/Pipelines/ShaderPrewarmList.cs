@@ -96,11 +96,11 @@ internal sealed class ReplayCpuMemory(IReadOnlyList<CodeRange> ranges) : ICpuMem
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source) => false;
 }
 
-internal readonly record struct CodeRange(ulong Address, byte[] Bytes);
+public readonly record struct CodeRange(ulong Address, byte[] Bytes);
 
-internal readonly record struct FusedCodeParts(ulong EntryHeaderAddress, ulong ContinuationAddress, ulong ContinuationHeaderAddress);
+public readonly record struct FusedCodeParts(ulong EntryHeaderAddress, ulong ContinuationAddress, ulong ContinuationHeaderAddress);
 
-internal sealed class ShaderCodeCapture
+public sealed class ShaderCodeCapture
 {
     public required ulong Hash { get; init; }
     public required uint CodeSize { get; init; }
@@ -125,9 +125,8 @@ internal sealed class ShaderCodeCapture
     }
 }
 
-internal sealed class ComputePrewarmRecord
+public sealed class ComputePrewarmRecord
 {
-    public ulong ContinuationAddressOffset { get; init; }
     public required ulong Hash { get; init; }
     public required uint CodeSize { get; init; }
     public required ulong Address { get; init; }
@@ -138,18 +137,28 @@ internal sealed class ComputePrewarmRecord
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
 
-    public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
-        (Hash, CodeSize, Address, ContinuationAddressOffset);
+    public (ulong Hash, uint CodeSize, ulong Address) CodeKey => (Hash, CodeSize, Address);
 }
 
-internal sealed class ShaderPrewarmList : IDisposable
+public sealed class ShaderPrewarmList : IDisposable
 {
-    public const string FileName = "shader-prewarm.bin";
-    public const string StampFileName = "shader-prewarm.stamp";
-    public const string ProgressFileName = "shader-prewarm.progress";
+    // Each record schema keeps its own list, stamp and progress: builds whose records
+    // differ share the title's directory, and one list for all of them was emptied by
+    // whichever build opened it last, so the next start of the other had nothing to
+    // prewarm. The lists of other schemas are kept, the most recently written first,
+    // up to MaxOtherLists.
+    public const int MaxOtherLists = 3;
+    private const string FilePrefix = "shader-prewarm";
+    private const string LegacyStem = FilePrefix;
+
+    public static string Stem => $"{FilePrefix}-{SchemaFingerprint.ToString("x8", CultureInfo.InvariantCulture)}";
+    public static string FileName => Stem + ".bin";
+    public static string StampFileName => Stem + ".stamp";
+    public static string ProgressFileName => Stem + ".progress";
+    public static string FirstFrameFileName => Stem + ".first-frame";
 
     private const uint Magic = 0x57504553;
-    private const uint FormatVersion = 3;
+    private const uint FormatVersion = 5;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
@@ -163,6 +172,11 @@ internal sealed class ShaderPrewarmList : IDisposable
     private readonly HashSet<ulong> _computes = [];
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset), ShaderCodeCapture> _loadedCodes = new();
     private readonly List<ComputePrewarmRecord> _loadedComputes = [];
+    // The computes this session created, in order, until its first guest frame.
+    private readonly List<ulong> _sessionComputes = [];
+    private readonly HashSet<ulong> _sessionComputeSet = [];
+    private string? _firstFramePath;
+    private bool _firstFrameWritten;
     private bool _failed;
 
     private ShaderPrewarmList(FileStream file, string stampPath, string progressPath)
@@ -188,8 +202,12 @@ internal sealed class ShaderPrewarmList : IDisposable
         {
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, FileName);
+            AdoptLegacyList(directory, path);
             var file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-            var list = new ShaderPrewarmList(file, Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName));
+            var list = new ShaderPrewarmList(file, Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName))
+            {
+                _firstFramePath = Path.Combine(directory, FirstFrameFileName),
+            };
             try
             {
                 list.Load();
@@ -200,12 +218,91 @@ internal sealed class ShaderPrewarmList : IDisposable
                 throw;
             }
 
+            PruneOtherLists(directory);
             return list;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm list unavailable: {exception.Message}");
             return null;
+        }
+    }
+
+    // A list from before the per-schema names is taken over when its schema is this one.
+    private static void AdoptLegacyList(string directory, string path)
+    {
+        try
+        {
+            AdoptLegacyListCore(directory, path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm could not adopt the older list: {exception.Message}");
+        }
+    }
+
+    private static void AdoptLegacyListCore(string directory, string path)
+    {
+        var legacy = Path.Combine(directory, LegacyStem + ".bin");
+        if (File.Exists(path) || !File.Exists(legacy) || ReadSchema(legacy) != SchemaFingerprint)
+        {
+            return;
+        }
+
+        // Copied, not moved: a build from before the per-schema names may still run on
+        // this title, and it keeps its list until the bound on other lists removes it.
+        foreach (var (from, to) in new[] { (".stamp", StampFileName), (".progress", ProgressFileName) })
+        {
+            var source = Path.Combine(directory, LegacyStem + from);
+            if (File.Exists(source))
+            {
+                File.Copy(source, Path.Combine(directory, to), overwrite: true);
+            }
+        }
+
+        File.Copy(legacy, path);
+    }
+
+    private static uint? ReadSchema(string path)
+    {
+        Span<byte> header = stackalloc byte[3 * sizeof(uint)];
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) < header.Length ||
+            BitConverter.ToUInt32(header) != Magic ||
+            BitConverter.ToUInt32(header[sizeof(uint)..]) != FormatVersion)
+        {
+            return null;
+        }
+
+        return BitConverter.ToUInt32(header[(2 * sizeof(uint))..]);
+    }
+
+    private static void PruneOtherLists(string directory)
+    {
+        try
+        {
+            PruneOtherListsCore(directory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm could not remove older lists: {exception.Message}");
+        }
+    }
+
+    private static void PruneOtherListsCore(string directory)
+    {
+        var others = new DirectoryInfo(directory)
+            .EnumerateFiles(FilePrefix + "*.bin")
+            .Where(file => !string.Equals(file.Name, FileName, StringComparison.Ordinal))
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .Skip(MaxOtherLists);
+        foreach (var file in others)
+        {
+            var stem = Path.GetFileNameWithoutExtension(file.Name);
+            foreach (var extension in new[] { ".bin", ".stamp", ".progress", ".first-frame" })
+            {
+                File.Delete(Path.Combine(directory, stem + extension));
+            }
         }
     }
 
@@ -252,7 +349,9 @@ internal sealed class ShaderPrewarmList : IDisposable
         }
     }
 
-    public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record));
+    // Where the guest loaded the shader is not part of what it compiles to: the same shader at another
+    // address in each session made a new record every time, and the list grew with every start.
+    public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record, withAddress: false));
 
     public HashSet<ulong> ReadProgress(string stamp)
     {
@@ -336,15 +435,83 @@ internal sealed class ShaderPrewarmList : IDisposable
         }
     }
 
+    /// <summary>
+    /// The computes the last session that reached a guest frame created before its first
+    /// one, by identity; null when no session has. A prewarm can hold the guest for these
+    /// alone and compile the rest while it runs.
+    /// </summary>
+    public HashSet<ulong>? ReadFirstFrameComputes()
+    {
+        try
+        {
+            if (_firstFramePath is not { } path || !File.Exists(path))
+            {
+                return null;
+            }
+
+            var identities = new HashSet<ulong>();
+            foreach (var line in File.ReadAllLines(path))
+            {
+                if (ulong.TryParse(line, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var identity))
+                {
+                    identities.Add(identity);
+                }
+            }
+
+            return identities;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The guest showed its first frame: the computes this session created until now are
+    /// the ones the next start's prewarm holds the guest for. Once per session.
+    /// </summary>
+    public void WriteFirstFrameComputes()
+    {
+        ulong[] identities;
+        lock (_gate)
+        {
+            if (_firstFrameWritten || _firstFramePath is null)
+            {
+                return;
+            }
+
+            _firstFrameWritten = true;
+            identities = _sessionComputes.ToArray();
+            _sessionComputes.Clear();
+            _sessionComputeSet.Clear();
+        }
+
+        try
+        {
+            var temporary = _firstFramePath + ".tmp";
+            File.WriteAllLines(temporary, identities.Select(identity => identity.ToString("X16", CultureInfo.InvariantCulture)));
+            File.Move(temporary, _firstFramePath, overwrite: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm first-frame list write failed: {exception.Message}");
+        }
+    }
+
     private static string ProgressKey(string stamp) =>
         XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp)).ToString("X16", CultureInfo.InvariantCulture);
 
     public void RecordCompute(ShaderCodeCapture code, ComputePrewarmRecord record)
     {
         var payload = SerializeCompute(record);
-        var identity = XxHash3.HashToUInt64(payload);
+        var identity = Identity(record);
         lock (_gate)
         {
+            if (!_firstFrameWritten && _sessionComputeSet.Add(identity))
+            {
+                _sessionComputes.Add(identity);
+            }
+
             if (_failed || !_computes.Add(identity))
             {
                 return;
@@ -454,12 +621,15 @@ internal sealed class ShaderPrewarmList : IDisposable
                 }
 
                 case ComputeKind:
-                    if (_computes.Add(XxHash3.HashToUInt64(payload)))
+                {
+                    var record = DeserializeCompute(payload);
+                    if (_computes.Add(Identity(record)))
                     {
-                        _loadedComputes.Add(DeserializeCompute(payload));
+                        _loadedComputes.Add(record);
                     }
 
                     return true;
+                }
 
                 default:
                     return false;
@@ -494,7 +664,7 @@ internal sealed class ShaderPrewarmList : IDisposable
         return (uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(builder.ToString()));
     }
 
-    private static byte[] SerializeCode(ShaderCodeCapture code)
+    internal static byte[] SerializeCode(ShaderCodeCapture code)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
@@ -522,7 +692,7 @@ internal sealed class ShaderPrewarmList : IDisposable
         return stream.ToArray();
     }
 
-    private static ShaderCodeCapture DeserializeCode(byte[] payload)
+    internal static ShaderCodeCapture DeserializeCode(byte[] payload)
     {
         using var reader = new BinaryReader(new MemoryStream(payload));
         var hash = reader.ReadUInt64();
@@ -551,13 +721,13 @@ internal sealed class ShaderPrewarmList : IDisposable
         };
     }
 
-    private static byte[] SerializeCompute(ComputePrewarmRecord record)
+    private static byte[] SerializeCompute(ComputePrewarmRecord record, bool withAddress = true)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
         writer.Write(record.Hash);
         writer.Write(record.CodeSize);
-        writer.Write(record.Address);
+        writer.Write(withAddress ? record.Address : 0UL);
         writer.Write(record.ContinuationAddressOffset);
         writer.Write(record.UserDataBase);
         writer.Write(record.UserDataCount);
@@ -577,6 +747,8 @@ internal sealed class ShaderPrewarmList : IDisposable
         writer.Write(info.LocalDataShareDwords);
         writer.Write(info.ScratchDwords);
         writer.Write(info.IeeeMode);
+        writer.Write(info.FloatMode);
+        writer.Write(info.Dx10Clamp);
         writer.Write(info.NeedsLocalDataShareBarriers);
         writer.Write(info.WorkgroupRegister);
 
@@ -612,6 +784,7 @@ internal sealed class ShaderPrewarmList : IDisposable
             writer.Write(image.IndirectSearchIterations);
             writer.Write(image.Cube);
             writer.Write(image.EmulatedCompareFunction);
+            writer.Write(image.PackedFormat);
         }
 
         writer.Write(specialization.BufferCandidateTables.Count);
@@ -652,6 +825,8 @@ internal sealed class ShaderPrewarmList : IDisposable
             LocalDataShareDwords = reader.ReadUInt32(),
             ScratchDwords = reader.ReadUInt32(),
             IeeeMode = reader.ReadBoolean(),
+            FloatMode = reader.ReadUInt32(),
+            Dx10Clamp = reader.ReadBoolean(),
             NeedsLocalDataShareBarriers = reader.ReadBoolean(),
             WorkgroupRegister = reader.ReadInt32(),
         };
@@ -678,7 +853,8 @@ internal sealed class ShaderPrewarmList : IDisposable
                 reader.ReadUInt32(),
                 reader.ReadUInt32(),
                 reader.ReadBoolean(),
-                reader.ReadInt32()));
+                reader.ReadInt32(),
+                PackedFormat: reader.ReadUInt32()));
         }
 
         for (var count = CheckedCount(reader.ReadInt32(), payload.Length); count > 0; count--)

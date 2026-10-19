@@ -169,10 +169,10 @@ public sealed class GpuCommandInterpreterWaitTests
         var skipped = CreateInstanceCountPacket(2);
         skipped[0] |= 1u;
 
-        // kWaitForQueryResults (0) drains the GPU and predicates on the label.
+        // kWaitForQueryResults (0) predicates on the label; nothing owes it, so nothing waits.
         var waitingLayout = StreamRunner.Packet(PacketOpcode.SetPredication, (3u << 16) | (1u << 8), StreamRunner.Low(Label), StreamRunner.High(Label));
         runner.Run(waitingLayout, skipped);
-        Assert.Equal(new[] { "flush_and_wait" }, runner.Host.Calls);
+        Assert.Empty(runner.Host.Calls);
         Assert.True(runner.Interpreter.PredicateSkip);
         Assert.Equal(1u, runner.Interpreter.InstanceCount);
 
@@ -186,14 +186,14 @@ public sealed class GpuCommandInterpreterWaitTests
 
         var oldLayout = StreamRunner.Packet(PacketOpcode.SetPredication, StreamRunner.Low(Label), StreamRunner.High(Label) | (3u << 16));
         runner.Run(oldLayout, skipped);
-        Assert.Equal(new[] { "flush_and_wait" }, runner.Host.Calls);
+        Assert.Empty(runner.Host.Calls);
         Assert.False(runner.Interpreter.PredicateSkip);
         Assert.Equal(2u, runner.Interpreter.InstanceCount);
 
         runner.Run(StreamRunner.Packet(PacketOpcode.SetPredication, 0, 0, 0));
         Assert.False(runner.Interpreter.PredicateSkip);
         Assert.Contains("predication address is zero", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetPredication, 3u << 16, 0, 0)).Message);
-        Assert.Contains("predication operation is unknown", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetPredication, 1u << 16, 0, 0)).Message);
+        Assert.Contains("predication operation is unknown", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetPredication, 5u << 16, 0, 0)).Message);
     }
 
     [Fact]

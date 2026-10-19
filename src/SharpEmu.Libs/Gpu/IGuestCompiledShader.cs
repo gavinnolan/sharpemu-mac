@@ -9,7 +9,7 @@ namespace SharpEmu.Libs.Gpu;
 /// bytes (SPIR-V words for Vulkan; MSL/DXIL for future backends), exposed solely for
 /// diagnostics dumps and size traces — callers must never interpret it.
 /// </summary>
-internal interface IGuestCompiledShader
+public interface IGuestCompiledShader
 {
     byte[] Payload { get; }
     uint? InputLocationMask => null;

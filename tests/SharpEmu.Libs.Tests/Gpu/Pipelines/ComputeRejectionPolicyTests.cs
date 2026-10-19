@@ -20,7 +20,7 @@ public sealed class ComputeRejectionPolicyTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void UnsupportedShaderCallsRespectTheRejectionPolicy(bool strict)
+    public void UnlinkableShaderCallsCompileTheCallerAlone(bool strict)
     {
         using var fatal = new FatalScope();
         var guest = new PipelineTestGuest();
@@ -28,21 +28,10 @@ public sealed class ComputeRejectionPolicyTests
         guest.RegisterProgram(CodeAddress, HeaderAddress, [0xBE8E2100, 0xBF810000]);
         var source = guest.Source(CodeAddress, ShaderStage.Compute, []);
         var cursor = 0u;
-        if (strict)
-        {
-            var failure = Assert.Throws<SchedulerFatalException>(() => guest.Programs.TryGetProgram(
-                source, PipelineTestGuest.ComputeOptions(32), true, ref cursor, out _, out _, out _));
-            Assert.Contains("does not support linked shader calls", failure.Message);
-        }
-        else
-        {
-            Assert.False(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(32),
-                false, ref cursor, out _, out _, out var rejection));
-            Assert.Contains("does not support linked shader calls", rejection);
-        }
-        Assert.Empty(guest.Compiler.Requests);
-        Assert.Empty(guest.Host.Modules);
-        Assert.Equal(0u, cursor);
+        Assert.True(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(32),
+            strict, ref cursor, out _, out _, out var rejection), rejection);
+        var request = Assert.Single(guest.Compiler.Requests);
+        Assert.Contains(request.Program.Instructions, static instruction => instruction.Opcode == "SSwappcB64");
     }
 
     [Theory]

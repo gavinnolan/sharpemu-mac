@@ -103,6 +103,11 @@ public static partial class AgcExports
             return;
         }
 
+        if (Gpu.GpuCommands.GpuClobberDiagnostics.Enabled)
+        {
+            Gpu.GpuCommands.GpuClobberDiagnostics.RecordSubmittedTable(packetAddress, registersAddress, registerCount, indirectRegister);
+        }
+
         destination = indirectRegister switch
         {
             RCxRegsIndirect => state.CxRegisters,

@@ -43,6 +43,12 @@ public class ManagedCommandStreamHost : ICommandStreamHost
 
     public virtual bool TryReadGuest(ulong address, Span<byte> destination) => Memory.TryRead(address, destination);
 
+    public virtual bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES") => Memory.TryWrite(address, source);
+    public virtual void ExecuteGuestMemoryOperation(Action operation, string kind = "MEMORY_OPERATION", ulong address = 0, ulong bytes = 0, ulong value = 0) => operation();
+    public virtual void ExecuteCommandMemoryOperation(CommandMemoryOperation operation) =>
+        ExecuteGuestMemoryOperation(() => operation.Execute(this), operation.DebugName,
+            operation.Address, operation.ByteCount, operation.Value);
+
     public virtual void RunPendingCommands()
     {
     }
@@ -167,7 +173,11 @@ public class ManagedCommandStreamHost : ICommandStreamHost
     }
 
     public virtual void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount) =>
-        EndOfPipe.ReadGdsWords(_gds, destination, wordOffset, wordCount);
+        GlobalDataShare.ReadWords(_gds, destination, wordOffset, wordCount);
+
+    public virtual bool DefersEndOfPipeLabels => false;
+
+    public virtual bool PublishesSyntheticOcclusionDumps => false;
 
     // Without a GPU tick every completion is due as soon as it is recorded.
     public virtual void RecordEndOfPipe(in EndOfPipeWrite write)
@@ -229,5 +239,5 @@ public class ManagedCommandStreamHost : ICommandStreamHost
     {
     }
 
-    public Exception Fatal(string message) => SubmissionScheduler.Fatal(message);
+    public Exception Fatal(string message) => GpuFatal.Fatal(message);
 }

@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -42,11 +44,15 @@ public sealed partial class RenderExecutor
             return false;
         }
 
-        // Later draws can read these stores before flip. Do not defer their producer.
-        if (state.ColorCount == 0 && !state.Depth.HasTarget && state.PixelActive &&
-            programs.PixelInput.Stage.Program is { Images.Length: > 0 } &&
-            !DrawWritesMemory(programs.PixelInput.Stage) && !DrawWritesMemory(programs.VertexInput.Stage) &&
-            _host.TryRetainTargetlessDraw(banks, programs, in arguments))
+        if (DepthBoundsDiscardEverything(ref state))
+        {
+            // Every fragment fails the bounds test and the draw stores nothing, so it has no
+            // effect at all; a host test cannot take an empty range (Metal's needs min <= max).
+            TraceDrawDisposition(banks, in draw, "empty-depth-bounds");
+            return false;
+        }
+
+        if (MayRetainTargetlessDraw(ref state) && _host.TryRetainTargetlessDraw(banks, programs, in arguments))
         {
             TraceTargetlessAttachments(banks, arguments.SubmitId);
             TraceDrawDisposition(banks, in draw, "retained-targetless-draw");
@@ -55,6 +61,42 @@ public sealed partial class RenderExecutor
 
         return true;
     }
+
+    // Whether the draw tests depth bounds that hold no stored depth and has no effect
+    // besides its fragments. The DB passes a fragment whose stored depth d satisfies
+    // min <= d <= max; a stored depth is within [0, 1], so a range that holds none of
+    // [0, 1] (min > max, min > 1 or max < 0) discards every fragment. The vertex stage
+    // still runs then and the pixel stage may run before the discard, so a draw whose
+    // programs store to memory records as usual and the host has to take the range.
+    // A clearing draw records as usual too.
+    private bool DepthBoundsDiscardEverything(ref DrawState state)
+    {
+        if (!state.Depth.HasTarget)
+        {
+            return false;
+        }
+
+        ref readonly var target = ref state.Depth.Target;
+        var depth = target.State;
+        if (!depth.DepthBoundsTestEnabled || depth.DepthClearEnabled || depth.StencilClearEnabled ||
+            (ViewFormatRules.DepthAspects(target.Target.Format) & GpuImageAspect.DepthBit) == 0 ||
+            float.IsNaN(depth.DepthMinBounds) || float.IsNaN(depth.DepthMaxBounds) ||
+            Math.Max(depth.DepthMinBounds, 0f) <= Math.Min(depth.DepthMaxBounds, 1f))
+        {
+            return false;
+        }
+
+        return !(state.PixelActive && DrawWritesMemory(state.Programs.PixelInput.Stage)) &&
+            !DrawWritesMemory(state.Programs.VertexInput.Stage);
+    }
+
+    // A targetless draw whose pixel program samples images and stores nothing may be
+    // retained and replayed later, so it needs its counts. Later draws can read stores
+    // before flip, so a draw that stores is never deferred.
+    private bool MayRetainTargetlessDraw(ref DrawState state) =>
+        state.ColorCount == 0 && !state.Depth.HasTarget && state.PixelActive &&
+        state.Programs.PixelInput.Stage.Program is { Images.Length: > 0 } &&
+        !DrawWritesMemory(state.Programs.PixelInput.Stage) && !DrawWritesMemory(state.Programs.VertexInput.Stage);
 
     private static void TraceDrawDisposition(RegisterBanks banks, in DrawCall draw, string reason)
     {

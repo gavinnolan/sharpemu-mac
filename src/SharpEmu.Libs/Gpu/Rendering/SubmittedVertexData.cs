@@ -6,7 +6,7 @@ using SharpEmu.HLE;
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 // Owns the submitted bytes and layout until the matching draw has copied them.
-internal sealed class SubmittedVertexData
+public sealed class SubmittedVertexData
 {
     private readonly VertexInputBuffer[] _buffers;
     private readonly VertexAttributeResource[] _attributes;
@@ -73,4 +73,8 @@ internal sealed class SubmittedVertexData
 
     // Draw records own their copies; a replay cannot modify the submission snapshot.
     public byte[] CopyBuffer(int index) => (byte[])_data[index].Clone();
+
+    // A bounded draw copy still starts at the captured origin and owns new bytes.
+    // This never exposes or modifies the submission's private full snapshot.
+    public byte[] CopyBufferPrefix(int index, int byteCount) => _data[index].AsSpan(0, byteCount).ToArray();
 }

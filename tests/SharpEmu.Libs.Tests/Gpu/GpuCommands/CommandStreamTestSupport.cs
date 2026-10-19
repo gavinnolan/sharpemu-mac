@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
@@ -13,8 +14,12 @@ namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
 internal sealed class CommandStreamFatalException(string message) : Exception(message);
 
 // Records every host call in order and serves guest memory from a fake.
-internal sealed class RecordingCommandStreamHost : ICommandStreamHost
+internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandSubmissionCompletionHost
 {
+    internal Action<int, ulong>? BeginPrefixCapture;
+    internal Func<bool, IGuestSubmissionPrefixCompletion?>? EndPrefixCapture;
+    public void BeginSubmissionCompletionCapture(int queueId, ulong submissionId) => BeginPrefixCapture?.Invoke(queueId, submissionId);
+    public IGuestSubmissionPrefixCompletion? EndSubmissionCompletionCapture(bool complete) => EndPrefixCapture?.Invoke(complete);
     public const ulong MemoryBase = 0x1000_0000;
     public const int MemorySize = 0x10_0000;
 
@@ -93,6 +98,17 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public bool FlipSlot { get; set; } = true;
 
+    // A host that leaves end-of-pipe labels to the GPU, and the tick they land by.
+    public bool DefersEndOfPipeLabels { get; set; }
+
+    public bool WritesGdsAtEndOfPipe { get; set; }
+
+    public ulong PendingLabelTick { get; set; }
+
+    public Func<EndOfPipeWriteKind, bool>? DefersKind { get; set; }
+
+    public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersKind?.Invoke(kind) ?? DefersEndOfPipeLabels;
+
     public bool FlipDone { get; set; } = true;
 
     public ulong NextFlipRequestId { get; set; } = 1;
@@ -128,9 +144,45 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
         return GuestMemory.TryRead(address, destination);
     }
 
+    // A host that hands over command blocks, as the Metal host does. BlockVersion stands for the
+    // counters of its token: a test bumps it where the real host would bump one.
+    public bool SupportsCommandBlocks { get; set; }
+
+    public long BlockVersion { get; set; }
+
+    public List<(ulong Address, int Size)> BlockReads { get; } = new();
+
+    public Func<ulong, int, bool>? RefusesBlock { get; set; }
+
+    public bool TryReadCommandBlock(ulong address, Span<byte> block, out CommandReadToken token)
+    {
+        token = new CommandReadToken(BlockVersion, 0, 0, 0);
+        BlockReads.Add((address, block.Length));
+        return RefusesBlock?.Invoke(address, block.Length) != true && GuestMemory.TryRead(address, block);
+    }
+
+    public bool IsCommandBlockCurrent(in CommandReadToken token) => token.First == BlockVersion;
+
+    // Polls that asked the host to commit the recording buffer so a pending write can land.
+    public List<ulong> PollCommits { get; } = new();
+
+    public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination, bool commitPendingWrite)
+    {
+        if (commitPendingWrite)
+        {
+            PollCommits.Add(address);
+        }
+
+        return TryReadGuest(address, destination);
+    }
+
+    // Called before every packet, where a real host runs what other threads posted.
+    public Action? OnRunPending { get; set; }
+
     public void RunPendingCommands()
     {
         PendingCommandRuns++;
+        OnRunPending?.Invoke();
         while (PendingCommands.Count != 0)
         {
             PendingCommands.Dequeue()();
@@ -148,6 +200,11 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public void RunGarbageCollector() => Calls.Add("gc");
 
     public void EmitGlobalBarrier() => Calls.Add("barrier");
+
+    // Counted rather than recorded in Calls: every barrier-emitting packet also releases.
+    public int ShaderWriteReleases { get; private set; }
+
+    public void ReleaseShaderWrites() => ShaderWriteReleases++;
 
     public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
     {
@@ -194,7 +251,7 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
     {
         Calls.Add($"read_gds {wordOffset} {wordCount}");
-        EndOfPipe.ReadGdsWords(Gds, destination, wordOffset, wordCount);
+        GlobalDataShare.ReadWords(Gds, destination, wordOffset, wordCount);
     }
 
     public void RecordEndOfPipe(in EndOfPipeWrite write)
@@ -203,6 +260,48 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
         Calls.Add($"eop {write.Kind}");
         EndOfPipeRecorded?.Invoke(write);
     }
+
+    // A host that lands the graphics queue's command-processor writes in order with its labels.
+    public bool DefersCommandProcessorWrites { get; set; }
+
+    public List<(string Kind, ulong Address, byte[] Bytes)> CommandProcessorWrites { get; } = new();
+
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
+    {
+        CommandProcessorWrites.Add((kind, address, source.ToArray()));
+        Calls.Add($"cp_write {kind} {address:X} {source.Length}");
+    }
+
+    // A host that takes a run of identical qword stores as one call, as the Metal host does.
+    public bool RecordsQwordRuns { get; set; }
+
+    public bool PublishesSyntheticOcclusionDumps { get; set; }
+
+    public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
+    {
+        if (!RecordsQwordRuns)
+        {
+            var bytes = BitConverter.GetBytes(value);
+            for (var index = 0; index < count; index++)
+            {
+                RecordCommandProcessorWrite(address + (ulong)index * strideBytes, bytes, kind);
+            }
+
+            return;
+        }
+
+        Calls.Add($"cp_qwords {kind} {address:X} {count} {strideBytes}");
+        for (var index = 0; index < count; index++)
+        {
+            CommandProcessorWrites.Add((kind, address + (ulong)index * strideBytes, BitConverter.GetBytes(value)));
+        }
+    }
+
+    public void FillBufferInOrder(ulong address, ulong size, uint value) =>
+        Calls.Add($"fill_in_order {address:X} {size:X} {value:X8}");
+
+    public void CopyBufferInOrder(ulong destination, ulong source, ulong size) =>
+        Calls.Add($"copy_in_order {destination:X} {source:X} {size:X}");
 
     public void TriggerInterrupt(int eventId, uint contextId) => Calls.Add($"interrupt {eventId} {contextId}");
 
@@ -242,6 +341,33 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
+
+    public bool ResolvesIndirectAutoDrawOnGpu { get; set; }
+
+    /// <summary>Guest ranges GPU work still writes; null answers every range as pending.</summary>
+    public List<(ulong Address, ulong Size)>? PendingGpuWrites { get; set; }
+
+    public bool HasPendingGpuWrite(ulong address, ulong size) =>
+        PendingGpuWrites is not { } pending ||
+        pending.Exists(range => address < range.Address + range.Size && range.Address < address + size);
+
+    /// <summary>Operand ranges recorded work still owes; a read of one commits it and parks.</summary>
+    public List<(ulong Address, ulong Size)> OwedOperandWrites { get; } = [];
+
+    public bool CommitPendingOperandWrite(ulong address, ulong size)
+    {
+        if (!OwedOperandWrites.Exists(range => address < range.Address + range.Size && range.Address < address + size))
+        {
+            return false;
+        }
+
+        Calls.Add($"commit_operand {address:X} {size}");
+        return true;
+    }
+
+    public List<ulong> IndirectCpuReads { get; } = [];
+
+    public void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size) => IndirectCpuReads.Add(address);
 
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
 

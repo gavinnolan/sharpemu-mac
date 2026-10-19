@@ -6,10 +6,10 @@ using System.Security.Cryptography;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
-internal static class IndexedDrawTrace
+public static class IndexedDrawTrace
 {
-    internal delegate bool ReadGuestBytes(ulong address, Span<byte> destination);
-    internal readonly record struct Sample(string Signature, ulong Address, uint Count, uint IndexType);
+    public delegate bool ReadGuestBytes(ulong address, Span<byte> destination);
+    public readonly record struct Sample(string Signature, ulong Address, uint Count, uint IndexType);
 
     private static readonly uint _selectedCount = ReadSelectedCount();
     private static readonly Dictionary<string, int> _occurrences = new(StringComparer.Ordinal);
@@ -18,11 +18,11 @@ internal static class IndexedDrawTrace
     private static long _previousFlip;
     private static long _scanIssues;
 
-    internal sealed class FrameCounts
+    public sealed class FrameCounts
     {
         private readonly Dictionary<(string Signature, string Stage), long> _counts = new();
 
-        internal bool Record(string signature, string stage)
+        public bool Record(string signature, string stage)
         {
             var key = (signature, stage);
             if (!_counts.TryGetValue(key, out var count) && _counts.Count >= 256) return false;
@@ -30,7 +30,7 @@ internal static class IndexedDrawTrace
             return true;
         }
 
-        internal KeyValuePair<(string Signature, string Stage), long>[] CloseFrame()
+        public KeyValuePair<(string Signature, string Stage), long>[] CloseFrame()
         {
             var counts = _counts.ToArray();
             foreach (var entry in counts) _counts[entry.Key] = 0;
@@ -38,10 +38,10 @@ internal static class IndexedDrawTrace
         }
     }
 
-    internal static bool Enabled => _selectedCount != 0;
-    internal static uint SelectedCount => _selectedCount;
+    public static bool Enabled => _selectedCount != 0;
+    public static uint SelectedCount => _selectedCount;
 
-    internal static Sample? Capture(uint count, uint indexType, ulong address, ReadGuestBytes read)
+    public static Sample? Capture(uint count, uint indexType, ulong address, ReadGuestBytes read)
     {
         if (_selectedCount == 0 || count != _selectedCount) return null;
         var elementSize = indexType switch { 0 => 2, 1 => 4, 2 => 1, _ => 0 };
@@ -51,7 +51,7 @@ internal static class IndexedDrawTrace
         return new(signature, address, count, indexType);
     }
 
-    internal static string ComputeSignature(ReadOnlySpan<byte> indices, int elementSize)
+    public static string ComputeSignature(ReadOnlySpan<byte> indices, int elementSize)
     {
         if (elementSize is not (1 or 2 or 4) || indices.Length % elementSize != 0)
             throw new ArgumentException("The index data has an invalid element size.", nameof(elementSize));
@@ -70,7 +70,7 @@ internal static class IndexedDrawTrace
         return Convert.ToHexString(SHA256.HashData(normalized));
     }
 
-    internal static void Write(Sample? sample, string stage, ulong submit, ulong packet)
+    public static void Write(Sample? sample, string stage, ulong submit, ulong packet)
     {
         if (sample is not { } value) return;
         lock (_gate)
@@ -88,14 +88,14 @@ internal static class IndexedDrawTrace
         }
     }
 
-    internal static string CreateLabel(Sample sample, ulong submit, ulong packet)
+    public static string CreateLabel(Sample sample, ulong submit, ulong packet)
     {
         lock (_gate)
             return $"IndexedDraw afterFlip={_previousFlip} hash={sample.Signature} address=0x{sample.Address:X16} " +
                 $"count={sample.Count} indexType={sample.IndexType} submit={submit} packet=0x{packet:X16}";
     }
 
-    internal static void ScanIssue(string reason)
+    public static void ScanIssue(string reason)
     {
         lock (_gate)
         {
@@ -104,7 +104,7 @@ internal static class IndexedDrawTrace
         }
     }
 
-    internal static void OnFlip(long version)
+    public static void OnFlip(long version)
     {
         if (!Enabled) return;
         lock (_gate)

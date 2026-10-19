@@ -391,12 +391,15 @@ public sealed class RegisterWriteTableTests
     }
 
     [Fact]
-    public void UserClipPlanes_MustStayDisabled()
+    public void UserClipPlanes_AreStoredWhetherOrNotEnabled()
     {
         var banks = NewBanks();
 
-        Assert.Equal(1u, WriteContext(banks, PaClUserClipPlane0X, 0));
-        Assert.Contains("clip planes", Assert.Throws<InvalidOperationException>(() => WriteContext(banks, PaClUserClipPlane0X, Float(1f))).Message);
+        // UCP_ENA_n decides at the draw whether a plane clips; writing one is harmless.
+        Assert.Equal(1u, WriteContext(banks, PaClUserClipPlane0X, Float(1f)));
+        Assert.Equal(1u, WriteContext(banks, PaClUserClipPlane5W, Float(-0.5f)));
+        Assert.Equal(1f, banks.Context.UserClipPlanes[0]);
+        Assert.Equal(-0.5f, banks.Context.UserClipPlanes[23]);
     }
 
     [Fact]

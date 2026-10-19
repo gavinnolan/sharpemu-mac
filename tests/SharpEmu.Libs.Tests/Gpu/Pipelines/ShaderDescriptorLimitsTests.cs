@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Pipelines;
 using Silk.NET.Vulkan;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Pipelines;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 

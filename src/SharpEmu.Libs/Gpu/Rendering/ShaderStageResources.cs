@@ -54,6 +54,10 @@ public class ShaderProgramInfo
     public int InstanceOffsetScalarRegister { get; init; } = NoScalarRegister;
     public bool UsesDeviceAddresses { get; init; }
 
+    // A store or an atomic through the device-address page table: the draw writes memory
+    // no host-side range bounds, unlike a program that only reads through it.
+    public bool WritesDeviceAddresses { get; init; }
+
     // The dword every invocation stores when the whole program is 'index, v_mov constant, one
     // buffer store, end' (AGC's constant fill kernels); null for any other program.
     public uint? ConstantStoreValue { get; init; }
@@ -89,7 +93,7 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
         if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout) return;
         if (ThreadLimits is not { } limits || shaderData.Length != layout.ShaderDataDwordCount)
         {
-            throw SubmissionScheduler.Fatal("The compute dispatch has missing thread limits or invalid shader data.");
+            throw GpuFatal.Fatal("The compute dispatch has missing thread limits or invalid shader data.");
         }
 
         var offset = (int)layout.DispatchThreadLimitsDword;
@@ -103,7 +107,7 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
         if (Program?.Bindings is not { UsesMeshDrawParameters: true } layout) return;
         if (MeshDraw is not { } draw || shaderData.Length != layout.ShaderDataDwordCount)
         {
-            throw SubmissionScheduler.Fatal("The mesh draw has missing parameters or invalid shader data.");
+            throw GpuFatal.Fatal("The mesh draw has missing parameters or invalid shader data.");
         }
 
         var offset = (int)layout.MeshDrawParametersDword;
@@ -141,7 +145,8 @@ public readonly record struct VertexAttributeResource(
     int BufferIndex,
     uint OffsetBytes);
 
-// The viewport transform a vertex program applies when clipping is off.
+// The viewport transform a vertex program applies when clipping is off, and the guest's
+// clip-space conventions a host may have to apply in the program.
 public readonly record struct ClipSpaceTransform(
     bool Enabled,
     float ScaleX,
@@ -149,7 +154,38 @@ public readonly record struct ClipSpaceTransform(
     float OffsetX,
     float OffsetY,
     float HalfExtentX,
-    float HalfExtentY);
+    float HalfExtentY)
+{
+    // PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF clear: the program's z runs over [-w, w].
+    public bool DepthNegativeOneToOne { get; init; }
+
+    // The host viewport maps +y down the target: the clip-disabled viewport always, else a
+    // positive guest y scale. A host whose clip space is y-up negates the position's y then.
+    public bool PositionYDown { get; init; }
+
+    // A negative guest x scale: the host viewport keeps a positive width and the program
+    // negates the position's x.
+    public bool PositionXMirror { get; init; }
+
+    // The guest depth planes the host clamps instead of clipping, which the program clips.
+    public SharpEmu.ShaderCompiler.ShaderDepthPlanes DepthPlanes { get; init; }
+
+    // PA_CL_VTE_CNTL.VTX_XY_FMT / VTX_Z_FMT: the exported x and y, or z, are already divided
+    // by w. VTX_W0_FMT clear: the exported w is 1 / w.
+    public bool XyPreDivided { get; init; }
+    public bool ZPreDivided { get; init; }
+    public bool WReciprocal { get; init; }
+
+    // The enabled user clip planes (PA_CL_UCP_n, four floats each), clipped in the program;
+    // UCP_CULL_ONLY_ENA culls with them instead.
+    public float[]? UserClipPlanes { get; init; }
+    public bool UserClipPlanesCullOnly { get; init; }
+
+    // The program maps depth onto the host's viewport range: z' = z * DepthScale + w * DepthOffset.
+    public bool DepthRemap { get; init; }
+    public float DepthScale { get; init; }
+    public float DepthOffset { get; init; }
+}
 
 public sealed class VertexInputInfo
 {
@@ -161,6 +197,8 @@ public sealed class VertexInputInfo
     public int FetchAttributeRegister { get; init; }
     public int FetchBufferRegister { get; init; }
     public bool IeeeMode { get; set; }
+    public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
+    public bool Dx10Clamp { get; set; } = true;
     public uint ScratchDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
@@ -210,22 +248,37 @@ public sealed class PixelInputInfo
     public uint SystemInputBase { get; init; }
     public uint CustomInterpolationMask { get; init; }
     public uint PerspectiveCenterRegister { get; init; } = NoPerspectiveCenterRegister;
-    public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
-    public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
+    // Each instance still owns its default arrays, made on first read: the resolver sets all
+    // three for every draw, and initializers allocated them only to be replaced.
+    public uint[] InterpolatorSettings { get => _interpolatorSettings ??= new uint[InterpolatorCount]; init => _interpolatorSettings = value; }
+    public byte[] TargetOutputModes { get => _targetOutputModes ??= new byte[TargetCount]; init => _targetOutputModes = value; }
+    public ColorComponentMap[] TargetExportMappings { get => _targetExportMappings ??= new ColorComponentMap[TargetCount]; init => _targetExportMappings = value; }
+    private uint[]? _interpolatorSettings;
+    private byte[]? _targetOutputModes;
+    private ColorComponentMap[]? _targetExportMappings;
+    // SPI_PS_IN_CONTROL.PS_W32_EN (bit 15).
+    public bool GuestWave32 { get; set; }
     // SPI_SHADER_COL_FORMAT of each EXP target.
-    public byte[] TargetExportFormats { get; init; } = new byte[TargetCount];
-    public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
+    public byte[] TargetExportFormats { get => _targetExportFormats ??= new byte[TargetCount]; init => _targetExportFormats = value; }
+    private byte[]? _targetExportFormats;
     public bool IeeeMode { get; set; }
+    public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
+    public bool Dx10Clamp { get; set; } = true;
     public uint ScratchDwords { get; init; }
     public bool PositionX { get; init; }
     public bool PositionY { get; init; }
     public bool PositionZ { get; init; }
     public bool PositionW { get; init; }
     public bool FrontFace { get; init; }
+    // SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS: FRONT_FACE is 0xFFFFFFFF/0 rather than +1.0/-1.0.
+    public bool FrontFaceAllBits { get; init; }
     public bool NoPerspective { get; init; }
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }
+    public bool StencilExportEnable { get; init; }
     public bool SampleMaskExportEnable { get; init; }
+    // SPI_SHADER_Z_FORMAT; null when the registers name no format.
+    public SharpEmu.ShaderCompiler.Gen5ColorExportFormat? DepthExportFormat { get; init; }
     public bool SampleShading { get; init; }
     public bool EarlyDepth { get; init; }
     public bool ExecuteOnNoop { get; init; }
@@ -251,6 +304,8 @@ public sealed class ComputeInputInfo
     public uint WaveSize { get; init; } = 64;
     public uint LocalDataShareDwords { get; init; }
     public bool IeeeMode { get; set; }
+    public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
+    public bool Dx10Clamp { get; set; } = true;
     public uint ScratchDwords { get; init; }
     public bool NeedsLocalDataShareBarriers { get; init; }
     public int WorkgroupRegister { get; init; }
@@ -298,10 +353,31 @@ public readonly record struct BufferDescriptorWords(uint Word0, uint Word1, uint
     }
 
     // The byte footprint the records cover; null when it overflows.
+    //
+    // A swizzled V# (SWIZZLE_ENABLE with a nonzero stride, the rule the shader translators
+    // apply too) counts num_records in records of stride bytes but does not lay them out
+    // one after another: index_stride records share each row of dwords, one dword of each
+    // in turn (RDNA2 ISA 8.1.5, a four-byte element on gfx10). Its footprint runs to one
+    // past the last byte of record records - 1 at offset stride - 1, which is
+    // sharpemu_swizzled_footprint in the Metal translator's buffer_offset_prelude.msl.
     public ulong? Footprint()
     {
         ulong records = RecordCount;
         ulong stride = Stride;
+        if (SwizzleEnabled && stride != 0)
+        {
+            if (records == 0)
+            {
+                return 0;
+            }
+
+            // records < 2^32, stride < 2^14 and index_stride <= 64: no overflow.
+            var indexStride = 8ul << (int)IndexStride;
+            var last = records - 1;
+            var end = stride - 1;
+            return (((last / indexStride) * stride) + (end & ~3ul)) * indexStride + ((last % indexStride) * 4) + (end & 3) + 1;
+        }
+
         if (stride != 0 && records > ulong.MaxValue / stride)
         {
             return null;

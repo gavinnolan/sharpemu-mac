@@ -1,9 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -25,9 +26,13 @@ public sealed class GraphicsPrograms
 {
     public ShaderProgram Vertex { get; init; }
     public ShaderProgram Pixel { get; init; }
-    public VertexInputInfo VertexInput { get; init; } = new();
+    // A default is made on first read: an initializer made one for every draw only for the
+    // resolver to replace it.
+    public VertexInputInfo VertexInput { get => _vertexInput ??= new(); init => _vertexInput = value; }
     public MeshDrawConfiguration? MeshInput { get; init; }
-    public PixelInputInfo PixelInput { get; init; } = new();
+    public PixelInputInfo PixelInput { get => _pixelInput ??= new(); init => _pixelInput = value; }
+    private VertexInputInfo? _vertexInput;
+    private PixelInputInfo? _pixelInput;
 
     // False when the provider could not build the programs; the executor skips the draw.
     public bool Available { get; init; } = true;
@@ -47,7 +52,9 @@ public sealed class GraphicsPrograms
 public sealed class ComputeProgram
 {
     public ShaderProgram Program { get; init; }
-    public ComputeInputInfo Input { get; init; } = new();
+    // Made on first read, like GraphicsPrograms' inputs.
+    public ComputeInputInfo Input { get => _input ??= new(); init => _input = value; }
+    private ComputeInputInfo? _input;
 
     // False when the provider could not build the program; the executor skips the dispatch.
     public bool Available { get; init; } = true;
@@ -59,6 +66,20 @@ public sealed class ComputeProgram
 // The shader and pipeline caches behind the executor.
 public interface IShaderPipelineProvider
 {
+    // True when the backend can run an NGG primitive shader as a mesh pipeline. The
+    // executor then stops skipping culling primitive-shader draws; see IGuestGpuBackend.
+    bool SupportsPrimitiveShaderMeshPipelines => false;
+
+    // Optional capture of rejected stage inputs; it never admits or executes the draw.
+    void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
+
+    // Original packet and primitive-assembly state at the rejection boundary.
+    // Legacy diagnostic implementers retain their existing optional callback.
+    void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context,
+        UserConfigRegisters userConfig, in TargetlessDrawArguments draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null) =>
+        RecordUnsupportedGraphics(vertex, context);
+
     bool MeshShadersSupported => false;
 
     void DumpRejectedGraphics(RegisterBanks banks, bool autoDraw) { }
@@ -70,7 +91,26 @@ public interface IShaderPipelineProvider
         ContextRegisters context,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
-        bool depthBound);
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound = false);
+
+    // The same, knowing whether the draw's primitives are a triangle list: only then can a
+    // passthrough primitive shader run as a mesh function that hands its pixel program the
+    // three vertex values a host without per-vertex pixel inputs cannot give it.
+    GraphicsPrograms GetGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList) =>
+        GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
+            depthAspectBound, stencilAspectBound);
 
     GraphicsPrograms GetMeshGraphicsPrograms(
         VertexStageRegisters vertex,
@@ -89,11 +129,32 @@ public interface IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram);
+
+    // False means the host is still compiling this pipeline and the draw may be left out;
+    // asking again returns it once the compile finishes, without starting a second one.
+    bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle)
+    {
+        handle = CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);
+        return true;
+    }
 
     // The dispatch dimensions are groups, or threads when the initiator counts threads.
     ComputeProgram GetComputeProgram(
@@ -103,6 +164,19 @@ public interface IShaderPipelineProvider
         uint dimensionX,
         uint dimensionY,
         uint dimensionZ);
+
+    // The same for a dispatch that may suspend on its pipeline: retry keeps the prepared program
+    // for the attempt that runs it, which takes it back while the guest words it read still
+    // hold (ComputeProgramRetry). A provider that keeps nothing prepares it every time.
+    ComputeProgram GetComputeProgram(
+        ComputeStageRegisters compute,
+        ShaderInterfaceRegisters shaderInterface,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ,
+        Pipelines.ComputeProgramRetry retry) =>
+        GetComputeProgram(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 

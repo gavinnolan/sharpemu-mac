@@ -41,6 +41,10 @@ public static class PacketDispatchTable
         table[PacketOpcode.MemorySemaphore] = static (interpreter, in packet, payload) => interpreter.MemorySemaphorePacket(in packet, payload);
         table[PacketOpcode.WaitRegisterMemory] = static (interpreter, in packet, payload) => interpreter.WaitRegisterMemory32Packet(in packet, payload);
         table[PacketOpcode.IndirectBuffer] = static (interpreter, in packet, payload) => interpreter.IndirectBufferPacket(in packet, payload);
+        table[PacketOpcode.IndirectBufferConstant] = static (interpreter, in packet, payload) => interpreter.IndirectBufferConstantPacket(in packet, payload);
+        table[PacketOpcode.ContextControl] = static (interpreter, in packet, payload) => interpreter.ContextControlPacket(in packet, payload);
+        table[PacketOpcode.SurfaceSync] = static (interpreter, in packet, payload) => interpreter.SurfaceSyncPacket(in packet, payload);
+        table[PacketOpcode.IndexAttributesIndirect] = static (interpreter, in packet, payload) => interpreter.IndexAttributesIndirectPacket(in packet, payload);
         table[PacketOpcode.CopyData] = static (interpreter, in packet, payload) => interpreter.CopyDataPacketHandler(in packet, payload);
         table[PacketOpcode.ConditionalWrite] = static (interpreter, in packet, payload) => interpreter.ConditionalWritePacket(in packet, payload);
         table[PacketOpcode.EventWrite] = static (interpreter, in packet, payload) => interpreter.EventWritePacket(in packet, payload);

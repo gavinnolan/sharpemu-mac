@@ -3,27 +3,27 @@
 
 namespace SharpEmu.Libs.Gpu.Scheduling;
 
-internal sealed class PendingGuestPublications
+public sealed class PendingGuestPublications
 {
-    internal sealed class Entry(int queue, ulong address, ulong size)
+    public sealed class Entry(int queue, ulong address, ulong size)
     {
-        internal readonly int Queue = queue;
-        internal readonly ulong Address = address;
-        internal readonly ulong Size = size;
-        internal ulong Tick;
-        internal bool Publishing;
-        internal bool Registered;
-        internal volatile bool Completed;
-        internal bool DeferredLabel;
+        public readonly int Queue = queue;
+        public readonly ulong Address = address;
+        public readonly ulong Size = size;
+        public ulong Tick;
+        public bool Publishing;
+        public bool Registered;
+        public volatile bool Completed;
+        public bool DeferredLabel;
         // A held-back command write: command-processor reads wait for it, unlike a label they forward.
-        internal bool HeldWrite;
-        internal ulong Value;
+        public bool HeldWrite;
+        public ulong Value;
         // A dump with a GPU slot can be copied into a reading buffer instead of waited for.
-        internal long GpuSlot = -1;
+        public long GpuSlot = -1;
         // Add order across all queues; the scheduler publishes entries in this order.
-        internal long Ordinal;
-        internal uint DumpMask;
-        internal uint DumpStride;
+        public long Ordinal;
+        public uint DumpMask;
+        public uint DumpStride;
     }
 
     private readonly object _gate = new();
@@ -45,7 +45,7 @@ internal sealed class PendingGuestPublications
     }
 
     // True when the queue has a pending entry added after the given one, so it publishes later.
-    internal bool QueueFollows(int queue, long ordinal)
+    public bool QueueFollows(int queue, long ordinal)
     {
         lock (_gate) return _queueNewest.TryGetValue(queue, out var newest) && newest > ordinal;
     }
@@ -93,7 +93,7 @@ internal sealed class PendingGuestPublications
     }
 
     // Read without the lock; Index replaces the array under the lock.
-    internal Entry[] PendingDumps => _dumps;
+    public Entry[] PendingDumps => _dumps;
 
     private bool DumpOverlap(ulong address, ulong size, bool skipGpuSlots, out ulong tick)
     {
@@ -110,7 +110,7 @@ internal sealed class PendingGuestPublications
     }
 
     // GPU resource reads pass includeLabels false; a deferred label only orders later writes.
-    internal bool HasOverlap(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
+    public bool HasOverlap(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
     {
         if (size == 0 || address > ulong.MaxValue - size) return false;
         if (!includeLabels && _failure is null) return DumpOverlap(address, size, skipGpuSlots, out _);
@@ -124,9 +124,9 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal int Count { get { lock (_gate) return _entries.Count; } }
+    public int Count { get { lock (_gate) return _entries.Count; } }
 
-    internal bool HasLabelOverlap(ulong address, ulong size)
+    public bool HasLabelOverlap(ulong address, ulong size)
     {
         if (size == 0 || address > ulong.MaxValue - size || !MayOverlap(address, size)) return false;
         lock (_gate)
@@ -140,11 +140,11 @@ internal sealed class PendingGuestPublications
     }
 
     // The command processor sees deferred label bytes at once; a pending dump hides the range.
-    internal bool TryOverlayLabels(ulong address, Span<byte> bytes, out int coveredMask) =>
+    public bool TryOverlayLabels(ulong address, Span<byte> bytes, out int coveredMask) =>
         TryOverlayLabels(-1, address, bytes, out coveredMask, out _);
 
     // newestForeign is the newest used label of another queue; the reader must keep its order after it.
-    internal bool TryOverlayLabels(int readerQueue, ulong address, Span<byte> bytes, out int coveredMask,
+    public bool TryOverlayLabels(int readerQueue, ulong address, Span<byte> bytes, out int coveredMask,
         out Entry? newestForeign)
     {
         coveredMask = 0;
@@ -173,7 +173,7 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal Entry Add(int queue, ulong address, ulong size)
+    public Entry Add(int queue, ulong address, ulong size)
     {
         if (size == 0 || address > ulong.MaxValue - size)
             throw new ArgumentOutOfRangeException(nameof(size));
@@ -189,7 +189,7 @@ internal sealed class PendingGuestPublications
     }
 
     // A zero-size entry that holds a queue's later signals behind publications already queued.
-    internal Entry AddOrdering(int queue)
+    public Entry AddOrdering(int queue)
     {
         lock (_gate)
         {
@@ -202,7 +202,7 @@ internal sealed class PendingGuestPublications
     }
 
     // A held-back command-processor write; readers wait for it like a dump.
-    internal Entry AddWrite(int queue, ulong address, ulong size)
+    public Entry AddWrite(int queue, ulong address, ulong size)
     {
         if (size == 0 || address > ulong.MaxValue - size)
             throw new ArgumentOutOfRangeException(nameof(size));
@@ -217,7 +217,7 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal bool HasQueue(int queue)
+    public bool HasQueue(int queue)
     {
         lock (_gate)
         {
@@ -226,7 +226,7 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal void Register(Entry entry, ulong tick)
+    public void Register(Entry entry, ulong tick)
     {
         lock (_gate)
         {
@@ -237,7 +237,7 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal Entry? AddAfterPending(int queue, ulong address, ulong size, ulong value = 0)
+    public Entry? AddAfterPending(int queue, ulong address, ulong size, ulong value = 0)
     {
         if (address > ulong.MaxValue - size) throw new ArgumentOutOfRangeException(nameof(size));
         lock (_gate)
@@ -256,7 +256,7 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal Entry? LastRecorded(int queue)
+    public Entry? LastRecorded(int queue)
     {
         lock (_gate)
         {
@@ -269,7 +269,7 @@ internal sealed class PendingGuestPublications
 
     // Entries register in queue order, so the running maximum covers every earlier entry.
     // Published entries can raise it, but their ticks are already complete.
-    internal ulong PredecessorTick(Entry target)
+    public ulong PredecessorTick(Entry target)
     {
         lock (_gate)
         {
@@ -278,7 +278,7 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal ulong OverlapTick(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
+    public ulong OverlapTick(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
     {
         if (size == 0 || address > ulong.MaxValue - size) return 0;
         if (!includeLabels && _failure is null)
@@ -302,7 +302,7 @@ internal sealed class PendingGuestPublications
     }
 
     // Diagnostic only: names the newest unpublished entry that a wait covers.
-    internal void Publish(Entry entry, Action write)
+    public void Publish(Entry entry, Action write)
     {
         lock (_gate)
         {
@@ -334,7 +334,7 @@ internal sealed class PendingGuestPublications
         }
     }
 
-    internal void Fail(Exception exception)
+    public void Fail(Exception exception)
     {
         lock (_gate)
         {

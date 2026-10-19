@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
-using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -222,6 +221,76 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
     }
 
+    private RegisterBanks PixelStoreBanks()
+    {
+        var banks = Banks();
+        banks.Context.RenderTargetMask = 0;
+        banks.Context.ColorTargets[0] = default;
+        banks.Context.ShaderInterface.DepthShaderControl = default;
+        banks.Context.ScreenViewport.ScreenScissorLeft = 4;
+        banks.Context.ScreenViewport.ScreenScissorTop = 2;
+        banks.Context.ScreenViewport.ScreenScissorRight = 36;
+        banks.Context.ScreenViewport.ScreenScissorBottom = 18;
+        return banks;
+    }
+
+    [Fact]
+    public void PixelProgramStoringToAnImage_DrawsWithoutAttachmentsOverTheScissor()
+    {
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [new ImageResourceInfo(ImageResourceClass.Storage, true)])));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(0u, rendering.ColorAttachmentCount);
+        Assert.True(rendering.RasterizesWithoutAttachments);
+        Assert.Equal(36u, rendering.Width);
+        Assert.Equal(18u, rendering.Height);
+    }
+
+    [Fact]
+    public void PixelProgramWritingABuffer_DrawsAndIsNeverRetained()
+    {
+        _host.RetainTargetlessDraws = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, buffers: [written], images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)]), buffers: [BufferDescriptor(VertexBase, 4, 16)]));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PixelStoreDrawWithoutAPixelShader_DrawsNothing()
+    {
+        var banks = PixelStoreBanks();
+        banks.Shader.Pixel.Address = 0;
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [new ImageResourceInfo(ImageResourceClass.Storage, true)])));
+        _executor.DrawAuto(1, banks, Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PixelProgramWithoutStores_AndNoTarget_DrawsNothingAndIsNotRetained()
+    {
+        _host.RetainTargetlessDraws = true;
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PixelProgramSamplingOnly_AndNoTarget_DrawsNothing()
+    {
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)])));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
@@ -251,20 +320,38 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void TargetlessDrawWithImagesAndDeviceAddresses_IsNeverRetained(bool vertexUsesDeviceAddresses)
+    public void TargetlessDrawWithImagesAndDeviceAddressWrites_IsNeverRetained(bool vertexWritesDeviceAddresses)
     {
         _host.RetainTargetlessDraws = true;
         _pipelines.Graphics = Programs(
-            vertexStage: Stage(Program(ShaderStageKind.Vertex, usesDeviceAddresses: vertexUsesDeviceAddresses)),
+            vertexStage: Stage(Program(ShaderStageKind.Vertex,
+                usesDeviceAddresses: vertexWritesDeviceAddresses, writesDeviceAddresses: vertexWritesDeviceAddresses)),
             pixelStage: Stage(Program(ShaderStageKind.Pixel,
                 images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)],
-                usesDeviceAddresses: !vertexUsesDeviceAddresses)));
+                usesDeviceAddresses: !vertexWritesDeviceAddresses, writesDeviceAddresses: !vertexWritesDeviceAddresses)));
 
         _executor.DrawAuto(1, TargetlessBanks(), Auto(3));
 
         Assert.Empty(_host.RetainedDraws);
         Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
         Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+    }
+
+    // Reading through the device-address page table writes nothing, so the draw can wait.
+    [Fact]
+    public void TargetlessDrawWithImagesThatOnlyReadsDeviceAddresses_IsRetained()
+    {
+        _host.RetainTargetlessDraws = true;
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, usesDeviceAddresses: true)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel,
+                images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)],
+                usesDeviceAddresses: true)));
+
+        _executor.DrawIndexed(9, TargetlessBanks(), Indexed(6));
+
+        Assert.Contains("retain_targetless 9", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -6,7 +6,7 @@ using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
-internal sealed class ImageDescriptorTrace
+public sealed class ImageDescriptorTrace
 {
     private static readonly RecentImageTrace _recent = new(512);
     private static readonly object _gate = new();
@@ -28,7 +28,7 @@ internal sealed class ImageDescriptorTrace
         }
     }
 
-    internal static void WriteHistory()
+    public static void WriteHistory()
     {
         if (!ImageClearTrace.Enabled) return;
         lock (_gate) _recent.WriteTo(Console.Error, "ImageDescriptorHistory");

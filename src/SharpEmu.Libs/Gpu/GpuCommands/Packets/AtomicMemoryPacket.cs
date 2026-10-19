@@ -67,6 +67,15 @@ public readonly record struct AtomicMemoryPacket(
             loopControl & 0x1FFFu,
             (control >> 30) & 0x3u);
 
+    /// <summary>ATOMIC_MEM ADD_32 without a return (operation 15, no-return bit, command 2):
+    /// what RELEASE_MEM data select 7 does to its destination at end of pipe.</summary>
+    public static AtomicMemoryPacket Add32(ulong address, uint addend) =>
+        Decode(0x4Fu | (2u << 8), (uint)address, (uint)(address >> 32), addend, 0, 0, 0, 0);
+
+    /// <summary>Adds to a guest dword under the shared atomic gate, as an end-of-pipe completion does.</summary>
+    public static bool TryAdd32(ICpuMemory memory, ulong address, uint addend) =>
+        Add32(address, addend).TryApply(memory.TryRead, memory, out _, out _, out _);
+
     // Applies the operation once, read-modify-write, under the shared atomic gate.
     public bool TryApply(
         GuestReader read,

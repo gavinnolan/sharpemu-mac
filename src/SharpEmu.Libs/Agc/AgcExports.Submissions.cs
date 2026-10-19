@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu;
@@ -33,7 +34,11 @@ public static partial class AgcExports
         }
 
         var profileEnabled = DcbSubmissionProfile.Enabled;
-        var callStartTicks = profileEnabled
+        // DSTRACE §4.6 SUBMIT reuses the profile's tick locals; timed equals profileEnabled
+        // whenever SHARPEMU_DSTRACE is unset.
+        var dsSubmit = DsTrace.Gpu && DsTrace.Armed;
+        var timed = profileEnabled || dsSubmit;
+        var callStartTicks = timed
             ? System.Diagnostics.Stopwatch.GetTimestamp()
             : 0L;
         var packetAddress = ctx[CpuRegister.Rdi];
@@ -52,16 +57,18 @@ public static partial class AgcExports
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.SubmitEntered, 0, 0, commandAddress, dwordCount);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
-        var setupEndTicks = profileEnabled
+        IGuestSubmissionPreparation? preparation = null;
+        var setupEndTicks = timed
             ? System.Diagnostics.Stopwatch.GetTimestamp()
             : 0L;
         var lockAcquiredTicks = 0L;
+        var dsSubmissionId = 0UL;
         var snapshotEndTicks = 0L;
         var enqueueEndTicks = 0L;
         lock (gpuState.CommandSubmissionGate)
         lock (gpuState.Gate)
         {
-            if (profileEnabled)
+            if (timed)
             {
                 lockAcquiredTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             }
@@ -83,7 +90,7 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                snapshots))
+                snapshots, out preparation))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
@@ -91,10 +98,19 @@ public static partial class AgcExports
             {
                 enqueueEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             }
+
+            dsSubmissionId = gpuState.SubmissionSequence;
         }
+
+        var preparationStartTicks = profileEnabled
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0L;
+        if (!TryWaitSubmissionPreparation(preparation))
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
 
         if (profileEnabled)
         {
+            var preparationEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             DcbSubmissionProfile.Record(
                 dwordCount,
                 setupEndTicks - callStartTicks,
@@ -102,11 +118,33 @@ public static partial class AgcExports
                 lockAcquiredTicks - setupEndTicks,
                 enqueueEndTicks - snapshotEndTicks,
                 0,
-                enqueueEndTicks - callStartTicks);
+                preparationEndTicks - callStartTicks,
+                preparationEndTicks - preparationStartTicks);
+        }
+
+        if (dsSubmit)
+        {
+            DsEmitSubmit(ctx, packetAddress, dwordCount, lockAcquiredTicks - setupEndTicks, callStartTicks, dsSubmissionId);
         }
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // DSTRACE §4.6 SUBMIT: one record per accepted DCB submission, at its return.
+    private static void DsEmitSubmit(
+        CpuContext ctx, ulong packetAddress, uint dwordCount, long gateWaitTicks, long callStartTicks, ulong submissionId)
+    {
+        Span<ulong> returns = stackalloc ulong[1];
+        _ = DsGuestMem.ReturnChain(ctx[CpuRegister.Rbp], ctx[CpuRegister.Rsp], returns);
+        DsTrace.Emit(
+            DsEv.SUBMIT,
+            packetAddress,
+            dwordCount,
+            (ulong)DsTrace.TicksToNs(gateWaitTicks),
+            (ulong)DsTrace.TicksToNs(System.Diagnostics.Stopwatch.GetTimestamp() - callStartTicks),
+            submissionId,
+            returns[0]);
     }
 
     [SysAbiExport(
@@ -139,6 +177,7 @@ public static partial class AgcExports
             ownerHandle, 0, commandAddress, dwordCount);
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        IGuestSubmissionPreparation? preparation = null;
         lock (gpuState.CommandSubmissionGate)
         lock (gpuState.Gate)
         {
@@ -148,12 +187,14 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                null))
+                null, out preparation))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
         }
 
+        if (!TryWaitSubmissionPreparation(preparation))
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -288,6 +329,7 @@ public static partial class AgcExports
 
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        List<IGuestSubmissionPreparation>? preparations = null;
         lock (gpuState.CommandSubmissionGate)
         lock (gpuState.Gate)
         {
@@ -319,13 +361,18 @@ public static partial class AgcExports
                     commandAddress,
                     dwordCount,
                     ++gpuState.SubmissionSequence,
-                    snapshots))
+                    snapshots, out var preparation))
                 {
                     return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
                 }
+                if (preparation is not null) (preparations ??= []).Add(preparation);
             }
         }
 
+        if (preparations is not null)
+            foreach (var preparation in preparations)
+                if (!TryWaitSubmissionPreparation(preparation))
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -336,8 +383,9 @@ public static partial class AgcExports
         ulong address,
         uint dwordCount,
         ulong submissionId,
-        object? geometrySnapshots)
+        object? geometrySnapshots, out IGuestSubmissionPreparation? preparation)
     {
+        preparation = null;
         if (HostSessionControl.IsShutdownRequested)
         {
             return false;
@@ -347,7 +395,10 @@ public static partial class AgcExports
         {
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendEntered,
                 queue, submissionId, address, dwordCount);
-            GuestGpu.Current.SubmitCommandStream(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
+            var backend = GuestGpu.Current;
+            if (backend is IGuestSubmissionPreparationBackend preparing)
+                preparation = preparing.SubmitCommandStreamWithPreparation(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
+            else backend.SubmitCommandStream(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendReturned,
                 queue, submissionId, address, dwordCount);
             return true;
@@ -357,4 +408,11 @@ public static partial class AgcExports
             return false;
         }
     }
+    private static bool TryWaitSubmissionPreparation(IGuestSubmissionPreparation? preparation)
+    {
+        if (preparation is null) return true;
+        try { _ = preparation.WaitUntilPrepared(); return true; }
+        catch (OperationCanceledException) { return false; }
+    }
+
 }

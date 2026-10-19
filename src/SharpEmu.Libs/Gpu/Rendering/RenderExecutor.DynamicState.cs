@@ -1,18 +1,24 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 public sealed partial class RenderExecutor
 {
-    private const uint MaxViewportDimension = 16384;
 
     // A guest bias for a fixed-point depth format scales by the host depth bits.
-    public static float DepthBiasConstantFactor(float guestFactor, in PolygonOffsetRegisters offset, Format hostDepthFormat)
+    //
+    // A fixed-point guest depth (a Z24 surface the host keeps as D32 float) has a constant unit
+    // of 2^NEG_NUM_DB_BITS, while the host's float unit is 2^(exponent(max z) - 23). The two are
+    // equal for primitives whose depth lies in [0.5, 1) once the factor is scaled to 2^-24 units;
+    // deeper below 0.5 the host offset is smaller by 2^(-1 - exponent). This is a documented
+    // deviation: the host has no constant-unit bias on a float attachment, and refusing would
+    // stop every title whose Z24 targets land on D32 float.
+    public static float DepthBiasConstantFactor(float guestFactor, in PolygonOffsetRegisters offset, GpuFormat hostDepthFormat)
     {
         if (offset.DepthIsFloat)
         {
@@ -21,12 +27,15 @@ public sealed partial class RenderExecutor
 
         var hostDepthBits = hostDepthFormat switch
         {
-            Format.D16Unorm or Format.D16UnormS8Uint => 16,
-            Format.D24UnormS8Uint => 24,
-            _ => 0,
+            GpuFormat.D16Unorm or GpuFormat.D16UnormS8Uint => 16,
+            GpuFormat.D24UnormS8Uint => 24,
+            _ => FloatHostUnitBits,
         };
-        return hostDepthBits == 0 ? guestFactor : MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
+        return MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
     }
+
+    // The float host unit that equals a 24-bit fixed-point one: 2^(exponent - 23) for z in [0.5, 1).
+    private const int FloatHostUnitBits = 24;
 
     // The dynamic state of a draw from the context bank and the resolved targets.
     private DynamicDrawState BuildDynamicState(RegisterBanks banks, in DrawState state, ulong submitId, ulong packetAddress)
@@ -54,54 +63,36 @@ public sealed partial class RenderExecutor
         }
 
         var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight, recoverStaleWindow: true);
-        ref readonly var viewport = ref viewportRegisters.Viewports[0];
-        float viewportX;
-        float viewportY;
-        float viewportWidth;
-        float viewportHeight;
-        if (context.Clip.ClipDisable)
-        {
-            viewportX = 0;
-            viewportY = 0;
-            viewportWidth = Math.Min(limits.MaxViewportWidth, MaxViewportDimension);
-            viewportHeight = Math.Min(limits.MaxViewportHeight, MaxViewportDimension);
-        }
-        else
-        {
-            viewportX = viewport.XOffset - viewport.XScale;
-            viewportY = viewport.YOffset - viewport.YScale;
-            viewportWidth = viewport.XScale * 2f;
-            viewportHeight = viewport.YScale * 2f;
-        }
+        // The pipeline cache keyed the vertex program on the other half of this transform.
+        var viewport = HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
 
-        var lineWidth = context.LineWidth;
-        if (lineWidth != 1f)
-        {
-            if (RenderTrace.Enabled && RenderTrace.LineWidthClamp())
-            {
-                RenderTrace.Write($"Clamping the line width to 1.0 because wide lines are not enabled: lineWidth={lineWidth}");
-            }
-
-            lineWidth = 1f;
-        }
+        // The host draws lines one pixel wide; validation warned once about a wider guest line.
+        const float lineWidth = 1f;
 
         var depthTarget = state.Depth.HasTarget ? state.Depth.Target : default;
         var depthState = depthTarget.State;
         var depthFormat = depthTarget.Target.Format;
         var mode = context.RasterMode;
         var polygonOffset = context.PolygonOffset;
-        var useFront = mode.PolygonOffsetFrontEnable && !mode.CullFront;
-        var useBack = mode.PolygonOffsetBackEnable && !mode.CullBack;
-        var depthBiasEnabled = useFront || useBack;
-        var depthBiasConstant = 0f;
-        var depthBiasSlope = 0f;
-        if (depthBiasEnabled)
-        {
-            // One host bias serves both faces; a visible front face wins.
-            var guestConstant = useFront ? polygonOffset.FrontOffset : polygonOffset.BackOffset;
-            depthBiasConstant = DepthBiasConstantFactor(guestConstant, in polygonOffset, depthFormat);
-            depthBiasSlope = (useFront ? polygonOffset.FrontScale : polygonOffset.BackScale) / 16f;
-        }
+        // A front-facing triangle takes the front offset under POLY_OFFSET_FRONT_ENABLE, a
+        // back-facing one the back offset under POLY_OFFSET_BACK_ENABLE, and points and lines
+        // the front offset under POLY_OFFSET_PARA_ENABLE; a face whose enable is off is not
+        // biased. A host sets one bias per draw, so a draw whose two visible faces differ is
+        // marked per-face and the host draws each face with its own.
+        var frontOffset = mode.PolygonOffsetFrontEnable || mode.PolygonOffsetParaEnable
+            ? (DepthBiasConstantFactor(polygonOffset.FrontOffset, in polygonOffset, depthFormat), polygonOffset.FrontScale / 16f)
+            : (0f, 0f);
+        var front = mode.PolygonOffsetFrontEnable ? frontOffset : (0f, 0f);
+        var back = mode.PolygonOffsetBackEnable
+            ? (DepthBiasConstantFactor(polygonOffset.BackOffset, in polygonOffset, depthFormat), polygonOffset.BackScale / 16f)
+            : (0f, 0f);
+        var pointLine = mode.PolygonOffsetParaEnable ? frontOffset : (0f, 0f);
+        var frontVisible = !mode.CullFront;
+        var backVisible = !mode.CullBack;
+        var depthBiasPerFace = frontVisible && backVisible && front != back;
+        var (depthBiasConstant, depthBiasSlope) = frontVisible ? front : back;
+        var depthBiasEnabled = (frontVisible && mode.PolygonOffsetFrontEnable) ||
+            (backVisible && mode.PolygonOffsetBackEnable) || mode.PolygonOffsetParaEnable;
 
         byte colorWriteMask = 0;
         for (var i = 0; i < state.ColorCount; i++)
@@ -114,12 +105,12 @@ public sealed partial class RenderExecutor
 
         var blend = context.BlendColor;
         var dynamicState = new DynamicDrawState(
-            viewportX,
-            viewportY,
-            viewportWidth,
-            viewportHeight,
-            viewport.ZOffset - (context.Clip.DirectXClipSpace ? 0f : viewport.ZScale),
-            viewport.ZScale + viewport.ZOffset,
+            viewport.X,
+            viewport.Y,
+            viewport.Width,
+            viewport.Height,
+            viewport.MinDepth,
+            viewport.MaxDepth,
             scissor,
             lineWidth,
             blend.Red,
@@ -127,17 +118,30 @@ public sealed partial class RenderExecutor
             blend.Blue,
             blend.Alpha,
             depthState.DepthTestEnabled,
-            depthState.DepthWriteEnabled && !depthState.DepthClearEnabled,
+            // The DB writes depth only when it tests it: Z_WRITE_ENABLE without Z_ENABLE
+            // leaves the buffer alone, which a host that writes under an always-pass compare
+            // would not.
+            depthState.DepthTestEnabled && depthState.DepthWriteEnabled && !depthState.DepthClearEnabled,
             depthState.DepthCompare,
             depthBiasEnabled,
             depthBiasConstant,
             depthBiasEnabled ? polygonOffset.Clamp : 0f,
             depthBiasSlope,
+            // The bounds test reads the stored depth, so without a depth target there is
+            // nothing to test (depthState is the default then).
+            depthState.DepthBoundsTestEnabled,
+            depthState.DepthMinBounds,
+            depthState.DepthMaxBounds,
             depthState.StencilTestEnabled,
             depthState.FrontMasks,
             depthState.BackMasks,
             state.ColorCount,
             colorWriteMask,
+            depthBiasPerFace,
+            depthBiasPerFace ? back.Item1 : 0f,
+            depthBiasPerFace ? back.Item2 : 0f,
+            pointLine.Item1,
+            pointLine.Item2,
             context.DepthCountControl);
         if (ScissorTrace.Instance is { Active: true } trace)
             trace.Draw(banks, submitId, packetAddress, framebufferWidth, framebufferHeight,

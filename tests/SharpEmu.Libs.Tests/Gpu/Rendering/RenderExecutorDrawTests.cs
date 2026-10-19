@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -92,7 +93,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
             "draw_indexed 6 2 0 3 0",
             "reset_bindings");
         Assert.Single(_pipelines.PipelineRequests);
-        Assert.Equal((PrimitiveTopology.TriangleList, false, true), _pipelines.PipelineRequests[0]);
+        Assert.Equal((GpuPrimitiveTopology.TriangleList, false, true), _pipelines.PipelineRequests[0]);
         Assert.DoesNotContain("end_rendering", _host.Calls);
         Assert.DoesNotContain("prepare_device_addresses", _host.Calls);
         Assert.Contains("create_graphics_pipeline colors=1 depth=False topology=TriangleList restart=False", _pipelines.Calls);
@@ -121,11 +122,45 @@ public sealed class RenderExecutorDrawTests : IDisposable
         AssertOrder(
             "obtain 100500000 50 written=False",
             "obtain 100600000 14 written=False",
+            "prepare_indirect",
             "begin_rendering",
             "bind_pipeline Graphics A1",
             "draw_indexed_indirect",
             "reset_bindings");
+        Assert.Contains(_host.Calls, c => c.StartsWith("prepare_indirect", StringComparison.Ordinal) && c.EndsWith("indexed=True limit=40", StringComparison.Ordinal));
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed ", StringComparison.Ordinal));
+    }
+
+    // A primitive shader runs on Metal as a mesh pipeline, whose launch grid is sized
+    // from the counts the GPU would have read. The host says so and the draw is resolved
+    // here instead of being handed over - and never dropped.
+    [Fact]
+    public void IndirectIndexedDrawOnAMeshProgram_ReadsTheArgumentsOnTheCpu()
+    {
+        _host.IndirectDrawArgumentsTaken = false;
+        WriteIndirectArguments(6, 2, 4, 3, 1);
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(), arguments);
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed 6 2 ", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal));
+    }
+
+    // Metal draws a rectangle list as one patch per rectangle, sized from the index count.
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void IndirectIndexedRectangleList_ReadsTheArgumentsOnTheCpuWhenTheHostAsks(bool taken, bool cpu)
+    {
+        _host.TakesIndirectRectangleListArguments = taken;
+        WriteIndirectArguments(6, 2, 4, 3, 1);
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(PrimitiveRectangleList), arguments);
+
+        Assert.Equal(cpu, _host.Calls.Any(c => c.StartsWith("draw_indexed 6 2 ", StringComparison.Ordinal)));
+        Assert.Equal(!cpu, _host.Calls.Any(c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -137,6 +172,65 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
         AssertOrder("obtain 100500008 C written=False", "draw_indexed 6 2 0 3 1", "reset_bindings");
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void IndirectAutoDraw_LetsTheGpuReadTheArguments()
+    {
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(), arguments);
+
+        AssertOrder(
+            "obtain 100600000 10 written=False",
+            "prepare_indirect",
+            "begin_rendering",
+            "bind_pipeline Graphics A1",
+            "draw_indirect",
+            "reset_bindings");
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
+    }
+
+    // A rectangle list without per-vertex buffers takes its first vertex through the draw
+    // block, so its counts can stay on the GPU; one whose vertex buffers would have to be
+    // rebound at the first vertex is read first when the host says so.
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void IndirectAutoRectangleList_ReadsTheArgumentsOnTheCpuWhenTheHostAsks(bool taken, bool cpu)
+    {
+        _host.TakesIndirectRectangleListArguments = taken;
+        WriteIndirectArguments(6, 2, 4, 1);
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(PrimitiveRectangleList), arguments);
+
+        Assert.Equal(cpu, _host.Calls.Contains("draw 6 2 4 1"));
+        Assert.Equal(!cpu, _host.Calls.Any(c => c.StartsWith("draw_indirect", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void IndirectAutoDrawOnAMeshProgram_ReadsTheArgumentsOnTheCpu()
+    {
+        _host.IndirectDrawArgumentsTaken = false;
+        WriteIndirectArguments(6, 2, 4, 1);
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(), arguments);
+
+        Assert.Contains("draw 6 2 4 1", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indirect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void IndirectAutoStrip_ReadsTheArgumentsOnTheCpuAndSkipsAnEmptyDraw()
+    {
+        WriteIndirectArguments(6, 2, 4, 1);
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(PrimitiveTriangleStrip), arguments);
+        Assert.Contains("draw 6 2 4 1", _host.Calls);
+
+        _host.Calls.Clear();
+        WriteIndirectArguments(6, 0, 4, 1);
+        _executor.DrawAuto(8, Banks(PrimitiveTriangleStrip), arguments);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -390,6 +484,203 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void RejectedGeometryDiagnosticKeepsOriginalPacketAndContextWithoutDrawing(bool indexed, bool diagnostic)
+    {
+        // Isolated instance flag: no process environment or rendering policy is changed.
+        typeof(RenderExecutor).GetField("_dumpSkippedGraphics",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(_executor, diagnostic);
+        var banks = Banks();
+        banks.Context.ShaderStages = 0x00402020;
+        banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = 2;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 128;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 4;
+        banks.Context.ShaderInterface.GeometryOnChipControl = 0x00402040;
+        banks.Context.ShaderInterface.ExportRingItemSize = 28;
+        banks.UserConfig.IndexOffset = 19;
+        banks.UserConfig.GeometryEngineControl = new() { PrimitiveGroupSize = 31, VertexGroupSize = 63 };
+        var indexedArguments = new DrawIndexedArguments(0xABCD0000, 0x27, 97, 0xDEAD0000, 1, 3, -7, 5,
+            DrawOffsetSource.IndirectArguments, UnboundedIndexBuffer: true);
+        var autoArguments = new DrawAutoArguments(0xABCE0000, 0x2D, 101, 4, 11, 6,
+            DrawOffsetSource.IndirectArguments);
+        if (indexed) _executor.DrawIndexed(71, banks, indexedArguments);
+        else _executor.DrawAuto(73, banks, autoArguments);
+        Assert.Empty(_pipelines.Calls);
+        Assert.Equal(0, _host.GuestReads);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("find_image", StringComparison.Ordinal) ||
+            c.StartsWith("draw_", StringComparison.Ordinal));
+        if (!diagnostic) { Assert.Empty(_pipelines.UnsupportedGraphics); return; }
+        var captured = Assert.Single(_pipelines.UnsupportedGraphics);
+        Assert.Same(banks.Shader.Vertex, captured.Vertex);
+        Assert.Same(banks.Context, captured.Context);
+        Assert.Same(banks.UserConfig, captured.UserConfig);
+        Assert.Equal(indexed, captured.Draw.Indexed);
+        Assert.Equal(indexed ? 71UL : 73UL, captured.Draw.SubmitId);
+        Assert.Null(captured.OriginalIndirect);
+        if (indexed) { Assert.Equal(indexedArguments, captured.Draw.Indexed_); Assert.Equal(default, captured.Draw.Auto); }
+        else { Assert.Equal(autoArguments, captured.Draw.Auto); Assert.Equal(default, captured.Draw.Indexed_); }
+        Assert.Equal(28u, captured.Context.ShaderInterface.ExportRingItemSize);
+        Assert.Equal(19u, captured.UserConfig.IndexOffset);
+        Assert.Equal((ushort)31, captured.UserConfig.GeometryEngineControl.PrimitiveGroupSize);
+        Assert.Equal((ushort)63, captured.UserConfig.GeometryEngineControl.VertexGroupSize);
+    }
+
+    [Fact]
+    public void RejectedIndirectGeometryDiagnosticKeepsOriginalAndExistingCpuResolvedArguments()
+    {
+        typeof(RenderExecutor).GetField("_dumpSkippedGraphics",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(_executor, true);
+        var banks = Banks();
+        banks.UserConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleStrip; // existing CPU indirect route
+        banks.Context.ShaderStages = 0x00402020;
+        WriteIndirectArguments(6, 2, 4, unchecked((uint)-3), 7);
+        var original = Indexed(40, source: DrawOffsetSource.IndirectArguments) with
+        { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(79, banks, original);
+        var captured = Assert.Single(_pipelines.UnsupportedGraphics);
+        Assert.Equal(original, captured.OriginalIndirect!.Value);
+        Assert.True(captured.Draw.Indexed);
+        Assert.Equal(79UL, captured.Draw.SubmitId);
+        Assert.Equal(6u, captured.Draw.Indexed_.IndexCount);
+        Assert.Equal(2u, captured.Draw.Indexed_.InstanceCount);
+        Assert.Equal(-3, captured.Draw.Indexed_.BaseVertex);
+        Assert.Equal(7u, captured.Draw.Indexed_.FirstInstance);
+        Assert.Equal(original.IndexAddress + 8, captured.Draw.Indexed_.IndexAddress); // fixture's 16-bit index type
+        Assert.Equal(0UL, captured.Draw.Indexed_.IndirectArgumentsAddress);
+        Assert.Equal(1, _host.GuestReads); // existing 20-byte argument read only; no diagnostic index/descriptor read
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("find_image", StringComparison.Ordinal) ||
+            c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    // The captured Void Terrarium culling draw: a stage mask the compact primitive masks do
+    // not cover, with the NGG subgroup registers the per-vertex path cannot honor.
+    private static void ApplyCullingPrimitiveShaderDraw(RegisterBanks banks)
+    {
+        banks.Context.ShaderStages = 0x00402020;
+        banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = 2;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 128;
+        banks.Context.ShaderInterface.GeometryOnChipControl = 0x00402040;
+        banks.Shader.Vertex.GeometryAddress = 0;
+    }
+
+    [Fact]
+    public void CullingPrimitiveShaderDraw_IsSkippedWithoutMeshPipelines()
+    {
+        // Vulkan's behavior, and Metal's until its host builds mesh pipelines.
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        Assert.False(_pipelines.SupportsPrimitiveShaderMeshPipelines);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CullingPrimitiveShaderDraw_RunsWhenTheBackendHasMeshPipelines()
+    {
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
+        Assert.Empty(_pipelines.UnsupportedGraphics);
+    }
+
+    [Fact]
+    public void MeshPipelines_DoNotAdmitAPlainVertexDraw()
+    {
+        // A zero stage mask is the plain vertex/pixel path. Rescuing it as a mesh draw
+        // would compile an ordinary vertex program as the merged ES/GS stage and size its
+        // workgroup from geometry-engine registers this draw never programmed.
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        banks.Context.ShaderStages = 0;
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(0x1u)] // a legacy vertex/LS stage mask stays unsupported
+    [InlineData(0x41u)] // VS_EN selected beside GS_EN
+    public void MeshPipelines_DoNotAdmitForeignStageMasks(uint stageMask)
+    {
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        banks.Context.ShaderStages = stageMask;
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    // A vertex+geometry shader pair the way UE4 renders a volume LUT slice by slice: the
+    // geometry stage enabled in VGT_SHADER_STAGES_EN, an output budget in
+    // VGT_GS_MAX_VERT_OUT, and the geometry program address register written. Gen5 runs the
+    // pair as one merged ES/GS program at the export address.
+    private static void ApplyGeometryStageDraw(RegisterBanks banks, uint maxVerticesOut)
+    {
+        banks.Context.ShaderStages = 0x00C02030;
+        banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = 1;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 0x40;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = maxVerticesOut;
+        banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
+        banks.Shader.Vertex.GeometryAddress = 0x3000;
+        banks.Shader.Vertex.GeometryUserDataAddress = 0x4000;
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(3u)]
+    public void MeshPipelines_RunAGeometryStageDraw(uint maxVerticesOut)
+    {
+        var banks = Banks();
+        ApplyGeometryStageDraw(banks, maxVerticesOut);
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
+        Assert.Empty(_pipelines.UnsupportedGraphics);
+    }
+
+    [Fact]
+    public void GeometryStageDraw_WithAnOutputBudgetIsSkippedWithoutMeshPipelines()
+    {
+        // Vulkan's behavior is unchanged: the per-vertex path cannot run the GS half.
+        var banks = Banks();
+        ApplyGeometryStageDraw(banks, maxVerticesOut: 3);
+        Assert.False(_pipelines.SupportsPrimitiveShaderMeshPipelines);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MeshPipelines_DoNotAdmitAGeometryStageBesideTheLegacyVertexStage()
+    {
+        var banks = Banks();
+        ApplyGeometryStageDraw(banks, maxVerticesOut: 3);
+        banks.Context.ShaderStages |= 0x40; // VS_EN
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData(0x02002000u, 0u)]
     [InlineData(0x02002000u, 1u)]
     [InlineData(0x00002000u, 0u)]
@@ -444,36 +735,33 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.DoesNotContain(_pipelines.Calls, call => call.StartsWith("get_mesh_programs", StringComparison.Ordinal));
         Assert.Null(_host.MeshIndices);
         Assert.NotEmpty(_pipelines.PipelineRequests);
-        Assert.All(_pipelines.PipelineRequests, request => Assert.Equal(PrimitiveTopology.TriangleStrip, request.Topology));
+        Assert.All(_pipelines.PipelineRequests, request => Assert.Equal(GpuPrimitiveTopology.TriangleStrip, request.Topology));
         Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw_mesh", StringComparison.Ordinal));
         Assert.Contains(_host.Calls, call => call.StartsWith(indexed ? "draw_indexed " : "draw ", StringComparison.Ordinal));
     }
 
     [Theory]
-    [InlineData(1u, PrimitiveTopology.PointList)]
-    [InlineData(2u, PrimitiveTopology.LineList)]
-    [InlineData(3u, PrimitiveTopology.LineStrip)]
-    [InlineData(4u, PrimitiveTopology.TriangleList)]
-    [InlineData(5u, PrimitiveTopology.TriangleFan)]
-    [InlineData(6u, PrimitiveTopology.TriangleStrip)]
-    [InlineData(7u, PrimitiveTopology.PatchList)]
-    [InlineData(19u, PrimitiveTopology.TriangleFan)]
-    public void ResolveTopology_MapsEveryPrimitiveType(uint primitiveType, PrimitiveTopology expected)
+    [InlineData(1u, GpuPrimitiveTopology.PointList)]
+    [InlineData(2u, GpuPrimitiveTopology.LineList)]
+    [InlineData(3u, GpuPrimitiveTopology.LineStrip)]
+    [InlineData(4u, GpuPrimitiveTopology.TriangleList)]
+    [InlineData(5u, GpuPrimitiveTopology.TriangleFan)]
+    [InlineData(6u, GpuPrimitiveTopology.TriangleStrip)]
+    [InlineData(7u, GpuPrimitiveTopology.PatchList)]
+    [InlineData(17u, GpuPrimitiveTopology.PatchList)]
+    [InlineData(19u, GpuPrimitiveTopology.TriangleFan)]
+    public void ResolveTopology_MapsEveryPrimitiveType(uint primitiveType, GpuPrimitiveTopology expected)
     {
         var userConfig = new UserConfigRegisters { PrimitiveType = primitiveType };
-        Assert.True(_executor.ResolveTopology(userConfig, autoDraw: false, out var topology));
+        Assert.True(_executor.ResolveTopology(userConfig, out var topology));
         Assert.Equal(expected, topology);
     }
 
     [Fact]
-    public void ResolveTopology_HandlesNoneAndTheLegacyRectangleList()
+    public void ResolveTopology_HandlesNoneAndRejectsAnUnknownType()
     {
-        Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 0 }, autoDraw: false, out _));
-        Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
-        Assert.Equal(PrimitiveTopology.TriangleStrip, topology);
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: false, out _));
-        Assert.Contains("primitiveType=17", fatal.Message);
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, autoDraw: true, out _));
+        Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 0 }, out _));
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, out _));
         Assert.Contains("primitiveType=9", fatal.Message);
     }
 
@@ -494,33 +782,33 @@ public sealed class RenderExecutorDrawTests : IDisposable
     {
         var banks = Banks(primitiveType: PrimitiveTriangleStrip);
         banks.UserConfig.PrimitiveResetControl = 0;
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
 
         banks.UserConfig.PrimitiveResetControl = 1;
         banks.Context.PrimitiveResetIndex = 0xFFFF;
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleList, 0));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleList, 0));
 
         banks.UserConfig.PrimitiveType = PrimitiveTriangleList;
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
 
         banks.UserConfig.PrimitiveType = PrimitiveTriangleStrip;
         banks.Context.PrimitiveResetIndex = 0xFFFF_FFFF;
         banks.UserConfig.PrimitiveResetControl = 3;
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 1));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 1));
 
         banks.UserConfig.PrimitiveResetControl = 1;
         banks.Context.PrimitiveResetIndex = 0xFF;
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 2));
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 2));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
 
         banks.UserConfig.PrimitiveResetControl = 4;
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
         Assert.Contains("control=0x00000004", fatal.Message);
 
         banks.UserConfig.PrimitiveResetControl = 1;
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 3));
+        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 3));
         Assert.Contains("indexTypeAndSize=3", fatal.Message);
     }
 
@@ -772,16 +1060,13 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void LegacyRectangleList_DrawsFourVerticesAndRejectsOtherShapes()
+    public void LegacyRectangleList_DrawsAsARectangleListOfEveryRectangle()
     {
-        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(3, instances: 2));
-        Assert.Contains("draw 4 2 0 0", _host.Calls);
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6, instances: 2));
+        Assert.Contains("draw 6 2 0 0", _host.Calls);
 
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6)));
-        Assert.Contains("count=6 buffers=0", fatal.Message);
-
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(3)));
-        Assert.Contains("primitiveType=17", fatal.Message);
+        _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(6, baseVertex: 1));
+        Assert.Contains("draw_indexed 6 1 0 1 0", _host.Calls);
     }
 
     [Theory]
@@ -791,8 +1076,8 @@ public sealed class RenderExecutorDrawTests : IDisposable
     public void LegacyRectangleList_NativeFillPreservesGuestDrawArguments(uint count)
     {
         _host.SupportsNativeRectangles = true;
-        Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
-        Assert.Equal(PrimitiveTopology.PatchList, topology);
+        Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, out var topology));
+        Assert.Equal(GpuPrimitiveTopology.PatchList, topology);
         _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(count, instances: 2, firstVertex: 9, firstInstance: 4, source: DrawOffsetSource.IndirectArguments));
         Assert.Contains($"draw {count} 2 9 4", _host.Calls);
     }
@@ -839,7 +1124,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
         _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex, parameterExportMask: 0)), pixelInputs: 0);
         _executor.DrawAuto(1, Banks(primitiveType: 7), Auto(3));
         Assert.Contains("draw 3 1 0 0", _host.Calls);
-        Assert.Equal(PrimitiveTopology.PatchList, _pipelines.PipelineRequests[0].Topology);
+        Assert.Equal(GpuPrimitiveTopology.PatchList, _pipelines.PipelineRequests[0].Topology);
     }
 
     [Fact]
@@ -964,7 +1249,119 @@ public sealed class RenderExecutorDrawTests : IDisposable
             pixelStage: Stage(Program(ShaderStageKind.Pixel, buffers: [written]), buffers: [descriptor]));
         _executor.DrawIndexed(1, Banks(), Indexed(3));
 
-        AssertOrder("draw_indexed 3 1 0 0 0", "end_rendering", $"write_barrier {PipelineStageFlags.VertexShaderBit | PipelineStageFlags.FragmentShaderBit}", "reset_bindings");
+        AssertOrder("draw_indexed 3 1 0 0 0", "end_rendering", $"write_barrier {GpuPipelineStage.VertexShaderBit | GpuPipelineStage.FragmentShaderBit}", "reset_bindings");
+    }
+
+    [Fact]
+    public void VertexOnlyBufferWrites_KeepThePassOpenWhenTheHostOrdersThemInside()
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var descriptor = BufferDescriptor(VertexBase, 4, 16);
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [descriptor]),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        AssertOrder("draw_indexed 3 1 0 0 0", $"write_barrier {GpuPipelineStage.VertexShaderBit}", "reset_bindings");
+        var draw = _host.Calls.IndexOf("draw_indexed 3 1 0 0 0");
+        Assert.DoesNotContain(_host.Calls.Skip(draw), call => call == "end_rendering");
+    }
+
+    [Fact]
+    public void PixelBufferWrites_StillEndThePassWhenTheHostOrdersVertexWritesInside()
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var descriptor = BufferDescriptor(VertexBase, 4, 16);
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, buffers: [written]), buffers: [descriptor]));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        AssertOrder("draw_indexed 3 1 0 0 0", "end_rendering", $"write_barrier {GpuPipelineStage.FragmentShaderBit}", "reset_bindings");
+    }
+
+    // A host that orders vertex stores in the pass and defers the pass end of fragment stores.
+    private void DrawWithPixelStores(bool vertexWrites = false)
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        _host.DefersFragmentWritePassEnd = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var descriptor = BufferDescriptor(VertexBase, 4, 16);
+        _pipelines.Graphics = Programs(
+            vertexStage: vertexWrites ? Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [descriptor]) : Stage(Program(ShaderStageKind.Vertex)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, usesDeviceAddresses: true, writesDeviceAddresses: true)));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+        _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex)), pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+    }
+
+    private const string FragmentBarrier = $"write_barrier {nameof(GpuPipelineStage.FragmentShaderBit)}";
+
+    [Fact]
+    public void PixelStores_KeepThePassOpenWhenTheHostDefersItsEnd()
+    {
+        DrawWithPixelStores();
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        var draw = _host.Calls.IndexOf("draw_indexed 3 1 0 0 0");
+        Assert.True(draw >= 0);
+        Assert.DoesNotContain(_host.Calls, call => call == "end_rendering" || call.StartsWith("write_barrier", StringComparison.Ordinal));
+        Assert.Equal(2, _host.Calls.Count(call => call == "draw_indexed 3 1 0 0 0"));
+    }
+
+    [Fact]
+    public void PixelStores_WithVertexStoresBarrierOnlyTheVertexStageInsideThePass()
+    {
+        DrawWithPixelStores(vertexWrites: true);
+
+        Assert.Contains($"write_barrier {GpuPipelineStage.VertexShaderBit}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call == "end_rendering" || call == FragmentBarrier);
+    }
+
+    [Fact]
+    public void DeferredPixelStores_EndThePassBeforeTheNextDispatch()
+    {
+        DrawWithPixelStores();
+        _host.Calls.Clear();
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        AssertOrder("end_rendering", FragmentBarrier, "end_rendering", "preparation_begin", "dispatch 1 1 1");
+    }
+
+    [Fact]
+    public void DeferredPixelStores_EndThePassWhenTheGuestReleasesShaderWritesOnce()
+    {
+        DrawWithPixelStores();
+        _host.Calls.Clear();
+        _executor.ReleaseShaderWrites();
+        Assert.Equal(["end_rendering", FragmentBarrier], _host.Calls);
+
+        _host.Calls.Clear();
+        _executor.ReleaseShaderWrites();
+        Assert.Empty(_host.Calls);
+    }
+
+    [Fact]
+    public void DeferredPixelStores_EndThePassBeforeAnIndirectDraw()
+    {
+        DrawWithPixelStores();
+        _host.Calls.Clear();
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(), arguments);
+
+        AssertOrder("end_rendering", FragmentBarrier, "obtain 100600000 14 written=False", "begin_rendering", "draw_indexed_indirect");
+    }
+
+    [Fact]
+    public void DeferredPixelStores_NeedNothingOnceTheHostEndedTheirPass()
+    {
+        DrawWithPixelStores();
+        _host.RenderPassSerial++;
+        _host.Calls.Clear();
+        _executor.ReleaseShaderWrites();
+
+        Assert.Empty(_host.Calls);
     }
 
     [Fact]

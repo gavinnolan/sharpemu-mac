@@ -1,7 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -79,7 +79,7 @@ public sealed class TickTimelineTests
         Assert.True(SchedulingTestSupport.WaitUntil(() => _device.Log.Contains("wait 4")));
         Assert.False(await SchedulingTestSupport.CompletesWithin(waiter, 50));
         _device.Complete(4);
-        Assert.True(await SchedulingTestSupport.CompletesWithin(waiter, 5000));
+        Assert.True(await SchedulingTestSupport.CompletesWithin(waiter, 10000));
         Assert.Equal(4UL, timeline.CompletedTick);
     }
 

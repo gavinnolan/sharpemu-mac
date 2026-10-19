@@ -31,9 +31,18 @@ public sealed partial class GpuCommandInterpreter
             Suspend();
             return 8;
         }
-        if (!atomic.TryApply(_host.TryReadGuestOperand, _host.Memory, out var priorValue, out _, out var comparePassed))
+
+        var operation = CommandMemoryOperation.Atomic(atomic);
+        NotePacketBlockWrite();
+        _host.ExecuteCommandMemoryOperation(operation);
+        var priorValue = operation.PriorValue;
+        var comparePassed = operation.ComparePassed;
+
+        // A failed try of a compare-swap loop writes nothing; reporting it would wake every
+        // other loop parked on the address, and two such loops would wake each other forever.
+        if (atomic.Command != 1 || comparePassed)
         {
-            throw _host.Fatal($"The atomic address cannot be accessed: address=0x{atomic.Address:X16} size={atomic.ByteCount}.");
+            GuestMemoryWritten?.Invoke(atomic.Address, sizeof(ulong));
         }
 
         if (atomic.ReturnsData)
@@ -52,7 +61,12 @@ public sealed partial class GpuCommandInterpreter
 
         if (atomic.Command == 1 && !comparePassed)
         {
-            Suspend();
+            // A compare-swap loop passes once the bytes equal the compare value; any other
+            // looping operation is retried whenever the bytes change.
+            SuspendOn(atomic.IsCompareSwap
+                ? CommandWaitCondition.WatchedCompare(atomic.Address, atomic.Is64Bit, priorValue, atomic.LoopReferenceValue,
+                    atomic.Is64Bit ? ulong.MaxValue : uint.MaxValue, 3)
+                : CommandWaitCondition.WatchedMemory(atomic.Address, atomic.Is64Bit, priorValue));
         }
 
         return 8;
@@ -78,10 +92,10 @@ public sealed partial class GpuCommandInterpreter
                 Suspend();
                 return 3;
             }
-            if (!Packets.MemorySemaphorePacket.TrySignal(_host.TryReadGuestOperand, _host.Memory, semaphore.Address, semaphore.WriteSignal, out _))
-            {
-                throw _host.Fatal($"The semaphore cannot be signaled: address=0x{semaphore.Address:X16}.");
-            }
+
+            NotePacketBlockWrite();
+            _host.ExecuteCommandMemoryOperation(CommandMemoryOperation.Semaphore(semaphore));
+            GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
 
             return 3;
         }
@@ -92,14 +106,23 @@ public sealed partial class GpuCommandInterpreter
             Suspend();
             return 3;
         }
-        if (!Packets.MemorySemaphorePacket.TryConsume(_host.TryReadGuestOperand, _host.Memory, semaphore.Address, out var priorValue))
-        {
-            throw _host.Fatal($"The semaphore cannot be read: address=0x{semaphore.Address:X16}.");
-        }
 
+        var consume = CommandMemoryOperation.Semaphore(semaphore);
+        NotePacketBlockWrite();
+        _host.ExecuteCommandMemoryOperation(consume);
+        var priorValue = consume.PriorValue;
+
+        // Only a taken token is a write. Reporting the empty poll too woke every other
+        // head waiting on this semaphore, which polled, reported and woke this one back:
+        // two waiters on one semaphore spun against each other until a signal came.
         if (priorValue == 0)
         {
-            Suspend();
+            // A token is a nonzero count, which a signal from the guest's CPU adds unseen.
+            SuspendOn(CommandWaitCondition.WatchedCompare(semaphore.Address, is64Bit: true, 0, 0, ulong.MaxValue, 4));
+        }
+        else
+        {
+            GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
         }
 
         return 3;
@@ -129,7 +152,15 @@ public sealed partial class GpuCommandInterpreter
                 $"read=0x{readAddress:X16} write=0x{writeAddress:X16} address=0x{packet.PacketAddress:X16}.");
         }
 
-        var observed = ReadDword(readAddress);
+        // The compare reads what earlier work on this queue left there before this packet
+        // may publish its own write; work still owing those bytes parks the submission.
+        Span<byte> observedBytes = stackalloc byte[sizeof(uint)];
+        if (!TryReadOperandOrSuspend(readAddress, observedBytes))
+        {
+            return 8;
+        }
+
+        var observed = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(observedBytes);
         _ = WaitOperation.TryCompare(observed, reference, mask, compareFunction, out var passed);
         if (!passed)
         {
@@ -258,6 +289,19 @@ public sealed partial class GpuCommandInterpreter
         throw _host.Fatal($"The wrapped DMA packet length is not supported: length={packet.Length} address=0x{packet.PacketAddress:X16}.");
     }
 
+    // The constant engine's indirect buffer. Its packets (constant RAM loads and dumps, the
+    // CE counter) run on this one queue in submission order, which is the order the two
+    // engines' counters already enforce; the branch form is draw-engine only.
+    internal uint IndirectBufferConstantPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
+    {
+        if (packet.Length != 4)
+        {
+            throw _host.Fatal($"The constant indirect-buffer packet length is not supported: length={packet.Length} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        return IndirectBufferPacket(packet, payload);
+    }
+
     // Bit 20 selects a call (the parent continues) or a chain (the parent ends).
     internal uint IndirectBufferPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
@@ -292,6 +336,7 @@ public sealed partial class GpuCommandInterpreter
         if (address == 1 && ringChunkBase != 0)
         {
             var nextChunk = ringChunkBase + RingChunkBytes;
+            GpuStreamDiagnostics.RecordRingFollow();
             ChainToBuffer(nextChunk, RingChunkBytes / sizeof(uint), followedChunkAdvance: true);
         }
 
@@ -316,7 +361,13 @@ public sealed partial class GpuCommandInterpreter
                 $"then=0x{thenBuffer:X16}/{thenDwords} else=0x{elseBuffer:X16}/{elseDwords} address=0x{packet.PacketAddress:X16}.");
         }
 
-        _ = WaitOperation.TryCompare(ReadQword(compareAddress), reference, mask, function, out var takeThen);
+        Span<byte> compareBytes = stackalloc byte[sizeof(ulong)];
+        if (!TryReadOperandOrSuspend(compareAddress, compareBytes))
+        {
+            return 13;
+        }
+
+        _ = WaitOperation.TryCompare(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(compareBytes), reference, mask, function, out var takeThen);
         if (takeThen)
         {
             RunIndirectBuffer(thenBuffer, thenDwords);

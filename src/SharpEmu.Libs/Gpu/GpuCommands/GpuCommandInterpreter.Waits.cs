@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -34,7 +35,17 @@ public sealed partial class GpuCommandInterpreter
             Suspend();
             return;
         }
-        if (!deferred) value = ReadWaitOperand(address, is64Bit);
+
+        // The first look commits nothing. Committing the recording command buffer so a
+        // pending write can land ends the open render pass, and when this queue's own store
+        // or a recorded label satisfies the wait the commit buys nothing: nine in ten poll
+        // commits on Void Terrarium, Superliminal and Quake resumed without suspending, each
+        // one storing and reloading every attachment of the pass.
+        if (!deferred)
+        {
+            value = ReadWaitOperand(address, is64Bit, commitPendingWrite: false);
+        }
+
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");
@@ -45,55 +56,174 @@ public sealed partial class GpuCommandInterpreter
             _ = WaitOperation.TryCompare(ownValue, reference, mask, compareFunction, out satisfied);
         }
 
+        if (!satisfied && PendingLabelLookup is { } pending && pending(address, is64Bit, out var labelValue))
+        {
+            _ = WaitOperation.TryCompare(labelValue, reference, mask, compareFunction, out satisfied);
+        }
+
+        if (!satisfied && !deferred)
+        {
+            // Nothing recorded will satisfy it, so the bytes have to change: make sure the
+            // work that writes them is on its way before the submission sleeps on them.
+            value = ReadWaitOperand(address, is64Bit, commitPendingWrite: true);
+            _ = WaitOperation.TryCompare(value, reference, mask, compareFunction, out satisfied);
+        }
+
         if (!satisfied)
         {
-            Suspend();
+            if (DsTrace.Gpu)
+            {
+                DsNoteWaitOperands(reference, mask, compareFunction, value);
+            }
+
+            SuspendOn(CommandWaitCondition.WatchedCompare(address, is64Bit, value, reference, mask, compareFunction));
         }
     }
 
-    // The wait bit is PredicationZPassWaitOp: 0 (kWaitForQueryResults) stalls the command
-    // processor until the results arrive, 1 (kDoNotPredicateIfQueryResultsNotReady) never
-    // stalls and leaves the tagged packets unpredicated while the results are outstanding.
-    internal void SetPredication(uint condition, uint operation, uint waitOperation, ulong address)
+    private const ulong QueryReadyBit = 1UL << 63;
+    private const int ZPassDepthBlocks = 16;
+
+    // What the last predication found, for a zpass packet that continues the set.
+    private bool _predicationVisible;
+
+    // Predication is set (not cleared): the draws that follow may be the ones it decides on,
+    // so a backend never leaves one out while its pipeline compiles (DrawsMustExecute).
+    private bool _predicationSet;
+
+    // Between an occlusion query's begin and end dumps (ZPASS_DONE at a block's even, then
+    // odd, qword): the draws inside are what the query counts.
+    private bool _occlusionQueryOpen;
+
+    /// <summary>
+    /// Draws a backend has to run even while their pipeline is still compiling: predicated
+    /// ones and those inside an occlusion query, whose outcome the guest reads back.
+    /// </summary>
+    internal bool DrawsMustExecute => _predicationSet || _occlusionQueryOpen;
+
+    /// <summary>
+    /// Sets the predicate the packets with header bit 0 obey.
+    /// </summary>
+    /// <remarks>
+    /// <para>The operation picks what the address holds: 1 the zpass (occlusion) counters,
+    /// sixteen depth-block pairs of begin and end qwords with bit 63 set once written; 2 a
+    /// streamout-statistics record of primitives written and needed, begin then end, which
+    /// counts as visible while nothing overflowed; 3 a DX12 qword and 4 a Vulkan dword that
+    /// count as visible when nonzero. The boolean says which outcome draws: 0 draws when
+    /// not visible (or overflowed), 1 when visible.</para>
+    /// <para>The hint is PredicationZPassWaitOp: 0 (kWaitForQueryResults) stalls the
+    /// command processor until the results are in, so the submission parks on them; 1
+    /// (kDoNotPredicateIfQueryResultsNotReady) never stalls and leaves the tagged packets
+    /// unpredicated while the results are outstanding. The continue bit ORs a zpass result
+    /// into the previous one, so one predicate can span several queries.</para>
+    /// </remarks>
+    internal void SetPredication(uint condition, uint operation, uint waitOperation, ulong address, bool continueSet = false)
     {
+        _predicationSet = operation != 0;
+        if (operation == 0)
+        {
+            // Clearing predication reads no memory, so no GPU result can be outstanding.
+            PredicateSkip = false;
+            _predicationVisible = false;
+            return;
+        }
+
+        if (operation > 4)
+        {
+            throw _host.Fatal($"The predication operation is unknown: operation=0x{operation:X8} address=0x{address:X16}.");
+        }
+
+        if (condition > 1)
+        {
+            throw _host.Fatal($"The predication condition is unknown: condition=0x{condition:X8} address=0x{address:X16}.");
+        }
+
+        if (address == 0)
+        {
+            throw _host.Fatal($"The predication address is zero: operation={operation}.");
+        }
+
+        var size = operation switch
+        {
+            1 => (ulong)ZPassDepthBlocks * 2 * sizeof(ulong),
+            2 => 4UL * sizeof(ulong),
+            3 => (ulong)sizeof(ulong),
+            _ => (ulong)sizeof(uint),
+        };
+
+        if (waitOperation != 0 && _host.HasPendingGpuWrite(address, size))
+        {
+            // The results are still on their way, and the game asked for the packets to run
+            // unpredicated in that case.
+            PredicateSkip = false;
+            return;
+        }
+
+        Span<ulong> words = stackalloc ulong[ZPassDepthBlocks * 2];
+        var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(words)[..(int)size];
+        if (!TryReadOperandOrSuspend(address, bytes))
+        {
+            return;
+        }
+
+        bool visible;
         switch (operation)
         {
-            case 0:
-                // Clearing predication reads no memory, so no GPU result can be outstanding.
-                PredicateSkip = false;
-                break;
-            case 3:
+            case 1:
             {
-                if (address == 0)
+                ulong passed = 0;
+                for (var block = 0; block < ZPassDepthBlocks; block++)
                 {
-                    throw _host.Fatal("The predication address is zero.");
+                    var begin = words[block * 2];
+                    var end = words[(block * 2) + 1];
+                    if ((begin & end & QueryReadyBit) == 0)
+                    {
+                        if (waitOperation != 0)
+                        {
+                            PredicateSkip = false;
+                            return;
+                        }
+
+                        // The occlusion dumps that fill the pairs have not run; the command
+                        // processor would stall here until they do.
+                        Interlocked.Increment(ref _predicationResultWaits);
+                        SuspendOn(CommandWaitCondition.Memory(address, size));
+                        return;
+                    }
+
+                    passed += (end & ~QueryReadyBit) - (begin & ~QueryReadyBit);
                 }
 
-                if (waitOperation != 0)
+                visible = passed != 0;
+                if (continueSet)
                 {
-                    // The results are outstanding while work is queued behind this packet, and
-                    // the game asked for the packets to run unpredicated in that case.
-                    PredicateSkip = false;
-                    break;
+                    visible |= _predicationVisible;
                 }
 
-                _host.FlushAndWait();
-                var value = ReadQword(address);
-                PredicateSkip = condition switch
-                {
-                    0 => value != 0,
-                    1 => value == 0,
-                    _ => throw _host.Fatal($"The predication condition is unknown: condition=0x{condition:X8} address=0x{address:X16}."),
-                };
-                TracePredication(condition, waitOperation, address, value);
-                VisibilityResultTrace.Predicate(QueueId, SubmitId, address, value, condition, waitOperation, PredicateSkip);
                 break;
             }
 
+            case 2:
+                // Overflow is the streamout having needed room for more primitives than it wrote.
+                visible = words[3] - words[1] == words[2] - words[0];
+                break;
+            case 3:
+                visible = words[0] != 0;
+                break;
             default:
-                throw _host.Fatal($"The predication operation is unknown: operation=0x{operation:X8} address=0x{address:X16}.");
+                visible = (uint)words[0] != 0;
+                break;
         }
+
+        _predicationVisible = visible;
+        PredicateSkip = condition == 0 ? visible : !visible;
+        TracePredication(condition, waitOperation, address, words[0]);
+        VisibilityResultTrace.Predicate(QueueId, SubmitId, address, words[0], condition, waitOperation, PredicateSkip);
     }
+
+    private static long _predicationResultWaits;
+
+    /// <summary>Zpass predicates since startup that parked until the occlusion results were written.</summary>
+    public static long PredicationResultWaits => Interlocked.Read(ref _predicationResultWaits);
 
     private static long _predicationTraceCount;
     private readonly Queue<(ulong Address, ulong Value, long Evaluation, long Timestamp)> _skippedPredicates = new();
@@ -135,7 +265,7 @@ public sealed partial class GpuCommandInterpreter
     {
         if (ConstantEngineCount <= DrawEngineCount && !ConstantEngineComplete)
         {
-            Suspend();
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.EngineCounter));
         }
     }
 
@@ -148,7 +278,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (ConstantEngineCount - DrawEngineCount >= difference)
         {
-            Suspend();
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.EngineCounter));
         }
     }
 
@@ -183,7 +313,13 @@ public sealed partial class GpuCommandInterpreter
         var mask = ReadValue(payload, 3 + (int)valueDwords, is64Bit);
         if ((control & 0x10u) == 0)
         {
-            throw _host.Fatal($"A register-space wait is not supported: control=0x{control:X8} address=0x{packet.PacketAddress:X16}.");
+            if (is64Bit)
+            {
+                throw _host.Fatal($"A 64-bit register-space wait is not supported: control=0x{control:X8} address=0x{packet.PacketAddress:X16}.");
+            }
+
+            WaitOnRegister(control & 0x7u, payload[1] & 0x3FFFFu, (uint)reference, (uint)mask, WaitOperation.Decode(control, is64Bit), packet.PacketAddress);
+            return payloadDwords;
         }
 
         WaitOnMemory(control & 0x7u, address, reference, mask, WaitOperation.Decode(control, is64Bit), is64Bit);
@@ -193,6 +329,61 @@ public sealed partial class GpuCommandInterpreter
     private static ulong ReadValue(ReadOnlySpan<uint> payload, int index, bool is64Bit) =>
         is64Bit ? payload[index] | ((ulong)payload[index + 1] << 32) : payload[index];
 
+    // A register-space poll reads a register this queue's own packets write, so nothing
+    // else can change it while the submission waits: an unmet compare can never be met.
+    // The register address is a dword index: config space 0x2000-0x2BFF, persistent SH
+    // 0x2C00-0x2FFF, context 0xA000-0xBFFF and user config 0xC000-0xFFFF.
+    private void WaitOnRegister(uint compareFunction, uint register, uint reference, uint mask, uint waitOperation, ulong packetAddress)
+    {
+        if (!WaitOperation.IsValid(waitOperation))
+        {
+            throw _host.Fatal($"The wait operation is not supported: operation=0x{waitOperation:X8} register=0x{register:X5}.");
+        }
+
+        if (!WaitOperation.ShouldExecute(waitOperation, ConditionalWaitEnabled))
+        {
+            return;
+        }
+
+        uint value;
+        bool written;
+        if (register >= ShaderRegisterSpaceBase && register < ShaderRegisterSpaceBase + RegisterBankLayout.ShaderRegisterCount)
+        {
+            written = Registers.Shader.TryGetValue(register - ShaderRegisterSpaceBase, out value);
+        }
+        else if (register >= UserConfigRegisterSpaceBase && register < UserConfigRegisterSpaceBase + RegisterBankLayout.UserConfigRegisterCount)
+        {
+            written = Registers.UserConfig.TryGetValue(register - UserConfigRegisterSpaceBase, out value);
+        }
+        else
+        {
+            throw _host.Fatal($"A register-space wait polls a register that is not modelled: register=0x{register:X5} address=0x{packetAddress:X16}.");
+        }
+
+        if (!written)
+        {
+            throw _host.Fatal($"A register-space wait polls a register this queue never wrote: register=0x{register:X5} address=0x{packetAddress:X16}.");
+        }
+
+        if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
+        {
+            throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} register=0x{register:X5}.");
+        }
+
+        if (!satisfied)
+        {
+            throw _host.Fatal(
+                $"A register-space wait can never be satisfied: register=0x{register:X5} value=0x{value:X8} " +
+                $"reference=0x{reference:X8} mask=0x{mask:X8} function={compareFunction} address=0x{packetAddress:X16}.");
+        }
+    }
+
+    private const uint ShaderRegisterSpaceBase = 0x2C00;
+    private const uint UserConfigRegisterSpaceBase = 0xC000;
+
+    // COND_EXEC skips the next count dwords when the dword it reads is zero. The two low
+    // address bits are reserved, and the compute engine's form carries a cache policy in
+    // bits 25-26 of the third dword, which does not change what is read.
     internal uint ConditionalExecutePacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
         var payloadDwords = packet.Length - 1;
@@ -202,16 +393,28 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var address = ((ulong)payload[1] << 32) | (payload[0] & 0xFFFF_FFFCu);
-        var control = payload[0] & 0x3u;
+        var reserved = payload[2] & ~(0x3u << 25);
         var executeCount = payload[3] & 0x3FFFu;
-        if (control != 0 || payload[2] != 0 || address == 0 || payloadDwords + executeCount >= packet.Remaining)
+        // Remaining counts this packet's header, so a skip that ends exactly at the end of
+        // the buffer is payload + count == Remaining - 1.
+        if (reserved != 0 || address == 0 || payloadDwords + executeCount >= packet.Remaining)
         {
             throw _host.Fatal(
-                $"The conditional-execute packet is not supported: control={control} reserved=0x{payload[2]:X8} " +
+                $"The conditional-execute packet is not supported: reserved=0x{payload[2]:X8} " +
                 $"address=0x{address:X16} count={executeCount} remaining={packet.Remaining}.");
         }
 
-        if (ReadDword(address) != 0) return payloadDwords;
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        if (!TryReadOperandOrSuspend(address, bytes))
+        {
+            return payloadDwords;
+        }
+
+        if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) != 0)
+        {
+            return payloadDwords;
+        }
+
         TraceSkippedPackets("conditional-execute", packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount, (uint)address);
         return payloadDwords + executeCount;
     }
@@ -224,7 +427,7 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The predication packet is too short: length={packet.Length} address=0x{packet.PacketAddress:X16}.");
         }
 
-        const uint flagsMask = 0x0007_1100u;
+        const uint flagsMask = 0x8007_1100u;
         uint flags;
         ulong address;
         if (payloadDwords >= 3 && (payload[0] & ~flagsMask) == 0 && payload[2] <= 0xFFFFu)
@@ -238,7 +441,7 @@ public sealed partial class GpuCommandInterpreter
             address = (payload[0] & 0xFFFF_FFF0u) | ((ulong)(payload[1] & 0xFFu) << 32);
         }
 
-        SetPredication((flags >> 8) & 0x1u, (flags >> 16) & 0x7u, (flags >> 12) & 0x1u, address);
+        SetPredication((flags >> 8) & 0x1u, (flags >> 16) & 0x7u, (flags >> 12) & 0x1u, address, (flags & (1u << 31)) != 0);
         return payloadDwords;
     }
 

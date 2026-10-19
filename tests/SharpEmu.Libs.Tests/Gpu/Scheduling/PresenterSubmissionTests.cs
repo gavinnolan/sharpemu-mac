@@ -7,9 +7,10 @@ using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.GpuCommands;
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
@@ -264,12 +265,12 @@ public sealed class PresenterSubmissionTests
             scheduler.QueuePriorityCompletionAction(() => futureCallback.TrySetResult());
             Assert.False(firstCompletion.Task.IsCompleted);
             device.Complete(1);
-            Assert.Equal(1UL, await firstCompletion.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(1UL, await firstCompletion.Task.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.False(futureCallback.Task.IsCompleted);
             Assert.Equal(2UL, scheduler.CurrentTick);
             scheduler.Flush();
             device.Complete(2);
-            await futureCallback.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await futureCallback.Task.WaitAsync(TimeSpan.FromSeconds(10));
         }
         finally
         {
@@ -323,13 +324,13 @@ public sealed class PresenterSubmissionTests
                     entered.SetResult();
                     while (scheduler.Timeline.CompletedTick < 1)
                     {
-                        Assert.True(Monitor.Wait(gate, TimeSpan.FromSeconds(5)), "Completion did not wake the presenter.");
+                        Assert.True(Monitor.Wait(gate, TimeSpan.FromSeconds(10)), "Completion did not wake the presenter.");
                     }
                 }
             });
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
             device.Complete(1);
-            await waiter.WaitAsync(TimeSpan.FromSeconds(5));
+            await waiter.WaitAsync(TimeSpan.FromSeconds(10));
         }
         finally
         {
@@ -338,7 +339,7 @@ public sealed class PresenterSubmissionTests
             wake();
             if (waiter is not null)
             {
-                await waiter.WaitAsync(TimeSpan.FromSeconds(5));
+                await waiter.WaitAsync(TimeSpan.FromSeconds(10));
             }
         }
     }

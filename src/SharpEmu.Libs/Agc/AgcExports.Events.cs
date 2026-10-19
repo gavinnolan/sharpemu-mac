@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Kernel;
@@ -69,6 +70,9 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
+        // PIXEL_PIPE_STAT_CONTROL (0x38) and PIXEL_PIPE_STAT_DUMP (0x39) carry an address:
+        // an occlusion query is a pair of dumps into its result block. Refusing them left
+        // the block as the guest cleared it, so every queried primitive read as occluded.
         var hasAddress = eventType is 0x38 or 0x39;
         var packetDwords = hasAddress ? 4u : 2u;
         var eventIndex = hasAddress ? 1u : eventType is 0x07 or 0x0F or 0x10 ? 4u : 0u;
@@ -117,6 +121,11 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int DcbSetFlip(CpuContext ctx)
     {
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            DsEmitFlip(ctx);
+        }
+
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var videoOutHandle = (uint)ctx[CpuRegister.Rsi];
         var displayBufferIndex = (int)ctx[CpuRegister.Rdx];
@@ -134,6 +143,25 @@ public static partial class AgcExports
 
         TraceAgc($"agc.dcb_set_flip buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} handle={videoOutHandle} index={displayBufferIndex} mode={flipMode} arg=0x{flipArg:X16}");
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    // DSTRACE §4.6 FLIP: the frame boundary, at the entry of sceAgcDcbSetFlip.
+    private static long _dsFlipSequence;
+
+    private static void DsEmitFlip(CpuContext ctx)
+    {
+        Span<ulong> returns = stackalloc ulong[1];
+        _ = DsGuestMem.ReturnChain(ctx[CpuRegister.Rbp], ctx[CpuRegister.Rsp], returns);
+        DsTrace.Emit(
+            DsEv.FLIP,
+            (ulong)Interlocked.Increment(ref _dsFlipSequence),
+            ctx[CpuRegister.Rdi],
+            ctx[CpuRegister.Rsi],
+            ctx[CpuRegister.Rdx],
+            ctx[CpuRegister.Rcx],
+            ctx[CpuRegister.R8],
+            DsTrace.CurrentRa1,
+            returns[0]);
     }
 
     [SysAbiExport(

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -48,7 +49,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Equal((0.1f, 0.2f, 0.3f, 0.4f), (state.BlendRed, state.BlendGreen, state.BlendBlue, state.BlendAlpha));
         Assert.True(state.DepthTestEnabled);
         Assert.True(state.DepthWriteEnabled);
-        Assert.Equal(CompareOp.Always, state.DepthCompare);
+        Assert.Equal(GpuCompareOp.Always, state.DepthCompare);
         Assert.False(state.DepthBiasEnabled);
         Assert.False(state.StencilTestEnabled);
         Assert.Equal((1u, (byte)1), (state.ColorWriteCount, state.ColorWriteEnableMask));
@@ -108,13 +109,30 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.True(_host.BegunRenderings[0].DepthStencilAttachment.DepthClear);
     }
 
+    [Fact]
+    public void DynamicState_ADepthWriteWithoutTheDepthTestWritesNothing()
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, depthTest: false, depthWrite: true);
+        var state = DrawAndTakeState(banks);
+
+        Assert.False(state.DepthTestEnabled);
+        Assert.False(state.DepthWriteEnabled);
+    }
+
+    // The front offset biases front faces and the back offset back faces; a face whose
+    // enable is off takes none, and two visible faces with different biases split the draw.
     [Theory]
-    [InlineData(true, false, false, false, true, 2f)]
-    [InlineData(false, true, false, false, true, 4f)]
-    [InlineData(true, false, true, false, false, 0f)]
-    [InlineData(true, true, true, false, true, 4f)]
-    [InlineData(false, false, false, false, false, 0f)]
-    public void DynamicState_DepthBiasFollowsTheEnabledUncooledFace(bool frontEnable, bool backEnable, bool cullFront, bool cullBack, bool expectedEnabled, float expectedConstant)
+    [InlineData(true, false, false, false, true, 2f, true, 0f)]
+    [InlineData(false, true, false, false, true, 0f, true, 4f)]
+    [InlineData(true, true, false, false, true, 2f, true, 4f)]
+    [InlineData(true, false, true, false, false, 0f, false, 0f)]
+    [InlineData(true, true, true, false, true, 4f, false, 0f)]
+    [InlineData(false, true, false, true, false, 0f, false, 0f)]
+    [InlineData(false, false, false, false, false, 0f, false, 0f)]
+    public void DynamicState_DepthBiasFollowsTheEnabledUncooledFace(
+        bool frontEnable, bool backEnable, bool cullFront, bool cullBack, bool expectedEnabled, float expectedConstant,
+        bool expectedPerFace, float expectedBackConstant)
     {
         var banks = Banks(withDepth: true);
         banks.Context.RasterMode = new RasterModeRegisters { PolygonOffsetFrontEnable = frontEnable, PolygonOffsetBackEnable = backEnable, CullFront = cullFront, CullBack = cullBack };
@@ -123,17 +141,36 @@ public sealed class RenderExecutorStateTests : IDisposable
 
         Assert.Equal(expectedEnabled, state.DepthBiasEnabled);
         Assert.Equal(expectedConstant, state.DepthBiasConstantFactor);
-        Assert.Equal(expectedEnabled ? (frontEnable && !cullFront ? 2f : 4f) : 0f, state.DepthBiasSlopeFactor);
+        Assert.Equal(expectedConstant, state.DepthBiasSlopeFactor);
         Assert.Equal(expectedEnabled ? 0.5f : 0f, state.DepthBiasClamp);
+        Assert.Equal(expectedPerFace, state.DepthBiasPerFace);
+        Assert.Equal(expectedBackConstant, state.DepthBiasBackConstantFactor);
+        Assert.Equal(expectedBackConstant, state.DepthBiasBackSlopeFactor);
+    }
+
+    // Points and lines take the front offset under POLY_OFFSET_PARA_ENABLE alone.
+    [Theory]
+    [InlineData(false, true, 2f)]
+    [InlineData(true, false, 0f)]
+    public void DynamicState_PointAndLineBiasFollowsTheParaEnable(bool frontEnable, bool paraEnable, float expected)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.RasterMode = new RasterModeRegisters { PolygonOffsetFrontEnable = frontEnable, PolygonOffsetParaEnable = paraEnable };
+        banks.Context.PolygonOffset = new PolygonOffsetRegisters { FrontOffset = 2f, BackOffset = 4f, FrontScale = 32f, BackScale = 64f };
+        var state = DrawAndTakeState(banks);
+
+        Assert.Equal(expected, state.DepthBiasPointLineConstantFactor);
+        Assert.Equal(expected, state.DepthBiasPointLineSlopeFactor);
     }
 
     [Theory]
-    [InlineData(true, -23, Format.D16Unorm, 1f)]
-    [InlineData(false, -23, Format.D32Sfloat, 1f)]
-    [InlineData(false, -23, Format.D16Unorm, 1f / 128f)]
-    [InlineData(false, -23, Format.D24UnormS8Uint, 2f)]
-    [InlineData(false, -16, Format.D16UnormS8Uint, 1f)]
-    public void DepthBiasConstantFactor_ScalesFixedPointFormatsByTheHostDepthBits(bool isFloat, int negativeBits, Format format, float expected)
+    [InlineData(true, -23, GpuFormat.D16Unorm, 1f)]
+    [InlineData(false, -23, GpuFormat.D32Sfloat, 2f)]
+    [InlineData(false, -24, GpuFormat.D32Sfloat, 1f)]
+    [InlineData(false, -23, GpuFormat.D16Unorm, 1f / 128f)]
+    [InlineData(false, -23, GpuFormat.D24UnormS8Uint, 2f)]
+    [InlineData(false, -16, GpuFormat.D16UnormS8Uint, 1f)]
+    public void DepthBiasConstantFactor_ScalesFixedPointFormatsByTheHostDepthBits(bool isFloat, int negativeBits, GpuFormat format, float expected)
     {
         var offset = new PolygonOffsetRegisters { DepthIsFloat = isFloat, NegativeDepthBits = (sbyte)negativeBits };
         Assert.Equal(expected, RenderExecutor.DepthBiasConstantFactor(1f, in offset, format));
@@ -340,13 +377,13 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Equal(rendering, Assert.Single(_pipelines.PipelineRenderings));
         Assert.Equal((64u, 64u, 1u, 1u, 1u), (rendering.Width, rendering.Height, rendering.Layers, rendering.ColorAttachmentCount, rendering.Samples));
         var color = rendering.ColorAttachments[0];
-        Assert.Equal((new ImageView(0x1001), ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, false), (color.View, color.Layout, color.Format, color.IsClear));
+        Assert.Equal((new GpuImageHandle(0x1001), GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm, false), (color.View, color.Layout, color.Format, color.IsClear));
         var depth = rendering.DepthStencilAttachment;
-        Assert.Equal((new ImageView(0x2002), Format.D32Sfloat, true, false, false, false), (depth.View, depth.Format, depth.HasDepth, depth.DepthClear, depth.HasStencil, depth.StencilClear));
-        Assert.Equal(ImageLayout.DepthAttachmentOptimal, depth.Layout);
-        Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
-        Assert.Equal(Format.Undefined, rendering.StencilFormat);
-        Assert.Contains($"transition_depth 2 {ImageLayout.DepthAttachmentOptimal} {ImageAspectFlags.DepthBit} loadClear=False", _host.Calls);
+        Assert.Equal((new GpuImageHandle(0x2002), GpuFormat.D32Sfloat, true, false, false, false), (depth.View, depth.Format, depth.HasDepth, depth.DepthClear, depth.HasStencil, depth.StencilClear));
+        Assert.Equal(GpuImageLayout.DepthAttachmentOptimal, depth.Layout);
+        Assert.Equal(GpuFormat.D32Sfloat, rendering.DepthFormat);
+        Assert.Equal(GpuFormat.Undefined, rendering.StencilFormat);
+        Assert.Contains($"transition_depth 2 {GpuImageLayout.DepthAttachmentOptimal} {GpuImageAspect.DepthBit} loadClear=False", _host.Calls);
     }
 
     [Theory]
@@ -354,7 +391,7 @@ public sealed class RenderExecutorStateTests : IDisposable
     [InlineData(true)]
     public void Attachments_ADccMetadataClearReplacesTheClearValueAndLoadsAClear(bool fastClearEnabled)
     {
-        var clearValue = default(ClearColorValue);
+        var clearValue = default(GpuClearColor);
         clearValue.Uint32_0 = 0x11;
         clearValue.Uint32_3 = 0x44;
         _host.ColorMetadataClears[ColorBase] = clearValue;
@@ -381,9 +418,9 @@ public sealed class RenderExecutorStateTests : IDisposable
 
         var depth = _host.BegunRenderings[0].DepthStencilAttachment;
         Assert.True(depth.DepthClear);
-        Assert.Equal(ImageLayout.DepthAttachmentOptimal, depth.Layout);
+        Assert.Equal(GpuImageLayout.DepthAttachmentOptimal, depth.Layout);
         Assert.True(_host.DynamicStates[0].DepthWriteEnabled);
-        Assert.Contains($"transition_depth 2 {ImageLayout.DepthAttachmentOptimal} {ImageAspectFlags.DepthBit} loadClear=True", _host.Calls);
+        Assert.Contains($"transition_depth 2 {GpuImageLayout.DepthAttachmentOptimal} {GpuImageAspect.DepthBit} loadClear=True", _host.Calls);
     }
 
     [Fact]
@@ -393,8 +430,8 @@ public sealed class RenderExecutorStateTests : IDisposable
         banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, depthWrite: false);
         _executor.DrawIndexed(1, banks, Indexed(3));
 
-        Assert.Equal(ImageLayout.DepthReadOnlyOptimal, _host.BegunRenderings[0].DepthStencilAttachment.Layout);
-        Assert.Contains($"transition_depth 2 {ImageLayout.DepthReadOnlyOptimal} {ImageAspectFlags.None} loadClear=False", _host.Calls);
+        Assert.Equal(GpuImageLayout.DepthReadOnlyOptimal, _host.BegunRenderings[0].DepthStencilAttachment.Layout);
+        Assert.Contains($"transition_depth 2 {GpuImageLayout.DepthReadOnlyOptimal} {GpuImageAspect.None} loadClear=False", _host.Calls);
     }
 
     [Fact]
@@ -407,7 +444,7 @@ public sealed class RenderExecutorStateTests : IDisposable
 
         var rendering = _host.BegunRenderings[0];
         Assert.Equal((0u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
-        Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
+        Assert.Equal(GpuFormat.D32Sfloat, rendering.DepthFormat);
         Assert.Contains("create_graphics_pipeline colors=0 depth=True topology=TriangleList restart=False", _pipelines.Calls);
     }
 
@@ -425,6 +462,27 @@ public sealed class RenderExecutorStateTests : IDisposable
 
         var rendering = _host.BegunRenderings[0];
         Assert.Equal((expectedColors, expectedExtent, expectedExtent), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+    }
+
+    [Fact]
+    public void Attachments_TheDepthPassKeepsTheTargetsTheCompactedExportsReach()
+    {
+        // Unreal's base pass exports MRT0 and MRT1 with CB_SHADER_MASK enabling slots 0 and 2:
+        // the second export lands in slot 2, and slot 1 is bound but written by nothing. Testing
+        // the export mask at the slot number dropped slot 2 and kept slot 1, so the stationary
+        // lights' precomputed shadow factors never reached their G-buffer.
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 32, 32);
+        banks.Context.ColorTargets[2] = RegisterWords.Color(RecordingRenderHost.MemoryBase + 0x40_0000, 64, 64);
+        banks.Context.RenderTargetMask = 0xFFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xF0F;
+        banks.Context.ShaderInterface.TargetOutputModes[0] = 4;
+        banks.Context.ShaderInterface.TargetOutputModes[1] = 4;
+        _pipelines.Graphics = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = 0xFF }));
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = _host.BegunRenderings[0];
+        Assert.Equal((2u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
     }
 
     [Fact]
@@ -450,7 +508,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         var rendering = _host.BegunRenderings[0];
         Assert.True(rendering.DepthStencilAttachment.HasStencil);
         Assert.Equal(rendering.DepthStencilAttachment.Format, rendering.StencilFormat);
-        Assert.NotEqual(Format.Undefined, rendering.StencilFormat);
+        Assert.NotEqual(GpuFormat.Undefined, rendering.StencilFormat);
     }
 
     [Fact]
@@ -594,7 +652,15 @@ public sealed class RenderExecutorStateTests : IDisposable
     {
         { "user vectors", banks => banks.UserConfig.GeometryEngineUserVectorEnable = new GeometryEngineUserVectorEnableRegisters { VectorRegister2 = true }, "v1=False v2=True v3=False" },
         { "line stipple", banks => banks.Context.ScanMode = new ScanModeRegisters { LineStippleEnable = true }, "Line stipple" },
-        { "clip planes", banks => banks.Context.Clip = new ClipControlRegisters { UserClipPlanes = 3 }, "planes=3" },
+        {
+            "point sprite clip planes",
+            banks =>
+            {
+                banks.Context.Clip = new ClipControlRegisters { UserClipPlanes = 3, UserClipPlaneMode = 2 };
+                banks.UserConfig.PrimitiveType = (uint)GuestPrimitiveType.PointList;
+            },
+            "planes=0x03 mode=2"
+        },
         { "copy centroid", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 1u << 7 }, "renderControl=0x00000080" },
         { "copy sample", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 2u << 8 }, "copySample=2" },
         { "front polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { FrontPolygonType = 1 }, "type=1" },

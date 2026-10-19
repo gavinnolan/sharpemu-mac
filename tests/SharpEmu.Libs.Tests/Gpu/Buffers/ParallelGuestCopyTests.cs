@@ -3,7 +3,7 @@
 
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
-using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Gpu.Vulkan.Buffers;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Buffers;

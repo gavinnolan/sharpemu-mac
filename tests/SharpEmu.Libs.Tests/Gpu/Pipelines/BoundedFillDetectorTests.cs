@@ -207,6 +207,46 @@ public sealed class BoundedFillDetectorTests
         Assert.Null(BoundedFillDetector.Detect(program));
     }
 
+    // Demon's Souls 0xDC18751CB6791EF9: if (gid < cb[0]) dst[gid] = src[gid & cb[1]], with src in
+    // s[0:3], dst in s[4:7] and the constants in s[8:11].
+    private static readonly uint[] DemonsSoulsMaskedCopy =
+    [
+        0xBEFC03FF, 0x94E6DD39, 0xBF960000, 0xBFA00003, 0xD7460000, 0x04010C0C, 0xF4201A84, 0xFA000000,
+        0xBF8CC07F, 0x7DA8006A, 0xBF880009, 0xF4201A84, 0xFA000004, 0xBF8CC07F, 0x3602006A, 0xE0002000,
+        0x80000101, 0xBF8C3F70, 0xE0102000, 0x80010100, 0xBF810000,
+    ];
+
+    [Fact]
+    public void TheDemonsSoulsMaskedCopyIsRecognized()
+    {
+        var program = Decode(DemonsSoulsMaskedCopy);
+        Assert.Equal("VAndB32", program.Instructions.Single(instruction => instruction.Pc == 0x38).Opcode);
+        var copy = BoundedFillDetector.DetectCopy(program);
+
+        Assert.NotNull(copy);
+        static FillWord User(uint register) => new(FillWordSource.UserData, register, 0, 0);
+        Assert.True(copy.MaskIndex);
+        Assert.Equal(12u, copy.GroupScalarRegister);
+        Assert.Equal(new FillWord(FillWordSource.BufferResource, 8, 0, 0), copy.Count);
+        Assert.Equal(new FillWord(FillWordSource.BufferResource, 8, 0, 4), copy.Modulus);
+        Assert.Equal([User(0), User(1), User(2), User(3)], copy.Source);
+        Assert.Equal([User(4), User(5), User(6), User(7)], copy.Destination);
+        Assert.Null(BoundedFillDetector.Detect(program));
+        Assert.False(BoundedFillDetector.DetectCopy(Decode(DemonsSoulsModuloCopy))!.MaskIndex);
+    }
+
+    [Theory]
+    [InlineData(0x80010100u, 0x80010101u)] // stores at the masked index
+    [InlineData(0x80000101u, 0x80000100u)] // loads at the unmasked index
+    [InlineData(0xBF880009u, 0xBF880008u)] // the empty exec mask skips somewhere else
+    [InlineData(0x80010100u, 0x80010000u)] // stores the index, not the loaded value
+    public void AMaskedCopyThatIsNotDstAtIndexFromSrcAtMaskIsRejected(uint original, uint replacement)
+    {
+        var words = DemonsSoulsMaskedCopy.ToArray();
+        words[Array.IndexOf(words, original)] = replacement;
+        Assert.Null(BoundedFillDetector.DetectCopy(Decode(words)));
+    }
+
     [Fact]
     public void AModuloCopyStoringAtTheRemainderIsRejected()
     {

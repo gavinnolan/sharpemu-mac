@@ -15,7 +15,7 @@ namespace SharpEmu.Libs.Gpu;
 /// <summary>A guest texture referenced by a draw or dispatch. Format/NumberType/
 /// TileMode/DstSelect/Type are raw guest descriptor codes. Depth is the
 /// normalized volume depth (one for non-3D resources).</summary>
-internal sealed record GuestDrawTexture(
+public sealed record GuestDrawTexture(
     ulong Address,
     uint Width,
     uint Height,
@@ -50,15 +50,28 @@ internal sealed record GuestDrawTexture(
     // payloads can be smaller because tiled mip padding is not uploaded.
     ulong SourceByteCount = 0,
     // False when the guest changed the backing range while AGC copied it.
-    // Backends must retain an older cached image instead of publishing these
-    // bytes or performing an unprotected recovery read.
+    // Backends must not publish unstable bytes or perform a late unprotected
+    // recovery read. A retained image requires a safe lifetime/freshness
+    // reservation; otherwise the backend must explicitly reject the snapshot.
     bool CpuSnapshotStable = true,
     // The raw resource descriptor dwords and the shape the shader module was compiled with.
     uint[]? Descriptor = null,
-    ShaderImageShape Shape = default);
+    ShaderImageShape Shape = default,
+    GuestImageAccess Access = GuestImageAccess.Unknown);
+
+/// <summary>Instruction-derived image intent. Unknown is distinct from a
+/// read-only storage binding; resource class alone never establishes a write.</summary>
+[Flags]
+public enum GuestImageAccess : byte
+{
+    Unknown = 0,
+    Read = 1,
+    Write = 2,
+    Atomic = 4,
+}
 
 /// <summary>One linear mip range in a texture staging buffer.</summary>
-internal readonly record struct GuestTextureMipUpload(
+public readonly record struct GuestTextureMipUpload(
     ulong BufferOffset,
     uint MipLevel,
     uint Width,
@@ -66,7 +79,7 @@ internal readonly record struct GuestTextureMipUpload(
     uint RowLength);
 
 /// <summary>Raw guest sampler descriptor dwords, copied verbatim from guest memory.</summary>
-internal readonly record struct GuestSampler(
+public readonly record struct GuestSampler(
     uint Word0,
     uint Word1,
     uint Word2,
@@ -74,7 +87,7 @@ internal readonly record struct GuestSampler(
 
 /// <summary>Identity of texture content in a backend cache. Sampling state is
 /// not part of the content. The backend binds a sampler for each image use.</summary>
-internal readonly record struct TextureContentIdentity(
+public readonly record struct TextureContentIdentity(
     ulong Address,
     uint Width,
     uint Height,
@@ -92,11 +105,11 @@ internal readonly record struct TextureContentIdentity(
 /// <summary>One content identity as observed through a sampler binding. A new
 /// binding must ship texels once so the backend can detect content that changed
 /// before write tracking became available.</summary>
-internal readonly record struct TextureCacheLookupIdentity(
+public readonly record struct TextureCacheLookupIdentity(
     TextureContentIdentity Content,
     GuestSampler Sampler);
 
-internal enum GuestStageKind
+public enum GuestStageKind
 {
     Vertex,
     Pixel,
@@ -104,10 +117,10 @@ internal enum GuestStageKind
 }
 
 // One merged device-address range of a draw: its first page, page count and the uploaded buffer.
-internal readonly record struct GuestAddressRange(uint FirstPage, uint PageCount, int BufferIndex);
+public readonly record struct GuestAddressRange(uint FirstPage, uint PageCount, int BufferIndex);
 
 // What each field of one stage's argument buffer names among the draw's buffers and textures.
-internal sealed record GuestStageBindings(
+public sealed record GuestStageBindings(
     GuestStageKind Stage,
     int[] BufferIndices,
     int[] ImageElements,
@@ -121,7 +134,7 @@ internal sealed record GuestStageBindings(
     ulong ProgramHash);
 
 // Size is the guest extent; Data carries bytes only for host-owned buffers and snapshot backends.
-internal sealed record GuestMemoryBuffer(
+public sealed record GuestMemoryBuffer(
     ulong BaseAddress,
     byte[] Data,
     int Length,
@@ -131,7 +144,7 @@ internal sealed record GuestMemoryBuffer(
     bool WriteBackToGuest = true);
 
 /// <summary>DataFormat/NumberFormat are raw guest vertex-attribute codes.</summary>
-internal sealed record GuestVertexBuffer(
+public sealed record GuestVertexBuffer(
     uint Location,
     uint ComponentCount,
     uint DataFormat,
@@ -144,7 +157,7 @@ internal sealed record GuestVertexBuffer(
     bool Pooled,
     bool PerInstance = false);
 
-internal sealed record GuestIndexBuffer(
+public sealed record GuestIndexBuffer(
     byte[] Data,
     int Length,
     bool Is32Bit,
@@ -176,7 +189,7 @@ internal sealed record GuestIndexBuffer(
 /// This class owns one pool lease. Record copies share this class. Thus, only
 /// one copy can return the array. A late copy cannot return a newer lease.
 /// </summary>
-internal sealed class GuestIndexBufferLease
+public sealed class GuestIndexBufferLease
 {
     private readonly byte[] _data;
     private int _returned;
@@ -187,6 +200,9 @@ internal sealed class GuestIndexBufferLease
     }
 
     public bool Returned => Volatile.Read(ref _returned) != 0;
+
+    /// <summary>Descriptor/lease array identity only; this is not an exclusive lifetime proof.</summary>
+    public bool Owns(byte[] data) => ReferenceEquals(_data, data);
 
     public bool TryReturn()
     {
@@ -200,13 +216,13 @@ internal sealed class GuestIndexBufferLease
     }
 }
 
-internal readonly record struct GuestRect(
+public readonly record struct GuestRect(
     int X,
     int Y,
     uint Width,
     uint Height);
 
-internal readonly record struct GuestViewport(
+public readonly record struct GuestViewport(
     float X,
     float Y,
     float Width,
@@ -214,7 +230,7 @@ internal readonly record struct GuestViewport(
     float MinDepth,
     float MaxDepth);
 
-internal readonly record struct GuestRasterState(
+public readonly record struct GuestRasterState(
     bool CullFront,
     bool CullBack,
     bool FrontFaceClockwise,
@@ -241,7 +257,7 @@ internal readonly record struct GuestRasterState(
     }
 }
 
-internal readonly record struct GuestStencilFaceState(
+public readonly record struct GuestStencilFaceState(
     uint FailOp,
     uint PassOp,
     uint DepthFailOp,
@@ -254,7 +270,7 @@ internal readonly record struct GuestStencilFaceState(
 // CompareOp uses the GCN DB_DEPTH_CONTROL ZFUNC encoding, which matches the
 // Vulkan CompareOp ordering (0=Never through 7=Always). Stencil operations
 // retain their raw DB_STENCIL_CONTROL encodings for backend translation.
-internal readonly record struct GuestDepthState(
+public readonly record struct GuestDepthState(
     bool TestEnable,
     bool WriteEnable,
     uint CompareOp,
@@ -272,7 +288,7 @@ internal readonly record struct GuestDepthState(
 
 /// <summary>Factors/funcs are raw guest CB_BLEND*_CONTROL register bitfields; the
 /// defaults (1/0) are the guest ONE/ZERO codes.</summary>
-internal readonly record struct GuestBlendState(
+public readonly record struct GuestBlendState(
     bool Enable,
     uint ColorSrcFactor,
     uint ColorDstFactor,
@@ -298,13 +314,13 @@ internal readonly record struct GuestBlendState(
 /// <summary>CB_BLEND_RED..ALPHA: the constant color referenced by the
 /// CONSTANT_COLOR / CONSTANT_ALPHA blend factors. One constant serves every
 /// render target of a draw; the hardware reset value is transparent black.</summary>
-internal readonly record struct GuestBlendConstant(
+public readonly record struct GuestBlendConstant(
     float Red,
     float Green,
     float Blue,
     float Alpha);
 
-internal sealed record GuestRenderState(
+public sealed record GuestRenderState(
     IReadOnlyList<GuestBlendState> Blends,
     GuestRect? Scissor,
     GuestViewport? Viewport,
@@ -324,7 +340,7 @@ internal sealed record GuestRenderState(
 }
 
 /// <summary>Format, NumberType, ComponentSwap, and TileMode are raw guest render-target codes.</summary>
-internal sealed record GuestRenderTarget(
+public sealed record GuestRenderTarget(
     ulong Address,
     uint Width,
     uint Height,
@@ -338,7 +354,7 @@ internal sealed record GuestRenderTarget(
     uint WriteMask = 0xF);
 
 /// <summary>Guest DB surface bound alongside a color render target.</summary>
-internal sealed record GuestDepthTarget(
+public sealed record GuestDepthTarget(
     ulong ReadAddress,
     ulong WriteAddress,
     uint Width,
@@ -368,7 +384,7 @@ internal sealed record GuestDepthTarget(
 }
 
 /// <summary>Separates an attachment clear from a direct DB clear operation.</summary>
-internal readonly record struct GuestDepthClearMode(
+public readonly record struct GuestDepthClearMode(
     bool ClearDepthAttachment,
     bool ClearStencilAttachment,
     bool SuppressDrawDepthState,

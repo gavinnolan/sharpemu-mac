@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -133,5 +134,5 @@ public sealed class DrawImageTypeRejectionTests
     }
 
     private static DrawImageTypeMismatchException Mismatch() =>
-        new(0x1234, 0x213590000, ImageType.Type1D, ImageViewType.Type2D);
+        new(0x1234, 0x213590000, GpuImageType.Type1D, GpuImageViewType.Type2D);
 }

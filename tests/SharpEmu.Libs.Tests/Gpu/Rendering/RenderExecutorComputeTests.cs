@@ -500,7 +500,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
 
     private const ulong CopySource = RecordingRenderHost.MemoryBase + 0x71_0000;
 
-    private void ConfigureBoundedCopy(uint count, uint modulus, uint sourceRecords, uint destinationRecords, uint sourceFormat = Format32UInt)
+    private void ConfigureBoundedCopy(uint count, uint modulus, uint sourceRecords, uint destinationRecords, uint sourceFormat = Format32UInt, bool mask = false)
     {
         static SharpEmu.Libs.Gpu.Pipelines.FillWord User(uint register) =>
             new(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.UserData, register, 0, 0);
@@ -510,7 +510,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
             new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 8, 0, 0),
             new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 8, 0, 4),
             [User(0), User(1), User(2), User(3)],
-            [User(4), User(5), User(6), User(7)]);
+            [User(4), User(5), User(6), User(7)],
+            mask);
         var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0xF333, BoundedCopy = copy };
         var source = BufferDescriptor(CopySource, 4, sourceRecords, format: sourceFormat);
         var destination = BufferDescriptor(MetadataAddress, 4, destinationRecords, format: Format32UInt);
@@ -564,6 +565,30 @@ public sealed class RenderExecutorComputeTests : IDisposable
         AssertDispatched(1, 1, 1);
     }
 
+    [Theory]
+    [InlineData(0u, 1u)]
+    [InlineData(3u, 4u)]
+    [InlineData(0xFFFFFFFFu, 64u)]
+    public void MaskedCopy_RepeatsWithThePeriodOfItsLowBitMask(uint mask, uint sourceWords)
+    {
+        ConfigureBoundedCopy(count: 0x40, modulus: mask, sourceRecords: 0x40, destinationRecords: 0x40, mask: true);
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.Contains($"host_copy {MetadataAddress:X} {CopySource:X} {sourceWords} 64", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void MaskedCopyWithAMaskThatIsNotLowBits_IsDispatched()
+    {
+        ConfigureBoundedCopy(count: 0x40, modulus: 0x5, sourceRecords: 0x40, destinationRecords: 0x40, mask: true);
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("host_copy", StringComparison.Ordinal));
+        Assert.Contains("kernel_fill_fallback copy-mask", _host.Calls);
+        AssertDispatched(1, 1, 1);
+    }
+
     [Fact]
     public void BoundedCopyTheHostRefuses_IsDispatched()
     {
@@ -614,6 +639,30 @@ public sealed class RenderExecutorComputeTests : IDisposable
 
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("fill_dcc", StringComparison.Ordinal));
         AssertDispatched(16, 1, 1);
+    }
+
+    [Fact]
+    public void AVaryingPatternFill_IsOfferedToTheHostAsAnImageClear()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress);
+        _host.KernelFillAccepted = true;
+        ConfigurePatternFill(count: 0x400, length: 2, pattern: [0x3C003C00, 0x3C000000, 0, 0]);
+        _executor.Dispatch(1, Banks(), 0x400, 1, 1, 0x61);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("fill_dcc", StringComparison.Ordinal));
+        Assert.Contains($"kernel_fill {MetadataAddress:X} 1000 3C003C00,3C000000", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void ABoundedFillOutsideDccMetadata_IsOfferedToTheHostAsAnImageClear()
+    {
+        _host.KernelFillAccepted = true;
+        ConfigureBoundedFill(start: 0x10, count: 0x300, records: 0x400);
+        _executor.Dispatch(1, Banks(), 16, 1, 1, 0x41);
+
+        Assert.Contains($"kernel_fill {MetadataAddress + 0x40:X} C00 00000000", _host.Calls);
+        AssertNotDispatched();
     }
 
     [Fact]

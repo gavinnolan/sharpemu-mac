@@ -2,20 +2,33 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
 // The static state of a stage as one word list; two draws with equal lists share a program entry.
 public static class StageStaticKey
 {
-    public const int MaxWords = 15 + VertexInputInfo.MaxBuffers * 13;
+    // The nine trailing words are the NGG primitive-shader state (see the vertex key).
+    // The clip-space part adds up to two depth-remap words and the user clip planes.
+    public const int MaxWords = 16 + 2 + 1 + (SharpEmu.Libs.Gpu.GpuCommands.Registers.ContextRegisters.UserClipPlaneCount * 4) + 9 + VertexInputInfo.MaxBuffers * 13;
 
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 
     private static uint Bit(bool value) => value ? 1u : 0u;
 
     // The vertex key adds the required output count the paired pixel program declares.
-    public static void Build(VertexInputInfo info, int requiredOutputCount, List<uint> key)
+    public static void Build(VertexInputInfo info, int requiredOutputCount, List<uint> key) =>
+        Build(info, requiredOutputCount, null, key);
+
+    // A primitive-shader draw compiles the same program differently - as the merged ES/GS
+    // workgroup stage, sized by the geometry-engine registers - so that state belongs in
+    // the key or two draws would share one permutation.
+    public static void Build(
+        VertexInputInfo info,
+        int requiredOutputCount,
+        Gen5NggStageInfo? primitiveShader,
+        List<uint> key)
     {
         key.Clear();
         key.Add(Bit(info.FetchEmbedded));
@@ -23,20 +36,28 @@ public static class StageStaticKey
         key.Add((uint)info.FetchBufferRegister);
         key.Add((uint)info.Attributes.Length);
         key.Add(Bit(info.IeeeMode));
+        key.Add(info.FloatMode);
+        key.Add(Bit(info.Dx10Clamp));
         key.Add(info.ScratchDwords);
         key.Add(info.PositionExportControl);
-        key.Add(Bit(info.ClipSpace.Enabled));
-        if (info.ClipSpace.Enabled)
-        {
-            key.Add(Bits(info.ClipSpace.ScaleX));
-            key.Add(Bits(info.ClipSpace.ScaleY));
-            key.Add(Bits(info.ClipSpace.OffsetX));
-            key.Add(Bits(info.ClipSpace.OffsetY));
-            key.Add(Bits(info.ClipSpace.HalfExtentX));
-            key.Add(Bits(info.ClipSpace.HalfExtentY));
-        }
+        AddClipSpace(info.ClipSpace, key);
 
         key.Add((uint)requiredOutputCount);
+        key.Add(Bit(primitiveShader.HasValue));
+        if (primitiveShader is { } ngg)
+        {
+            key.Add(ngg.VerticesPerSubgroup);
+            key.Add(ngg.PrimitivesPerSubgroup);
+            key.Add(ngg.MaxOutputPerSubgroup);
+            key.Add(ngg.OutputPrimitiveType);
+            key.Add(ngg.PrimitiveAmplificationFactor);
+            key.Add(ngg.LocalDataShareBytes);
+            key.Add(ngg.VertexGroupSize);
+            key.Add(ngg.PrimitiveGroupSize);
+            key.Add(ngg.GeometryVerticesOut);
+            key.Add(Bit(ngg.Passthrough));
+        }
+
         foreach (var attribute in info.Attributes)
         {
             var descriptor = attribute.Descriptor;
@@ -59,7 +80,10 @@ public static class StageStaticKey
     public static void Build(PixelInputInfo info, List<uint> key)
     {
         key.Clear();
+        key.Add(Bit(info.GuestWave32));
         key.Add(Bit(info.IeeeMode));
+        key.Add(info.FloatMode);
+        key.Add(Bit(info.Dx10Clamp));
         key.Add(info.ScratchDwords);
         key.Add(info.InputCount);
         key.Add(info.SystemInputBase);
@@ -70,10 +94,13 @@ public static class StageStaticKey
         key.Add(Bit(info.PositionZ));
         key.Add(Bit(info.PositionW));
         key.Add(Bit(info.FrontFace));
+        key.Add(Bit(info.FrontFaceAllBits));
         key.Add(Bit(info.NoPerspective));
         key.Add(Bit(info.KillEnable));
         key.Add(Bit(info.DepthExportEnable));
         key.Add(Bit(info.SampleMaskExportEnable));
+        key.Add(Bit(info.StencilExportEnable));
+        key.Add(info.DepthExportFormat is { } depthFormat ? (uint)depthFormat : uint.MaxValue);
         key.Add(Bit(info.EarlyDepth));
         for (var index = 0; index < info.TargetOutputModes.Length; index++)
         {
@@ -116,15 +143,41 @@ public static class StageStaticKey
         key.Add(info.Geometry.LocalDataShareDwords);
         key.Add(info.Geometry.PositionExportControl);
         key.Add((uint)requiredOutputCount);
-        key.Add(Bit(info.Geometry.ClipSpace.Enabled));
-        if (info.Geometry.ClipSpace.Enabled)
+        AddClipSpace(info.Geometry.ClipSpace, key);
+    }
+
+    // The clip-space part of a vertex or mesh key: the clip-disabled viewport transform and the
+    // guest clip-space conventions the program applies.
+    private static void AddClipSpace(in ClipSpaceTransform clipSpace, List<uint> key)
+    {
+        key.Add(Bit(clipSpace.Enabled));
+        if (clipSpace.Enabled)
         {
-            key.Add(Bits(info.Geometry.ClipSpace.ScaleX));
-            key.Add(Bits(info.Geometry.ClipSpace.ScaleY));
-            key.Add(Bits(info.Geometry.ClipSpace.OffsetX));
-            key.Add(Bits(info.Geometry.ClipSpace.OffsetY));
-            key.Add(Bits(info.Geometry.ClipSpace.HalfExtentX));
-            key.Add(Bits(info.Geometry.ClipSpace.HalfExtentY));
+            key.Add(Bits(clipSpace.ScaleX));
+            key.Add(Bits(clipSpace.ScaleY));
+            key.Add(Bits(clipSpace.OffsetX));
+            key.Add(Bits(clipSpace.OffsetY));
+            key.Add(Bits(clipSpace.HalfExtentX));
+            key.Add(Bits(clipSpace.HalfExtentY));
+        }
+
+        key.Add(Bit(clipSpace.DepthNegativeOneToOne) | (Bit(clipSpace.PositionYDown) << 1) |
+            (Bit(clipSpace.PositionXMirror) << 2) | ((uint)clipSpace.DepthPlanes << 3) |
+            (Bit(clipSpace.XyPreDivided) << 6) | (Bit(clipSpace.ZPreDivided) << 7) |
+            (Bit(clipSpace.WReciprocal) << 8) | (Bit(clipSpace.DepthRemap) << 9));
+        if (clipSpace.DepthRemap)
+        {
+            key.Add(Bits(clipSpace.DepthScale));
+            key.Add(Bits(clipSpace.DepthOffset));
+        }
+
+        if (clipSpace.UserClipPlanes is { Length: > 0 } userClipPlanes)
+        {
+            key.Add(((uint)userClipPlanes.Length << 1) | Bit(clipSpace.UserClipPlanesCullOnly));
+            foreach (var coefficient in userClipPlanes)
+            {
+                key.Add(Bits(coefficient));
+            }
         }
     }
 
@@ -137,6 +190,8 @@ public static class StageStaticKey
         key.Add((uint)info.ThreadIdCount);
         key.Add(info.LocalDataShareDwords);
         key.Add(Bit(info.IeeeMode));
+        key.Add(info.FloatMode);
+        key.Add(Bit(info.Dx10Clamp));
         key.Add(info.ScratchDwords);
         key.Add(Bit(info.NeedsLocalDataShareBarriers));
         key.Add(Bit(info.DispatchThreadDimensions));

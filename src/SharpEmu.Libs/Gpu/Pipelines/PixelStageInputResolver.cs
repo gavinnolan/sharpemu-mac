@@ -41,7 +41,7 @@ public static class PixelStageInputResolver
         var address = shaderInterface.PixelInputAddress;
         if ((enable & ~SupportedInputBits) != 0 || (address & ~SupportedInputBits) != 0 || enable != address)
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The pixel input registers are not supported: shader=0x{shaderAddress:X16} enable=0x{enable:X8} address=0x{address:X8}.");
         }
 
@@ -63,7 +63,10 @@ public static class PixelStageInputResolver
         ShaderInterfaceRegisters shaderInterface,
         ReadOnlySpan<byte> targetOutputModes,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        uint inputCount)
+        uint inputCount,
+        bool depthAspectBound,
+        bool stencilAspectBound = false,
+        PixelInputArrays? reuse = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var customMask = 0u;
@@ -72,7 +75,7 @@ public static class PixelStageInputResolver
         {
             if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out var word))
             {
-                throw SubmissionScheduler.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
+                throw GpuFatal.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
             }
 
             var semantic = new ShaderInputSemantic(word);
@@ -82,23 +85,24 @@ public static class PixelStageInputResolver
             }
         }
 
-        var interpolators = new uint[PixelInputInfo.InterpolatorCount];
+        Span<uint> interpolators = stackalloc uint[PixelInputInfo.InterpolatorCount];
         for (var index = 0u; index < inputCount; index++)
         {
             // An unwritten slot maps attribute n to parameter n.
-            interpolators[index] = (shaderInterface.PixelInterpolatorWritten & (1u << (int)index)) != 0
+            interpolators[(int)index] = (shaderInterface.PixelInterpolatorWritten & (1u << (int)index)) != 0
                 ? shaderInterface.PixelInterpolatorSettings[index]
                 : index;
         }
 
-        var outputModes = new byte[PixelInputInfo.TargetCount];
-        var mappings = new ColorComponentMap[PixelInputInfo.TargetCount];
+        Span<byte> outputModes = stackalloc byte[PixelInputInfo.TargetCount];
+        Span<ColorComponentMap> mappings = stackalloc ColorComponentMap[PixelInputInfo.TargetCount];
         for (var index = 0; index < PixelInputInfo.TargetCount; index++)
         {
             outputModes[index] = targetOutputModes[index];
             mappings[index] = outputModes[index] != 0 ? targetExportMapping[index] : default;
         }
 
+        reuse ??= new PixelInputArrays();
         var control = shaderInterface.DepthShaderControl;
         return new PixelInputInfo
         {
@@ -108,23 +112,47 @@ public static class PixelStageInputResolver
             PerspectiveCenterRegister = (activeInputs & InputPerspectiveCenter) != 0
                 ? ((activeInputs & InputPerspectiveSample) != 0 ? 2u : 0u)
                 : PixelInputInfo.NoPerspectiveCenterRegister,
-            InterpolatorSettings = interpolators,
-            TargetOutputModes = outputModes,
-            TargetExportFormats = shaderInterface.TargetOutputModes.ToArray(),
-            TargetExportMappings = mappings,
+            InterpolatorSettings = PixelInputArrays.Share(interpolators, ref reuse.Interpolators),
+            TargetOutputModes = PixelInputArrays.Share(outputModes, ref reuse.OutputModes),
+            TargetExportMappings = PixelInputArrays.Share(mappings, ref reuse.ExportMappings),
+            TargetExportFormats = PixelInputArrays.Share<byte>(shaderInterface.TargetOutputModes, ref reuse.ExportFormats),
             ScratchDwords = shader.ScratchDwords,
             PositionX = (activeInputs & InputPositionX) != 0,
             PositionY = (activeInputs & InputPositionY) != 0,
             PositionZ = (activeInputs & InputPositionZ) != 0,
             PositionW = (activeInputs & InputPositionW) != 0,
             FrontFace = (activeInputs & InputFrontFace) != 0,
+            FrontFaceAllBits = ((shaderInterface.BarycentricControl >> 24) & 1u) != 0,
             SampleShading = (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
             NoPerspective = (activeInputs & InputLinearCenter) != 0,
             KillEnable = control.KillEnable,
-            DepthExportEnable = control.DepthExportEnable,
+            // Without a depth aspect the DB drops the exported depth, and Metal rejects a
+            // fragment function that writes depth into a pipeline without one.
+            DepthExportEnable = control.DepthExportEnable && depthAspectBound,
+            // Likewise Metal rejects a stencil-writing fragment function without a stencil
+            // attachment.
+            StencilExportEnable = control.StencilExportEnable && stencilAspectBound,
             SampleMaskExportEnable = control.MaskExportEnable,
-            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable && !control.MaskExportEnable,
+            DepthExportFormat = shaderInterface.DepthExportFormat is var zFormat and > 0 and <= 9
+                ? (SharpEmu.ShaderCompiler.Gen5ColorExportFormat)zFormat
+                : null,
+            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
+                !control.StencilExportEnable && !control.MaskExportEnable,
             ExecuteOnNoop = control.ExecuteOnNoop,
         };
     }
+}
+
+// The arrays of the last pixel input resolved. Nothing writes a resolved input's arrays, and
+// consecutive draws of a pass resolve the same interpolators and targets: a draw whose arrays
+// come out equal shares the last ones instead of allocating its own. Used under one lock.
+public sealed class PixelInputArrays
+{
+    internal uint[]? Interpolators;
+    internal byte[]? OutputModes;
+    internal byte[]? ExportFormats;
+    internal ColorComponentMap[]? ExportMappings;
+
+    internal static T[] Share<T>(ReadOnlySpan<T> values, ref T[]? last) where T : IEquatable<T> =>
+        last is not null && values.SequenceEqual(last) ? last : last = values.ToArray();
 }

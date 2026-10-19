@@ -16,5 +16,13 @@ public sealed class CommandRegisterBanks
 {
     public Dictionary<uint, uint> Shader { get; } = new();
 
-    public void Reset() => Shader.Clear();
+    // The user-config words this queue wrote, keyed by offset from 0xC000; a register-space
+    // WAIT_REG_MEM polls them.
+    public Dictionary<uint, uint> UserConfig { get; } = new();
+
+    public void Reset()
+    {
+        Shader.Clear();
+        UserConfig.Clear();
+    }
 }

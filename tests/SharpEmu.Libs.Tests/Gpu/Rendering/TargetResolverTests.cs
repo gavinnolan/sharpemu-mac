@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Images;
@@ -27,7 +28,7 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
 
     private static Exception Fatal(string message) => new InvalidOperationException(message);
 
-    private static uint DepthControl(CompareOp depth, CompareOp stencil, CompareOp stencilBack = CompareOp.Never, bool backFace = false) =>
+    private static uint DepthControl(GpuCompareOp depth, GpuCompareOp stencil, GpuCompareOp stencilBack = GpuCompareOp.Never, bool backFace = false) =>
         StencilEnable | DepthEnable | DepthWrite | ((uint)depth << 4) | ((uint)stencil << 8) | ((uint)stencilBack << 20) | (backFace ? BackFaceEnable : 0);
 
     private static ContextRegisters StencilContext(byte pass, byte writeMask, byte operationValue, uint depthControl)
@@ -74,15 +75,15 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     [Fact]
     public void DepthState_ConvertsTheStencilFacesAndRejectsAConflictingReplacement()
     {
-        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x10, DepthControl(CompareOp.Less, CompareOp.Always));
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x10, DepthControl(GpuCompareOp.Less, GpuCompareOp.Always));
 
         var state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
 
         Assert.True(state.DepthTestEnabled);
         Assert.True(state.DepthWriteEnabled);
-        Assert.Equal(CompareOp.Less, state.DepthCompare);
+        Assert.Equal(GpuCompareOp.Less, state.DepthCompare);
         Assert.True(state.StencilTestEnabled);
-        Assert.Equal(new StencilOperations(StencilOp.Keep, StencilOp.Replace, StencilOp.Zero, CompareOp.Always), state.FrontOperations);
+        Assert.Equal(new StencilOperations(GpuStencilOp.Keep, GpuStencilOp.Replace, GpuStencilOp.Zero, GpuCompareOp.Always), state.FrontOperations);
         Assert.Equal(new StencilMasks(0xFF, 0xFF, 0x10), state.FrontMasks);
         Assert.Equal(state.FrontOperations, state.BackOperations);
         Assert.Equal(state.FrontMasks, state.BackMasks);
@@ -90,13 +91,13 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         context.StencilMask.OperationValue = 0x20;
         state = DepthTargetResolver.ResolveState(context, true, Fatal);
         Assert.Equal(0x20u, state.FrontMasks.Reference); // Always does not consume the comparison reference.
-        context.DepthTarget = context.DepthTarget with { DepthControl = DepthControl(CompareOp.Less, CompareOp.Equal) };
+        context.DepthTarget = context.DepthTarget with { DepthControl = DepthControl(GpuCompareOp.Less, GpuCompareOp.Equal) };
         Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
 
         // Without a write mask the operations have no effect, so the mismatch does not matter.
         context.StencilMask.WriteMask = 0;
         state = DepthTargetResolver.ResolveState(context, true, Fatal);
-        Assert.Equal(StencilOperations.Default with { Compare = CompareOp.Equal }, state.FrontOperations);
+        Assert.Equal(StencilOperations.Default with { Compare = GpuCompareOp.Equal }, state.FrontOperations);
         Assert.Equal(0u, state.FrontMasks.WriteMask);
     }
 
@@ -117,8 +118,8 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
 
         var state = DepthTargetResolver.ResolveState(context, true, Fatal);
 
-        Assert.Equal(new StencilOperations(StencilOp.Replace, StencilOp.Replace, StencilOp.Replace, CompareOp.Always), state.FrontOperations);
-        Assert.Equal(new StencilOperations(StencilOp.Zero, StencilOp.Zero, StencilOp.Zero, CompareOp.Always), state.BackOperations);
+        Assert.Equal(new StencilOperations(GpuStencilOp.Replace, GpuStencilOp.Replace, GpuStencilOp.Replace, GpuCompareOp.Always), state.FrontOperations);
+        Assert.Equal(new StencilOperations(GpuStencilOp.Zero, GpuStencilOp.Zero, GpuStencilOp.Zero, GpuCompareOp.Always), state.BackOperations);
         Assert.Equal(new StencilMasks(0xFF, 0x80, 0x80), state.FrontMasks);
         Assert.Equal(state.FrontMasks, state.BackMasks);
         for (uint oldValue = 0; oldValue <= 0xFF; oldValue++)
@@ -132,12 +133,12 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     [InlineData(0xFF, 0xF0, 0x11, 0x10)]
     public void DepthState_ReplacementMergesOnlyBitsUnusedByComparison(byte compareMask, byte writeMask, byte operationValue, uint reference)
     {
-        var context = StencilContext(pass: 4, writeMask, operationValue, DepthControl(CompareOp.Less, CompareOp.Equal));
+        var context = StencilContext(pass: 4, writeMask, operationValue, DepthControl(GpuCompareOp.Less, GpuCompareOp.Equal));
         context.StencilMask.Mask = compareMask;
 
         var state = DepthTargetResolver.ResolveState(context, true, Fatal);
 
-        Assert.Equal(StencilOp.Replace, state.FrontOperations.PassOperation);
+        Assert.Equal(GpuStencilOp.Replace, state.FrontOperations.PassOperation);
         Assert.Equal(reference, state.FrontMasks.Reference);
         Assert.Equal((uint)(context.StencilMask.TestValue & compareMask), state.FrontMasks.Reference & compareMask);
         Assert.Equal((uint)(operationValue & writeMask), state.FrontMasks.Reference & writeMask);
@@ -146,7 +147,7 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     [Fact]
     public void DepthState_StencilClearDisablesTheOperationsAndBackFaceDecodesSeparately()
     {
-        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(CompareOp.Less, CompareOp.Always, CompareOp.Equal, backFace: true));
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(GpuCompareOp.Less, GpuCompareOp.Always, GpuCompareOp.Equal, backFace: true));
         context.DepthTarget = context.DepthTarget with { RenderControl = 2 };
         context.StencilControl.FailBack = 5;
         context.StencilMask.MaskBack = 0x0F;
@@ -156,30 +157,34 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         var state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
 
         Assert.True(state.StencilClearEnabled);
-        Assert.Equal(StencilOp.Keep, state.FrontOperations.PassOperation);
+        Assert.Equal(GpuStencilOp.Keep, state.FrontOperations.PassOperation);
         Assert.Equal(0u, state.FrontMasks.WriteMask);
-        Assert.Equal(CompareOp.Equal, state.BackOperations.Compare);
-        Assert.Equal(StencilOp.Keep, state.BackOperations.FailOperation);
+        Assert.Equal(GpuCompareOp.Equal, state.BackOperations.Compare);
+        Assert.Equal(GpuStencilOp.Keep, state.BackOperations.FailOperation);
         Assert.Equal(new StencilMasks(0x0F, 0, 0x33), state.BackMasks);
 
         context.DepthTarget = context.DepthTarget with { RenderControl = 0 };
         context.StencilMask.OperationValue = 0x10;
-        context.StencilMask.OperationValueBack = 0x33;
+        context.StencilMask.OperationValueBack = 1;
         state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
-        Assert.Equal(StencilOp.IncrementAndClamp, state.BackOperations.FailOperation);
+        Assert.Equal(GpuStencilOp.IncrementAndClamp, state.BackOperations.FailOperation);
         Assert.Equal(0xFFu, state.BackMasks.WriteMask);
+
+        // ADD_CLAMP moves the stencil by the operand; the host only steps by one.
+        context.StencilMask.OperationValueBack = 0x33;
+        Assert.Contains("add/subtract operand", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
     }
 
     [Fact]
     public void DepthState_ExclusiveOrMapsToInvertOverTheWrittenBitsOnly()
     {
-        var context = StencilContext(pass: 0x0C, writeMask: 0x0F, operationValue: 0x0F, DepthControl(CompareOp.Less, CompareOp.Always));
+        var context = StencilContext(pass: 0x0C, writeMask: 0x0F, operationValue: 0x0F, DepthControl(GpuCompareOp.Less, GpuCompareOp.Always));
         context.StencilMask.TestValue = 0x0F;
 
-        Assert.Equal(StencilOp.Invert, DepthTargetResolver.ResolveState(context, true, Fatal).FrontOperations.PassOperation);
+        Assert.Equal(GpuStencilOp.Invert, DepthTargetResolver.ResolveState(context, true, Fatal).FrontOperations.PassOperation);
         context.StencilMask.OperationValue = 0;
         context.StencilMask.TestValue = 0;
-        Assert.Equal(StencilOp.Keep, DepthTargetResolver.ResolveState(context, true, Fatal).FrontOperations.PassOperation);
+        Assert.Equal(GpuStencilOp.Keep, DepthTargetResolver.ResolveState(context, true, Fatal).FrontOperations.PassOperation);
         context.StencilMask.OperationValue = 0x03;
         context.StencilMask.TestValue = 0x03;
         Assert.Contains("XOR", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
@@ -190,7 +195,7 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     [Fact]
     public void DepthState_WithoutAnActiveStencilPlane_KeepsTheDefaults()
     {
-        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(CompareOp.Less, CompareOp.Always));
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(GpuCompareOp.Less, GpuCompareOp.Always));
 
         var state = DepthTargetResolver.ResolveState(context, hasStencil: false, Fatal);
 
@@ -203,35 +208,35 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     [Fact]
     public void AttachmentWriteAspects_FollowClearsTestsAndTheFacesThatCanWrite()
     {
-        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x10, DepthControl(CompareOp.Less, CompareOp.Always));
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x10, DepthControl(GpuCompareOp.Less, GpuCompareOp.Always));
         var state = DepthTargetResolver.ResolveState(context, true, Fatal);
 
-        Assert.Equal(ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit, state.AttachmentWriteAspects(Format.D32SfloatS8Uint));
-        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, state.AttachmentLayout(Format.D32SfloatS8Uint));
-        Assert.Equal(ImageAspectFlags.DepthBit, state.AttachmentWriteAspects(Format.D32Sfloat));
-        Assert.Equal(ImageLayout.DepthAttachmentOptimal, state.AttachmentLayout(Format.D32Sfloat));
-        Assert.Equal(ImageAspectFlags.None, state.AttachmentWriteAspects(Format.Undefined));
+        Assert.Equal(GpuImageAspect.DepthBit | GpuImageAspect.StencilBit, state.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
+        Assert.Equal(GpuImageLayout.DepthStencilAttachmentOptimal, state.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
+        Assert.Equal(GpuImageAspect.DepthBit, state.AttachmentWriteAspects(GpuFormat.D32Sfloat));
+        Assert.Equal(GpuImageLayout.DepthAttachmentOptimal, state.AttachmentLayout(GpuFormat.D32Sfloat));
+        Assert.Equal(GpuImageAspect.None, state.AttachmentWriteAspects(GpuFormat.Undefined));
 
         var testOnly = state with { DepthWriteEnabled = false, StencilTestEnabled = false };
-        Assert.Equal(ImageAspectFlags.None, testOnly.AttachmentWriteAspects(Format.D32SfloatS8Uint));
-        Assert.True(testOnly.IsReadOnly(Format.D32SfloatS8Uint));
-        Assert.Equal(ImageLayout.DepthStencilReadOnlyOptimal, testOnly.AttachmentLayout(Format.D32SfloatS8Uint));
+        Assert.Equal(GpuImageAspect.None, testOnly.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
+        Assert.True(testOnly.IsReadOnly(GpuFormat.D32SfloatS8Uint));
+        Assert.Equal(GpuImageLayout.DepthStencilReadOnlyOptimal, testOnly.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
 
         // A compare that can never pass with an all-keep fail path writes nothing; a fail operation does.
         var neverPasses = state with
         {
             DepthWriteEnabled = false,
-            FrontOperations = new StencilOperations(StencilOp.Keep, StencilOp.Replace, StencilOp.Keep, CompareOp.Never),
+            FrontOperations = new StencilOperations(GpuStencilOp.Keep, GpuStencilOp.Replace, GpuStencilOp.Keep, GpuCompareOp.Never),
             FrontMasks = new StencilMasks(0, 0xFF, 0),
-            BackOperations = new StencilOperations(StencilOp.Keep, StencilOp.Replace, StencilOp.Keep, CompareOp.Never),
+            BackOperations = new StencilOperations(GpuStencilOp.Keep, GpuStencilOp.Replace, GpuStencilOp.Keep, GpuCompareOp.Never),
             BackMasks = new StencilMasks(0, 0xFF, 0),
         };
-        Assert.Equal(ImageAspectFlags.None, neverPasses.AttachmentWriteAspects(Format.D32SfloatS8Uint));
-        var failWrites = neverPasses with { FrontOperations = neverPasses.FrontOperations with { FailOperation = StencilOp.Zero } };
-        Assert.Equal(ImageAspectFlags.StencilBit, failWrites.AttachmentWriteAspects(Format.D32SfloatS8Uint));
-        Assert.Equal(ImageLayout.DepthReadOnlyStencilAttachmentOptimal, failWrites.AttachmentLayout(Format.D32SfloatS8Uint));
+        Assert.Equal(GpuImageAspect.None, neverPasses.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
+        var failWrites = neverPasses with { FrontOperations = neverPasses.FrontOperations with { FailOperation = GpuStencilOp.Zero } };
+        Assert.Equal(GpuImageAspect.StencilBit, failWrites.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
+        Assert.Equal(GpuImageLayout.DepthReadOnlyStencilAttachmentOptimal, failWrites.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
         var depthOnlyWrite = state with { StencilTestEnabled = false };
-        Assert.Equal(ImageLayout.DepthAttachmentStencilReadOnlyOptimal, depthOnlyWrite.AttachmentLayout(Format.D32SfloatS8Uint));
+        Assert.Equal(GpuImageLayout.DepthAttachmentStencilReadOnlyOptimal, depthOnlyWrite.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
     }
 
     [Fact]
@@ -244,10 +249,10 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
 
         Assert.NotNull(resolved);
         var state = resolved.Value;
-        Assert.Equal(Format.D32Sfloat, state.Target.Format);
+        Assert.Equal(GpuFormat.D32Sfloat, state.Target.Format);
         Assert.True(state.State.DepthClearEnabled);
         Assert.Equal(0.5f, state.State.DepthClearValue);
-        Assert.Equal(ImageAspectFlags.DepthBit, state.State.AttachmentWriteAspects(state.Target.Format));
+        Assert.Equal(GpuImageAspect.DepthBit, state.State.AttachmentWriteAspects(state.Target.Format));
 
         context.DepthTarget = RegisterWords.Depth(Base, 64, 64, depthTest: false, depthWrite: false);
         Assert.Null(DepthTargetResolver.Resolve(context, _vulkan.DeviceInfo, Fatal));

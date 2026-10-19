@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -37,23 +37,19 @@ public enum GuestIndexType : uint
 // Resolves draw and dispatch state from the register banks and records it through the host.
 public sealed partial class RenderExecutor
 {
-    // Prospero uses both the full NGG mask and compact primitive-shader masks
-    // when the task/mesh front end has already folded the upper enable bits
-    // away. Little Nightmares also emits 0x2030 for a primitive path with no
-    // geometry shader; the remaining bits describe the fixed NGG setup.
-    // GS_W32_EN (bit 22) and VS_W32_EN (bit 23) only select the wave size;
-    // graphics stages always compile as wave32, so they do not change the path.
-    private const uint VgtShaderStagesWaveSizeBits = (1u << 22) | (1u << 23);
-
+    // The stage-mask readings live in VgtShaderStages, so the pipeline cache compiles the
+    // vertex program the same way this decides whether the draw runs.
     private static bool IsPrimitiveShaderStageMask(uint stages) =>
-        (stages & ~VgtShaderStagesWaveSizeBits) is 0x02002000 or 0x00002000 or 0x00002030;
+        VgtShaderStages.IsPrimitiveShader(stages);
+
     private const uint MaxOutputPerSubgroupLimit = 0x40;
     private static int _geometryWarningShown;
 
     private readonly IRenderHost _host;
     private readonly IShaderPipelineProvider _pipelines;
     private readonly bool _strictDrawResources;
-    private readonly HashSet<(ulong ShaderHash, ImageType ImageType, ImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];
+    private readonly bool _dumpSkippedGraphics = Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SKIPPED_GRAPHICS") == "1";
+    private readonly HashSet<(ulong ShaderHash, GpuImageType ImageType, GpuImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];
 
     public RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines)
         : this(host, pipelines, Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0")
@@ -69,15 +65,52 @@ public sealed partial class RenderExecutor
 
     private readonly record struct DrawCall(string Name, RecordedOperation Operation, uint Count, uint InstanceCount, uint FirstInstance);
 
-    // IndirectArgumentsAddress: the GPU reads the indexed draw's counts from guest memory there.
-    private readonly record struct DrawEmission(bool Indexed, int VertexOffset, uint FirstVertex, uint FirstInstance, ulong IndirectArgumentsAddress = 0);
+    // IndirectArgumentsAddress: the GPU reads the draw's counts from guest memory there, and
+    // IndirectIndexLimit bounds an indexed draw's count as the bound index range does.
+    // TriangleListIndices: nonzero when the draw was converted to an indexed triangle list of
+    // that many indices (TriangulateFans), which EmitDraw then draws whatever the guest type.
+    private readonly record struct DrawEmission(bool Indexed, int VertexOffset, uint FirstVertex, uint FirstInstance,
+        ulong IndirectArgumentsAddress = 0, uint IndirectIndexLimit = uint.MaxValue, uint TriangleListIndices = 0);
 
-    private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, IndexType Type);
+    private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, GpuIndexType Type);
 
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]
     private struct ColorTargetStates
     {
         private ColorTargetState _element0;
+    }
+
+    private readonly Dictionary<ulong, bool> _pixelStoreDecisions = new();
+
+    // A draw stored to memory from its fragment stage and, because the host defers it, the
+    // render pass it drew in (_fragmentWritesPass, the host's pass serial) was left open.
+    private bool _fragmentWritesPending;
+    private long _fragmentWritesPass;
+
+    /// <summary>
+    /// A consumer of earlier shader stores can follow: the guest flushed or invalidated its
+    /// caches. Ends the render pass that holds deferred fragment-stage stores, if any.
+    /// </summary>
+    public void ReleaseShaderWrites() => ReleaseFragmentWrites();
+
+    // Ends the pass a deferred fragment store was made in and records the barrier the storing
+    // draw would have recorded. A pass the host has ended since needs neither: the encoder
+    // boundary orders its stores, and a barrier now would land in whatever pass is open.
+    private void ReleaseFragmentWrites()
+    {
+        if (!_fragmentWritesPending)
+        {
+            return;
+        }
+
+        _fragmentWritesPending = false;
+        if (_host.RenderPassSerial != _fragmentWritesPass)
+        {
+            return;
+        }
+
+        _host.EndRendering("release");
+        _host.ShaderWriteBarrier(GpuPipelineStage.FragmentShaderBit);
     }
 
     private struct DrawState
@@ -97,11 +130,14 @@ public sealed partial class RenderExecutor
 
     public void DrawIndexed(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
+        _drawMustExecute = arguments.MustExecute;
         using var meshTrace = MeshDrawTrace.Begin(submitId, banks.Shader.Vertex.ExportAddress, banks.Context.ShaderStages);
         try
         {
             if (arguments.IndirectArgumentsAddress != 0 &&
-                (UsesMeshExecution(banks) ? !CanDrawMeshIndirectOnGpu(banks, in arguments) : !CanDrawIndirectOnGpu(banks, in arguments)))
+                (UsesMeshExecution(banks)
+                    ? !CanDrawMeshIndirectOnGpu(banks, in arguments)
+                    : !CanDrawIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
             {
                 DrawIndexedWithCpuArguments(submitId, banks, in arguments);
                 return;
@@ -131,6 +167,7 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.TriangleFan:
             case GuestPrimitiveType.Polygon:
             case GuestPrimitiveType.RectangleList:
+            case GuestPrimitiveType.RectangleListLegacy:
                 break;
             default:
                 return false;
@@ -156,6 +193,8 @@ public sealed partial class RenderExecutor
 
     private const ulong MaxIndirectIndexBufferBytes = 64ul << 20;
 
+    private const ulong AutoIndirectArgumentsSize = 16;
+
     // List inputs ignore restart and use the learned index extent as their capacity.
     // Other mesh inputs keep the CPU path.
     private bool CanDrawMeshIndirectOnGpu(RegisterBanks banks, in DrawIndexedArguments arguments)
@@ -179,6 +218,7 @@ public sealed partial class RenderExecutor
     private void DrawIndexedWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
         Span<byte> bytes = stackalloc byte[(int)IndexedIndirectArgumentsSize];
+        _host.NoteIndirectArgumentsReadOnCpu(arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize);
         if (!_host.TryReadGuest(arguments.IndirectArgumentsAddress, bytes))
         {
             throw _host.Fatal($"The indirect draw arguments are unreadable: address=0x{arguments.IndirectArgumentsAddress:X16}.");
@@ -207,10 +247,11 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        DrawIndexedCore(submitId, banks, in resolved);
+        DrawIndexedCore(submitId, banks, in resolved, arguments);
     }
 
-    private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
+    private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null)
     {
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("selection", $"indexed=true count={arguments.IndexCount}");
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
@@ -257,7 +298,8 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (IsUnsupportedGeometryStage(banks, autoDraw: false))
+        if (IsUnsupportedGeometryStage(banks,
+            new TargetlessDrawArguments(submitId, true, arguments, default), originalIndirectIndexedDraw))
         {
             TraceDisposition("unsupported-geometry-stage");
             return;
@@ -271,28 +313,28 @@ public sealed partial class RenderExecutor
         }
 
         ValidateDrawRegisters(banks);
-        if (!ResolveTopology(userConfig, autoDraw: false, out var topology))
+        if (!ResolveTopology(userConfig, out var topology))
         {
             TraceDisposition("no-topology");
             return;
         }
 
         var primitiveRestart = ResolvePrimitiveRestart(banks, topology, arguments.IndexTypeAndSize);
-        IndexType indexType;
+        GpuIndexType indexType;
         ulong indexSize;
         var expandIndex8 = false;
         switch ((GuestIndexType)arguments.IndexTypeAndSize)
         {
             case GuestIndexType.Index16:
-                indexType = IndexType.Uint16;
+                indexType = GpuIndexType.Uint16;
                 indexSize = 2ul * arguments.IndexCount;
                 break;
             case GuestIndexType.Index32:
-                indexType = IndexType.Uint32;
+                indexType = GpuIndexType.Uint32;
                 indexSize = 4ul * arguments.IndexCount;
                 break;
             case GuestIndexType.Index8:
-                indexType = IndexType.Uint16;
+                indexType = GpuIndexType.Uint16;
                 indexSize = arguments.IndexCount;
                 expandIndex8 = true;
                 break;
@@ -302,18 +344,39 @@ public sealed partial class RenderExecutor
 
         var draw = new DrawCall("DrawIndexed", RecordedOperation.DrawIndex, arguments.IndexCount, arguments.InstanceCount, arguments.FirstInstance);
         byte[]? expandedIndices = null;
-        if (expandIndex8)
+        var triangleListIndices = 0u;
+        if (TriangulatesFans(userConfig))
+        {
+            // Every index is read so restarts split the fans where the hardware does; the
+            // list's indices are the guest's own, so the vertex offset applies unchanged.
+            var restartIndex = primitiveRestart
+                ? banks.Context.PrimitiveResetIndex & IndexMask((GuestIndexType)arguments.IndexTypeAndSize)
+                : (uint?)null;
+            var vertices = ReadGuestIndices(arguments.IndexAddress, arguments.IndexCount, (GuestIndexType)arguments.IndexTypeAndSize);
+            var list = TriangulateFans((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex);
+            if (list.Length == 0)
+            {
+                return;
+            }
+
+            expandedIndices = ListIndexBytes(list, wide: true);
+            triangleListIndices = (uint)list.Length;
+            indexType = GpuIndexType.Uint32;
+            topology = GpuPrimitiveTopology.TriangleList;
+            primitiveRestart = false;
+        }
+        else if (expandIndex8)
         {
             expandedIndices = ExpandIndex8(arguments.IndexAddress, arguments.IndexCount, primitiveRestart, banks.Context.PrimitiveResetIndex);
         }
         else if (primitiveRestart)
         {
-            var indexMask = indexType == IndexType.Uint16 ? 0xFFFFu : uint.MaxValue;
+            var indexMask = indexType == GpuIndexType.Uint16 ? 0xFFFFu : uint.MaxValue;
             var restartIndex = banks.Context.PrimitiveResetIndex & indexMask;
             if (restartIndex != indexMask)
             {
                 expandedIndices = ConvertRestartIndices(arguments.IndexAddress, arguments.IndexCount, indexType, restartIndex);
-                indexType = IndexType.Uint32;
+                indexType = GpuIndexType.Uint32;
             }
         }
 
@@ -331,7 +394,8 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (arguments.IndirectArgumentsAddress != 0 && state.ColorCount == 0 && !state.Depth.HasTarget)
+        if (arguments.IndirectArgumentsAddress != 0 && !_host.TakesTargetlessIndirectDrawArguments &&
+            state.ColorCount == 0 && !state.Depth.HasTarget)
         {
             // A targetless draw may be retained and replayed later; it needs its counts.
             DrawIndexedWithCpuArguments(submitId, banks, in arguments);
@@ -339,6 +403,27 @@ public sealed partial class RenderExecutor
         }
 
         ResolveShaderPrograms(banks, ref state, indexed: true);
+        if (arguments.IndirectArgumentsAddress != 0 && _host.TakesTargetlessIndirectDrawArguments &&
+            MayRetainTargetlessDraw(ref state))
+        {
+            // A retained draw is replayed later; it needs its counts.
+            DrawIndexedWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (!_host.TakesIndirectDrawArguments(
+                    state.Programs.Vertex, arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) ||
+                (IsRectangleList(banks.UserConfig.PrimitiveType) &&
+                    !_host.TakesIndirectRectangleListArguments)))
+        {
+            // The backend runs this program as a mesh pipeline, or this rectangle list as
+            // patches, whose launch is sized from the very counts the GPU would have read;
+            // they are read here instead, before any pass is open, so the draw still happens.
+            DrawIndexedWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
         if (!ApplyProgramAdaptations(banks, in draw, ref state, new TargetlessDrawArguments(submitId, true, arguments, default)))
         {
             TraceDisposition("adapted");
@@ -356,7 +441,9 @@ public sealed partial class RenderExecutor
             vertexOffset,
             0,
             indirect ? arguments.FirstInstance : ResolveInstanceOffset(state.Programs.VertexInput),
-            arguments.IndirectArgumentsAddress);
+            arguments.IndirectArgumentsAddress,
+            arguments.UnboundedIndexBuffer ? uint.MaxValue : arguments.IndexCount,
+            triangleListIndices);
         var disposition = RecordDraw(submitId, banks, in draw, ref state, topology, in emission, in indexSource, primitiveRestart,
             setBindDebug: true, setAutoDebug: false, indexedTrace: traceSample, packetAddress: tracePacket);
         TraceDisposition(disposition);
@@ -365,10 +452,18 @@ public sealed partial class RenderExecutor
 
     public void DrawAuto(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
     {
+        _drawMustExecute = arguments.MustExecute;
         using var meshTrace = MeshDrawTrace.Begin(submitId, banks.Shader.Vertex.ExportAddress, banks.Context.ShaderStages);
         try
         {
-            DrawAutoCore(submitId, banks, arguments);
+            if (arguments.IndirectArgumentsAddress != 0 &&
+                (!CanDrawAutoIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
+            {
+                DrawAutoWithCpuArguments(submitId, banks, in arguments);
+                return;
+            }
+
+            DrawAutoCore(submitId, banks, in arguments);
         }
         catch (Exception exception) when (meshTrace is not null)
         {
@@ -376,6 +471,60 @@ public sealed partial class RenderExecutor
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("failure", $"type={exception.GetType().Name} message={exception.Message}");
             throw;
         }
+    }
+
+    // A non-indexed draw takes its arguments on the GPU for the same primitives as an
+    // indexed one; strips (metadata clear quads), legacy primitives and misaligned
+    // arguments are drawn from their counts.
+    private static bool CanDrawAutoIndirectOnGpu(RegisterBanks banks, in DrawAutoArguments arguments)
+    {
+        if ((arguments.IndirectArgumentsAddress & 0x3) != 0)
+        {
+            return false;
+        }
+
+        switch ((GuestPrimitiveType)banks.UserConfig.PrimitiveType)
+        {
+            case GuestPrimitiveType.PointList:
+            case GuestPrimitiveType.LineList:
+            case GuestPrimitiveType.LineStrip:
+            case GuestPrimitiveType.TriangleList:
+            case GuestPrimitiveType.TriangleFan:
+            case GuestPrimitiveType.Polygon:
+            case GuestPrimitiveType.RectangleList:
+            case GuestPrimitiveType.RectangleListLegacy:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // Reads the indirect arguments now and draws from them, as the interpreter would have.
+    private void DrawAutoWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
+    {
+        Span<byte> bytes = stackalloc byte[(int)AutoIndirectArgumentsSize];
+        _host.NoteIndirectArgumentsReadOnCpu(arguments.IndirectArgumentsAddress, AutoIndirectArgumentsSize);
+        if (!_host.TryReadGuest(arguments.IndirectArgumentsAddress, bytes))
+        {
+            throw _host.Fatal($"The indirect draw arguments are unreadable: address=0x{arguments.IndirectArgumentsAddress:X16}.");
+        }
+
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        var resolved = arguments with
+        {
+            VertexCount = words[0],
+            InstanceCount = words[1],
+            FirstVertex = words[2],
+            FirstInstance = words[3],
+            IndirectArgumentsAddress = 0,
+        };
+        if (resolved.VertexCount == 0 || resolved.InstanceCount == 0)
+        {
+            _host.ResetBindings();
+            return;
+        }
+
+        DrawAutoCore(submitId, banks, in resolved);
     }
 
     private void DrawAutoCore(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
@@ -416,7 +565,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (IsUnsupportedGeometryStage(banks, autoDraw: true))
+        if (IsUnsupportedGeometryStage(banks, new TargetlessDrawArguments(submitId, false, default, arguments)))
         {
             TraceDrawTargets(banks, "unsupported-geometry-stage");
             return;
@@ -439,7 +588,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (!ResolveTopology(userConfig, autoDraw: true, out var topology))
+        if (!ResolveTopology(userConfig, out var topology))
         {
             TraceDrawDisposition(banks, in draw, "no-primitive-topology");
             TraceDrawTargets(banks, "no-topology");
@@ -448,9 +597,32 @@ public sealed partial class RenderExecutor
         }
 
         ResolveShaderPrograms(banks, ref state);
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (_host.TakesTargetlessIndirectDrawArguments
+                ? MayRetainTargetlessDraw(ref state)
+                : state.ColorCount == 0 && !state.Depth.HasTarget))
+        {
+            // A retained draw is replayed later; it needs its counts.
+            DrawAutoWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (!_host.TakesIndirectDrawArguments(
+                    state.Programs.Vertex, arguments.IndirectArgumentsAddress, AutoIndirectArgumentsSize) ||
+                (IsRectangleList(banks.UserConfig.PrimitiveType) &&
+                    !_host.TakesIndirectAutoRectangleListArguments(
+                        state.Programs.VertexInput, arguments.IndirectArgumentsAddress, AutoIndirectArgumentsSize))))
+        {
+            // A mesh pipeline or a rectangle list drawn as patches may be sized from the
+            // counts, so they are read here, before any pass is open.
+            DrawAutoWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
-        var rectangleList = topology == PrimitiveTopology.PatchList;
+        var rectangleList = topology == GpuPrimitiveTopology.PatchList;
         if (rectangleList && vertexInput.Buffers.Length == 0 && vertexInput.Stage.Program?.ParameterExportMask == 0 && pixelInput.InputCount != 0)
         {
             if (RenderTrace.Enabled)
@@ -477,20 +649,173 @@ public sealed partial class RenderExecutor
         var vertexOffset = indirect
             ? (int)arguments.FirstVertex
             : ResolveVertexOffset(userConfig.IndexOffset, vertexInput) + (int)arguments.FirstVertex;
+        var firstInstance = indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput);
+        if (TriangulatesFans(userConfig))
+        {
+            // The vertices are numbered from zero and the first vertex becomes the indexed
+            // draw's vertex offset, so every vertex keeps its vertex id.
+            if (arguments.IndirectArgumentsAddress != 0)
+            {
+                throw _host.Fatal("A triangle fan to convert to a triangle list still has its counts in guest memory.");
+            }
+
+            var vertices = new uint[arguments.VertexCount];
+            for (var index = 0u; index < arguments.VertexCount; index++)
+            {
+                vertices[index] = index;
+            }
+
+            var list = TriangulateFans((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex: null);
+            if (list.Length == 0)
+            {
+                _host.ResetBindings();
+                return;
+            }
+
+            var wide = arguments.VertexCount > ushort.MaxValue;
+            var bytes = ListIndexBytes(list, wide);
+            var listSource = new IndexSource(true, 0, bytes, (ulong)bytes.Length, wide ? GpuIndexType.Uint32 : GpuIndexType.Uint16);
+            var listEmission = new DrawEmission(true, vertexOffset, 0, firstInstance, TriangleListIndices: (uint)list.Length);
+            RecordDraw(submitId, banks, in draw, ref state, GpuPrimitiveTopology.TriangleList, in listEmission, in listSource,
+                primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
+            _host.ResetBindings();
+            return;
+        }
+
         var emission = new DrawEmission(
             false,
             0,
             (uint)vertexOffset,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput));
+            firstInstance,
+            arguments.IndirectArgumentsAddress);
         var disposition = RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true,
             packetAddress: arguments.PacketAddress);
         TraceDrawTargets(banks, disposition);
         _host.ResetBindings();
     }
 
-    private byte[] ConvertRestartIndices(ulong indexAddress, uint indexCount, IndexType indexType, uint restartIndex)
+    // Triangle fans, polygons and legacy quad lists, which a host without fans draws as
+    // triangle lists (IRenderHost.DrawsTriangleFans).
+    private bool TriangulatesFans(UserConfigRegisters userConfig) =>
+        !_host.DrawsTriangleFans &&
+        (GuestPrimitiveType)userConfig.PrimitiveType is
+            GuestPrimitiveType.TriangleFan or GuestPrimitiveType.Polygon or GuestPrimitiveType.QuadListLegacy;
+
+    // The triangle list the primitive assembler makes of these vertices, in its vertex order:
+    // fan triangle i is (v[i+1], v[i+2], v[0]), the order DI_PT_TRIFAN assembles (the
+    // first-vertex provoking vertex is v[i+1], as radv's VK fans report it), and a restart
+    // index ends the fan, the next index starting a new one. A polygon is one fan. Each
+    // quad of a quad list is (q0, q1, q2) and (q0, q2, q3), both taking q0 as their
+    // provoking vertex; a count that is not a whole number of quads is refused.
+    private uint[] TriangulateFans(GuestPrimitiveType type, uint[] vertices, uint? restartIndex)
     {
-        var sourceStride = indexType == IndexType.Uint16 ? sizeof(ushort) : sizeof(uint);
+        if (type == GuestPrimitiveType.QuadListLegacy)
+        {
+            if ((vertices.Length & 0x3) != 0)
+            {
+                throw _host.Fatal($"A legacy quad list count is not a multiple of four: count={vertices.Length}.");
+            }
+
+            var quads = new uint[checked((vertices.Length / 4) * 6)];
+            for (int quad = 0, output = 0; quad < vertices.Length; quad += 4, output += 6)
+            {
+                quads[output] = vertices[quad];
+                quads[output + 1] = vertices[quad + 1];
+                quads[output + 2] = vertices[quad + 2];
+                quads[output + 3] = vertices[quad];
+                quads[output + 4] = vertices[quad + 2];
+                quads[output + 5] = vertices[quad + 3];
+            }
+
+            return quads;
+        }
+
+        var triangles = new List<uint>(Math.Max(0, (vertices.Length - 2) * 3));
+        var hub = 0;
+        for (var index = 0; index < vertices.Length; index++)
+        {
+            if (restartIndex is { } restart && vertices[index] == restart)
+            {
+                hub = index + 1;
+                continue;
+            }
+
+            if (index - hub >= 2)
+            {
+                triangles.Add(vertices[index - 1]);
+                triangles.Add(vertices[index]);
+                triangles.Add(vertices[hub]);
+            }
+        }
+
+        return [.. triangles];
+    }
+
+    private byte[] ListIndexBytes(uint[] list, bool wide)
+    {
+        var bytes = new byte[checked(list.Length * (wide ? sizeof(uint) : sizeof(ushort)))];
+        for (var index = 0; index < list.Length; index++)
+        {
+            var value = list[index];
+            if (wide)
+            {
+                // Metal reserves the all-ones index for primitive restart.
+                if (value == uint.MaxValue)
+                {
+                    throw _host.Fatal("A triangle fan converted to a triangle list has a 32-bit vertex index of 0xFFFFFFFF.");
+                }
+
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), value);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(index * sizeof(ushort)), checked((ushort)value));
+            }
+        }
+
+        return bytes;
+    }
+
+    private static uint IndexMask(GuestIndexType type) => type switch
+    {
+        GuestIndexType.Index8 => 0xFFu,
+        GuestIndexType.Index16 => 0xFFFFu,
+        _ => uint.MaxValue,
+    };
+
+    // The draw's guest indices, widened to 32 bits.
+    private uint[] ReadGuestIndices(ulong indexAddress, uint indexCount, GuestIndexType type)
+    {
+        var stride = type switch
+        {
+            GuestIndexType.Index8 => 1,
+            GuestIndexType.Index16 => 2,
+            GuestIndexType.Index32 => 4,
+            _ => throw _host.Fatal($"The index type and size is unknown: indexTypeAndSize={(uint)type}."),
+        };
+        var source = new byte[checked((int)indexCount * stride)];
+        if (indexAddress == 0 || !_host.TryReadGuest(indexAddress, source))
+        {
+            throw _host.Fatal($"The fan index data is unreadable: address=0x{indexAddress:X16} count={indexCount}.");
+        }
+
+        var indices = new uint[indexCount];
+        for (var index = 0; index < indices.Length; index++)
+        {
+            indices[index] = stride switch
+            {
+                1 => source[index],
+                2 => BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan(index * 2)),
+                _ => BinaryPrimitives.ReadUInt32LittleEndian(source.AsSpan(index * 4)),
+            };
+        }
+
+        return indices;
+    }
+
+    private byte[] ConvertRestartIndices(ulong indexAddress, uint indexCount, GpuIndexType indexType, uint restartIndex)
+    {
+        var sourceStride = indexType == GpuIndexType.Uint16 ? sizeof(ushort) : sizeof(uint);
         var source = new byte[checked((int)indexCount * sourceStride)];
         if (indexAddress == 0 || !_host.TryReadGuest(indexAddress, source))
         {
@@ -549,7 +874,7 @@ public sealed partial class RenderExecutor
             return (int)indexOffset;
         }
 
-        var program = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The embedded fetch vertex input has no program.");
+        var program = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The embedded fetch vertex input has no program.");
         return (int)ReadUserDataScalar(program, vertexInput.Stage.Resources, program.VertexOffsetScalarRegister);
     }
 
@@ -560,7 +885,7 @@ public sealed partial class RenderExecutor
             return 0;
         }
 
-        var program = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The embedded fetch vertex input has no program.");
+        var program = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The embedded fetch vertex input has no program.");
         return ReadUserDataScalar(program, vertexInput.Stage.Resources, program.InstanceOffsetScalarRegister);
     }
 
@@ -596,12 +921,15 @@ public sealed partial class RenderExecutor
 
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 
-    private bool IsUnsupportedGeometryStage(RegisterBanks banks, bool autoDraw)
+    // Only the plain vertex path and the primitive-shader vertex path with default geometry state run.
+    private bool IsUnsupportedGeometryStage(RegisterBanks banks, in TargetlessDrawArguments draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null)
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
         var vertex = banks.Shader.Vertex;
         var stages = context.ShaderStages;
+        var autoDraw = !draw.Indexed;
         if (UsesMeshExecution(banks))
         {
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("gate", "accepted=true");
@@ -611,9 +939,20 @@ public sealed partial class RenderExecutor
             IsPrimitiveShaderStageMask(stages) && vertex.ExportAddress != 0 &&
             (vertex.GeometryAddress == 0 ||
              (shaderInterface.GeometryMaxVerticesOut == 0 && IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType)));
-        var unsupportedStageMask = stages != 0 && !IsPrimitiveShaderStageMask(stages);
-        var unsupportedGeometryStage = vertex.ExportAddress != 0 && vertex.GeometryAddress != 0 && !primitiveShaderVertexPath;
-        var geometryRegisters = !primitiveShaderVertexPath &&
+        // A backend with mesh pipelines runs the merged ES/GS stage as it really is, so the
+        // NGG setup registers that defeat the per-vertex path stop being rejections: the
+        // primitive shader itself consumes the subgroup control and the output budget. That
+        // includes a draw with the geometry stage enabled: Gen5 has no separate geometry
+        // program, the GS half is the continuation of the merged program at the export
+        // address, so a stored geometry address or output budget is no reason to refuse it.
+        var primitiveShaderMeshPath =
+            _pipelines.SupportsPrimitiveShaderMeshPipelines &&
+            vertex.ExportAddress != 0 &&
+            VgtShaderStages.SelectsPrimitiveShaderOnly(stages);
+        var unsupportedStageMask = stages != 0 && !IsPrimitiveShaderStageMask(stages) && !primitiveShaderMeshPath;
+        var unsupportedGeometryStage = vertex.ExportAddress != 0 && vertex.GeometryAddress != 0 &&
+            !primitiveShaderVertexPath && !primitiveShaderMeshPath;
+        var geometryRegisters = !primitiveShaderVertexPath && !primitiveShaderMeshPath &&
             ((shaderInterface.PrimitiveShaderSubgroupControl != 0 && shaderInterface.PrimitiveShaderSubgroupControl != 1) ||
              shaderInterface.GeometryMaxVerticesOut != 0 ||
              !IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType) ||
@@ -639,6 +978,9 @@ public sealed partial class RenderExecutor
                 $"unsupportedRegisters={geometryRegisters}.");
         }
 
+        if (_dumpSkippedGraphics)
+            _pipelines.RecordUnsupportedGraphics(vertex, context, banks.UserConfig, in draw, originalIndirectIndexedDraw);
+
         if (RenderTrace.Enabled && RenderTrace.GeometryStageSkip())
         {
             var geometryControl = banks.UserConfig.GeometryEngineControl;
@@ -657,7 +999,7 @@ public sealed partial class RenderExecutor
     {
         var control = shaderInterface.DepthShaderControl;
         // The export format describes data; it does not enable shader execution.
-        return control.KillEnable || control.DepthExportEnable ||
+        return control.KillEnable || control.DepthExportEnable || control.StencilExportEnable ||
                control.MaskExportEnable || control.DualExportEnable || control.ExecuteOnNoop;
     }
 
@@ -681,45 +1023,44 @@ public sealed partial class RenderExecutor
         return mode is ColorModeEliminateFastClear or ColorModeFmaskDecompress or ColorModeDccDecompress;
     }
 
-    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out PrimitiveTopology topology)
+    // DI_PT_2D_RECTANGLE (7) and DI_PT_RECTLIST (17) are both rectangle lists: three
+    // vertices per rectangle, the fourth corner completed by the rasterizer. The AGC
+    // names them kRectList and kRectListLegacy, and they draw through the same path.
+    private static bool IsRectangleList(uint primitiveType) =>
+        (GuestPrimitiveType)primitiveType is GuestPrimitiveType.RectangleList or GuestPrimitiveType.RectangleListLegacy;
+
+    public bool ResolveTopology(UserConfigRegisters userConfig, out GpuPrimitiveTopology topology)
     {
-        topology = PrimitiveTopology.PointList;
+        topology = GpuPrimitiveTopology.PointList;
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
         {
             case GuestPrimitiveType.None:
                 return false;
             case GuestPrimitiveType.PointList:
-                topology = PrimitiveTopology.PointList;
+                topology = GpuPrimitiveTopology.PointList;
                 break;
             case GuestPrimitiveType.LineList:
-                topology = PrimitiveTopology.LineList;
+                topology = GpuPrimitiveTopology.LineList;
                 break;
             case GuestPrimitiveType.LineStrip:
-                topology = PrimitiveTopology.LineStrip;
+                topology = GpuPrimitiveTopology.LineStrip;
                 break;
             case GuestPrimitiveType.TriangleList:
-                topology = PrimitiveTopology.TriangleList;
+                topology = GpuPrimitiveTopology.TriangleList;
                 break;
             case GuestPrimitiveType.TriangleFan:
             case GuestPrimitiveType.Polygon:
-                topology = PrimitiveTopology.TriangleFan;
+                topology = GpuPrimitiveTopology.TriangleFan;
                 break;
             case GuestPrimitiveType.TriangleStrip:
-                topology = PrimitiveTopology.TriangleStrip;
+                topology = GpuPrimitiveTopology.TriangleStrip;
                 break;
             case GuestPrimitiveType.RectangleList:
-                topology = PrimitiveTopology.PatchList;
-                break;
             case GuestPrimitiveType.RectangleListLegacy:
-                if (!autoDraw)
-                {
-                    throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
-                }
-
-                topology = _host.SupportsNativeRectangles ? PrimitiveTopology.PatchList : PrimitiveTopology.TriangleStrip;
+                topology = GpuPrimitiveTopology.PatchList;
                 break;
             case GuestPrimitiveType.QuadListLegacy:
-                topology = PrimitiveTopology.TriangleFan;
+                topology = GpuPrimitiveTopology.TriangleFan;
                 break;
             default:
                 throw _host.Fatal($"The primitive type is unknown: primitiveType={userConfig.PrimitiveType}.");
@@ -728,7 +1069,7 @@ public sealed partial class RenderExecutor
         return true;
     }
 
-    public bool ResolvePrimitiveRestart(RegisterBanks banks, PrimitiveTopology topology, uint indexTypeAndSize)
+    public bool ResolvePrimitiveRestart(RegisterBanks banks, GpuPrimitiveTopology topology, uint indexTypeAndSize)
     {
         var userConfig = banks.UserConfig;
         var control = userConfig.PrimitiveResetControl;
@@ -752,7 +1093,7 @@ public sealed partial class RenderExecutor
                 return false;
         }
 
-        if (topology is not (PrimitiveTopology.LineStrip or PrimitiveTopology.TriangleStrip or PrimitiveTopology.TriangleFan))
+        if (topology is not (GpuPrimitiveTopology.LineStrip or GpuPrimitiveTopology.TriangleStrip or GpuPrimitiveTopology.TriangleFan))
         {
             return false;
         }
@@ -795,7 +1136,12 @@ public sealed partial class RenderExecutor
 
         inputs.Indexed = indexed;
         inputs.PixelActive = state.PixelActive;
+        inputs.TriangleList = AssemblesTriangleList(banks);
         inputs.DepthBound = state.Depth.HasTarget;
+        inputs.DepthAspectBound = state.Depth.HasTarget &&
+            (ViewFormatRules.FullAspects(state.Depth.Target.Target.Format) & GpuImageAspect.DepthBit) != 0;
+        inputs.StencilAspectBound = state.Depth.HasTarget &&
+            (ViewFormatRules.DepthAspects(state.Depth.Target.Target.Format) & GpuImageAspect.StencilBit) != 0;
         if (Prefetch is { } prefetch && prefetch.TryTakeGraphics(banks, in inputs, out var prefetched))
         {
             state.Programs = prefetched;

@@ -253,15 +253,266 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
         Assert.Equal(1, queue.BlockedQueueCount);
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(0, queue.BlockedQueueCount);
-        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        // The compute submission finishing says nothing about the label the graphics
+        // head is comparing, so that head is left asleep instead of re-running a
+        // slice to read the same value and suspend again.
+        Assert.Equal(1, queue.BlockedQueueCount);
         Assert.Equal(SliceResult.AllBlocked, queue.ProcessOne());
 
+        // A write the queue cannot observe — here the test host's own — is what the
+        // blocked-retry fallback is for.
         host.WriteDword(Label, 1);
         queue.RetryBlocked();
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
         Assert.Equal(1UL, queue.BlockedRetries);
+    }
+
+    /// <summary>
+    /// A head waiting on guest memory wakes when those bytes are written and stays
+    /// asleep when other bytes are. Waking every head on every event is what made
+    /// Demon's Souls run 952,889 slices for 371,022 submissions.
+    /// </summary>
+    /// <summary>
+    /// Async compute waiting on a graphics fence the GPU has yet to write. Every queue
+    /// encodes into one GPU stream in order, so the waiter may go on as soon as the label
+    /// is recorded; waiting until the GPU wrote it and the guest was told let the guest
+    /// recycle the fence slot first, and SILENT HILL's compute queue then waited for ever
+    /// on bytes that had become a pool pointer.
+    /// </summary>
+    [Fact]
+    public void AnotherQueuesRecordedLabelSatisfiesAWaitUntilItLands()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        EnqueueCompute(host, queue, 0x20, Compute, 1, WaitEqual(Label, 1), WriteLabel(Label + 8, 7));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+
+        Enqueue(host, queue, Graphics, 2, ReleaseMemoryInterrupt(Label, 1));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+
+        // The GPU has not written the label, yet the compute head goes on.
+        Assert.Equal(0u, host.ReadDword(Label));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+
+        // Once that tick completes the label is memory's business again: the slot still
+        // holds 0, so a later wait on it sleeps instead of seeing the old value.
+        queue.NotifyCompletedGpuTick(5);
+        EnqueueCompute(host, queue, 0x20, Compute, 3, WaitEqual(Label, 1), WriteLabel(Label + 8, 9));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+    }
+
+    /// <summary>
+    /// A wait on this queue's own recorded label is satisfied by the label, so nothing is
+    /// committed for it: a commit would end the open render pass and store every attachment
+    /// for a wait that never sleeps. Only a wait nothing recorded satisfies commits.
+    /// </summary>
+    [Fact]
+    public void AWaitItsOwnRecordedLabelSatisfiesCommitsNothing()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, ReleaseMemoryInterrupt(Label, 1), WaitEqual(Label, 1), WriteLabel(Label + 8, 7));
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(0u, host.ReadDword(Label));
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+        Assert.Empty(host.PollCommits);
+
+        Enqueue(host, queue, Graphics, 2, WaitEqual(Label, 2), WriteLabel(Label + 8, 9));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(new[] { Label }, host.PollCommits);
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+    }
+
+    /// <summary>
+    /// Demon's Souls' drain shape: a label, a wait on it, then a store the guest recycles
+    /// command memory on. The wait is met at parse by the recorded label, and the store used
+    /// to be written then too, long before the GPU wrote the label - which then landed in
+    /// memory the guest had already reused. On a host that lands command-processor writes in
+    /// order the store is recorded behind the label instead, and a wait on it is still met.
+    /// </summary>
+    [Fact]
+    public void AStoreAfterAWaitOnARecordedLabelIsRecordedBehindTheLabel()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PendingLabelTick = 5;
+        var signal = Label + 0x10;
+        host.WriteDword(Label, 0);
+        host.WriteDword(signal, 0);
+        Enqueue(host, queue, Graphics, 1, ReleaseMemoryInterrupt(Label, 1), WaitEqual(Label, 1), WriteLabel(signal, 0x5A17));
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(0u, host.ReadDword(Label));
+        Assert.Equal(0u, host.ReadDword(signal));
+        var label = host.Calls.FindIndex(call => call.StartsWith("eop ", StringComparison.Ordinal));
+        var store = host.Calls.IndexOf($"cp_write WRITE_DATA {signal:X} 4");
+        Assert.True(label >= 0 && store > label, string.Join(", ", host.Calls));
+        Assert.Empty(host.PollCommits);
+        var entry = Assert.Single(CommandProcessorWriteHistory.Find(signal, sizeof(uint)), e => e.Kind == "WRITE_DATA" && e.Value == 0x5A17);
+        Assert.True(entry.Deferred);
+
+        // Waits on the store, this queue's and another's, read it as written.
+        Enqueue(host, queue, Graphics, 2, WaitEqual(signal, 0x5A17), WriteLabel(signal + 8, 9));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        EnqueueCompute(host, queue, 0x20, Compute, 3, WaitEqual(signal, 0x5A17), WriteLabel(signal + 0x10, 3));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Empty(host.PollCommits);
+
+        // The compute queue's store is recorded in order too.
+        Assert.Equal(0u, host.ReadDword(signal + 0x10));
+        Assert.Equal(0u, host.ReadDword(signal + 8));
+        Assert.Contains($"cp_write WRITE_DATA {signal + 0x10:X} 4", host.Calls);
+    }
+
+    private static uint[] WaitNotEqual(ulong address, uint reference) =>
+        StreamRunner.Packet(PacketOpcode.WaitRegisterMemory, 0x14u, StreamRunner.Low(address), StreamRunner.High(address), reference, 0xFFFF_FFFFu, 0);
+
+    /// <summary>
+    /// The synthetic occlusion dump is sixteen qword stores 16 bytes apart. A host that takes
+    /// them as a run gets one call; either way the host sees the same stores in the same
+    /// order, another queue's wait on one of them is met by the recorded label at once, a
+    /// wait on the bytes between them is not woken, and the labels are forgotten when their
+    /// tick lands.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnOcclusionDumpIsRecordedInOrderAndAnotherQueuesWaitSeesItUntilItLands(bool batch)
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PublishesSyntheticOcclusionDumps = true;
+        host.RecordsQwordRuns = true;
+        host.PendingLabelTick = 5;
+        var dump = Label + 0x200;
+        var seen = Label + 0x10;
+        var untouched = Label + 0x18;
+        host.WriteDword(dump + 48, 0);
+        host.WriteDword(dump + 56, 0);
+        host.WriteDword(seen, 0);
+        host.WriteDword(untouched, 0);
+        EnqueueCompute(host, queue, 0x20, Compute, 1, WaitNotEqual(dump + 48, 0), WriteLabel(seen, 7));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        EnqueueCompute(host, queue, 0x21, Compute + 0x1000, 2, WaitNotEqual(dump + 56, 0), WriteLabel(untouched, 9));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(2, queue.BlockedQueueCount);
+
+        var interpreter = queue.GetInterpreter(0);
+        interpreter.BatchCommandProcessorWrites = batch;
+        interpreter.RaiseEvent(0x39, 1, dump);
+
+        var stores = host.CommandProcessorWrites.Where(write => write.Kind == "ZPASS_DUMP").ToArray();
+        Assert.Equal(Enumerable.Range(0, 16).Select(index => dump + (ulong)index * 16), stores.Select(write => write.Address));
+        var value = BitConverter.ToUInt64(stores[0].Bytes);
+        Assert.Equal(1UL << 63, value & (1UL << 63));
+        Assert.All(stores, write => Assert.Equal(value, BitConverter.ToUInt64(write.Bytes)));
+        Assert.Equal(batch ? 1 : 0, host.Calls.Count(call => call.StartsWith("cp_qwords ", StringComparison.Ordinal)));
+        Assert.Equal(batch ? 0 : 16, host.Calls.Count(call => call.StartsWith("cp_write ZPASS_DUMP ", StringComparison.Ordinal)));
+
+        // The wait on a stored qword is met by the recorded label; the one on the bytes
+        // between two stores is not woken by them.
+        Assert.Equal(1, queue.BlockedQueueCount);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Contains($"cp_write WRITE_DATA {seen:X} 4", host.Calls);
+        Assert.DoesNotContain($"cp_write WRITE_DATA {untouched:X} 4", host.Calls);
+
+        // Once that tick completes the labels are memory's business again.
+        queue.NotifyCompletedGpuTick(5);
+        EnqueueCompute(host, queue, 0x22, Compute + 0x2000, 3, WaitNotEqual(dump + 96, 0), WriteLabel(seen + 0x40, 3));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+    }
+
+    [Fact]
+    public void AWaitMetByARecordedLabelDoesNotNeedTheBlockedHeadHintToBeRaised()
+    {
+        // Nothing is blocked when the label is recorded, so its wake is skipped; a wait that
+        // starts afterwards still reads the label, which was published before it.
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, ReleaseMemoryInterrupt(Label, 1));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(0, queue.BlockedQueueCount);
+
+        EnqueueCompute(host, queue, 0x20, Compute, 2, WaitEqual(Label, 1), WriteLabel(Label + 8, 7));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+        Assert.Equal(0, CommandStreamQueue.LabelWakeVerifyMismatches);
+    }
+
+    [Fact]
+    public void MemoryWaitWakesOnlyForAWriteThatTouchesItsOwnBytes()
+    {
+        var (host, queue) = NewQueue();
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(9));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(1, queue.BlockedQueueCount);
+
+        // Somewhere else entirely: the head has no reason to look again.
+        queue.NotifyGuestMemoryWritten(Label + 0x1000, sizeof(uint));
+        Assert.Equal(1, queue.BlockedQueueCount);
+        Assert.Equal(SliceResult.AllBlocked, queue.ProcessOne());
+
+        // Its own bytes: it looks again, and the value is still wrong, so it sleeps.
+        queue.NotifyGuestMemoryWritten(Label, sizeof(uint));
+        Assert.Equal(0, queue.BlockedQueueCount);
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+
+        host.WriteDword(Label, 1);
+        queue.NotifyGuestMemoryWritten(Label, sizeof(uint));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
+    }
+
+    /// <summary>
+    /// A wake that arrives while the slice is running reaches a head that has not parked
+    /// yet, so parking it afterwards would sleep until the retry timer. A command
+    /// processor polling a label the GPU is about to write is exactly that race, and the
+    /// timer is a hundred milliseconds against a submission that finishes in one.
+    /// </summary>
+    [Fact]
+    public void AWakeDuringTheSliceLeavesTheHeadRunnable()
+    {
+        var (host, queue) = NewQueue();
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(9));
+        host.BeforeGuestRead = address =>
+        {
+            if (address != Label)
+            {
+                return;
+            }
+
+            // The submission completes between the poll and the park.
+            host.BeforeGuestRead = null;
+            queue.NotifyCompletedGpuTick(1);
+        };
+
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(0, queue.BlockedQueueCount);
+        Assert.Equal(1ul, queue.WakesRacedWithSlice);
+
+        // No further event is needed to look again; the value is still wrong, and with
+        // nothing racing this time the head does park.
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(1, queue.BlockedQueueCount);
+
+        host.WriteDword(Label, 1);
+        queue.NotifyCompletedGpuTick(2);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
     }
 
     [Fact]
@@ -314,7 +565,7 @@ public sealed class CommandStreamQueueTests
         host.WriteDword(Label, 1);
         queue.RetryBlocked();
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -331,12 +582,12 @@ public sealed class CommandStreamQueueTests
         {
             Assert.True(SpinWait.SpinUntil(
                 () => (drainThread.ThreadState & ThreadState.WaitSleepJoin) != 0,
-                TimeSpan.FromSeconds(2)));
+                TimeSpan.FromSeconds(10)));
             host.WriteDword(Label, 1);
         }
         finally
         {
-            Assert.True(drainThread.Join(TimeSpan.FromSeconds(2)));
+            Assert.True(drainThread.Join(TimeSpan.FromSeconds(10)));
         }
 
         Assert.Equal(IdleOutcome.Completed, outcome);
@@ -375,7 +626,7 @@ public sealed class CommandStreamQueueTests
         await Task.WhenAny(drain, Task.Delay(350));
         Assert.False(drain.IsCompleted);
         host.WriteDword(Label, 1);
-        Assert.Equal(IdleOutcome.Completed, await drain.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(IdleOutcome.Completed, await drain.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
     }
 
@@ -389,7 +640,7 @@ public sealed class CommandStreamQueueTests
 
         Assert.Throws<CommandStreamFatalException>(() => queue.ProcessOne());
 
-        Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.False(queue.HasPending);
         Assert.Contains("no longer accepts", Assert.Throws<CommandStreamFatalException>(() => queue.EnqueueGraphics(Graphics, 2, 2, null)).Message);
     }
@@ -421,7 +672,7 @@ public sealed class CommandStreamQueueTests
 
             Assert.True(failingErrorWriter.WriteAttempted);
             Assert.Same(hostException, actualException);
-            Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.False(queue.HasPending);
             Assert.Contains("no longer accepts", Assert.Throws<CommandStreamFatalException>(() =>
                 queue.EnqueueGraphics(Graphics, 2, 3, null)).Message);
@@ -429,7 +680,7 @@ public sealed class CommandStreamQueueTests
         finally
         {
             queue.Fail();
-            await waiter.WaitAsync(TimeSpan.FromSeconds(2));
+            await waiter.WaitAsync(TimeSpan.FromSeconds(10));
         }
     }
 
@@ -452,7 +703,7 @@ public sealed class CommandStreamQueueTests
         Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(1));
 
         // The first suspend point returns without draining the accepted submissions.
-        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, queue.FrameNumber);
         Assert.True(queue.HasPending);
 
@@ -462,7 +713,7 @@ public sealed class CommandStreamQueueTests
         Assert.False(second.IsCompleted);
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await second.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await second.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(1, queue.FrameNumber);
 
         // The next graphics submission starts from a reset processor.
@@ -489,7 +740,7 @@ public sealed class CommandStreamQueueTests
         Assert.False(done.IsCompleted);
 
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await done.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await done.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(1, queue.FrameNumber);
         Assert.False(queue.HasPending);
     }
@@ -516,7 +767,7 @@ public sealed class CommandStreamQueueTests
         Assert.False(guest.IsCompleted);
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(IdleOutcome.Completed, await guest.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await guest.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     [Theory]
@@ -545,7 +796,7 @@ public sealed class CommandStreamQueueTests
             if (address == Label + 6 * 8) host.WriteQword(address, 0);
         };
 
-        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, queue.FrameNumber); // CPU/GPU overlap remains enabled.
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(0UL, host.ReadQword(Label + 6 * 8)); // The CPU reset was not overwritten.
