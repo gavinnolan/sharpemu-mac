@@ -243,6 +243,7 @@ internal sealed class CompiledResourceTransaction
             descriptors.Add(Call(nameof(SetTablePhase), input, Expression.Constant(true)));
             descriptors.Add(Expression.TryFinally(Expression.Block(table), Call(nameof(SetTablePhase), input, Expression.Constant(false))));
             descriptors.Add(Expression.Label(done, Expression.Constant(true)));
+            ResourcePlanBuildCounters.RecordTransaction();
             return new CompiledResourceTransaction(
                 Expression.Lambda<Func<ResourceRuntimeInputs, List<DescriptorWords>, uint[], bool>>(
                     Expression.Block(locals, descriptors), input, descriptorOutput, output).Compile(),

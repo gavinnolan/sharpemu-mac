@@ -269,6 +269,8 @@ def parse_ticks(tlog):
             d = kv(text)
             d['phases'] = {name: (float(ms), int(n)) for name, ms, n in PHASE_MS.findall(text)}
             fam['render'].append((t, d))
+        elif text.startswith('[PERF][PLAN_BUILDS]'):
+            fam['plans'].append((t, kv(text)))
         elif text.startswith('[MEM] dotnet'):
             m = re.search(r'pause_ms=\d+\(\+(\d+)\)', text)
             if m:
@@ -542,6 +544,11 @@ def analyse(run, lo, hi, slack=0.25):
         m['regimes_10s_fps'] = {k: r(v, 3) for k, v in shares.items()}
         m['regime_windows'] = total
     m['render'] = render_section(fam['render'], lo, hi) if tlog else None
+    if m['render']:
+        plans = in_window(fam['plans'], lo, hi)
+        if plans:
+            m['render']['plan_builds_per_frame'] = r(
+                sum(d.get('dynamic_methods', 0.0) + d.get('transactions', 0.0) for _, d in plans) / m['render']['frames'], 2)
     m['counters'] = counters_section(fam, flips, lo, hi) if tlog else None
     m['pass_profile'] = passprof_section(tlog, lo, hi) if tlog else None
     if frames.get('p50_ms') is not None:

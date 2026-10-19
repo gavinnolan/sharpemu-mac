@@ -429,7 +429,13 @@ internal static partial class MetalV2Presenter
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                     var dsIdle = DsTrace.Gpu && DsTrace.Armed;
                     var dsIdleCpu = dsIdle ? DsTrace.SelfCpuNs() : 0UL;
-                    _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
+                    // The park is idle time, not loop overhead: charged to Idle it stays out of
+                    // Unattributed and out of the worker's per-draw figure.
+                    using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Measure(
+                        SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.Idle))
+                    {
+                        _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
+                    }
                     var idleEnded = System.Diagnostics.Stopwatch.GetTimestamp();
                     host.NoteIdle(idleEnded - idleStarted);
                     if (dsIdle)

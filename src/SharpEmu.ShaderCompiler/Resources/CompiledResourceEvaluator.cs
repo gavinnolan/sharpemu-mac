@@ -146,6 +146,7 @@ internal sealed class CompiledResourceEvaluator
     {
         var count = Math.Min(NodesPerMethod, Count - first);
         DynamicMethodsCreated.Add();
+        ResourcePlanBuildCounters.RecordEvaluatorMethod();
         var method = new DynamicMethod($"Srt_{plan.Hash:X16}_{first}", typeof(bool),
             [typeof(RuntimeValueEvaluator), typeof(int), typeof(ulong).MakeByRefType()], typeof(CompiledResourceEvaluator).Module, true);
         var il = method.GetILGenerator();

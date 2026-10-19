@@ -265,6 +265,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // the label whenever the GPU could not write it.
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
+        using var endOfPipeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandEndOfPipe);
         _endOfPipeRecords++;
         // Recorded ahead of the label, so its bytes land before the guest is told the
         // work is done.
@@ -683,7 +685,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _imageCache.ForgetStandingDccClaims(guestAddress, (ulong)copy.Bytes);
         }
 
-        NoteGuestMemoryWrite(guestAddress, (ulong)copy.Bytes, origin);
+        using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping))
+        {
+            NoteGuestMemoryWrite(guestAddress, (ulong)copy.Bytes, origin);
+        }
+
         _pendingLabelWrites++;
         return serial;
     }
@@ -775,6 +782,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             FirstValue(source), MetalGpuWriteOrigin.Copy, "cp write", kind, size);
 
         // Parse-time readers see the bytes as written until they land (MetalPendingWriteOverlay).
+        using var bookkeepingScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping);
         if (_cpOverlay.Count >= MaxOverlayEntriesBeforeRetire)
         {
             _cpOverlay.Retire(CompletedSerial);
@@ -989,6 +998,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private void EncodeLabelCopies(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)
     {
+        using var encodeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandLabelEncode);
         EncodeLabelBarrier(commandBuffer);
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -1748,11 +1759,19 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 GpuComponentSwizzle.B, GpuComponentSwizzle.G, GpuComponentSwizzle.R, GpuComponentSwizzle.A)
             : default;
 
-    public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments) =>
+    public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
+    {
+        using var entryScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandDrawEntry);
         _translation!.DrawIndexed(submitId, in arguments);
+    }
 
-    public void DrawAuto(ulong submitId, in DrawAutoArguments arguments) =>
+    public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
+    {
+        using var entryScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandDrawEntry);
         _translation!.DrawAuto(submitId, in arguments);
+    }
 
     public void DispatchDirect(
         ulong submitId,

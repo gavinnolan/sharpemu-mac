@@ -550,6 +550,8 @@ internal sealed partial class MetalRenderHost :
 
     private ulong FlushCommandBuffer(PassEndCause cause, MetalFlushCause why)
     {
+        using var flushScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandFlush);
         // An upload left for a pass is made before the buffer it belongs in is committed.
         _imageCache.DrainDeferredRefreshes();
         if (_commandBuffer == 0)

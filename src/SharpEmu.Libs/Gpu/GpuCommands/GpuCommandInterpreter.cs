@@ -433,7 +433,12 @@ public sealed partial class GpuCommandInterpreter
             // header on its own first doubled the number of guest reads the command
             // stream makes, and a guest read is not free: the backend has to decide
             // whether the GPU may still be writing those bytes.
-            var window = ReadPacketWindow(cursorIndex, packetAddress, cursor.Remaining);
+            ReadOnlySpan<uint> window;
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+            {
+                window = ReadPacketWindow(cursorIndex, packetAddress, cursor.Remaining);
+            }
+
             var header = window[0];
             if (PacketProfile.Enabled)
             {
@@ -512,9 +517,18 @@ public sealed partial class GpuCommandInterpreter
             }
 
             // The window already holds the body unless the packet is a long one.
-            var payload = length <= (uint)window.Length
-                ? window.Slice(1, (int)(length - 1))
-                : ReadPayload(cursorIndex, packetAddress, length - 1);
+            ReadOnlySpan<uint> payload;
+            if (length <= (uint)window.Length)
+            {
+                payload = window.Slice(1, (int)(length - 1));
+            }
+            else
+            {
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+                {
+                    payload = ReadPayload(cursorIndex, packetAddress, length - 1);
+                }
+            }
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
             uint consumed;
             if (PacketProfile.Enabled)

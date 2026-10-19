@@ -42,6 +42,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal uint SetContextRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
+        using var registerScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandRegisterWrite);
         var offset = RegisterBankLayout.Normalize(payload[0]);
         if (offset == RegisterBankLayout.ContextNop)
         {
@@ -123,6 +124,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal uint SetShaderRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
+        using var registerScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandRegisterWrite);
         var offset = payload[0];
         if (offset == RegisterBankLayout.ShaderRegisterNop)
         {
@@ -150,6 +152,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal uint SetUserConfigRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
+        using var registerScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandRegisterWrite);
         if (InternalDataPacket.Matches(packet.Header, payload))
         {
             return packet.Length - 1;
@@ -195,6 +198,7 @@ public sealed partial class GpuCommandInterpreter
 
     private uint RegisterTablePacket(in PacketContext packet, ReadOnlySpan<uint> payload, RegisterBank bank)
     {
+        using var registerScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandRegisterWrite);
         if (packet.Length != 5)
         {
             throw _host.Fatal($"The register table header is not supported: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");

@@ -203,6 +203,14 @@ public static class RenderPhaseProfile
         GpuWriteFlush,
         MappedSizeClamp,
         StorageBufferResolve,
+        // The command stream's own time on the Metal worker, split by what it was doing.
+        // Exclusive: nested scopes (draw translation, waits, label encoding) are carved out.
+        CommandPacketRead,
+        CommandRegisterWrite,
+        CommandDrawEntry,
+        CommandFlush,
+        CommandLabelEncode,
+        CommandCpBookkeeping,
         Count,
     }
 
@@ -459,6 +467,9 @@ public static class RenderPhaseProfile
 
     internal static bool DetailMeasurementsEnabled => Enabled && _scopeDepth > 0;
 
+    /// <summary>The ticks charged to a phase in the current report window; for tests.</summary>
+    internal static long PhaseTicks(Phase phase) => Volatile.Read(ref _ticks[(int)phase]);
+
     /// <summary>
     /// Closes out the running phase and switches to <paramref name="next"/>,
     /// returning the phase that was running.
@@ -579,6 +590,7 @@ public static class RenderPhaseProfile
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
+        Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourcePlanBuildCounters.TakeReport());
         foreach (var provider in ReportProviders)
         {
             Console.Error.WriteLine(provider());

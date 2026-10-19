@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -75,11 +76,16 @@ public sealed partial class GpuCommandInterpreter
         var first = source.Length >= sizeof(ulong)
             ? BinaryPrimitives.ReadUInt64LittleEndian(source)
             : source.Length >= sizeof(uint) ? BinaryPrimitives.ReadUInt32LittleEndian(source) : 0UL;
-        CommandProcessorWriteHistory.Record(QueueId, destination, source.Length,
-            source.Length == sizeof(uint) ? (uint)first : first, kind, deferred: true);
-        NotePendingBytes(destination, source);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping))
+        {
+            CommandProcessorWriteHistory.Record(QueueId, destination, source.Length,
+                source.Length == sizeof(uint) ? (uint)first : first, kind, deferred: true);
+            NotePendingBytes(destination, source);
+        }
+
         _host.RecordCommandProcessorWrite(destination, source, kind);
 
+        using var trailingScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping);
         _lastWriteLength = 0;
         if (source.Length is sizeof(uint) or sizeof(ulong))
         {
