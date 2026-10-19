@@ -1096,6 +1096,31 @@ internal sealed partial class MetalRenderHost
 
     public void EndRendering() => FinishRendering(default, hasNext: false);
 
+    // The executor ends the pass to release fragment stores, to order a write the pass cannot,
+    // or because a dispatch is next; the TBDR line and the pass profile say which.
+    void IRenderHost.EndRendering(string why)
+    {
+        if (_renderingActive)
+        {
+            switch (why)
+            {
+                case "release":
+                    _passEndRelease++;
+                    break;
+                case "barrier":
+                    _passEndBarrier++;
+                    break;
+                default:
+                    _passEndDispatch++;
+                    break;
+            }
+
+            PassProfileNoteEnd(why);
+        }
+
+        EndRendering();
+    }
+
     // The pass is ending because another one is about to begin, and that one is what
     // decides whether this pass's stores are worth making.
     private void EndRenderingBefore(in RenderingState next) => FinishRendering(in next, hasNext: true);

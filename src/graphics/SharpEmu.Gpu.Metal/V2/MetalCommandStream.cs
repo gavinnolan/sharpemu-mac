@@ -1057,10 +1057,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _encodingDeferredLabels = true;
         try
         {
+            var copies = _deferredLabelCopies.Count;
             EncodeLabelCopies(
                 EnsureCommandBuffer(),
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
             _deferredLabelCopies.Clear();
+            // The barrier and the blit encoder are gap the pass profile cannot sample.
+            if (PassProfileEnabled)
+            {
+                PassProfileNoteBetween($"label-copies n={copies}");
+            }
         }
         finally
         {

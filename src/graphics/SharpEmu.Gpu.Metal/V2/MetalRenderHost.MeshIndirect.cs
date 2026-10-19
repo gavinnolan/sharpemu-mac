@@ -105,6 +105,9 @@ internal sealed partial class MetalRenderHost
     private long _indirectLaunchesWritten;
     private long _indirectLaunchesReused;
     private long _passEndIndirect;
+    private long _passEndRelease;
+    private long _passEndBarrier;
+    private long _passEndDispatch;
 
     /// <summary>The indirect-draw counters of the PERF line; reported and reset.</summary>
     internal string TakeIndirectCounters() =>
@@ -117,6 +120,12 @@ internal sealed partial class MetalRenderHost
 
     /// <summary>Passes an indirect launch ended that would otherwise have continued; reported and reset.</summary>
     internal long TakeIndirectPassEnds() => Interlocked.Exchange(ref _passEndIndirect, 0);
+
+    /// <summary>Passes the executor ended itself, as release/barrier/dispatch; reported and reset.</summary>
+    internal string TakeExecutorPassEnds() =>
+        $"end_release={Interlocked.Exchange(ref _passEndRelease, 0)} " +
+        $"end_barrier={Interlocked.Exchange(ref _passEndBarrier, 0)} " +
+        $"end_dispatch={Interlocked.Exchange(ref _passEndDispatch, 0)}";
 
     /// <summary>
     /// Whether recorded GPU work may still write these bytes, so that a CPU read of them now
@@ -327,6 +336,11 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendVoid(encoder, SelUpdateFence, IndirectLaunchFence());
         MetalNative.SendVoid(encoder, SelEndEncoding);
         NoteRecordedWork();
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteBetween($"indirect-launch n={batch.Count}");
+        }
+
         _preparedLaunchPass = _renderPassSerial;
         _launchForDrawKey = key;
         _launchForDraw = _preparedLaunches[key];

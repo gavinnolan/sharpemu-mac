@@ -253,6 +253,10 @@ internal sealed partial class MetalRenderHost
             }
 
             staged.MarkWrittenBack();
+            if (PassProfileEnabled)
+            {
+                PassProfileNoteBetween($"staged-writeback n={written.Count}");
+            }
         }
         finally
         {

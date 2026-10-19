@@ -680,7 +680,7 @@ public sealed partial class RenderExecutor
             // ending the pass would store and reload every attachment for each such draw.
             if ((writeStages & GpuPipelineStage.FragmentShaderBit) != 0 || !_host.OrdersVertexWritesInsidePass)
             {
-                _host.EndRendering();
+                _host.EndRendering("barrier");
             }
 
             _host.ShaderWriteBarrier(writeStages);

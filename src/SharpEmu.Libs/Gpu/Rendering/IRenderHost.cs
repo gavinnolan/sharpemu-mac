@@ -210,6 +210,10 @@ public interface IRenderHost
 
     void EndRendering();
 
+    // Ends the pass for a stated reason ("release", "barrier" or "dispatch"), for a host that
+    // reports why passes ended; the others just end it.
+    void EndRendering(string why) => EndRendering();
+
     // Whether a texture bound for the draw being prepared reads the depth attachment's subresources.
     bool SamplesDepthAttachment(in DepthAttachmentState depth) => true;
 

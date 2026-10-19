@@ -161,7 +161,7 @@ public sealed partial class RenderExecutor
         }
 
         ReleaseFragmentWrites();
-        _host.EndRendering();
+        _host.EndRendering("dispatch");
         if (program.UsesDeviceAddresses)
         {
             _host.BeforeDeviceAddressPreparation([input.Stage]);

@@ -109,7 +109,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        _host.EndRendering();
+        _host.EndRendering("release");
         _host.ShaderWriteBarrier(GpuPipelineStage.FragmentShaderBit);
     }
 
