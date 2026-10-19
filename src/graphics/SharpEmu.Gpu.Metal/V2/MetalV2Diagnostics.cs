@@ -159,11 +159,13 @@ internal static class MetalV2Diagnostics
 
     public static readonly bool DccClaimFirstVerify = PerfSwitches.Verify("SHARPEMU_METAL_V2_DCC_CLAIM_FIRST_VERIFY");
 
-    // Sampled-only textures are created with Apple GPU lossy compression (about half the
-    // memory) where the device and the format allow it (MetalImageCache.Lossy.cs). Texels come
-    // back approximated; SHARPEMU_METAL_V2_LOSSY_TEXTURES=0 keeps every texture exact.
+    // SHARPEMU_METAL_V2_LOSSY_TEXTURES=1 creates sampled-only textures with Apple GPU lossy
+    // compression (about half the memory) where the device and the format allow it
+    // (MetalImageCache.Lossy.cs). Off by default: with it on, SH rendered dark scenes as
+    // pink/blue false colour, black specks and opaque lenses in 5 of 8 runs, and in none of 3
+    // with it off.
     public static readonly bool LossyTextures =
-        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOSSY_TEXTURES"), "0", StringComparison.Ordinal);
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOSSY_TEXTURES"), "1", StringComparison.Ordinal);
 
     // SHARPEMU_METAL_V2_COMPRESSIBLE_TARGETS=0 creates every colour image with the
     // shader-write and pixel-format-view usages, as before. Otherwise an image first asked

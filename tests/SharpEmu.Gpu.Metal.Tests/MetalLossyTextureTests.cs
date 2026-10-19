@@ -49,12 +49,13 @@ public sealed unsafe class MetalLossyTextureTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void ASampledImageIsCreatedLossyByDefaultAndExactWithTheFlagOff()
+    public void ASampledImageIsExactByDefaultAndLossyWithTheFlagOn()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
-        // On by default (SHARPEMU_METAL_V2_LOSSY_TEXTURES=0 turns it off).
-        Assert.True(rig.Cache.LossyTextures);
+        // Off by default (SHARPEMU_METAL_V2_LOSSY_TEXTURES=1 turns it on).
+        Assert.False(rig.Cache.LossyTextures);
+        rig.Cache.LossyTextures = true;
         var on = rig.Find(ImageAddress + 0x40000, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
         var onImage = rig.Cache.GetImage(on);
         Assert.True(onImage.Shape.Lossy);
