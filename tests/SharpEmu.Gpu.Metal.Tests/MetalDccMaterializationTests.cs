@@ -105,7 +105,14 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         public ulong CurrentSerial => harness.SubmissionSerial;
         public ulong CompletedSerial => harness.CompletedSerial;
         public IMetalSubmissionContext BeginTransfer(MetalTransferCause cause) => harness;
-        public bool HasPendingGpuWrite(ulong address, ulong size) => Pending;
+        public int PendingQueries;
+
+        public bool HasPendingGpuWrite(ulong address, ulong size)
+        {
+            PendingQueries++;
+            return Pending;
+        }
+
         public void FillGuestRange(ulong address, ulong size, uint value) => Fills++;
         public void NoteGuestWrite(ulong address, ulong size) { }
         public void WaitForGpu() { }
@@ -239,12 +246,14 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
     }
 
     // A slice that already holds the clear it was claimed for is settled from its first
-    // byte; the claim, not a scan of the slice, says it is a repeat.
+    // byte; the claim, not a scan of the slice, says it is a repeat. This is the full path,
+    // with SHARPEMU_METAL_V2_DCC_CLAIM_FIRST=0; the claim-first one reads nothing at all.
     [Fact]
     public void MaterializeDcc_ClaimedSliceIsNotScanned()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
+        rig.Cache.DccClaimFirst = false;
         rig.Lookup(ImageRole.ColorTarget);
         rig.FillMetadata(0x00);
         rig.Lookup();

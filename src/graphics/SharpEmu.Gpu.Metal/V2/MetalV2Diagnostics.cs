@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -148,6 +149,15 @@ internal static class MetalV2Diagnostics
     // (MetalRenderHost.DepthOnlyJoin.cs).
     public static readonly bool JoinDepthOnlyDraws =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_DEPTH_ONLY"), "0", StringComparison.Ordinal);
+
+    // SHARPEMU_METAL_V2_DCC_CLAIM_FIRST=0 makes every DCC slice lookup query pending writes
+    // and read the slice before it finds the clear already claimed, as before, instead of
+    // settling a slice whose claim stands from the claim alone (MetalImageCache.Tracking.cs).
+    // SHARPEMU_METAL_V2_DCC_CLAIM_FIRST_VERIFY=1 (or SHARPEMU_PERF_VERIFY=1) takes the full
+    // path for every slice and reports each standing claim it disagrees with.
+    public static readonly bool DccClaimFirst = PerfSwitches.Enabled("SHARPEMU_METAL_V2_DCC_CLAIM_FIRST");
+
+    public static readonly bool DccClaimFirstVerify = PerfSwitches.Verify("SHARPEMU_METAL_V2_DCC_CLAIM_FIRST_VERIFY");
 
     // Sampled-only textures are created with Apple GPU lossy compression (about half the
     // memory) where the device and the format allow it (MetalImageCache.Lossy.cs). Texels come

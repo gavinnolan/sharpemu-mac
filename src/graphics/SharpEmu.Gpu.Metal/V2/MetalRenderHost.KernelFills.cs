@@ -131,6 +131,7 @@ internal sealed partial class MetalRenderHost
 
         // The bytes are the image's now, as after a storage store into them: pending
         // command-processor bytes and staged copies there are stale, and a read waits.
+        _imageCache.ForgetStandingDccClaims(address, size);
         NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
         Interlocked.Increment(ref _kernelFills);
         return true;
@@ -155,6 +156,7 @@ internal sealed partial class MetalRenderHost
         }
 
         _imageCache.CompleteKernelCopy(destinationIdentifier);
+        _imageCache.ForgetStandingDccClaims(destination, size);
         NoteGuestMemoryWrite(destination, size, MetalGpuWriteOrigin.Copy);
         Interlocked.Increment(ref _kernelCopies);
         return true;

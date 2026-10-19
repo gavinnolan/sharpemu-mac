@@ -135,6 +135,7 @@ internal sealed partial class MetalImageCache
                 }
 
                 UnindexDccClaim(entry.Address);
+                UnstandDccClaimLocked(entry.Image, entry.Address);
                 return true;
             });
         }
@@ -651,6 +652,185 @@ internal sealed partial class MetalImageCache
 
         return false;
     }
+
+    // The claims above that still stand without a look at their bytes, by image and slice
+    // address, with the code each was claimed for. A slice found here is a repeat with no
+    // pending-write query and no read of the metadata: the full scan would read the code
+    // the claim was taken for and reach the same repeat.
+    //
+    // An entry is added when a claim is taken (after a settled scan, or from a recorded fill
+    // whose code is what lands) and again when a settled scan finds its claim standing. It
+    // goes with the claim, at every re-arm of the metadata (a CPU store into the watched
+    // range, a recorded GPU store, a fill, ClearMetadata) and when the image is released.
+    // It also goes, keeping the claim, wherever recorded work stores into guest memory
+    // without re-arming claims: image writebacks and alias publications, staged-storage
+    // writebacks, kernel fills and copies, end-of-pipe labels and unbounded stores. Those
+    // slices take the full path again, which is what notices whether their bytes changed.
+    // Writes through the raw backing (TryWriteBacking) reach no hook; the full path sees
+    // them only by re-reading, which SHARPEMU_METAL_V2_DCC_CLAIM_FIRST_VERIFY reports.
+    private readonly Dictionary<(ResourceSlotIdentifier Image, ulong Address), byte> _standingDccClaims = new();
+
+    /// <summary>SHARPEMU_METAL_V2_DCC_CLAIM_FIRST: a standing claim settles its slice unread.</summary>
+    internal bool DccClaimFirst { get; set; } = MetalV2Diagnostics.DccClaimFirst;
+
+    /// <summary>The full path runs for every slice, and a standing claim it disagrees with is reported.</summary>
+    internal bool DccClaimFirstVerify { get; set; } = MetalV2Diagnostics.DccClaimFirstVerify;
+
+    private long _dccClaimFirstMismatches;
+    private const int DccClaimFirstMismatchLines = 64;
+
+    /// <summary>Standing claims the full path disagreed with, under the verify mode.</summary>
+    internal long TakeDccClaimFirstMismatches() => Interlocked.Exchange(ref _dccClaimFirstMismatches, 0);
+
+    /// <summary>
+    /// Recorded work stores into guest memory without re-arming the claims there: the
+    /// slices starting in the range take the full path until a settled scan finds them
+    /// unchanged.
+    /// </summary>
+    public void ForgetStandingDccClaims(ulong address, ulong size)
+    {
+        if (Volatile.Read(ref _standingDccClaimCount) == 0)
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
+        ForgetStandingDccClaimsLocked(address, size);
+    }
+
+    // A writeback or alias publication this cache records into guest memory: the store
+    // does not re-arm claims, so the slices it reaches stop standing.
+    private void NoteOwnGuestWrite(ulong address, ulong size)
+    {
+        if (_lock.IsHeldByCurrentThread)
+        {
+            ForgetStandingDccClaimsLocked(address, size);
+        }
+        else
+        {
+            ForgetStandingDccClaims(address, size);
+        }
+
+        _owner.NoteGuestWrite(address, size);
+    }
+
+    /// <summary>As above, for a store that names no range: every slice takes the full path.</summary>
+    public void ForgetAllStandingDccClaims()
+    {
+        if (Volatile.Read(ref _standingDccClaimCount) == 0)
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
+        _standingDccClaims.Clear();
+        Volatile.Write(ref _standingDccClaimCount, 0);
+    }
+
+    // _standingDccClaims.Count, for the callers above to skip the lock when there is none.
+    // Entries are added by lookups on the GPU worker, which is also what records stores.
+    private int _standingDccClaimCount;
+
+    /// <summary>Caller holds the lock.</summary>
+    private void StandDccClaimLocked(ResourceSlotIdentifier image, ulong address, byte code)
+    {
+        _standingDccClaims[(image, address)] = code;
+        Volatile.Write(ref _standingDccClaimCount, _standingDccClaims.Count);
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void UnstandDccClaimLocked(ResourceSlotIdentifier image, ulong address)
+    {
+        if (_standingDccClaims.Remove((image, address)))
+        {
+            Volatile.Write(ref _standingDccClaimCount, _standingDccClaims.Count);
+        }
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void ForgetStandingDccClaimsLocked(ulong address, ulong size)
+    {
+        if (_standingDccClaims.Count == 0 || !MayHoldDccClaimStart(address, size))
+        {
+            return;
+        }
+
+        // Removing the current entry leaves the enumeration valid.
+        foreach (var key in _standingDccClaims.Keys)
+        {
+            if (key.Address >= address && key.Address - address < size)
+            {
+                _standingDccClaims.Remove(key);
+            }
+        }
+
+        Volatile.Write(ref _standingDccClaimCount, _standingDccClaims.Count);
+    }
+
+    // Whether any recorded fill reaches the slice. Caller holds the lock.
+    private bool RecordedDccFillOverlapsLocked(ulong address, ulong size)
+    {
+        foreach (var (start, fill) in _recordedDccFills)
+        {
+            if (address < start + fill.Size && start < address + size)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Marks in <paramref name="standing"/> the slices of one lookup whose claim stands, with
+    /// the code it stands for in <paramref name="codes"/>, all under one hold of the lock. A
+    /// slice a recorded fill still reaches is left to the full path, which settles the fill.
+    /// Returns how many were marked.
+    /// </summary>
+    private int ProbeStandingDccClaims(
+        ResourceSlotIdentifier imageIdentifier, ulong firstAddress, ulong sliceSize, uint count,
+        Span<bool> standing, Span<byte> codes)
+    {
+        if (Volatile.Read(ref _standingDccClaimCount) == 0)
+        {
+            return 0;
+        }
+
+        var found = 0;
+        using var held = _lock.Hold();
+        for (var slice = 0u; slice < count; slice++)
+        {
+            var address = firstAddress + sliceSize * slice;
+            if (!_standingDccClaims.TryGetValue((imageIdentifier, address), out var code) ||
+                (_recordedDccFills.Count != 0 && RecordedDccFillOverlapsLocked(address, sliceSize)))
+            {
+                continue;
+            }
+
+            standing[(int)slice] = true;
+            codes[(int)slice] = code;
+            found++;
+            if (!DccClaimFirstVerify && _deferredDccSlices.Count != 0)
+            {
+                // What the claimed repeat of the full path does with a deferral.
+                _deferredDccSlices.Remove((imageIdentifier, address));
+            }
+        }
+
+        return found;
+    }
+
+    private void ReportDccClaimFirstMismatch(
+        ResourceSlotIdentifier imageIdentifier, ulong address, byte claimed, string full)
+    {
+        if (Interlocked.Increment(ref _dccClaimFirstMismatches) <= DccClaimFirstMismatchLines)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][DCC][VERIFY] a standing claim disagrees with the full path: image={imageIdentifier} " +
+                $"meta=0x{address:X} claimed=0x{claimed:X2} full={full}");
+        }
+    }
+
     private long _dccRepeatsSkipped;
     private long _dccSlicesCoalesced;
 
@@ -784,6 +964,7 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        StandDccClaimLocked(image, address, code);
         IndexDccClaim(address);
         WatchMetadataLocked(address, size);
         return true;
@@ -801,6 +982,7 @@ internal sealed partial class MetalImageCache
                 }
 
                 UnindexDccClaim(entry.Address);
+                UnstandDccClaimLocked(entry.Image, entry.Address);
                 return true;
             });
             if (DccTraceActive && removed != 0 && DccTraceCovers(address, size) && Interlocked.Increment(ref _dccTraceLines) <= DccTraceMax)
@@ -1308,7 +1490,7 @@ internal sealed partial class MetalImageCache
         ResourceSlotIdentifier imageIdentifier, in ImageRequest request, uint metadataBaseLayer, long imageWriteSequence)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.DccClearScan);
-        var description = request.Description;
+        ref readonly var description = ref request.Description;
         var range = description.Metadata.Range;
         var layers = description.TransferLayers;
         const ulong MetadataBlockSize = 0x1000;
@@ -1333,8 +1515,41 @@ internal sealed partial class MetalImageCache
         }
 
         var sliceSize = range.Size / layers;
-        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(
-            checked((int)Math.Min(sliceSize, 64 * 1024)));
+        // Slices whose claim stands are repeats before anything is read: no pending-write
+        // query and no read of their bytes (see _standingDccClaims). Under the verify mode
+        // they take the full path too, and its answer is compared with the claim's.
+        const int StackSlices = 256;
+        Span<bool> standing = count <= StackSlices ? stackalloc bool[StackSlices] : new bool[count];
+        Span<byte> standingCodes = count <= StackSlices ? stackalloc byte[StackSlices] : new byte[count];
+        standing = standing[..(int)count];
+        standing.Clear();
+        var standingCount = DccClaimFirst
+            ? ProbeStandingDccClaims(imageIdentifier, range.Address + sliceSize * first, sliceSize, count, standing, standingCodes)
+            : 0;
+        var verify = standingCount != 0 && DccClaimFirstVerify;
+        if (standingCount != 0 && !verify)
+        {
+            Interlocked.Add(ref _dccRepeatsSkipped, standingCount);
+            if (DccTraceActive)
+            {
+                for (var slice = 0u; slice < count; slice++)
+                {
+                    if (standing[(int)slice])
+                    {
+                        TraceDcc(imageIdentifier, in request, range.Address + sliceSize * (first + slice), sliceSize,
+                            $"claim-standing code=0x{standingCodes[(int)slice]:X2}");
+                    }
+                }
+            }
+
+            if (standingCount == count)
+            {
+                return;
+            }
+        }
+
+        // Rented on the first slice that is scanned whole.
+        byte[]? buffer = null;
         // Adjacent slices that take the same clear are cleared together, as one pass over
         // all of their layers or depth planes. A volume the game clears whole through its
         // metadata is otherwise one pass per plane: UE4's 64-plane translucency volumes are
@@ -1345,6 +1560,12 @@ internal sealed partial class MetalImageCache
             Span<byte> firstByte = stackalloc byte[1];
             for (var slice = 0u; slice < count; slice++)
             {
+                var claimStands = standing[(int)slice];
+                if (claimStands && !verify)
+                {
+                    continue;
+                }
+
                 var address = range.Address + sliceSize * (first + slice);
                 // The metadata may still be being written by recorded work; scanning it
                 // now reads half-written data, and claiming it would hide the real clear.
@@ -1391,7 +1612,17 @@ internal sealed partial class MetalImageCache
                             out clear))
                     {
                         _deferredDccSlices.Remove((imageIdentifier, address));
-                        TraceDcc(imageIdentifier, in request, address, sliceSize, $"not-a-clear code=0x{code:X2} recorded={recorded}");
+                        if (claimStands)
+                        {
+                            ReportDccClaimFirstMismatch(
+                                imageIdentifier, address, standingCodes[(int)slice], $"not-a-clear code=0x{code:X2}");
+                        }
+
+                        if (DccTraceActive)
+                        {
+                            TraceDcc(imageIdentifier, in request, address, sliceSize, $"not-a-clear code=0x{code:X2} recorded={recorded}");
+                        }
+
                         continue;
                     }
 
@@ -1403,11 +1634,36 @@ internal sealed partial class MetalImageCache
                     {
                         _deferredDccSlices.Remove((imageIdentifier, address));
                         Interlocked.Increment(ref _dccRepeatsSkipped);
-                        TraceDcc(imageIdentifier, in request, address, sliceSize, $"claimed-repeat code=0x{code:X2} recorded={recorded}");
+                        if (claimStands && code != standingCodes[(int)slice])
+                        {
+                            ReportDccClaimFirstMismatch(
+                                imageIdentifier, address, standingCodes[(int)slice], $"claimed-repeat code=0x{code:X2}");
+                        }
+
+                        if (!recorded)
+                        {
+                            // Read settled and found claimed: from here the claim settles
+                            // the slice alone again.
+                            StandDccClaimLocked(imageIdentifier, address, code);
+                        }
+
+                        if (DccTraceActive)
+                        {
+                            TraceDcc(imageIdentifier, in request, address, sliceSize, $"claimed-repeat code=0x{code:X2} recorded={recorded}");
+                        }
+
                         continue;
                     }
                 }
 
+                if (claimStands)
+                {
+                    // The full path is about to scan a slice the claim would have settled.
+                    ReportDccClaimFirstMismatch(
+                        imageIdentifier, address, standingCodes[(int)slice], $"unclaimed code=0x{code:X2} recorded={recorded}");
+                }
+
+                buffer ??= System.Buffers.ArrayPool<byte>.Shared.Rent(checked((int)Math.Min(sliceSize, 64 * 1024)));
                 if (!recorded && !IsUniformSlice(address, sliceSize, code, buffer))
                 {
                     if (DccTraceEnabled)
@@ -1426,7 +1682,11 @@ internal sealed partial class MetalImageCache
                 // what has been done; a rewrite of the metadata re-arms it, so a surface
                 // the game clears every frame keeps working.
                 var decision = DecideDccClear(imageIdentifier, address, sliceSize, code, imageWriteSequence);
-                TraceDcc(imageIdentifier, in request, address, sliceSize, $"decision={decision} code=0x{code:X2} recorded={recorded}");
+                if (DccTraceActive)
+                {
+                    TraceDcc(imageIdentifier, in request, address, sliceSize, $"decision={decision} code=0x{code:X2} recorded={recorded}");
+                }
+
                 if (decision == DccClearDecision.Repeat)
                 {
                     Interlocked.Increment(ref _dccRepeatsSkipped);
@@ -1460,7 +1720,10 @@ internal sealed partial class MetalImageCache
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            if (buffer is not null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 

@@ -1203,6 +1203,8 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     public void NoteUnboundedGuestMemoryWrite()
     {
+        // The store may reach DCC metadata without re-arming a claim there.
+        _imageCache.ForgetAllStandingDccClaims();
         _gpuWrites.NoteUnbounded(SubmissionSerial);
         _cpOverlay.Clear();
         _labelOverlay.Clear();

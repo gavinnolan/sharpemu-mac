@@ -677,6 +677,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // never has, and checking for one per label is not free.
             _imageCache.InvalidateMemoryFromGpu(guestAddress, (ulong)copy.Bytes);
         }
+        else
+        {
+            // Nor does it re-arm a DCC claim; one standing over the label is read again.
+            _imageCache.ForgetStandingDccClaims(guestAddress, (ulong)copy.Bytes);
+        }
 
         NoteGuestMemoryWrite(guestAddress, (ulong)copy.Bytes, origin);
         _pendingLabelWrites++;

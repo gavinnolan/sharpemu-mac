@@ -1373,7 +1373,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             context.ProfileEncoded(ProfileLabel("writeback-run", in description));
         }
         image.MarkPublished(aligned, alignedEnd);
-        _owner.NoteGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
+        NoteOwnGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
         _writebackCauses[(int)cause]++;
         _partialWritebacks++;
         _partialWritebackBytesSaved += (long)(description.Data.Size - (alignedEnd - aligned));
@@ -2175,14 +2175,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         image.ClearGpuModified();
         // The retile is a GPU store into guest memory: until it completes the bytes
         // in guest memory are the old ones, so a read of them has to wait for it.
-        _owner.NoteGuestWrite(description.Data.Address, description.Data.Size);
+        NoteOwnGuestWrite(description.Data.Address, description.Data.Size);
         // And a guest store into them waits for it too (MetalImageCache.WritebackFence.cs).
         FenceWriteback(description.Data.Address, description.Data.Size, context.SubmissionSerial, cause);
         if (description.HasStencil)
         {
             // Noted whether or not every piece of the plane found a window: the hazard is
             // that a read sees stale bytes, and over-noting only costs a wait.
-            _owner.NoteGuestWrite(description.Stencil.Address, description.Stencil.Size);
+            NoteOwnGuestWrite(description.Stencil.Address, description.Stencil.Size);
             FenceWriteback(description.Stencil.Address, description.Stencil.Size, context.SubmissionSerial, cause);
         }
 

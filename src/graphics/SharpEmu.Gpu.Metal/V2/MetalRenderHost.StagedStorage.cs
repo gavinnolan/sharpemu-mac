@@ -249,6 +249,8 @@ internal sealed partial class MetalRenderHost
             NoteRecordedWork();
             foreach (var (address, size) in written)
             {
+                // The copy lands the stores in guest memory without re-arming DCC claims there.
+                _imageCache.ForgetStandingDccClaims(address, size);
                 NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.StorageBuffer);
             }
 
