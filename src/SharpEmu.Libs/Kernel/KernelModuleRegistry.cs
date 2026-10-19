@@ -20,6 +20,14 @@ public static class KernelModuleRegistry
     private static readonly object _gate = new();
     private static readonly Dictionary<int, ModuleEntry> _modulesByHandle = new();
     private static readonly Dictionary<int, Dictionary<string, ulong>> _symbolsByHandle = new();
+    private static readonly Dictionary<int, string[]> _neededByHandle = new();
+    private static readonly Dictionary<int, ModuleSegment[]> _segmentsByHandle = new();
+
+    /// <summary>
+    /// One mapped PT_LOAD segment of a module; <see cref="Protection"/> uses
+    /// the SCE_KERNEL_PROT_CPU_* bits (read 1, write 2, exec 4).
+    /// </summary>
+    public readonly record struct ModuleSegment(ulong Address, ulong Size, int Protection);
     private static readonly Dictionary<string, int> _handleByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, int> _handleByName = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<int, int> _sysmoduleHandleById = new();
@@ -63,6 +71,8 @@ public static class KernelModuleRegistry
         {
             _modulesByHandle.Clear();
             _symbolsByHandle.Clear();
+            _neededByHandle.Clear();
+            _segmentsByHandle.Clear();
             _handleByPath.Clear();
             _handleByName.Clear();
             _sysmoduleHandleById.Clear();
@@ -340,6 +350,107 @@ public static class KernelModuleRegistry
             }
         }
     }
+
+    /// <summary>
+    /// Records the modules <paramref name="handle"/> names as needed
+    /// (DT_SCE_NEEDED_MODULE), for dlsym's dependency-scoped lookup.
+    /// </summary>
+    public static void RegisterModuleDependencies(int handle, IReadOnlyList<string> neededModuleNames)
+    {
+        ArgumentNullException.ThrowIfNull(neededModuleNames);
+        lock (_gate)
+        {
+            if (_modulesByHandle.ContainsKey(handle))
+            {
+                _neededByHandle[handle] = neededModuleNames.Where(name => !string.IsNullOrWhiteSpace(name)).ToArray();
+            }
+        }
+    }
+
+    /// <summary>Records a module's mapped segments for the module-info structs.</summary>
+    public static void RegisterModuleSegments(int handle, IReadOnlyList<ModuleSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        lock (_gate)
+        {
+            if (_modulesByHandle.ContainsKey(handle))
+            {
+                _segmentsByHandle[handle] = segments.Where(segment => segment.Size != 0).ToArray();
+            }
+        }
+    }
+
+    /// <summary>The module's segments in load order, or empty when unknown.</summary>
+    public static ModuleSegment[] GetModuleSegments(int handle)
+    {
+        lock (_gate)
+        {
+            return _segmentsByHandle.TryGetValue(handle, out var segments) ? segments : [];
+        }
+    }
+
+    /// <summary>True when the handle is a mapped module with its own symbol table.</summary>
+    public static bool HasModuleSymbols(int handle)
+    {
+        lock (_gate)
+        {
+            return _symbolsByHandle.ContainsKey(handle);
+        }
+    }
+
+    /// <summary>
+    /// dlsym's lookup for a module handle: the module itself, then the
+    /// modules it needs, breadth-first, as FreeBSD rtld walks a handle's DAG.
+    /// A needed module that is not mapped here (an HLE library) contributes no
+    /// symbols.
+    /// </summary>
+    public static bool TryResolveModuleSymbolInScope(int handle, IReadOnlyList<string> symbolNames, out ulong address)
+    {
+        address = 0;
+        lock (_gate)
+        {
+            var visited = new HashSet<int> { handle };
+            var queue = new Queue<int>();
+            queue.Enqueue(handle);
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                if (_symbolsByHandle.TryGetValue(current, out var symbols))
+                {
+                    foreach (var name in symbolNames)
+                    {
+                        if (!string.IsNullOrWhiteSpace(name) &&
+                            symbols.TryGetValue(name, out address) &&
+                            address >= 0x10000)
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                if (!_neededByHandle.TryGetValue(current, out var needed))
+                {
+                    continue;
+                }
+
+                foreach (var neededName in needed)
+                {
+                    if (TryResolveNeededHandleLocked(neededName, out var neededHandle) && visited.Add(neededHandle))
+                    {
+                        queue.Enqueue(neededHandle);
+                    }
+                }
+            }
+        }
+
+        address = 0;
+        return false;
+    }
+
+    private static bool TryResolveNeededHandleLocked(string neededName, out int handle) =>
+        TryResolveHandleByNameLocked(neededName, out handle) ||
+        TryResolveHandleByNameLocked(neededName + ".prx", out handle) ||
+        TryResolveHandleByNameLocked(neededName + ".sprx", out handle);
 
     public static bool TryResolveModuleSymbol(int handle, string symbolName, out ulong address)
     {

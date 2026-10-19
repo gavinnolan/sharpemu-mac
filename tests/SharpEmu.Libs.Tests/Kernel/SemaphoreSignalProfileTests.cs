@@ -63,8 +63,8 @@ public sealed class SemaphoreSignalProfileTests
             SemaphoreSignalProfile.StartSession();
             var result = KernelSemaphoreCompatExports.KernelSignalSema(context, handle, count);
             Assert.Equal(succeeds ? 0 : unchecked((int)0x80020016), result);
-            Assert.Equal(succeeds ? 1 : 0, proxy.WakeCalls);
-            if (succeeds) Assert.Equal($"sceKernelWaitSema:{handle:X8}", proxy.WakeKey);
+            // Nobody waits, so no scheduler wake is issued (waiters are woken directly).
+            Assert.Equal(0, proxy.WakeCalls);
             context[CpuRegister.Rdi] = memoryBase;
             context[CpuRegister.Rsi] = memoryBase + 16;
             Assert.Equal(0, KernelSemaphoreCompatExports.PosixSemGetValue(context));
@@ -91,7 +91,7 @@ public sealed class SemaphoreSignalProfileTests
                     Assert.Equal(0x12345678UL, item.Signal.ReturnAddress);
                     Assert.Equal(snapshot.Events[0].Signal.Sequence, item.Signal.Sequence);
                 });
-                Assert.Equal(succeeds ? 3 : result, snapshot.Events[^1].Result);
+                Assert.Equal(succeeds ? 0 : result, snapshot.Events[^1].Result);
                 if (succeeds) Assert.Equal((int)remaining, snapshot.Events[1].Available);
             }
         }

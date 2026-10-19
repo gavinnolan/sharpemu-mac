@@ -290,19 +290,12 @@ public sealed class KernelMappingRangeTests
             }
         }
 
-        public void AssertDirectQueryMatches(IEnumerable<MappingRecord> records, ulong start, ulong length)
-        {
-            var expected = records.Where(record => length != 0 && record.IsDirect &&
-                    record.DirectStart < start + length && start < record.DirectStart + record.Length)
-                .OrderBy(record => record.Address).Select(CreateNativeRecord).ToArray();
-            var actual = (Array)TableType.GetMethod("FindDirectOverlaps")!
-                .Invoke(_mappings, [start, length])!;
-            Assert.Equal(expected, actual.Cast<object>().ToArray());
-        }
-
+        // Later optional fields (memory type, name, traits) keep their defaults.
         private static object CreateNativeRecord(MappingRecord record) => RegionConstructor.Invoke(
-            [record.Address, record.Length, record.Protection, record.IsFlexible,
-                record.IsDirect, record.DirectStart, record.BackingOffset, record.IsReserved]);
+            new object?[] { record.Address, record.Length, record.Protection, record.IsFlexible,
+                record.IsDirect, record.DirectStart, record.BackingOffset, record.IsReserved }
+            .Concat(RegionConstructor.GetParameters().Skip(8).Select(parameter => parameter.DefaultValue))
+            .ToArray());
 
         public void Dispose()
         {

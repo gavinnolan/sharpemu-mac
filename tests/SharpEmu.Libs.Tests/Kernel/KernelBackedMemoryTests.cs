@@ -138,7 +138,7 @@ public sealed class KernelBackedMemoryTests
         {
             DispatchCount++;
             // A blocked read must fail the test, not leave its host waiting forever.
-            Task.Run(readPendingImage).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            Task.Run(readPendingImage).WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
             IsGpuQueueThread = true;
             try { work(); }
             finally { IsGpuQueueThread = false; }
@@ -299,11 +299,17 @@ public sealed class KernelBackedMemoryTests
         Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(test.Context));
         Assert.True(test.Context.TryReadUInt64(test.Output, out var second));
         Assert.True(second >= first + size);
-        Assert.Equal((first, first + size), test.Query(first));
-        Assert.Equal((second, second + 0x10000), test.Query(second));
+        // Neighbouring reservations coalesce into one map entry, as the kernel reports them.
+        var expected = second == first + size
+            ? (first, second + 0x10000UL)
+            : (first, first + size);
+        Assert.Equal(expected, test.Query(first));
+        Assert.Equal(second == first + size ? expected : (second, second + 0x10000UL), test.Query(second));
     }
 
-    [Fact]
+    // Reserves 512 GiB, which does not reliably fit beside anything else on a
+    // host that withholds the low guest range. See GuestAddressSpaceRequirements.
+    [RoomyGuestAddressSpaceFact]
     public void LargeVirtualReservationFallsBackToSparseGuestRange()
     {
         using var test = new BackedKernelMemory();
@@ -381,7 +387,16 @@ public sealed class KernelBackedMemoryTests
     {
         using var test = new BackedKernelMemory();
         const ulong alignment = 0x10000;
-        var start = test.Reserve(8 * alignment);
+
+        // Reserve with the same alignment the search below asks for. Without
+        // it the reservation only has to be guest-page aligned, and then
+        // start + alignment is not an aligned address, so the search correctly
+        // returns the next aligned one inside the gap instead. Which of the two
+        // happens depends on where the host left its free space: it was aligned
+        // by luck until an Apple Silicon host started handing out ranges from
+        // its own allocation base.
+        var start = test.Reserve(8 * alignment, alignment: alignment);
+        Assert.Equal(0UL, start % alignment);
         Assert.Equal(0, test.Unmap(start + alignment, 3 * alignment));
         var method = typeof(KernelMemoryCompatExports).GetMethod("FindAvailableMappingAddress",
             System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
@@ -821,6 +836,91 @@ public sealed class KernelBackedMemoryTests
             KernelMemoryCompatExports.SetFlexibleBackingForTests(previous);
         }
     }
+
+    // Unreal titles batch-map direct memory into a fresh reservation at boot. With the GPU
+    // attached, the batch runs on the guest thread under the mapping lock and each entry runs
+    // as a nested transaction; that entry must run inline, not fail on the lock its own batch
+    // holds.
+    [NativePageProtectionFact]
+    public void BatchMapIntoUntouchedReservationRunsItsEntriesInsideTheBatchTransaction()
+    {
+        using var test = new BackedKernelMemory();
+        using var gpu = new GuestGpuMemory(test.Memory);
+        GuestGpuMemoryHook.Attach(gpu);
+        try
+        {
+            test.Allocate(0, 0x20000);
+            var address = test.Reserve(0x20000);
+            var entries = test.Output + 0x200;
+            for (var index = 0; index < 2; index++)
+            {
+                var entry = entries + (ulong)index * 32;
+                Assert.True(test.Context.TryWriteUInt64(entry, address + (ulong)index * 0x10000));
+                Assert.True(test.Context.TryWriteUInt64(entry + 8, (ulong)index * 0x10000));
+                Assert.True(test.Context.TryWriteUInt64(entry + 16, 0x10000));
+                Assert.True(test.Context.TryWriteUInt64(entry + 24, 0x33));
+            }
+            test.Context[CpuRegister.Rdi] = entries;
+            test.Context[CpuRegister.Rsi] = 2;
+            test.Context[CpuRegister.Rdx] = test.Output + 0x300;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelBatchMap(test.Context));
+            Assert.True(test.Context.TryReadUInt32(test.Output + 0x300, out var processed));
+            Assert.Equal(2u, processed);
+            Assert.True(test.Memory.IsBackedRange(address, 0x20000));
+            Assert.True(gpu.Covers(address, 0x20000));
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+    }
+
+    // The same state where no GPU can be attached (hosts with 16 KiB pages): the direct path
+    // marks the thread as inside a transaction and holds the mapping lock while the batch runs.
+    [Fact]
+    public void BatchMapEntriesRunInlineInsideADirectTransactionHoldingTheMappingLock()
+    {
+        using var test = new BackedKernelMemory();
+        test.Allocate(0, 0x20000);
+        var address = test.Reserve(0x20000);
+        var entries = test.Output + 0x200;
+        for (var index = 0; index < 2; index++)
+        {
+            var entry = entries + (ulong)index * 32;
+            Assert.True(test.Context.TryWriteUInt64(entry, address + (ulong)index * 0x10000));
+            Assert.True(test.Context.TryWriteUInt64(entry + 8, (ulong)index * 0x10000));
+            Assert.True(test.Context.TryWriteUInt64(entry + 16, 0x10000));
+            Assert.True(test.Context.TryWriteUInt64(entry + 24, 0x33));
+        }
+        test.Context[CpuRegister.Rdi] = entries;
+        test.Context[CpuRegister.Rsi] = 2;
+        test.Context[CpuRegister.Rdx] = test.Output + 0x300;
+
+        const System.Reflection.BindingFlags Static =
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        var type = typeof(KernelMemoryCompatExports);
+        var gate = type.GetField("_memoryGate", Static)!.GetValue(null)!;
+        var inside = type.GetField("_insideMappingTransaction", Static)!;
+        var direct = type.GetField("_directMappingTransaction", Static)!;
+        int result;
+        inside.SetValue(null, true);
+        direct.SetValue(null, true);
+        try
+        {
+            lock (gate)
+                result = KernelMemoryCompatExports.KernelBatchMap(test.Context);
+        }
+        finally
+        {
+            inside.SetValue(null, false);
+            direct.SetValue(null, false);
+        }
+
+        Assert.Equal(0, result);
+        Assert.True(test.Context.TryReadUInt32(test.Output + 0x300, out var processed));
+        Assert.Equal(2u, processed);
+        Assert.True(test.Memory.IsBackedRange(address, 0x20000));
+    }
 }
 
 internal sealed class BackedKernelMemory : IDisposable
@@ -871,13 +971,13 @@ internal sealed class BackedKernelMemory : IDisposable
         return result;
     }
 
-    public ulong Reserve(ulong size, ulong address = 0)
+    public ulong Reserve(ulong size, ulong address = 0, ulong alignment = 0)
     {
         Assert.True(Context.TryWriteUInt64(Output, address));
         Context[CpuRegister.Rdi] = Output;
         Context[CpuRegister.Rsi] = size;
         Context[CpuRegister.Rdx] = address == 0 ? 0UL : 0x10UL;
-        Context[CpuRegister.Rcx] = 0;
+        Context[CpuRegister.Rcx] = alignment;
         Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(Context));
         Assert.True(Context.TryReadUInt64(Output, out var result));
         return result;

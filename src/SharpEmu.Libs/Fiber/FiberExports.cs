@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 
 namespace SharpEmu.Libs.Fiber;
 
@@ -263,7 +264,12 @@ public static class FiberExports
         LibraryName = "libSceFiber")]
     public static int FiberSwitch(CpuContext ctx)
     {
-        return FiberRunCore(
+        if (DsTrace.Fiber)
+        {
+            DsFiber.BeginSwitch(ctx);
+        }
+
+        var result = FiberRunCore(
             ctx,
             ctx[CpuRegister.Rdi],
             ctx[CpuRegister.Rsi],
@@ -272,6 +278,12 @@ public static class FiberExports
             attachContextSize: 0,
             reason: "sceFiberSwitch",
             isSwitch: true);
+        if (DsTrace.Fiber && result != 0)
+        {
+            DsFiber.Cancel();
+        }
+
+        return result;
     }
 
     [SysAbiExport(
@@ -640,7 +652,10 @@ public static class FiberExports
         FiberThreadState? priorThreadState = null;
         var threadKey = GetThreadKey(ctx);
         ulong previousResumeArgument = 0;
-        lock (_fiberGate)
+        // Monitor enter/exit spelled out so DSTRACE can time the gate wait (§4.3);
+        // with DSTRACE off EnterGate is Monitor.Enter.
+        DsFiber.EnterGate(_fiberGate);
+        try
         {
             _threadStates.TryGetValue(threadKey, out priorThreadState);
             if (!TryReadFiberFields(ctx, fiber, out fields))
@@ -736,8 +751,16 @@ public static class FiberExports
                 };
             }
         }
+        finally
+        {
+            Monitor.Exit(_fiberGate);
+        }
 
         _ = GuestThreadExecution.EnterFiber(fiber);
+        if (DsTrace.Fiber)
+        {
+            DsFiber.NoteTransfer(previousFiber, fiber, resumed);
+        }
         var pending = _pendingTransfer ??= new PendingFiberTransfer();
         pending.Context = ctx;
         pending.Source = previousFiber;

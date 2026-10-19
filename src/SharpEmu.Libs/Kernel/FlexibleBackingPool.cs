@@ -11,6 +11,12 @@ internal sealed class FlexibleBackingPool
 
     private readonly SortedList<ulong, ulong> _free = new();
     private readonly List<Block> _blocks = new();
+    // Backing bytes no mapping has been given since the pool was made. A new backing
+    // object reads as zero, so a mapping over them needs no clear; clearing them wrote
+    // every page through the host alias, which committed memory the guest might never
+    // touch and, once the guest view touched it too, counted each page twice in the
+    // process footprint. A reset keeps this: bytes leave it when they are handed out.
+    private readonly SortedList<ulong, ulong> _pristine = new();
     private readonly ulong _offset;
     private readonly ulong _size;
 
@@ -18,6 +24,8 @@ internal sealed class FlexibleBackingPool
     {
         _offset = offset;
         _size = size;
+        if (size != 0)
+            _pristine.Add(offset, size);
         Reset();
     }
 
@@ -40,30 +48,57 @@ internal sealed class FlexibleBackingPool
             return false;
 
         var planned = new List<Block>();
-        var remaining = size;
-        var current = address;
-        foreach (var range in _free)
+        // One mapping wants one run of backing bytes. The guest address range is
+        // contiguous either way, but a mapping split across free ranges is not
+        // contiguous in the backing, and a host that maps the backing no-copy can
+        // then neither bind nor write back any buffer or image that crosses the seam:
+        // it stages a copy per submission instead, and a GPU-written image over such
+        // a range has nowhere to go. Smallest range that fits, so the big ranges stay
+        // whole for the next large mapping.
+        var best = -1;
+        for (var index = 0; index < _free.Count; index++)
         {
-            var count = Math.Min(remaining, range.Value);
-            planned.Add(new Block(current, count, range.Key));
-            remaining -= count;
-            current += count;
-            if (remaining == 0)
-                break;
+            if (_free.Values[index] < size || (best >= 0 && _free.Values[index] >= _free.Values[best]))
+                continue;
+            best = index;
         }
-        if (remaining != 0)
-            return false;
+
+        if (best >= 0)
+        {
+            planned.Add(new Block(address, size, _free.Keys[best]));
+        }
+        else
+        {
+            // Nothing holds it whole; fall back to filling it from several ranges.
+            var remaining = size;
+            var current = address;
+            foreach (var range in _free)
+            {
+                var count = Math.Min(remaining, range.Value);
+                planned.Add(new Block(current, count, range.Key));
+                remaining -= count;
+                current += count;
+                if (remaining == 0)
+                    break;
+            }
+
+            if (remaining != 0)
+                return false;
+        }
 
         for (var index = 0; index < planned.Count; index++)
         {
             var block = planned[index];
-            if (space.TryClearBacking(block.Offset, block.Size) &&
+            if (ClearUsedBacking(space, block.Offset, block.Size) &&
                 space.TryMapBacked(block.Address, block.Size, block.Offset, protection, out _))
                 continue;
 
+            // A guest call must not throw. A view the host would not unmap stays a stray
+            // mapping; its backing is never handed out, so nothing else can alias it.
             for (var rollback = index - 1; rollback >= 0; rollback--)
                 if (!space.TryUnmapBacked(planned[rollback].Address, planned[rollback].Size))
-                    throw new InvalidOperationException("Cannot restore a failed flexible mapping.");
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] Cannot undo a partial flexible mapping at 0x{planned[rollback].Address:X16}.");
             return false;
         }
 
@@ -74,6 +109,7 @@ internal sealed class FlexibleBackingPool
             if (block.Size < freeSize)
                 _free.Add(block.Offset + block.Size, freeSize - block.Size);
             _blocks.Add(block);
+            RemovePristine(block.Offset, block.Size);
         }
         _blocks.Sort((left, right) => left.Address.CompareTo(right.Address));
         Used += size;
@@ -81,11 +117,90 @@ internal sealed class FlexibleBackingPool
         return true;
     }
 
-    // The caller must remove the host views before it returns their backing.
-    public void Release(ulong address, ulong size)
+    // Takes back exactly the backing a released block held, so a failed replacement can
+    // restore the mapping it removed. False when any of those bytes were handed out again.
+    public bool TryReclaim(ulong address, ulong size, ulong offset)
+    {
+        if (size == 0 || offset > ulong.MaxValue - size)
+            return false;
+        var index = FindFreeIndex(offset);
+        if (index < 0 || _free.Keys[index] + _free.Values[index] < offset + size)
+            return false;
+        var rangeStart = _free.Keys[index];
+        var rangeEnd = rangeStart + _free.Values[index];
+        _free.RemoveAt(index);
+        if (rangeStart < offset)
+            _free.Add(rangeStart, offset - rangeStart);
+        if (offset + size < rangeEnd)
+            _free.Add(offset + size, rangeEnd - offset - size);
+        _blocks.Add(new Block(address, size, offset));
+        _blocks.Sort((left, right) => left.Address.CompareTo(right.Address));
+        Used += size;
+        return true;
+    }
+
+    // Backing owned by an object rather than by one mapping (JIT shared memory, which every
+    // view of the object maps): one contiguous run, cleared, handed back with ReleaseRun.
+    public bool TryAllocateRun(IGuestBackedSpace space, ulong size, out ulong offset)
+    {
+        offset = 0;
+        if (size == 0 || size > Available)
+            return false;
+        var best = -1;
+        for (var index = 0; index < _free.Count; index++)
+        {
+            if (_free.Values[index] < size || (best >= 0 && _free.Values[index] >= _free.Values[best]))
+                continue;
+            best = index;
+        }
+        if (best < 0)
+            return false;
+        var start = _free.Keys[best];
+        var freeSize = _free.Values[best];
+        if (!ClearUsedBacking(space, start, size))
+            return false;
+        _free.RemoveAt(best);
+        if (size < freeSize)
+            _free.Add(start + size, freeSize - size);
+        RemovePristine(start, size);
+        Used += size;
+        offset = start;
+        return true;
+    }
+
+    public void ReleaseRun(ulong offset, ulong size)
+    {
+        if (size == 0 || size > Used)
+            throw new InvalidOperationException("Flexible backing ownership is incomplete.");
+        AddFree(offset, size);
+        Used -= size;
+    }
+
+    // The free backing range that holds offset, merged with its free neighbours; empty when
+    // the offset is handed out or outside the pool.
+    public (ulong Start, ulong Length) FreeRangeContaining(ulong offset)
+    {
+        var index = FindFreeIndex(offset);
+        if (index < 0 || offset - _free.Keys[index] >= _free.Values[index])
+            return default;
+        return (_free.Keys[index], _free.Values[index]);
+    }
+
+    private int FindFreeIndex(ulong offset)
+    {
+        for (var index = _free.Count - 1; index >= 0; index--)
+            if (_free.Keys[index] <= offset)
+                return index;
+        return -1;
+    }
+
+    // The caller must remove the host views before it returns their backing. Returns the
+    // backing runs that became free.
+    public List<(ulong Offset, ulong Size)> Release(ulong address, ulong size)
     {
         var end = checked(address + size);
         var remaining = new List<Block>();
+        var freed = new List<(ulong Offset, ulong Size)>();
         ulong removed = 0;
         foreach (var block in _blocks)
         {
@@ -98,6 +213,7 @@ internal sealed class FlexibleBackingPool
                 continue;
             }
             AddFree(block.Offset + start - block.Address, stop - start);
+            freed.Add((block.Offset + start - block.Address, stop - start));
             removed += stop - start;
             if (block.Address < start)
                 remaining.Add(block with { Size = start - block.Address });
@@ -109,6 +225,44 @@ internal sealed class FlexibleBackingPool
         _blocks.Clear();
         _blocks.AddRange(remaining);
         Used -= removed;
+        return freed;
+    }
+
+    // Clears the parts of a backing range that an earlier mapping may have written.
+    private bool ClearUsedBacking(IGuestBackedSpace space, ulong offset, ulong size)
+    {
+        var cursor = offset;
+        var end = offset + size;
+        foreach (var range in _pristine)
+        {
+            var rangeEnd = range.Key + range.Value;
+            if (rangeEnd <= cursor)
+                continue;
+            if (range.Key >= end)
+                break;
+            if (range.Key > cursor && !space.TryClearBacking(cursor, range.Key - cursor))
+                return false;
+            cursor = Math.Max(cursor, Math.Min(rangeEnd, end));
+        }
+
+        return cursor >= end || space.TryClearBacking(cursor, end - cursor);
+    }
+
+    private void RemovePristine(ulong start, ulong size)
+    {
+        var end = start + size;
+        for (var index = _pristine.Count - 1; index >= 0; index--)
+        {
+            var rangeStart = _pristine.Keys[index];
+            var rangeEnd = rangeStart + _pristine.Values[index];
+            if (rangeStart >= end || rangeEnd <= start)
+                continue;
+            _pristine.RemoveAt(index);
+            if (rangeStart < start)
+                _pristine.Add(rangeStart, start - rangeStart);
+            if (end < rangeEnd)
+                _pristine.Add(end, rangeEnd - end);
+        }
     }
 
     private void AddFree(ulong start, ulong size)

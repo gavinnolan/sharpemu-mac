@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Fiber;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -18,6 +19,16 @@ namespace SharpEmu.Libs.Kernel;
 public static class KernelRuntimeCompatExports
 {
     private const ulong TlsErrnoOffset = 0x40;
+
+    /// <summary>
+    /// The guest's pid. A console title runs as a small fixed pid in its own
+    /// process namespace, not the host's; getpid, sysctl kern.proc.* and kill
+    /// all agree on this value (docs/deviations.md, "Process ids").
+    /// </summary>
+    internal const int GuestProcessId = 74;
+
+    /// <summary>The guest's parent pid (the console's SceSysCore-style launcher).</summary>
+    internal const int GuestParentProcessId = 1;
     private const ulong TlsStackChkGuardBaseOffset = 0x800;
     private const ulong StackChkGuardFieldOffset = 0x10;
     private const ulong TlsProcParamOffset = 0x100;
@@ -60,18 +71,80 @@ public static class KernelRuntimeCompatExports
     private static ulong _applicationHeapApiAddress;
     private static ulong _processProcParamAddress;
     private static uint _gpoStateBits;
-    private static readonly HashSet<int> _loadedSysmodules = new();
+    // sceSysmodule load counts by module id (Load increments, Unload
+    // decrements; IsLoaded is "count > 0").
+    private static readonly Dictionary<uint, int> _sysmoduleLoadCounts = new();
+
+    // SDK error_table.csv: 0x805A1000 "tried to load an unknown PRX",
+    // 0x805A1001 "unloaded a PRX already unloaded, or the module is not loaded".
+    internal const int SceSysmoduleErrorInvalidValue = unchecked((int)0x805A1000);
+    internal const int SceSysmoduleErrorUnloaded = unchecked((int)0x805A1001);
     private static readonly object _prtApertureGate = new();
     private static readonly (ulong Base, ulong Size)[] _prtApertures = new (ulong Base, ulong Size)[3];
     private static int _stackChkFailCount;
     private static long _usleepTraceCount;
+    // SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old behaviour of pumping the guest
+    // scheduler on every sceKernelUsleep, including sub-millisecond ones.
+    private static readonly bool _usleepShortPump =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_USLEEP_SHORT_PUMP"), "1", StringComparison.Ordinal);
     private static readonly bool _traceUsleep =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
     private static readonly bool _traceGuestThreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
 
+    // Adaptive nap for usleep(<1 ms) polling loops (a worker pool waiting for jobs). The
+    // first short sleeps of a streak sleep exactly what they ask for, so a wait that ends
+    // quickly stays fast; once one thread has been polling for SHARPEMU_USLEEP_NAP_AFTER_US (default 500 us)
+    // its short sleeps really sleep, for max(requested, SHARPEMU_USLEEP_NAP_US) (default
+    // 250 us; 0 turns naps off). A streak ends when the thread spends more than 2 ms
+    // between short sleeps or sleeps for 1 ms or more. Per thread, not per title.
+    internal static readonly long UsleepNapMicroseconds =
+        ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_US", 250);
+    internal static readonly long _usleepNapAfterTicks =
+        ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_AFTER_US", 500) * Stopwatch.Frequency / 1_000_000;
+    internal static readonly long _usleepStreakGapTicks = Stopwatch.Frequency * 2 / 1000;
+
     [ThreadStatic]
-    private static int _shortUsleepCount;
+    private static long _shortUsleepStreakStart;
+
+    [ThreadStatic]
+    private static long _lastShortUsleep;
+
+    private static long ReadNonNegativeEnvironmentInteger(string name, long fallback) =>
+        long.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value >= 0
+            ? value
+            : fallback;
+
+    /// <summary>
+    /// The sub-millisecond usleep policy (see <see cref="UsleepNapMicroseconds"/>): returns
+    /// true when this call napped, false when it slept just the requested time.
+    /// </summary>
+    internal static bool ShortUsleep(ulong micros)
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (_lastShortUsleep == 0 || now - _lastShortUsleep > _usleepStreakGapTicks)
+        {
+            _shortUsleepStreakStart = now;
+        }
+
+        _lastShortUsleep = now;
+        if (UsleepNapMicroseconds > 0 && now - _shortUsleepStreakStart >= _usleepNapAfterTicks)
+        {
+            HostTiming.SleepMicroseconds(Math.Max((long)micros, UsleepNapMicroseconds));
+            _lastShortUsleep = Stopwatch.GetTimestamp();
+            return true;
+        }
+
+        // Like the FreeBSD kernel (kern_clock_nanosleep always blocks for a nonzero
+        // interval), a short sleep never returns before its requested time. A bare yield
+        // returned in well under a microsecond, so a guest that counts usleep(1) calls as
+        // its timeout ("GPU hang after N polls") gave up long before real hardware would,
+        // and before the streak above was old enough to nap. The wait is an
+        // absolute-deadline host wait (mach_wait_until on macOS), never a millisecond
+        // round-up.
+        HostTiming.SleepMicroseconds((long)micros);
+        return false;
+    }
 
     private static readonly bool _stopwatchTicksAreNanoseconds =
         Stopwatch.Frequency == 1_000_000_000L;
@@ -95,31 +168,42 @@ public static class KernelRuntimeCompatExports
     public static int KernelUsleep(CpuContext ctx)
     {
         var micros = ctx[CpuRegister.Rdi];
+        var dsUsleep = DsTrace.Sched && DsTrace.Armed;
+        var dsEnter = dsUsleep ? Stopwatch.GetTimestamp() : 0;
         TraceUsleepSpin(ctx, micros);
         if (micros == 0)
         {
             ctx[CpuRegister.Rax] = 0;
+            if (dsUsleep)
+            {
+                DsSched.Usleep(ctx, 0, dsEnter, 0, 0);
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
+        // Sub-millisecond usleep is a worker polling backoff. Pump takes the global
+        // guest-thread gate and scans every thread, so many workers spinning on
+        // usleep(1) contend on it; the 1 ms dispatcher still pumps. The short sleep
+        // below still blocks. SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old always-Pump path.
+        long dsPump = 0;
+        if (micros >= 1000 || _usleepShortPump)
+        {
+            dsPump = dsUsleep ? Stopwatch.GetTimestamp() : 0;
+            GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
+            if (dsUsleep)
+            {
+                dsPump = Stopwatch.GetTimestamp() - dsPump;
+            }
+        }
 
+        var dsBranch = 2;
         if (micros < 1000)
         {
-            // Guest worker pools use usleep(1) as a polling backoff. Do not turn
-            // PS microsecond waits into Windows millisecond sleeps on hot paths.
-            if ((++_shortUsleepCount & 255) == 0)
-            {
-                Thread.Sleep(0);
-            }
-            else
-            {
-                Thread.Yield();
-            }
+            dsBranch = ShortUsleep(micros) ? 1 : 0;
         }
         else
         {
-            _shortUsleepCount = 0;
+            _lastShortUsleep = 0;
             // Precise sleep: rounding microseconds up to Thread.Sleep
             // milliseconds (which itself overshoots by a scheduler quantum)
             // hard-caps games that pace their frame loop with usleep.
@@ -128,6 +212,10 @@ public static class KernelRuntimeCompatExports
         }
 
         ctx[CpuRegister.Rax] = 0;
+        if (dsUsleep)
+        {
+            DsSched.Usleep(ctx, micros, dsEnter, dsPump, dsBranch);
+        }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -207,13 +295,16 @@ public static class KernelRuntimeCompatExports
         var timeAddress = ctx[CpuRegister.Rsi];
         if (timeAddress == 0)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return KernelErrno.Sce(OrbisErrno.EFAULT);
         }
 
-        GetClockTime(clockId, out var seconds, out var nanoseconds);
+        var errno = KernelClocks.TryGetTime(clockId, out var seconds, out var nanoseconds);
+        if (errno != 0)
+        {
+            return KernelErrno.Sce(errno);
+        }
 
-        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)nanoseconds)))
+        if (!KernelClocks.TryWriteTimespec(ctx, timeAddress, seconds, nanoseconds))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -222,30 +313,59 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "wRYVA5Zolso",
+        ExportName = "sceKernelClockGetres",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelClockGetres(CpuContext ctx)
+    {
+        var clockId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var resolutionAddress = ctx[CpuRegister.Rsi];
+        var errno = KernelClocks.TryGetResolution(clockId, out var seconds, out var nanoseconds);
+        if (errno != 0)
+        {
+            return KernelErrno.Sce(errno);
+        }
+
+        if (resolutionAddress != 0 &&
+            !KernelClocks.TryWriteTimespec(ctx, resolutionAddress, seconds, nanoseconds))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// Reads a clock for an internal deadline computation (condvar timed
+    /// waits). An id the guest could not have validated falls back to the
+    /// monotonic clock instead of failing the wait.
+    /// </summary>
     internal static void GetClockTime(int clockId, out long seconds, out long nanoseconds)
     {
-        if (clockId == 0)
+        if (KernelClocks.TryGetTime(clockId, out seconds, out nanoseconds) != 0)
         {
-            var now = DateTimeOffset.UtcNow;
-            seconds = now.ToUnixTimeSeconds();
-            nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
+            ReadMonotonicSinceStart(out seconds, out nanoseconds);
+        }
+    }
+
+    internal static void ReadMonotonicSinceStart(out long seconds, out long nanoseconds)
+    {
+        var processStartCounter = _processStartCounter;
+        var elapsedTicks = Stopwatch.GetTimestamp() - processStartCounter;
+        if (_stopwatchTicksAreNanoseconds)
+        {
+            // Constant divisors let the JIT strength-reduce the division;
+            // games call this thousands of times per second.
+            seconds = elapsedTicks / 1_000_000_000L;
+            nanoseconds = elapsedTicks - seconds * 1_000_000_000L;
         }
         else
         {
-            var processStartCounter = _processStartCounter;
-            var elapsedTicks = Stopwatch.GetTimestamp() - processStartCounter;
-            if (_stopwatchTicksAreNanoseconds)
-            {
-                // Constant divisors let the JIT strength-reduce the division;
-                // games call this thousands of times per second.
-                seconds = elapsedTicks / 1_000_000_000L;
-                nanoseconds = elapsedTicks - seconds * 1_000_000_000L;
-            }
-            else
-            {
-                seconds = elapsedTicks / Stopwatch.Frequency;
-                nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
-            }
+            seconds = elapsedTicks / Stopwatch.Frequency;
+            nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
         }
     }
 
@@ -292,14 +412,14 @@ public static class KernelRuntimeCompatExports
             (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
              !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)microseconds))))
         {
-            return -1;
+            return KernelErrno.Posix(ctx, OrbisErrno.EFAULT);
         }
 
         if (timezoneAddress != 0 &&
             (!TryWriteInt32(ctx, timezoneAddress, 0) ||
              !TryWriteInt32(ctx, timezoneAddress + sizeof(int), 0)))
         {
-            return -1;
+            return KernelErrno.Posix(ctx, OrbisErrno.EFAULT);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -367,9 +487,31 @@ public static class KernelRuntimeCompatExports
 
     internal static ulong ReadProcessTimeCounterAt(long timestamp)
     {
-        var elapsedTicks = timestamp - _processStartCounter;
-        return unchecked((ulong)Math.Max(0, elapsedTicks));
+        var elapsedTicks = Math.Max(0, timestamp - _processStartCounter);
+        if (_stopwatchTicksAreNanoseconds)
+        {
+            return unchecked((ulong)elapsedTicks);
+        }
+
+        var whole = elapsedTicks / Stopwatch.Frequency;
+        var remainder = elapsedTicks % Stopwatch.Frequency;
+        return unchecked((ulong)(whole * (long)ProcessTimeCounterFrequency +
+            remainder * (long)ProcessTimeCounterFrequency / Stopwatch.Frequency));
     }
+
+    /// <summary>
+    /// <c>sceKernelGetProcessTimeCounterFrequency</c>: a fixed 1 GHz on every
+    /// host (docs/deviations.md, "Process-time counter"). The counter is
+    /// scaled to it, so counter / frequency stays real seconds.
+    /// </summary>
+    internal const ulong ProcessTimeCounterFrequency = 1_000_000_000UL;
+
+    /// <summary>
+    /// True when the host Stopwatch already ticks in nanoseconds, so a native
+    /// stub reading the raw host counter agrees with
+    /// <see cref="ProcessTimeCounterFrequency"/>.
+    /// </summary>
+    public static bool HostCounterMatchesProcessTimeFrequency => _stopwatchTicksAreNanoseconds;
 
     [SysAbiExport(
         Nid = "BNowx2l588E",
@@ -378,7 +520,7 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelGetProcessTimeCounterFrequency(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = unchecked((ulong)Stopwatch.Frequency);
+        ctx[CpuRegister.Rax] = ProcessTimeCounterFrequency;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -423,6 +565,37 @@ public static class KernelRuntimeCompatExports
 
         ctx[CpuRegister.Rax] = address;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // SceProcParam header: u64 size, u32 magic, u32 entry count, u64 SDK
+    // version (0xMMmmppxx, e.g. 0x04000031 for SDK 4.00).
+    private const ulong ProcParamSdkVersionOffset = 0x10;
+    private const ulong ProcParamMinimumSizeWithSdkVersion = 0x18;
+
+    /// <summary>
+    /// The SDK version the title was built with, from its PT_SCE_PROCPARAM
+    /// segment. False when the title has no proc param or it is too short.
+    /// </summary>
+    internal static bool TryGetProcessSdkVersion(CpuContext ctx, out uint sdkVersion)
+    {
+        sdkVersion = 0;
+        ulong address;
+        lock (_stateGate)
+        {
+            address = _processProcParamAddress;
+        }
+
+        if (address == 0 ||
+            !ctx.TryReadUInt64(address, out var size) ||
+            size < ProcParamMinimumSizeWithSdkVersion ||
+            !ctx.TryReadUInt64(address + ProcParamSdkVersionOffset, out var version) ||
+            version == 0)
+        {
+            return false;
+        }
+
+        sdkVersion = unchecked((uint)version);
+        return true;
     }
 
     public static void ConfigureProcessProcParamAddress(ulong procParamAddress)
@@ -668,6 +841,20 @@ public static class KernelRuntimeCompatExports
         return address != 0 && TryWriteInt32(ctx, address, value);
     }
 
+    internal static bool TryGetErrno(CpuContext ctx, out int value)
+    {
+        value = 0;
+        var address = GetTlsScratchAddress(ctx, TlsErrnoOffset);
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        if (address == 0 || !ctx.Memory.TryRead(address, bytes))
+        {
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
+        return true;
+    }
+
     [SysAbiExport(
         Nid = "bnZxYgAFeA0",
         ExportName = "sceKernelGetSanitizerNewReplaceExternal",
@@ -810,6 +997,41 @@ public static class KernelRuntimeCompatExports
         }
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // sceKernelGetPrtAperture(id, *base, *size): the aperture SetPrtAperture stored, zero when unset.
+    [SysAbiExport(
+        Nid = "L0v2Go5jOuM",
+        ExportName = "sceKernelGetPrtAperture",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelGetPrtAperture(CpuContext ctx)
+    {
+        var apertureId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var baseAddress = ctx[CpuRegister.Rsi];
+        var sizeAddress = ctx[CpuRegister.Rdx];
+        if (apertureId < 0 || apertureId >= _prtApertures.Length)
+            return unchecked((int)0x80020016);
+        if (baseAddress == 0 || sizeAddress == 0)
+            return unchecked((int)0x8002000E);
+        (ulong Base, ulong Size) aperture;
+        lock (_prtApertureGate)
+            aperture = _prtApertures[apertureId];
+        return ctx.TryWriteUInt64(baseAddress, aperture.Base) && ctx.TryWriteUInt64(sizeAddress, aperture.Size)
+            ? 0
+            : unchecked((int)0x8002000E);
+    }
+
+    internal static bool OverlapsPrtAperture(ulong address, ulong size)
+    {
+        if (size == 0)
+            return false;
+        var end = address > ulong.MaxValue - size ? ulong.MaxValue : address + size;
+        lock (_prtApertureGate)
+        {
+            return _prtApertures.Any(aperture => aperture.Size != 0 &&
+                aperture.Base < end && address < aperture.Base + aperture.Size);
+        }
     }
 
     internal static bool ContainsPrtRange(ulong address, ulong size)
@@ -1154,6 +1376,27 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    /// <summary>
+    /// sceKernelDlclose(handle): 0 for a handle the registry knows, ESRCH
+    /// otherwise. Modules stay mapped: nothing is unloaded (deviations.md).
+    /// The NID is not in the PS5 catalog; it is exported for titles built
+    /// against older SDKs.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "cuC7gViUT4Q",
+        ExportName = "sceKernelDlclose",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelDlclose(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var result = KernelModuleRegistry.TryGetModuleByHandle(handle, out _)
+            ? 0
+            : OrbisErrno.ToSceKernelError(OrbisErrno.ESRCH);
+        ctx[CpuRegister.Rax] = unchecked((ulong)(long)result);
+        return result;
+    }
+
     [SysAbiExport(
         Nid = "wzvqT4UqKX8",
         ExportName = "sceKernelLoadStartModule",
@@ -1261,17 +1504,80 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceSysmoduleLoadModule",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSysmodule")]
-    public static int SysmoduleLoadModule(CpuContext ctx)
+    public static int SysmoduleLoadModule(CpuContext ctx) =>
+        SysmoduleResult(ctx, LoadSysmodule(unchecked((ushort)ctx[CpuRegister.Rdi])));
+
+    /// <summary>
+    /// One load of a system module: 0, or INVALID_VALUE for id 0. Ids are
+    /// not otherwise validated: no id table is available here, so an unknown
+    /// id loads as an HLE module (deviations.md).
+    /// </summary>
+    internal static int LoadSysmodule(uint moduleId)
     {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
-        _ = KernelModuleRegistry.MarkSysmoduleLoaded(moduleId);
-        lock (_stateGate)
+        if ((moduleId & 0x7FFFFFFF) == 0)
         {
-            _loadedSysmodules.Add(moduleId);
+            return SceSysmoduleErrorInvalidValue;
         }
 
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        // A module already mapped from the title's sce_module keeps its real
+        // handle (KernelModuleRegistry.MarkSysmoduleLoaded); otherwise the
+        // HLE library stands in under a synthetic handle.
+        _ = KernelModuleRegistry.MarkSysmoduleLoaded(unchecked((int)moduleId));
+        lock (_stateGate)
+        {
+            _sysmoduleLoadCounts[moduleId] = _sysmoduleLoadCounts.GetValueOrDefault(moduleId) + 1;
+        }
+
+        return 0;
+    }
+
+    /// <summary>One unload: 0, INVALID_VALUE for id 0, UNLOADED when not loaded.</summary>
+    internal static int UnloadSysmodule(uint moduleId)
+    {
+        if ((moduleId & 0x7FFFFFFF) == 0)
+        {
+            return SceSysmoduleErrorInvalidValue;
+        }
+
+        lock (_stateGate)
+        {
+            if (!_sysmoduleLoadCounts.TryGetValue(moduleId, out var count) || count < 1)
+            {
+                return SceSysmoduleErrorUnloaded;
+            }
+
+            if (count == 1)
+            {
+                _sysmoduleLoadCounts.Remove(moduleId);
+                KernelModuleRegistry.MarkSysmoduleUnloaded(unchecked((int)moduleId));
+            }
+            else
+            {
+                _sysmoduleLoadCounts[moduleId] = count - 1;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>0 when loaded, INVALID_VALUE for id 0, otherwise UNLOADED.</summary>
+    internal static int QuerySysmodule(uint moduleId)
+    {
+        if ((moduleId & 0x7FFFFFFF) == 0)
+        {
+            return SceSysmoduleErrorInvalidValue;
+        }
+
+        lock (_stateGate)
+        {
+            return _sysmoduleLoadCounts.GetValueOrDefault(moduleId) > 0 ? 0 : SceSysmoduleErrorUnloaded;
+        }
+    }
+
+    private static int SysmoduleResult(CpuContext ctx, int result)
+    {
+        ctx[CpuRegister.Rax] = unchecked((ulong)(long)result);
+        return result;
     }
 
     [SysAbiExport(
@@ -1432,18 +1738,8 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceSysmoduleUnloadModule",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSysmodule")]
-    public static int SysmoduleUnloadModule(CpuContext ctx)
-    {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
-        KernelModuleRegistry.MarkSysmoduleUnloaded(moduleId);
-        lock (_stateGate)
-        {
-            _loadedSysmodules.Remove(moduleId);
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
+    public static int SysmoduleUnloadModule(CpuContext ctx) =>
+        SysmoduleResult(ctx, UnloadSysmodule(unchecked((ushort)ctx[CpuRegister.Rdi])));
 
     [SysAbiExport(
         Nid = "hHrGoGoNf+s",
@@ -1452,12 +1748,13 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libSceSysmodule")]
     public static int SysmoduleLoadModuleInternalWithArg(CpuContext ctx)
     {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
+        // Internal ids are 32-bit (0x80000000 | id).
+        var moduleId = unchecked((uint)ctx[CpuRegister.Rdi]);
         var resultAddress = ctx[CpuRegister.R8];
-        _ = KernelModuleRegistry.MarkSysmoduleLoaded(moduleId);
-        lock (_stateGate)
+        var result = LoadSysmodule(moduleId);
+        if (result != 0)
         {
-            _loadedSysmodules.Add(moduleId);
+            return SysmoduleResult(ctx, result);
         }
 
         if (resultAddress != 0 && !TryWriteInt32(ctx, resultAddress, 0))
@@ -1484,15 +1781,7 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libSceSysmodule")]
     public static int SysmoduleIsLoaded(CpuContext ctx)
     {
-        var moduleId = unchecked((int)ctx[CpuRegister.Rdi]);
-        var loaded = KernelModuleRegistry.IsSysmoduleLoaded(moduleId);
-        lock (_stateGate)
-        {
-            loaded |= _loadedSysmodules.Contains(moduleId);
-        }
-
-        ctx[CpuRegister.Rax] = loaded ? 0UL : unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return SysmoduleResult(ctx, QuerySysmodule(unchecked((ushort)ctx[CpuRegister.Rdi])));
     }
 
     [SysAbiExport(
@@ -1642,8 +1931,9 @@ public static class KernelRuntimeCompatExports
         var payload = new byte[ModuleInfoSize];
         BinaryPrimitives.WriteUInt64LittleEndian(payload, ModuleInfoSize);
         WriteModuleName(payload, module.Name);
-        WriteModuleSegment(payload, 0x108, module);
-        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x148), 1);
+        // segments[4] at 0x108, segment_count at 0x148; the 20-byte
+        // fingerprint at 0x14C stays zero (not read from the SELF).
+        WriteModuleSegments(payload, 0x108, 0x148, module);
         return ctx.Memory.TryWrite(outInfoAddress, payload);
     }
 
@@ -1661,10 +1951,20 @@ public static class KernelRuntimeCompatExports
         BinaryPrimitives.WriteUInt64LittleEndian(
             payload.AsSpan((int)ModuleInfoExInitProcOffset),
             module.EntryPoint);
-        WriteModuleSegment(payload, (int)ModuleInfoExSegmentsOffset, module);
+        // eh_frame_hdr_addr 0x148, eh_frame_addr 0x150, eh_frame_hdr_size
+        // 0x158 (unknown, 0), eh_frame_size 0x15C.
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(0x148), module.EhFrameHeaderAddress);
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(0x150), module.EhFrameAddress);
         BinaryPrimitives.WriteUInt32LittleEndian(
-            payload.AsSpan((int)ModuleInfoExSegmentCountOffset),
-            1);
+            payload.AsSpan(0x15C),
+            (uint)Math.Min(module.EhFrameSize, uint.MaxValue));
+        WriteModuleSegments(
+            payload,
+            (int)ModuleInfoExSegmentsOffset,
+            (int)ModuleInfoExSegmentCountOffset,
+            module);
+        // ref_count: every module the registry reports is loaded once.
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x1A4), 1);
         return ctx.Memory.TryWrite(outInfoAddress, payload);
     }
 
@@ -1726,19 +2026,39 @@ public static class KernelRuntimeCompatExports
         }
     }
 
-    private static void WriteModuleSegment(
+    // SceKernelModuleSegmentInfo[4]: { u64 address; u32 size; i32 prot; }.
+    internal const int ModuleInfoMaxSegments = 4;
+
+    private static void WriteModuleSegments(
         Span<byte> payload,
         int offset,
+        int countOffset,
         KernelModuleRegistry.ModuleEntry module)
     {
-        Debug.Assert(offset >= 0 && offset + ModuleInfoSegmentSize <= payload.Length);
-        BinaryPrimitives.WriteUInt64LittleEndian(payload.Slice(offset), module.BaseAddress);
-        BinaryPrimitives.WriteUInt32LittleEndian(
-            payload.Slice(offset + sizeof(ulong)),
-            (uint)Math.Min(module.EndAddress - module.BaseAddress, uint.MaxValue));
-        // Loaded modules are represented as a single aggregate readable and
-        // executable range until per-program-header registry data is exposed.
-        BinaryPrimitives.WriteInt32LittleEndian(payload.Slice(offset + 12), 5);
+        var segments = KernelModuleRegistry.GetModuleSegments(module.Handle);
+        if (segments.Length == 0)
+        {
+            // No program headers known (synthetic or host modules): one
+            // aggregate readable and executable range.
+            segments =
+            [
+                new KernelModuleRegistry.ModuleSegment(module.BaseAddress, module.EndAddress - module.BaseAddress, 5),
+            ];
+        }
+
+        var count = Math.Min(segments.Length, ModuleInfoMaxSegments);
+        for (var i = 0; i < count; i++)
+        {
+            var slot = offset + i * ModuleInfoSegmentSize;
+            Debug.Assert(slot >= 0 && slot + ModuleInfoSegmentSize <= payload.Length);
+            BinaryPrimitives.WriteUInt64LittleEndian(payload.Slice(slot), segments[i].Address);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                payload.Slice(slot + sizeof(ulong)),
+                (uint)Math.Min(segments[i].Size, uint.MaxValue));
+            BinaryPrimitives.WriteInt32LittleEndian(payload.Slice(slot + 12), segments[i].Protection);
+        }
+
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.Slice(countOffset), (uint)count);
     }
 
     private static bool TryReadUtf8Z(CpuContext ctx, ulong address, int maxLength, out string value)
@@ -2088,15 +2408,17 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, posix ? "nanosleep" : "sceKernelNanosleep");
-        var totalTicks = tvSec * TimeSpan.TicksPerSecond + Math.Max(tvNsec / 100L, 1L);
-        try
+        // Same policy as usleep: a sub-millisecond sleep neither pumps the scheduler (its
+        // gate) nor rounds to a millisecond; longer sleeps wait for an absolute deadline
+        // (mach_wait_until on macOS) instead of Thread.Sleep's millisecond granularity.
+        if (tvSec == 0 && tvNsec < 1_000_000L)
         {
-            Thread.Sleep(TimeSpan.FromTicks(totalTicks));
+            _ = ShortUsleep((ulong)((tvNsec + 999) / 1000));
         }
-        catch (ArgumentOutOfRangeException)
+        else
         {
-            Thread.Sleep(TimeSpan.FromMilliseconds(int.MaxValue));
+            GuestThreadExecution.Scheduler?.Pump(ctx, posix ? "nanosleep" : "sceKernelNanosleep");
+            HostTiming.SleepUntil(SharpEmu.Libs.Threading.GuestTime.DeadlineFromRelativeNanoseconds(tvSec, tvNsec));
         }
 
         WriteRemainingTime(ctx, remainAddress, 0, 0);
@@ -2117,7 +2439,9 @@ public static class KernelRuntimeCompatExports
         }
         else
         {
-            ctx[CpuRegister.Rax] = unchecked((ulong)errnoValue);
+            // sceKernelNanosleep reports the sce code, not the bare errno.
+            _ = sceResult;
+            return SharpEmu.Libs.Threading.GuestErrno.ReturnSce(ctx, errnoValue);
         }
 
         return (int)sceResult;
@@ -2150,7 +2474,7 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int GetProcessId(CpuContext ctx)
     {
-        var processId = Environment.ProcessId;
+        var processId = GuestProcessId;
         ctx[CpuRegister.Rax] = unchecked((uint)processId);
         return processId;
     }

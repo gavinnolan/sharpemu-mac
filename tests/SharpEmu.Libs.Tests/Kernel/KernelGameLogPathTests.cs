@@ -4,6 +4,8 @@
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
+using SharpEmu.Logging;
+
 namespace SharpEmu.Libs.Tests.Kernel;
 
 [Collection(KernelMemoryCompatStateCollection.Name)]

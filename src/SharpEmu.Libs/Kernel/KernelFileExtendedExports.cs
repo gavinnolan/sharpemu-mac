@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Diagnostics;
+using System.Buffers;
 using SharpEmu.HLE.FileSystem;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -23,17 +25,6 @@ public static partial class KernelMemoryCompatExports
     private const int F_SETFD = 2;
     private const int F_GETFL = 3;
     private const int F_SETFL = 4;
-
-    // poll event bits.
-    private const short POLLIN = 0x0001;
-    private const short POLLOUT = 0x0004;
-
-    // AIO request state (SCE_KERNEL_AIO_STATE_*).
-    private const uint AioStateCompleted = 3;
-    private const int SizeofAioRwRequest = 40;
-
-    private static long _nextAioSubmitId = 1;
-    private static readonly ConcurrentDictionary<uint, int> _aioResults = new();
 
     private static Stream? GetOpenFile(int fd)
     {
@@ -87,6 +78,20 @@ public static partial class KernelMemoryCompatExports
 
     private static int KernelPreadCore(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelPreadCoreInner(ctx);
+        FileIoProfile.EndNoted(
+            FileIoProfile.Op.Pread,
+            profile,
+            bytes: outcome == (int)OrbisGen2Result.ORBIS_GEN2_OK
+                ? unchecked((long)ctx[CpuRegister.Rax])
+                : 0,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelPreadCoreInner(CpuContext ctx)
+    {
         var fd = unchecked((int)ctx[CpuRegister.Rdi]);
         var bufferAddress = ctx[CpuRegister.Rsi];
         var requested = (int)Math.Min(ctx[CpuRegister.Rdx], int.MaxValue);
@@ -102,31 +107,115 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        FileIoProfile.NotePath(OpenFileName(stream));
+
         if (requested == 0)
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var buffer = GC.AllocateUninitializedArray<byte>(requested);
-        int read;
+        // Titles that stream from .pak archives pread in chunks well past the
+        // 85 KiB large-object threshold, so a fresh array per call put every
+        // read's staging buffer on the LOH. The read goes straight into the
+        // guest's host mapping when it hands the range out in place, and
+        // through a pooled buffer otherwise.
+        byte[]? buffer = null;
         try
         {
-            read = ReadOpenFileAt(stream, buffer, offset);
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
+            int read;
+            try
+            {
+                if (!ctx.Memory.TryFillInPlace(bufferAddress, requested, (Stream: stream, Offset: offset),
+                        static (state, destination) => ReadOpenFileAt(state.Stream, destination, state.Offset), out read))
+                {
+                    buffer = ArrayPool<byte>.Shared.Rent(requested);
+                    read = ReadOpenFileAt(stream, buffer.AsSpan(0, requested), offset);
+                }
+            }
+            catch (IOException)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
 
-        if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
+            if (read > 0 && stream is FileStream file)
+            {
+                // pread never advances the file offset, so the kernel's own
+                // read-ahead cannot see that a chunked archive read is
+                // sequential; say so explicitly. A file served from a mounted
+                // archive has no host handle to advise.
+                AdvisePreadReadAhead(fd, file, offset, read);
+            }
 
-        ctx[CpuRegister.Rax] = unchecked((ulong)read);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            SharpEmu.HLE.GuestLoadProgress.NoteFileRead(read);
+
+            if (read > 0 && buffer is not null && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)read);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        finally
+        {
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
     }
+
+    // Per guest descriptor: where the next read would have to start to count as
+    // continuing, plus the file length, so deciding whether to hint costs no
+    // syscall of its own. Dropped when the descriptor closes.
+    private readonly record struct PreadStream(long NextOffset, long Length);
+
+    private static readonly ConcurrentDictionary<int, PreadStream> _preadStreams = new();
+
+    private static void AdvisePreadReadAhead(int fd, FileStream stream, long offset, int read)
+    {
+        if (!HostReadAhead.Enabled)
+        {
+            return;
+        }
+
+        var completed = offset + read;
+        long length;
+        bool continuesPreviousRead;
+        if (_preadStreams.TryGetValue(fd, out var tracked))
+        {
+            length = tracked.Length;
+            continuesPreviousRead = tracked.NextOffset == offset;
+        }
+        else
+        {
+            try
+            {
+                length = RandomAccess.GetLength(stream.SafeFileHandle);
+            }
+            catch (Exception exception) when (
+                exception is IOException or ObjectDisposedException)
+            {
+                return;
+            }
+
+            continuesPreviousRead = false;
+        }
+
+        _preadStreams[fd] = new PreadStream(completed, length);
+        if (!continuesPreviousRead || completed >= length)
+        {
+            return;
+        }
+
+        HostReadAhead.Advise(
+            stream.SafeFileHandle,
+            completed,
+            (int)Math.Min(HostReadAhead.WindowBytes, length - completed));
+    }
+
+    internal static void ForgetPreadStream(int fd) => _preadStreams.TryRemove(fd, out _);
 
     [SysAbiExport(Nid = "C2kJ-byS5rM", ExportName = "pwrite",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -144,6 +233,20 @@ public static partial class KernelMemoryCompatExports
 
     private static int KernelPwriteCore(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelPwriteCoreInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.Pwrite,
+            profile,
+            bytes: outcome == (int)OrbisGen2Result.ORBIS_GEN2_OK
+                ? unchecked((long)ctx[CpuRegister.Rax])
+                : 0,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelPwriteCoreInner(CpuContext ctx)
+    {
         var fd = unchecked((int)ctx[CpuRegister.Rdi]);
         var bufferAddress = ctx[CpuRegister.Rsi];
         var requested = (int)Math.Min(ctx[CpuRegister.Rdx], int.MaxValue);
@@ -165,23 +268,30 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var payload = GC.AllocateUninitializedArray<byte>(requested);
-        if (!ctx.Memory.TryRead(bufferAddress, payload))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
+        var payload = ArrayPool<byte>.Shared.Rent(requested);
         try
         {
-            WriteOpenFileAt(stream, payload, offset);
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
+            if (!ctx.Memory.TryRead(bufferAddress, payload.AsSpan(0, requested)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
 
-        ctx[CpuRegister.Rax] = unchecked((ulong)requested);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            try
+            {
+                WriteOpenFileAt(stream, payload.AsSpan(0, requested), offset);
+            }
+            catch (IOException)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(payload);
+        }
     }
 
     // ---- Synchronization ----
@@ -202,7 +312,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "KIbJFQ0I1Cg", ExportName = "fdatasync",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixFdatasync(CpuContext ctx) => KernelFsyncCore(ctx);
+    public static int PosixFdatasync(CpuContext ctx) => PosixFsync(ctx);
 
     [SysAbiExport(Nid = "30Rh4ixbKy4", ExportName = "sceKernelFdatasync",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -282,13 +392,23 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        try
-        {
-            stream.SetLength(length);
-        }
-        catch (IOException)
+        // FreeBSD kern_ftruncate: EINVAL when the fd is not open for writing
+        // (every /app0 descriptor, archive-backed files).
+        if (!stream.CanWrite)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        try
+        {
+            lock (stream)
+            {
+                stream.SetLength(length);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or NotSupportedException or UnauthorizedAccessException)
+        {
+            return KernelErrno.Sce(HostExceptionToErrno(ex));
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -320,7 +440,7 @@ public static partial class KernelMemoryCompatExports
 
         if (IsReadOnlyGuestMutationPath(guestPath))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EROFS;
         }
 
         var hostPath = ResolveGuestPath(guestPath);
@@ -329,18 +449,19 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        if (Directory.Exists(hostPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EISDIR;
+        }
+
         try
         {
             using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, GuestFileShare);
             stream.SetLength(length);
         }
-        catch (FileNotFoundException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return KernelErrno.Sce(HostExceptionToErrno(ex));
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -373,7 +494,7 @@ public static partial class KernelMemoryCompatExports
 
         if (IsReadOnlyGuestMutationPath(fromGuest) || IsReadOnlyGuestMutationPath(toGuest))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EROFS;
         }
 
         var fromHost = ResolveGuestPath(fromGuest);
@@ -383,28 +504,10 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        try
+        var errno = RenameHostPath(fromHost, toHost);
+        if (errno != 0)
         {
-            if (Directory.Exists(fromHost))
-            {
-                Directory.Move(fromHost, toHost);
-            }
-            else
-            {
-                File.Move(fromHost, toHost, overwrite: true);
-            }
-        }
-        catch (FileNotFoundException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return KernelErrno.Sce(errno);
         }
 
         InvalidateNegativeStatCacheForPathAndAncestors(toGuest);
@@ -413,6 +516,67 @@ public static partial class KernelMemoryCompatExports
         InvalidateAprFileSizeCache(toHost);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// rename(2) on host paths with FreeBSD semantics: a file replaces a file,
+    /// a directory replaces an empty directory, a file over a directory is
+    /// EISDIR, a directory over a file ENOTDIR, over a non-empty directory
+    /// ENOTEMPTY. Returns 0 or the errno.
+    /// </summary>
+    internal static int RenameHostPath(string fromHost, string toHost)
+    {
+        try
+        {
+            var fromIsDirectory = Directory.Exists(fromHost);
+            if (!fromIsDirectory && !File.Exists(fromHost))
+            {
+                return OrbisErrno.ENOENT;
+            }
+
+            if (string.Equals(
+                    Path.GetFullPath(fromHost),
+                    Path.GetFullPath(toHost),
+                    StringComparison.Ordinal))
+            {
+                return 0;
+            }
+
+            var toIsDirectory = Directory.Exists(toHost);
+            var toIsFile = !toIsDirectory && File.Exists(toHost);
+            if (fromIsDirectory)
+            {
+                if (toIsFile)
+                {
+                    return OrbisErrno.ENOTDIR;
+                }
+
+                if (toIsDirectory)
+                {
+                    if (Directory.EnumerateFileSystemEntries(toHost).Any())
+                    {
+                        return OrbisErrno.ENOTEMPTY;
+                    }
+
+                    Directory.Delete(toHost);
+                }
+
+                Directory.Move(fromHost, toHost);
+                return 0;
+            }
+
+            if (toIsDirectory)
+            {
+                return OrbisErrno.EISDIR;
+            }
+
+            File.Move(fromHost, toHost, overwrite: true);
+            return 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return HostExceptionToErrno(ex);
+        }
     }
 
     // ---- Descriptor duplication ----
@@ -434,7 +598,12 @@ public static partial class KernelMemoryCompatExports
 
             // POSIX dup shares the open file description (and offset), which is
             // exactly the shared FileStream reference.
-            var newFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+            var newFd = AllocateGuestFileDescriptor();
+            if (newFd < 0)
+            {
+                return KernelErrno.Posix(ctx, OrbisErrno.EMFILE);
+            }
+
             _openFiles[newFd] = stream;
             ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
         }
@@ -458,18 +627,27 @@ public static partial class KernelMemoryCompatExports
                     notFoundErrno: Ebadf);
             }
 
+            if (newFd < 0 || newFd >= GuestDescriptors.Limit)
+            {
+                return KernelErrno.Posix(ctx, OrbisErrno.EBADF);
+            }
+
             if (oldFd == newFd)
             {
                 ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
-            // If newFd names an open file, dup2 closes it first.
-            if (_openFiles.TryGetValue(newFd, out var existing) && !ReferenceEquals(existing, stream))
+            // If newFd names an open file, dup2 closes it first; the stream
+            // itself survives while another descriptor still shares it.
+            if (_openFiles.TryGetValue(newFd, out var existing) &&
+                !ReferenceEquals(existing, stream) &&
+                !IsStreamSharedLocked(existing, newFd))
             {
                 try { existing.Dispose(); } catch (IOException) { }
             }
 
+            GuestDescriptors.TryClaim(newFd);
             _openFiles[newFd] = stream;
             ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
         }
@@ -509,7 +687,18 @@ public static partial class KernelMemoryCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
                     }
 
-                    var newFd = Math.Max((int)Interlocked.Increment(ref _nextFileDescriptor), argument);
+                    // F_DUPFD: the lowest free descriptor >= argument.
+                    if (argument < 0 || argument >= GuestDescriptors.Limit)
+                    {
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                    }
+
+                    var newFd = AllocateGuestFileDescriptor(argument);
+                    if (newFd < 0)
+                    {
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EMFILE;
+                    }
+
                     _openFiles[newFd] = stream;
                     ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
                 }
@@ -531,275 +720,5 @@ public static partial class KernelMemoryCompatExports
                 ctx[CpuRegister.Rax] = 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-    }
-
-    // ---- poll / select ----
-    // Regular files are always ready for both read and write, so report every
-    // requested descriptor as immediately ready.
-
-    [SysAbiExport(Nid = "ku7D4q1Y9PI", ExportName = "poll",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixPoll(CpuContext ctx)
-    {
-        var fdsAddress = ctx[CpuRegister.Rdi];
-        var count = unchecked((uint)ctx[CpuRegister.Rsi]);
-        if (fdsAddress == 0 || count == 0)
-        {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        // struct pollfd { int fd; short events; short revents; } == 8 bytes.
-        var ready = 0;
-        Span<byte> buffer = stackalloc byte[8];
-        for (uint i = 0; i < count && i < 4096; i++)
-        {
-            var entry = fdsAddress + i * 8;
-            if (!ctx.Memory.TryRead(entry, buffer))
-            {
-                break;
-            }
-
-            var events = BinaryPrimitives.ReadInt16LittleEndian(buffer[4..]);
-            var revents = (short)(events & (POLLIN | POLLOUT));
-            BinaryPrimitives.WriteInt16LittleEndian(buffer[6..], revents);
-            if (revents != 0)
-            {
-                ready++;
-            }
-
-            _ = ctx.Memory.TryWrite(entry, buffer);
-        }
-
-        ctx[CpuRegister.Rax] = unchecked((ulong)ready);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(Nid = "T8fER+tIGgk", ExportName = "select",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixSelect(CpuContext ctx)
-    {
-        // nfds in Rdi; the fd_sets are left as-is (all reported ready) and the
-        // ready count returned is nfds so callers proceed without blocking.
-        var nfds = unchecked((int)ctx[CpuRegister.Rdi]);
-        ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(nfds, 0));
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    // ---- Asynchronous I/O (executed synchronously) ----
-
-    [SysAbiExport(Nid = "HgX7+AORI58", ExportName = "sceKernelAioSubmitReadCommands",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioSubmitReadCommands(CpuContext ctx) => KernelAioSubmit(ctx, write: false);
-
-    [SysAbiExport(Nid = "lXT0m3P-vs4", ExportName = "sceKernelAioSubmitReadCommandsMultiple",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioSubmitReadCommandsMultiple(CpuContext ctx) => KernelAioSubmit(ctx, write: false);
-
-    [SysAbiExport(Nid = "XQ8C8y+de+E", ExportName = "sceKernelAioSubmitWriteCommands",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioSubmitWriteCommands(CpuContext ctx) => KernelAioSubmit(ctx, write: true);
-
-    private static int KernelAioSubmit(CpuContext ctx, bool write)
-    {
-        var requestsAddress = ctx[CpuRegister.Rdi];
-        var count = unchecked((int)ctx[CpuRegister.Rsi]);
-        var outIdAddress = ctx[CpuRegister.Rcx];
-        if (requestsAddress == 0 || count <= 0 || count > 0x10000)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        // Each SceKernelAioRWRequest: offset(8) nbyte(8) buf(8) result(8) fd(4).
-        Span<byte> request = stackalloc byte[SizeofAioRwRequest];
-        Span<byte> result = stackalloc byte[16];
-        for (var i = 0; i < count; i++)
-        {
-            var entry = requestsAddress + (ulong)(i * SizeofAioRwRequest);
-            if (!ctx.Memory.TryRead(entry, request))
-            {
-                break;
-            }
-
-            var offset = BinaryPrimitives.ReadInt64LittleEndian(request[0..]);
-            var nbyte = (int)Math.Min(BinaryPrimitives.ReadUInt64LittleEndian(request[8..]), int.MaxValue);
-            var buf = BinaryPrimitives.ReadUInt64LittleEndian(request[16..]);
-            var resultPtr = BinaryPrimitives.ReadUInt64LittleEndian(request[24..]);
-            var fd = BinaryPrimitives.ReadInt32LittleEndian(request[32..]);
-
-            long transferred = KernelAioTransfer(ctx, fd, offset, nbyte, buf, write);
-            if (resultPtr != 0)
-            {
-                BinaryPrimitives.WriteInt64LittleEndian(result[0..], transferred);
-                BinaryPrimitives.WriteUInt32LittleEndian(result[8..], AioStateCompleted);
-                _ = ctx.Memory.TryWrite(resultPtr, result);
-            }
-        }
-
-        var submitId = unchecked((uint)Interlocked.Increment(ref _nextAioSubmitId));
-        _aioResults[submitId] = (int)AioStateCompleted;
-        if (outIdAddress != 0)
-        {
-            Span<byte> idBuffer = stackalloc byte[sizeof(uint)];
-            BinaryPrimitives.WriteUInt32LittleEndian(idBuffer, submitId);
-            _ = ctx.Memory.TryWrite(outIdAddress, idBuffer);
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static long KernelAioTransfer(CpuContext ctx, int fd, long offset, int nbyte, ulong buf, bool write)
-    {
-        if (nbyte <= 0 || buf == 0 || offset < 0)
-        {
-            return 0;
-        }
-
-        var stream = GetOpenFile(fd);
-        if (stream is null)
-        {
-            return -1;
-        }
-
-        var scratch = GC.AllocateUninitializedArray<byte>(nbyte);
-        try
-        {
-            if (write)
-            {
-                if (!ctx.Memory.TryRead(buf, scratch))
-                {
-                    return -1;
-                }
-
-                WriteOpenFileAt(stream, scratch, offset);
-                return nbyte;
-            }
-
-            var read = ReadOpenFileAt(stream, scratch, offset);
-            if (read > 0 && !ctx.Memory.TryWrite(buf, scratch.AsSpan(0, read)))
-            {
-                return -1;
-            }
-
-            return read;
-        }
-        catch (IOException)
-        {
-            return -1;
-        }
-    }
-
-    [SysAbiExport(Nid = "o7O4z3jwKzo", ExportName = "sceKernelAioPollRequests",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioPollRequests(CpuContext ctx) => KernelAioComplete(ctx);
-
-    [SysAbiExport(Nid = "2pOuoWoCxdk", ExportName = "sceKernelAioPollRequest",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioPollRequest(CpuContext ctx) => KernelAioGetRequestState(ctx);
-
-    [SysAbiExport(Nid = "lgK+oIWkJyA", ExportName = "sceKernelAioWaitRequests",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioWaitRequests(CpuContext ctx)
-    {
-        if (ctx[CpuRegister.Rcx] is not (1 or 2))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        return KernelAioComplete(ctx);
-    }
-
-    [SysAbiExport(Nid = "KOF-oJbQVvc", ExportName = "sceKernelAioWaitRequest",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioWaitRequest(CpuContext ctx) => KernelAioGetRequestState(ctx);
-
-    private static int KernelAioGetRequestState(CpuContext ctx)
-    {
-        var submitId = unchecked((uint)ctx[CpuRegister.Rdi]);
-        if (!_aioResults.TryGetValue(submitId, out var completedState))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        // Submission finishes the transfer before it publishes the request ID.
-        Span<byte> state = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(state, completedState);
-        if (!ctx.Memory.TryWrite(ctx[CpuRegister.Rsi], state))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static int KernelAioComplete(CpuContext ctx)
-    {
-        var requestIdsAddress = ctx[CpuRegister.Rdi];
-        var count = unchecked((int)ctx[CpuRegister.Rsi]);
-        var statesAddress = ctx[CpuRegister.Rdx];
-        if (count <= 0 || count > 128)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        var byteCount = (ulong)count * sizeof(uint);
-        if (requestIdsAddress == 0 || statesAddress == 0 ||
-            requestIdsAddress > ulong.MaxValue - byteCount || statesAddress > ulong.MaxValue - byteCount)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        Span<byte> state = stackalloc byte[sizeof(uint)];
-        for (var index = 0; index < count; index++)
-        {
-            if (!ctx.Memory.TryRead(requestIdsAddress + (ulong)index * sizeof(uint), state))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            var submitId = BinaryPrimitives.ReadUInt32LittleEndian(state);
-            if (!_aioResults.TryGetValue(submitId, out var completedState))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-            }
-
-            BinaryPrimitives.WriteInt32LittleEndian(state, completedState);
-            if (!ctx.Memory.TryWrite(statesAddress + (ulong)index * sizeof(uint), state))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(Nid = "fR521KIGgb8", ExportName = "sceKernelAioCancelRequest",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioCancelRequest(CpuContext ctx)
-    {
-        // Already completed; report the completed state if an out pointer given.
-        var stateAddress = ctx[CpuRegister.Rsi];
-        if (stateAddress != 0)
-        {
-            Span<byte> state = stackalloc byte[sizeof(uint)];
-            BinaryPrimitives.WriteUInt32LittleEndian(state, AioStateCompleted);
-            _ = ctx.Memory.TryWrite(stateAddress, state);
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(Nid = "5TgME6AYty4", ExportName = "sceKernelAioDeleteRequest",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioDeleteRequest(CpuContext ctx)
-    {
-        var submitId = unchecked((uint)ctx[CpuRegister.Rdi]);
-        _aioResults.TryRemove(submitId, out _);
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 }

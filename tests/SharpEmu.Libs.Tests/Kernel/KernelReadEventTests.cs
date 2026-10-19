@@ -45,7 +45,9 @@ public sealed class KernelReadEventTests
             KernelSocketCompatExports.Connect(ctx));
         Assert.Equal(0UL, ctx[CpuRegister.Rax]);
 
-        using var server = await acceptTask.WaitAsync(TimeSpan.FromSeconds(2));
+        // Both bounds return as soon as the event happens; they only have to outlast
+        // thread-pool and read-event poll-timer delays while the full suite loads the machine.
+        using var server = await acceptTask.WaitAsync(TimeSpan.FromSeconds(10));
         var equeue = CreateEqueue(ctx, memory);
         const ulong expectedUserData = 0xCAFE_BABE_1234_5678;
 
@@ -58,7 +60,7 @@ public sealed class KernelReadEventTests
             KernelEventQueueCompatExports.KernelAddReadEvent(ctx));
 
         await server.GetStream().WriteAsync(new byte[] { 0x5A });
-        WriteUInt32(memory, TimeoutAddress, 1_000_000);
+        WriteUInt32(memory, TimeoutAddress, 10_000_000);
         ConfigureWait(ctx, equeue, TimeoutAddress);
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_OK,
@@ -124,8 +126,9 @@ public sealed class KernelReadEventTests
         ctx[CpuRegister.Rsi] = 0x7FFF_FFFF;
         ctx[CpuRegister.Rdx] = 1;
 
+        // kqueue_register reports a descriptor that is not open as EBADF.
         Assert.Equal(
-            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND,
+            unchecked((int)0x80020009),
             KernelEventQueueCompatExports.KernelAddReadEvent(ctx));
 
         ctx[CpuRegister.Rdi] = equeue;

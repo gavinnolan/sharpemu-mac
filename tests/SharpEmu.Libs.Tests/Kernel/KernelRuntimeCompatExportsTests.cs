@@ -562,6 +562,168 @@ public sealed class KernelRuntimeCompatExportsTests
         }
     }
 
+    [Fact]
+    public void ModuleRegistry_ScopedLookupWalksNeededModulesBreadthFirst()
+    {
+        KernelModuleRegistry.Reset();
+        try
+        {
+            int Register(string name, ulong symbolAddress, params string[] needed)
+            {
+                var handle = KernelModuleRegistry.RegisterModule(
+                    Path.Combine(Path.GetTempPath(), "sharpemu-dag", name),
+                    symbolAddress & ~0xFFFFUL,
+                    0x10_0000,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    isMain: false);
+                KernelModuleRegistry.RegisterModuleSymbols(
+                    handle,
+                    new Dictionary<string, ulong> { [$"own_{Path.GetFileNameWithoutExtension(name)}"] = symbolAddress, ["shared"] = symbolAddress });
+                KernelModuleRegistry.RegisterModuleDependencies(handle, needed);
+                return handle;
+            }
+
+            var leaf = Register("libLeaf.prx", 0x9000_1000);
+            var middle = Register("libMiddle.sprx", 0x9100_1000, "libLeaf");
+            var top = Register("libTop.prx", 0x9200_1000, "libMiddle", "libSceNotMapped");
+            var unrelated = Register("libOther.prx", 0x9300_1000);
+
+            // The handle itself wins over its dependencies.
+            Assert.True(KernelModuleRegistry.TryResolveModuleSymbolInScope(top, ["shared"], out var address));
+            Assert.Equal(0x9200_1000UL, address);
+            // Dependencies are reached transitively, by name with or without extension.
+            Assert.True(KernelModuleRegistry.TryResolveModuleSymbolInScope(top, ["own_libLeaf"], out address));
+            Assert.Equal(0x9000_1000UL, address);
+            // A module outside the handle's DAG is not visible.
+            Assert.False(KernelModuleRegistry.TryResolveModuleSymbolInScope(top, ["own_libOther"], out _));
+            Assert.False(KernelModuleRegistry.TryResolveModuleSymbolInScope(leaf, ["own_libMiddle"], out _));
+            Assert.True(KernelModuleRegistry.HasModuleSymbols(middle));
+            Assert.True(KernelModuleRegistry.HasModuleSymbols(unrelated));
+            Assert.False(KernelModuleRegistry.HasModuleSymbols(
+                KernelModuleRegistry.RegisterSyntheticModule("libSceHleOnly.sprx", isSystemModule: true)));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
+    [Fact]
+    public void ModuleInfo_ReportsEveryLoadSegmentAndDlcloseChecksTheHandle()
+    {
+        const ulong infoAddress = 0x1_0000;
+        KernelModuleRegistry.Reset();
+        try
+        {
+            var handle = KernelModuleRegistry.RegisterModule(
+                Path.Combine(Path.GetTempPath(), "sharpemu-info", "libSeg.prx"),
+                0x8800_0000,
+                0x30_0000,
+                0x8800_1000,
+                0,
+                0x8810_0000,
+                0x8810_0100,
+                0x400,
+                isMain: false);
+            KernelModuleRegistry.RegisterModuleSegments(handle,
+            [
+                new(0x8800_0000, 0x10_0000, 5),
+                new(0x8810_0000, 0x8_0000, 1),
+                new(0x8820_0000, 0x10_0000, 3),
+            ]);
+
+            var memory = new FakeCpuMemory(infoAddress, 0x1000);
+            var ctx = new CpuContext(memory, Generation.Gen5);
+            Assert.True(ctx.TryWriteUInt64(infoAddress, 0x160));
+            ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+            ctx[CpuRegister.Rsi] = infoAddress;
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelGetModuleInfo(ctx));
+
+            var info = new byte[0x160];
+            Assert.True(memory.TryRead(infoAddress, info));
+            Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x148)));
+            Assert.Equal(0x8810_0000UL, BinaryPrimitives.ReadUInt64LittleEndian(info.AsSpan(0x108 + 16)));
+            Assert.Equal(0x8_0000u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x108 + 24)));
+            Assert.Equal(1, BinaryPrimitives.ReadInt32LittleEndian(info.AsSpan(0x108 + 28)));
+            Assert.Equal(3, BinaryPrimitives.ReadInt32LittleEndian(info.AsSpan(0x108 + 32 + 12)));
+
+            var exInfo = new byte[0x1A8];
+            Assert.True(ctx.TryWriteUInt64(infoAddress, 0x1A8));
+            ctx[CpuRegister.Rdi] = 0x8820_0010;
+            ctx[CpuRegister.Rsi] = 0;
+            ctx[CpuRegister.Rdx] = infoAddress;
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelGetModuleInfoFromAddr(ctx));
+            Assert.True(memory.TryRead(infoAddress, exInfo));
+            Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(exInfo.AsSpan(0x1A0)));
+            Assert.Equal(0x8810_0000UL, BinaryPrimitives.ReadUInt64LittleEndian(exInfo.AsSpan(0x148)));
+            Assert.Equal(0x8810_0100UL, BinaryPrimitives.ReadUInt64LittleEndian(exInfo.AsSpan(0x150)));
+            Assert.Equal(0x400u, BinaryPrimitives.ReadUInt32LittleEndian(exInfo.AsSpan(0x15C)));
+            Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(exInfo.AsSpan(0x1A4)));
+
+            ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelDlclose(ctx));
+            ctx[CpuRegister.Rdi] = 0x7777;
+            Assert.Equal(unchecked((int)0x80020003), KernelRuntimeCompatExports.KernelDlclose(ctx));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
+    [Fact]
+    public void Sysmodule_LoadIsRefcountedAndReportsSdkErrors()
+    {
+        const ushort id = 0x7AB1; // not a real module id; ids are not table-checked
+        var memory = new FakeCpuMemory(0x1_0000, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        int Call(Func<CpuContext, int> export, ulong id)
+        {
+            ctx[CpuRegister.Rdi] = id;
+            var result = export(ctx);
+            Assert.Equal(unchecked((ulong)(long)result), ctx[CpuRegister.Rax]);
+            return result;
+        }
+
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded, Call(KernelRuntimeCompatExports.SysmoduleUnloadModule, id));
+
+        // Upper register bits are not part of the uint16 id.
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleLoadModule, 0xDEAD_0000_0000_0000UL | id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleLoadModule, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleUnloadModule, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+        Assert.Equal(0, Call(KernelRuntimeCompatExports.SysmoduleUnloadModule, id));
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, id));
+
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorInvalidValue, Call(KernelRuntimeCompatExports.SysmoduleLoadModule, 0));
+        Assert.Equal(KernelRuntimeCompatExports.SceSysmoduleErrorInvalidValue, Call(KernelRuntimeCompatExports.SysmoduleIsLoaded, 0x1_0000));
+        Assert.Equal(unchecked((int)0x805A1000), KernelRuntimeCompatExports.SceSysmoduleErrorInvalidValue);
+        Assert.Equal(unchecked((int)0x805A1001), KernelRuntimeCompatExports.SceSysmoduleErrorUnloaded);
+    }
+
+    [Theory]
+    [InlineData("malloc", new[] { "malloc", "gQX+4GDQjpM" })]
+    [InlineData("gQX+4GDQjpM#C#A", new[] { "gQX+4GDQjpM" })]
+    [InlineData("UnityPluginLoad", new[] { "UnityPluginLoad", null })]
+    public void Dlsym_LookupNamesStripTheNidSuffix(string symbol, string?[] expected)
+    {
+        var names = SharpEmu.Core.Cpu.Native.DirectExecutionBackend.DlsymLookupNames(symbol);
+        Assert.Equal(expected[0], names[0]);
+        if (expected.Length > 1 && expected[1] is { } nid)
+        {
+            Assert.Equal(nid, names[1]);
+        }
+
+        Assert.Equal(expected.Length, names.Length);
+    }
+
     private static int GetMinutesWest() =>
         unchecked((int)-TimeZoneInfo.Local.BaseUtcOffset.TotalMinutes);
 

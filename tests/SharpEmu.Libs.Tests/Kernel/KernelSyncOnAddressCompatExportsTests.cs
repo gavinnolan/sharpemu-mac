@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Threading;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Kernel;
@@ -265,7 +266,7 @@ public sealed class KernelSyncOnAddressCompatExportsTests
         var (memory, ctx) = CreateContext();
         WriteUInt64(memory, ValueAddress, 21);
         WriteUInt64(memory, TimeoutAddress, 0);
-        WriteUInt64(memory, TimeoutAddress + sizeof(long), 1_000_000); // 1 ms
+        WriteUInt64(memory, TimeoutAddress + sizeof(long), 50_000_000); // 50 ms: long enough that first-call JIT cannot expire it before it parks
         SetErrnoStorage(ctx);
         ctx[CpuRegister.Rdi] = ValueAddress;
         ctx[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
@@ -284,11 +285,12 @@ public sealed class KernelSyncOnAddressCompatExportsTests
                 out _,
                 out var waiter,
                 out var deadline));
-            Assert.True(deadline > 0);
+            Assert.Equal(0, deadline);
+            Assert.True(Assert.IsAssignableFrom<GuestWaiter>(waiter).DeadlineTimestamp > 0);
             stagedWaiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter);
         });
 
-        Thread.Sleep(10);
+        Thread.Sleep(100);
         var resumed = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(stagedWaiter);
         Assert.Equal(-1, resumed.Resume());
         Assert.Equal(60, ReadInt32(memory, ctx.FsBase + 0x40)); // ETIMEDOUT
@@ -335,7 +337,9 @@ public sealed class KernelSyncOnAddressCompatExportsTests
                 out var deadline));
             Assert.Equal("sceKernelSyncOnAddressWait32", reason);
             Assert.True(hasContinuation);
-            Assert.Equal(timeoutAddress == 0, deadline == 0);
+            // Deadlines are armed on the waiter (timer service), not handed to the scheduler.
+            Assert.Equal(0, deadline);
+            Assert.Equal(timeoutAddress == 0, Assert.IsAssignableFrom<GuestWaiter>(waiter).DeadlineTimestamp == 0);
             stagedWaiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter);
         });
 

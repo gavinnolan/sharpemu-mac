@@ -6,7 +6,9 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Threading;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using SharpEmu.Libs.Threading;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -19,9 +21,6 @@ public static class KernelPthreadExtendedCompatExports
     private const ulong DefaultStackSize = 0x1_00000UL;
     private const ulong NativeGuestStackSize = 0x20_0000UL;
     private const ulong NativeGuestStackStride = 0x100_0000UL;
-    // Solo scheduling is off on a default-initialised pthread_attr_t; a title has to ask for it.
-    private const int DefaultSoloSched = 0;
-
     private const int DefaultInheritSched = 4;
     private const int DefaultSoloSched = 0;
     private const int DefaultSchedPolicy = 1;
@@ -39,8 +38,13 @@ public static class KernelPthreadExtendedCompatExports
     private static long _nextSyntheticRwlockHandleId = 1;
     private static long _nextSyntheticPthreadAttrHandleId = 1;
     private static long _nextSyntheticRwlockAttrHandleId = 1;
+    // libthr semantics by default: no write re-entry, a waiting writer blocks new readers,
+    // an unlock hands the lock to the first queued writer or else to every queued reader.
+    // SHARPEMU_STRICT_RWLOCK_WRITER_PREFERENCE=0 restores the old "compat writer" mode, in
+    // which a guest thread's write lock on a free rwlock is re-entrant and admits that
+    // thread's own read locks (introduced with the UE boot fixes, #102).
     private static readonly bool _strictRwlockWriterPreference =
-        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_STRICT_RWLOCK_WRITER_PREFERENCE"), "1", StringComparison.Ordinal);
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_STRICT_RWLOCK_WRITER_PREFERENCE"), "0", StringComparison.Ordinal);
 
     // pthread-specific values live in GuestFastPath's native per-thread tables
     // so the emitted pthread_getspecific stub and this managed path read exactly
@@ -75,7 +79,8 @@ public static class KernelPthreadExtendedCompatExports
         ulong thread,
         string name,
         int priority,
-        ulong affinityMask)
+        ulong affinityMask,
+        int detachState = DefaultDetachState)
     {
         lock (_stateGate)
         {
@@ -83,11 +88,72 @@ public static class KernelPthreadExtendedCompatExports
             state.Name = name;
             state.Priority = priority;
             state.AffinityMask = affinityMask;
+            state.DetachState = detachState;
             state.Attributes = state.Attributes with
             {
                 SchedPriority = priority,
                 AffinityMask = affinityMask,
+                DetachState = detachState,
             };
+        }
+    }
+
+    /// <summary>PTHREAD_CREATE_DETACHED (1) or JOINABLE (0) from a create attribute.</summary>
+    internal static int GetThreadStartDetachState(CpuContext ctx, ulong attrAddress)
+    {
+        if (attrAddress == 0)
+        {
+            return DefaultDetachState;
+        }
+
+        var resolvedAddress = ResolvePthreadAttrHandle(ctx, attrAddress);
+        lock (_stateGate)
+        {
+            return _attrStates.TryGetValue(resolvedAddress, out var attributes) ||
+                _attrStates.TryGetValue(attrAddress, out attributes)
+                ? attributes.DetachState
+                : DefaultDetachState;
+        }
+    }
+
+    /// <summary>
+    /// Join bookkeeping that libthr keeps in the thread: a detached thread cannot be joined
+    /// (EINVAL) and a thread is joined at most once (a second join finds no thread, ESRCH).
+    /// Returns 0 when the join may proceed and marks the thread as being joined.
+    /// </summary>
+    internal static int BeginJoin(ulong thread)
+    {
+        lock (_stateGate)
+        {
+            if (!_threadStates.TryGetValue(thread, out var state))
+            {
+                return 0;
+            }
+
+            if (state.DetachState != DefaultDetachState)
+            {
+                return GuestErrno.EINVAL;
+            }
+
+            if (state.Joined)
+            {
+                return GuestErrno.ESRCH;
+            }
+
+            state.Joined = true;
+            return 0;
+        }
+    }
+
+    /// <summary>Undoes <see cref="BeginJoin"/> when the join failed.</summary>
+    internal static void AbortJoin(ulong thread)
+    {
+        lock (_stateGate)
+        {
+            if (_threadStates.TryGetValue(thread, out var state))
+            {
+                state.Joined = false;
+            }
         }
     }
 
@@ -97,6 +163,7 @@ public static class KernelPthreadExtendedCompatExports
         public int Priority { get; set; } = DefaultThreadPriority;
         public ulong AffinityMask { get; set; } = DefaultThreadAffinityMask;
         public int DetachState { get; set; } = DefaultDetachState;
+        public bool Joined { get; set; }
         public PthreadAttrState Attributes { get; set; } = PthreadAttrState.Default;
     }
 
@@ -112,7 +179,9 @@ public static class KernelPthreadExtendedCompatExports
         public int ReaderTotalCount { get; set; }
         public int CompatWriterTotalCount { get; set; }
         public ulong WriterThreadId { get; set; }
+        // Queued writers (each also in Waiters).
         public int WaitingWriters { get; set; }
+        public LinkedList<RwlockWaiter> Waiters { get; } = new();
 
         // See PthreadMutexState.WakeKey.
         public string WakeKey { get; } = "pthread_rwlock#" + Interlocked.Increment(ref _nextRwlockWakeId).ToString("X");
@@ -177,15 +246,31 @@ public static class KernelPthreadExtendedCompatExports
         }
     }
 
+    // One queued rdlock/wrlock. The unlocker grants it (Granted) and removes it from the queue
+    // under SyncRoot, then wakes its thread: a parked guest thread directly through the
+    // scheduler, a host thread through HostSignal.
     private sealed class RwlockWaiter : IGuestThreadBlockWaiter
     {
         public required PthreadRwlockState Rwlock { get; init; }
         public required ulong ThreadId { get; init; }
         public required bool Write { get; init; }
+        public bool Posix { get; init; }
+        public long Deadline { get; init; }
+        public ulong SchedulerThread { get; init; }
+        public ManualResetEventSlim? HostSignal { get; init; }
+        public LinkedListNode<RwlockWaiter>? Node { get; set; }
+        public int Granted;
 
-        public int Resume() => (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        public int Resume()
+        {
+            // Resumed without a grant only by the scheduler's deadline.
+            var result = Volatile.Read(ref Granted) != 0 || !AbandonRwlockWaiter(this)
+                ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+            return Posix ? GuestErrno.FromSce(result) : result;
+        }
 
-        public bool TryWake() => TryAcquireBlockedRwlock(Rwlock, ThreadId, Write);
+        public bool TryWake() => Volatile.Read(ref Granted) != 0;
     }
 
     private readonly record struct TlsKeyState(ulong Destructor);
@@ -230,6 +315,12 @@ public static class KernelPthreadExtendedCompatExports
         lock (_stateGate)
         {
             var state = GetOrCreateThreadStateLocked(thread);
+            if (state.DetachState != DefaultDetachState || state.Joined)
+            {
+                // Already detached, or a joiner owns it: EINVAL as libthr.
+                return GuestErrno.ToSce(GuestErrno.EINVAL);
+            }
+
             state.DetachState = 1;
             state.Attributes = state.Attributes with { DetachState = 1 };
         }
@@ -243,7 +334,7 @@ public static class KernelPthreadExtendedCompatExports
         ExportName = "pthread_detach",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadDetach(CpuContext ctx) => PthreadDetach(ctx);
+    public static int PosixPthreadDetach(CpuContext ctx) => GuestErrno.FromSce(PthreadDetach(ctx));
 
     [SysAbiExport(
         Nid = "How7B8Oet6k",
@@ -867,66 +958,6 @@ public static class KernelPthreadExtendedCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    /// <summary>
-    /// Solo scheduling asks the kernel to give the thread a core to itself. SharpEmu maps guest
-    /// threads onto host threads and does not reserve cores, so the attribute has no scheduling
-    /// effect here - but it is a real attribute with a getter, and a title that sets it and reads
-    /// it back must see what it wrote. Storing it is what makes that true; returning a bare
-    /// success without recording the value would leave the getter reporting the default.
-    /// </summary>
-    [SysAbiExport(
-        Nid = "Dk6FC-TI+7Q",
-        ExportName = "scePthreadAttrSetsolosched",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int PthreadAttrSetsolosched(CpuContext ctx)
-    {
-        var attrAddress = ctx[CpuRegister.Rdi];
-        var soloSched = unchecked((int)ctx[CpuRegister.Rsi]);
-        if (attrAddress == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        lock (_stateGate)
-        {
-            var state = GetOrCreateAttrStateLocked(attrAddress);
-            _attrStates[attrAddress] = state with { SoloSched = soloSched };
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "9RnL-m0+diQ",
-        ExportName = "scePthreadAttrGetsolosched",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int PthreadAttrGetsolosched(CpuContext ctx)
-    {
-        var attrAddress = ctx[CpuRegister.Rdi];
-        var outSoloSchedAddress = ctx[CpuRegister.Rsi];
-        if (attrAddress == 0 || outSoloSchedAddress == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        PthreadAttrState state;
-        lock (_stateGate)
-        {
-            state = GetOrCreateAttrStateLocked(attrAddress);
-        }
-
-        if (!TryWriteInt32(ctx, outSoloSchedAddress, state.SoloSched))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = unchecked((uint)state.SoloSched);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
     [SysAbiExport(
         Nid = "eXbUSpEaTsA",
         ExportName = "scePthreadAttrSetinheritsched",
@@ -1193,9 +1224,9 @@ public static class KernelPthreadExtendedCompatExports
             var rwlock = new PthreadRwlockState();
             _rwlockStates[rwlockAddress] = rwlock;
             _rwlockStates[syntheticHandle] = rwlock;
+            _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         }
 
-        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1205,7 +1236,7 @@ public static class KernelPthreadExtendedCompatExports
         ExportName = "pthread_rwlock_init",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadRwlockInit(CpuContext ctx) => PthreadRwlockInit(ctx);
+    public static int PosixPthreadRwlockInit(CpuContext ctx) => GuestErrno.FromSce(PthreadRwlockInit(ctx));
 
     [SysAbiExport(
         Nid = "BB+kb08Tl9A",
@@ -1234,7 +1265,7 @@ public static class KernelPthreadExtendedCompatExports
 
         lock (state.SyncRoot)
         {
-            if (state.WriterThreadId != 0 || state.ReaderTotalCount != 0 || state.WaitingWriters != 0 || state.CompatWriterTotalCount != 0)
+            if (state.WriterThreadId != 0 || state.ReaderTotalCount != 0 || state.Waiters.Count != 0 || state.CompatWriterTotalCount != 0)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
             }
@@ -1259,7 +1290,7 @@ public static class KernelPthreadExtendedCompatExports
         ExportName = "pthread_rwlock_destroy",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadRwlockDestroy(CpuContext ctx) => PthreadRwlockDestroy(ctx);
+    public static int PosixPthreadRwlockDestroy(CpuContext ctx) => GuestErrno.FromSce(PthreadRwlockDestroy(ctx));
 
     [SysAbiExport(
         Nid = "Ox9i0c7L5w0",
@@ -1273,7 +1304,7 @@ public static class KernelPthreadExtendedCompatExports
         ExportName = "pthread_rwlock_rdlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadRwlockRdlock(CpuContext ctx) => PthreadRwlockRdlock(ctx);
+    public static int PosixPthreadRwlockRdlock(CpuContext ctx) => PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: false, posix: true);
 
     [SysAbiExport(
         Nid = "mqdNorrB+gI",
@@ -1287,7 +1318,7 @@ public static class KernelPthreadExtendedCompatExports
         ExportName = "pthread_rwlock_wrlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockWrlock(ctx);
+    public static int PosixPthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: true, posix: true);
 
     [SysAbiExport(
         Nid = "SFxTMOfuCkE",
@@ -1295,7 +1326,59 @@ public static class KernelPthreadExtendedCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PosixPthreadRwlockTryrdlock(CpuContext ctx) =>
-        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: false);
+        PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: false, tryOnly: true, posix: true);
+
+    [SysAbiExport(
+        Nid = "XD3mDeybCnk",
+        ExportName = "scePthreadRwlockTryrdlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTryrdlock(CpuContext ctx) =>
+        PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: false, tryOnly: true);
+
+    /// <summary>scePthreadRwlockTimedrdlock(rwlock, usec): relative timeout in microseconds.</summary>
+    [SysAbiExport(
+        Nid = "iPtZRWICjrM",
+        ExportName = "scePthreadRwlockTimedrdlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTimedrdlock(CpuContext ctx) =>
+        PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: false,
+            deadline: GuestTime.DeadlineAfterMicroseconds(unchecked((uint)ctx[CpuRegister.Rsi])));
+
+    [SysAbiExport(
+        Nid = "adh--6nIqTk",
+        ExportName = "scePthreadRwlockTimedwrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTimedwrlock(CpuContext ctx) =>
+        PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: true,
+            deadline: GuestTime.DeadlineAfterMicroseconds(unchecked((uint)ctx[CpuRegister.Rsi])));
+
+    /// <summary>pthread_rwlock_timedrdlock(rwlock, abstime): CLOCK_REALTIME absolute time.</summary>
+    [SysAbiExport(
+        Nid = "lb8lnYo-o7k",
+        ExportName = "pthread_rwlock_timedrdlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockTimedrdlock(CpuContext ctx) => PosixTimedRwlock(ctx, write: false);
+
+    [SysAbiExport(
+        Nid = "9zklzAl9CGM",
+        ExportName = "pthread_rwlock_timedwrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockTimedwrlock(CpuContext ctx) => PosixTimedRwlock(ctx, write: true);
+
+    private static int PosixTimedRwlock(CpuContext ctx, bool write)
+    {
+        if (!GuestTime.TryReadAbsoluteDeadline(ctx, ctx[CpuRegister.Rsi], GuestTime.ClockRealtime, out var deadline, out var errno))
+        {
+            return errno;
+        }
+
+        return PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write, posix: true, deadline: deadline);
+    }
 
     [SysAbiExport(
         Nid = "bIHoZCTomsI",
@@ -1303,7 +1386,7 @@ public static class KernelPthreadExtendedCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PthreadRwlockTrywrlock(CpuContext ctx) =>
-        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: true);
+        PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: true, tryOnly: true);
 
     [SysAbiExport(
         Nid = "XhWHn6P5R7U",
@@ -1311,75 +1394,7 @@ public static class KernelPthreadExtendedCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PosixPthreadRwlockTrywrlock(CpuContext ctx) =>
-        PthreadRwlockTrywrlock(ctx);
-
-    /// <summary>
-    /// Non-blocking counterpart of <see cref="PthreadRwlockLockCore"/>: acquires
-    /// only if the lock is free right now, otherwise reports BUSY.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately not routed through TryAcquireBlockedRwlock. That helper exists
-    /// for the scheduler resume path and decrements WaitingWriters on success,
-    /// which is correct only for a thread that previously incremented it. A fresh
-    /// try never did, so reusing it would silently consume another thread's
-    /// waiter count and let a queued writer be skipped.
-    /// </remarks>
-    private static int PthreadRwlockTryLockCore(CpuContext ctx, ulong rwlockAddress, bool write)
-    {
-        if (rwlockAddress == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        if (!TryResolveRwlockState(ctx, rwlockAddress, createIfZero: true, out var resolvedAddress, out var rwlock))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-
-        var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
-        lock (rwlock.SyncRoot)
-        {
-            if (write)
-            {
-                if (rwlock.WriterThreadId == currentThreadId || rwlock.GetReaderCount(currentThreadId) > 0)
-                {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
-                }
-
-                // Mirrors the blocking path's re-entrant compat-writer grant so the
-                // two agree on what counts as already owning the lock.
-                if (rwlock.CompatWriterCounts.GetValueOrDefault(currentThreadId) > 0)
-                {
-                    rwlock.AddCompatWriter(currentThreadId);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-                }
-
-                if (rwlock.WriterThreadId != 0 ||
-                    rwlock.ReaderTotalCount != 0 ||
-                    rwlock.CompatWriterTotalCount != 0)
-                {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
-                }
-
-                DetectRwlockWriterConflict(resolvedAddress, rwlock, currentThreadId, "trywrlock");
-                rwlock.WriterThreadId = currentThreadId;
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-            }
-
-            if (rwlock.WriterThreadId == currentThreadId)
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
-            }
-
-            if (ReaderMustWaitForRwlock(rwlock, currentThreadId))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
-            }
-
-            rwlock.AddReader(currentThreadId);
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-    }
+        PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: true, tryOnly: true, posix: true);
 
     [SysAbiExport(
         Nid = "+L98PIbGttk",
@@ -1400,39 +1415,25 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
-
-        try
+        List<RwlockWaiter>? granted = null;
+        lock (rwlock.SyncRoot)
         {
-            lock (rwlock.SyncRoot)
+            if (!rwlock.RemoveCompatWriter(currentThreadId))
             {
-                if (rwlock.RemoveCompatWriter(currentThreadId))
-                {
-                    Monitor.PulseAll(rwlock.SyncRoot);
-                }
-                else if (rwlock.WriterThreadId == currentThreadId)
+                if (rwlock.WriterThreadId == currentThreadId)
                 {
                     rwlock.WriterThreadId = 0;
-                    Monitor.PulseAll(rwlock.SyncRoot);
                 }
-                else if (rwlock.RemoveReader(currentThreadId))
-                {
-                    if (rwlock.ReaderTotalCount == 0 || rwlock.WaitingWriters > 0)
-                    {
-                        Monitor.PulseAll(rwlock.SyncRoot);
-                    }
-                }
-                else
+                else if (!rwlock.RemoveReader(currentThreadId))
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
                 }
             }
-        }
-        catch (SynchronizationLockException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+
+            GrantRwlockWaitersLocked(rwlock, ref granted);
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(rwlock.WakeKey);
+        WakeRwlockWaiters(rwlock, granted);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1441,7 +1442,7 @@ public static class KernelPthreadExtendedCompatExports
         ExportName = "pthread_rwlock_unlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadRwlockUnlock(CpuContext ctx) => PthreadRwlockUnlock(ctx);
+    public static int PosixPthreadRwlockUnlock(CpuContext ctx) => GuestErrno.FromSce(PthreadRwlockUnlock(ctx));
 
     [SysAbiExport(
         Nid = "yOfGg-I1ZII",
@@ -1669,7 +1670,25 @@ public static class KernelPthreadExtendedCompatExports
         GuestFastPath.ReleaseThread(threadHandle);
     }
 
-    private static int PthreadRwlockLockCore(CpuContext ctx, ulong rwlockAddress, bool write)
+    private static int PthreadRwlockLockCore(
+        CpuContext ctx,
+        ulong rwlockAddress,
+        bool write,
+        bool tryOnly = false,
+        bool posix = false,
+        long deadline = 0)
+    {
+        var result = PthreadRwlockLockSce(ctx, rwlockAddress, write, tryOnly, posix, deadline);
+        return posix ? GuestErrno.FromSce(result) : result;
+    }
+
+    private static int PthreadRwlockLockSce(
+        CpuContext ctx,
+        ulong rwlockAddress,
+        bool write,
+        bool tryOnly,
+        bool posix,
+        long deadline)
     {
         if (rwlockAddress == 0)
         {
@@ -1682,6 +1701,8 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        var cooperative = !tryOnly && GuestWait.CanBlockCooperatively;
+        RwlockWaiter waiter;
         lock (rwlock.SyncRoot)
         {
             if (write)
@@ -1697,52 +1718,17 @@ public static class KernelPthreadExtendedCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                 }
 
-                if (GuestThreadExecution.IsGuestThread &&
-                    !_strictRwlockWriterPreference &&
-                    rwlock.WriterThreadId == 0 &&
-                    rwlock.ReaderTotalCount == 0 &&
-                    rwlock.CompatWriterTotalCount == 0)
-                {
-                    rwlock.AddCompatWriter(currentThreadId);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-                }
-
                 if (rwlock.WriterThreadId == 0 && rwlock.ReaderTotalCount == 0 && rwlock.CompatWriterTotalCount == 0)
                 {
-                    DetectRwlockWriterConflict(resolvedAddress, rwlock, currentThreadId, "wrlock");
-                    rwlock.WriterThreadId = currentThreadId;
-                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-                }
-
-                rwlock.WaitingWriters++;
-                var transferredToScheduler = false;
-                try
-                {
-                    if (GuestThreadExecution.IsGuestThread &&
-                        GuestThreadExecution.TryGetCurrentImportCallFrame(out _) &&
-                        GuestThreadExecution.RequestCurrentThreadBlock(
-                            ctx,
-                            "pthread_rwlock_wrlock",
-                            rwlock.WakeKey,
-                            new RwlockWaiter { Rwlock = rwlock, ThreadId = currentThreadId, Write = true }))
+                    if (!tryOnly && !_strictRwlockWriterPreference && GuestThreadExecution.IsGuestThread)
                     {
-                        transferredToScheduler = true;
+                        rwlock.AddCompatWriter(currentThreadId);
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
 
-                    while (rwlock.WriterThreadId != 0 || rwlock.ReaderTotalCount != 0 || rwlock.CompatWriterTotalCount != 0)
-                    {
-                        Monitor.Wait(rwlock.SyncRoot);
-                    }
-
+                    DetectRwlockWriterConflict(resolvedAddress, rwlock, currentThreadId, tryOnly ? "trywrlock" : "wrlock");
                     rwlock.WriterThreadId = currentThreadId;
-                }
-                finally
-                {
-                    if (!transferredToScheduler)
-                    {
-                        rwlock.WaitingWriters = Math.Max(0, rwlock.WaitingWriters - 1);
-                    }
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                 }
             }
             else
@@ -1752,60 +1738,215 @@ public static class KernelPthreadExtendedCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
                 }
 
-                while (ReaderMustWaitForRwlock(rwlock, currentThreadId))
+                if (!ReaderMustWaitForRwlock(rwlock, currentThreadId))
                 {
-                    if (GuestThreadExecution.IsGuestThread &&
-                        GuestThreadExecution.TryGetCurrentImportCallFrame(out _) &&
-                        GuestThreadExecution.RequestCurrentThreadBlock(
-                            ctx,
-                            "pthread_rwlock_rdlock",
-                            rwlock.WakeKey,
-                            new RwlockWaiter { Rwlock = rwlock, ThreadId = currentThreadId, Write = false }))
+                    rwlock.AddReader(currentThreadId);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+            }
+
+            if (tryOnly)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+            }
+
+            if (deadline != 0 && Stopwatch.GetTimestamp() >= deadline)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+            }
+
+            waiter = new RwlockWaiter
+            {
+                Rwlock = rwlock,
+                ThreadId = currentThreadId,
+                Write = write,
+                Posix = posix,
+                Deadline = deadline,
+                SchedulerThread = cooperative ? GuestThreadExecution.CurrentGuestThreadHandle : 0,
+                HostSignal = cooperative ? null : new ManualResetEventSlim(initialState: false),
+            };
+            waiter.Node = rwlock.Waiters.AddLast(waiter);
+            if (write)
+            {
+                rwlock.WaitingWriters++;
+            }
+        }
+
+        if (cooperative &&
+            GuestThreadExecution.RequestCurrentThreadBlock(
+                ctx,
+                write ? "pthread_rwlock_wrlock" : "pthread_rwlock_rdlock",
+                rwlock.WakeKey,
+                waiter,
+                deadline))
+        {
+            // Placeholder: the guest sees RwlockWaiter.Resume's result.
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        return WaitForRwlockOnHost(ctx, waiter);
+    }
+
+    private static int WaitForRwlockOnHost(CpuContext ctx, RwlockWaiter waiter)
+    {
+        var rwlock = waiter.Rwlock;
+        var hostSignal = waiter.HostSignal!;
+        GuestWait.RegisterHostEvent(hostSignal);
+        try
+        {
+            var woke = false;
+            while (true)
+            {
+                if (woke)
+                {
+                    GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(ctx);
+                }
+
+                var waitMilliseconds = GuestWait.HostWaitSafetySliceMilliseconds;
+                lock (rwlock.SyncRoot)
+                {
+                    if (Volatile.Read(ref waiter.Granted) != 0)
                     {
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
 
-                    Monitor.Wait(rwlock.SyncRoot);
+                    if (waiter.Deadline != 0)
+                    {
+                        var remaining = waiter.Deadline - Stopwatch.GetTimestamp();
+                        if (remaining <= 0)
+                        {
+                            break;
+                        }
+
+                        waitMilliseconds = (int)Math.Min(
+                            waitMilliseconds,
+                            (remaining * 1000 + Stopwatch.Frequency - 1) / Stopwatch.Frequency);
+                    }
+
+                    // A grant sets the event under this lock, after this Reset.
+                    hostSignal.Reset();
                 }
 
-                if (rwlock.WriterThreadId != 0 ||
-                    rwlock.CompatWriterTotalCount > rwlock.CompatWriterCounts.GetValueOrDefault(currentThreadId))
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER][ERROR] RWLOCK READER/WRITER COEXIST: resolved=0x{resolvedAddress:X} reader=0x{currentThreadId:X} " +
-                        $"writer=0x{rwlock.WriterThreadId:X} compat_total={rwlock.CompatWriterTotalCount} readers_total={rwlock.ReaderTotalCount}");
-                }
-                rwlock.AddReader(currentThreadId);
+                _ = hostSignal.Wait(waitMilliseconds);
+                woke = true;
             }
         }
+        finally
+        {
+            GuestWait.UnregisterHostEvent(hostSignal);
+        }
 
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return AbandonRwlockWaiter(waiter)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT
+            : (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static bool TryAcquireBlockedRwlock(PthreadRwlockState rwlock, ulong currentThreadId, bool write)
+    // Takes a timed-out waiter off the queue. False when it was granted meanwhile (the caller
+    // then holds the lock). A departing writer can unblock the readers queued behind it.
+    private static bool AbandonRwlockWaiter(RwlockWaiter waiter)
     {
+        var rwlock = waiter.Rwlock;
+        List<RwlockWaiter>? granted = null;
         lock (rwlock.SyncRoot)
         {
-            if (write)
-            {
-                if (rwlock.WriterThreadId != 0 || rwlock.ReaderTotalCount != 0 || rwlock.CompatWriterTotalCount != 0)
-                {
-                    return false;
-                }
-
-                DetectRwlockWriterConflict(0, rwlock, currentThreadId, "wrlock-resume");
-                rwlock.WriterThreadId = currentThreadId;
-                rwlock.WaitingWriters = Math.Max(0, rwlock.WaitingWriters - 1);
-                return true;
-            }
-
-            if (ReaderMustWaitForRwlock(rwlock, currentThreadId))
+            if (Volatile.Read(ref waiter.Granted) != 0)
             {
                 return false;
             }
 
-            rwlock.AddReader(currentThreadId);
-            return true;
+            RemoveRwlockWaiterLocked(rwlock, waiter);
+            GrantRwlockWaitersLocked(rwlock, ref granted);
+        }
+
+        WakeRwlockWaiters(rwlock, granted);
+        return true;
+    }
+
+    private static void RemoveRwlockWaiterLocked(PthreadRwlockState rwlock, RwlockWaiter waiter)
+    {
+        if (waiter.Node is null)
+        {
+            return;
+        }
+
+        rwlock.Waiters.Remove(waiter.Node);
+        waiter.Node = null;
+        if (waiter.Write)
+        {
+            rwlock.WaitingWriters = Math.Max(0, rwlock.WaitingWriters - 1);
+        }
+    }
+
+    // libthr/urwlock hand-off with writer preference: once no writer holds the lock, the
+    // first queued writer gets it as soon as the readers are gone; with no writer queued,
+    // every queued reader gets it at once. Granted waiters leave the queue here.
+    private static void GrantRwlockWaitersLocked(PthreadRwlockState rwlock, ref List<RwlockWaiter>? granted)
+    {
+        if (rwlock.Waiters.Count == 0 || rwlock.WriterThreadId != 0 || rwlock.CompatWriterTotalCount != 0)
+        {
+            return;
+        }
+
+        if (rwlock.WaitingWriters > 0)
+        {
+            if (rwlock.ReaderTotalCount != 0)
+            {
+                return;
+            }
+
+            for (var node = rwlock.Waiters.First; node is not null; node = node.Next)
+            {
+                var writer = node.Value;
+                if (!writer.Write)
+                {
+                    continue;
+                }
+
+                RemoveRwlockWaiterLocked(rwlock, writer);
+                DetectRwlockWriterConflict(0, rwlock, writer.ThreadId, "wrlock-grant");
+                rwlock.WriterThreadId = writer.ThreadId;
+                GrantRwlockWaiterLocked(writer, ref granted);
+                return;
+            }
+
+            return;
+        }
+
+        for (var node = rwlock.Waiters.First; node is not null;)
+        {
+            var next = node.Next;
+            var reader = node.Value;
+            RemoveRwlockWaiterLocked(rwlock, reader);
+            rwlock.AddReader(reader.ThreadId);
+            GrantRwlockWaiterLocked(reader, ref granted);
+            node = next;
+        }
+    }
+
+    private static void GrantRwlockWaiterLocked(RwlockWaiter waiter, ref List<RwlockWaiter>? granted)
+    {
+        Volatile.Write(ref waiter.Granted, 1);
+        if (waiter.HostSignal is { } hostSignal)
+        {
+            hostSignal.Set();
+            return;
+        }
+
+        (granted ??= new List<RwlockWaiter>()).Add(waiter);
+    }
+
+    // Wakes granted guest threads after SyncRoot is released. One that has not parked yet
+    // sees its grant in the scheduler's park re-check.
+    private static void WakeRwlockWaiters(PthreadRwlockState rwlock, List<RwlockWaiter>? granted)
+    {
+        if (granted is null || GuestThreadExecution.Scheduler is not { } scheduler)
+        {
+            return;
+        }
+
+        foreach (var waiter in granted)
+        {
+            _ = scheduler.WakeBlockedWaiter(waiter.SchedulerThread, waiter, rwlock.WakeKey);
         }
     }
 
@@ -1900,9 +2041,10 @@ public static class KernelPthreadExtendedCompatExports
             return false;
         }
 
+        var isHandle = (rwlockAddress & 0xFFFF_FFFF_0000_0000UL) == SyntheticRwlockHandleBase;
         lock (_stateGate)
         {
-            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock))
+            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock) && isHandle)
             {
                 resolvedAddress = rwlockAddress;
                 return true;
@@ -1911,7 +2053,49 @@ public static class KernelPthreadExtendedCompatExports
 
         if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, rwlockAddress, out var pointedHandle))
         {
+            if (rwlock is not null)
+            {
+                resolvedAddress = rwlockAddress;
+                return true;
+            }
+
             return false;
+        }
+
+        if (rwlock is not null)
+        {
+            lock (_stateGate)
+            {
+                // The slot is the alias's generation tag (as for mutexes): it must still
+                // hold a handle. A slot pointing at another known rwlock was reassigned; a
+                // zero slot was re-initialised (PTHREAD_RWLOCK_INITIALIZER, reused memory)
+                // without a destroy, so the cached state is stale. Alias and slot are
+                // re-read under the gate: creators publish the alias and write the slot
+                // inside it, so the unlocked view above may be out of date.
+                _rwlockStates.TryGetValue(rwlockAddress, out rwlock);
+                if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, rwlockAddress, out pointedHandle))
+                {
+                    resolvedAddress = rwlockAddress;
+                    return rwlock is not null;
+                }
+
+                if (rwlock is not null)
+                {
+                    if (pointedHandle != 0 &&
+                        (!_rwlockStates.TryGetValue(pointedHandle, out var pointedState) || ReferenceEquals(pointedState, rwlock)))
+                    {
+                        resolvedAddress = rwlockAddress;
+                        return true;
+                    }
+
+                    if (pointedHandle == 0)
+                    {
+                        _rwlockStates.Remove(rwlockAddress);
+                    }
+
+                    rwlock = null;
+                }
+            }
         }
 
         if (pointedHandle != 0)
@@ -1940,11 +2124,18 @@ public static class KernelPthreadExtendedCompatExports
         var syntheticHandle = AllocateSyntheticHandle(SyntheticRwlockHandleBase, ref _nextSyntheticRwlockHandleId);
         lock (_stateGate)
         {
+            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock))
+            {
+                // Another thread created it first.
+                resolvedAddress = rwlockAddress;
+                return true;
+            }
+
             _rwlockStates[rwlockAddress] = createdRwlock;
             _rwlockStates[syntheticHandle] = createdRwlock;
+            _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         }
 
-        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         resolvedAddress = syntheticHandle;
         rwlock = createdRwlock;
         return true;
@@ -1954,6 +2145,16 @@ public static class KernelPthreadExtendedCompatExports
     {
         var id = unchecked((ulong)Interlocked.Increment(ref nextId));
         return baseAddress + (id << 4);
+    }
+
+    /// <summary>The calling thread's guest priority (wait-queue ordering for PRIO objects).</summary>
+    internal static int GetCurrentThreadPriority()
+    {
+        var thread = KernelPthreadState.GetCurrentThreadHandle();
+        lock (_stateGate)
+        {
+            return _threadStates.TryGetValue(thread, out var state) ? state.Priority : DefaultThreadPriority;
+        }
     }
 
     private static ThreadState GetOrCreateThreadStateLocked(ulong thread)
