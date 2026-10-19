@@ -36,7 +36,10 @@ public sealed partial class GpuCommandInterpreter
             var sample = IndexedDrawTrace.Capture(indexCount, IndexTypeAndSize, indexAddress, _host.Memory.TryRead);
             IndexedDrawTrace.Write(sample, "command", SubmitId, packetAddress);
         }
-        _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource));
+        _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource)
+        {
+            MustExecute = DrawsMustExecute,
+        });
     }
 
     internal void DrawIndexedOffset(ulong packetAddress, uint indexOffset, uint indexCount)
@@ -52,7 +55,10 @@ public sealed partial class GpuCommandInterpreter
             instanceCount = InstanceCount;
         }
 
-        _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource));
+        _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource)
+        {
+            MustExecute = DrawsMustExecute,
+        });
     }
 
     // VGT_DRAW_INITIATOR.SOURCE_SELECT: an indexed indirect draw fetches its indices by DMA (0),
@@ -126,7 +132,10 @@ public sealed partial class GpuCommandInterpreter
                 // the counts; the instance count is read only if a later draw needs it.
                 _deferredInstanceCountAddress = argumentsAddress + 4;
                 _host.DrawAuto(SubmitId, new DrawAutoArguments(
-                    packetAddress, opcode, uint.MaxValue, 1, 0, 0, DrawOffsetSource.IndirectArguments, argumentsAddress));
+                    packetAddress, opcode, uint.MaxValue, 1, 0, 0, DrawOffsetSource.IndirectArguments, argumentsAddress)
+                {
+                    MustExecute = DrawsMustExecute,
+                });
                 return;
             }
 
@@ -148,7 +157,10 @@ public sealed partial class GpuCommandInterpreter
             _deferredInstanceCountAddress = argumentsAddress + 4;
             _host.DrawIndexed(SubmitId, new DrawIndexedArguments(
                 packetAddress, opcode, gpuIndexCount, IndexBaseAddress, IndexTypeAndSize, 1, 0, 0,
-                DrawOffsetSource.IndirectArguments, argumentsAddress, UnboundedIndexBuffer: IndexBufferSize == 0));
+                DrawOffsetSource.IndirectArguments, argumentsAddress, UnboundedIndexBuffer: IndexBufferSize == 0)
+            {
+                MustExecute = DrawsMustExecute,
+            });
             return;
         }
 

@@ -917,6 +917,11 @@ internal sealed partial class MetalRenderHost
                     slot,
                     SelSetLoadAction,
                     clears ? Mtl.LoadActionClear : elided ? Mtl.LoadActionDontCare : Mtl.LoadActionLoad);
+                if (clears || elided)
+                {
+                    NoteColorTargetRebuilt(index);
+                }
+
                 MetalV2Native.SendVoidValue(slot, SelSetStoreAction, PendingStoreAction);
                 if (clears)
                 {
@@ -929,6 +934,12 @@ internal sealed partial class MetalRenderHost
 
             ref readonly var depthStencil = ref state.DepthStencilAttachment;
             var attached = state.ColorAttachmentCount != 0;
+            if (depthStencil.View.Handle != 0 && (depthStencil.HasDepth || depthStencil.HasStencil) &&
+                (!depthStencil.HasDepth || depthStencil.DepthClear) && (!depthStencil.HasStencil || depthStencil.StencilClear))
+            {
+                NoteDepthTargetRebuilt();
+            }
+
             if (depthStencil.HasDepth && depthStencil.View.Handle != 0)
             {
                 attached = true;

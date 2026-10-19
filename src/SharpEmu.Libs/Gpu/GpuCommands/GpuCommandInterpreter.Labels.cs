@@ -434,6 +434,14 @@ public sealed partial class GpuCommandInterpreter
     internal void RaiseEvent(uint eventType, uint eventIndex, ulong eventAddress)
     {
         var validCacheEventIndex = eventIndex is 0 or 7;
+        if (eventType == 0x39)
+        {
+            // A query's begin dump writes the first qword of a 16-byte depth-block pair and its
+            // end dump the second: open from the one to the other. A pair seen out of step
+            // only keeps draws running that could have been left out.
+            _occlusionQueryOpen = (eventAddress & 0x8) == 0;
+        }
+
         switch (eventType)
         {
             case 0x07:

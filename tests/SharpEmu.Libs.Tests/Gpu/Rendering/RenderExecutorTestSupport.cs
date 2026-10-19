@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Images;
@@ -219,6 +220,21 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void BindRenderTarget(ResourceSlotIdentifier image) => Calls.Add($"bind_target {image.Index}");
 
     public void ResetBindings() => Calls.Add("reset_bindings");
+
+    public bool SupportsPipelineSuspend { get; set; }
+
+    public void NotePipelineNotReady() => Calls.Add("pipeline_not_ready");
+
+    public bool LeavesOutDrawsWhileCompiling { get; set; }
+
+    // The host's say on the targets: true stands in for targets rebuilt every frame.
+    public bool TargetsRebuiltEveryFrame { get; set; } = true;
+
+    public bool MayLeaveOutWhileCompiling(in RenderingState rendering)
+    {
+        Calls.Add("may_leave_out");
+        return TargetsRebuiltEveryFrame;
+    }
 
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
     {
@@ -611,6 +627,57 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     }
 
     public List<bool> DisableBlendingRequests { get; } = new();
+
+    // How many left-out-able graphics requests report "still compiling" before one is handed over.
+    public int PendingGraphicsCompiles { get; set; }
+
+    public bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle)
+    {
+        Calls.Add("try_create_graphics_pipeline");
+        handle = default;
+        if (PendingGraphicsCompiles > 0)
+        {
+            PendingGraphicsCompiles--;
+            return false;
+        }
+
+        handle = CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);
+        return true;
+    }
+
+    // The retries the executor handed over, and whether the provider takes their kept program
+    // back (standing in for ShaderPipelineCache, whose own tests check when it may).
+    public List<ComputeProgramRetry> ComputeRetries { get; } = new();
+
+    public bool ReuseRetries { get; set; }
+
+    public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, ComputeProgramRetry retry)
+    {
+        ComputeRetries.Add(retry);
+        if (ReuseRetries && retry.Program is { } kept)
+        {
+            retry.Reused = true;
+            return kept;
+        }
+
+        retry.Reset();
+        var prepared = GetComputeProgram(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+        retry.Program = prepared;
+        return prepared;
+    }
 
     public (uint X, uint Y, uint Z) LastDispatchDimensions { get; private set; }
 

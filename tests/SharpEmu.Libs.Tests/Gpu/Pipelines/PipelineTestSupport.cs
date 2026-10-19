@@ -106,6 +106,31 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     // standing in for the host shader compiler running on a worker thread.
     public Dictionary<ulong, int> PendingComputeCompiles { get; } = new();
 
+    // How many graphics requests report "still compiling" before one is handed over.
+    public int PendingGraphicsCompiles { get; set; }
+
+    public int GraphicsCompileRequests { get; private set; }
+
+    public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        GraphicsCompileRequests++;
+        handle = default;
+        if (PendingGraphicsCompiles > 0)
+        {
+            PendingGraphicsCompiles--;
+            return false;
+        }
+
+        handle = CreateGraphicsPipeline(description);
+        return true;
+    }
+
+    // Answers resident reads from the fake memory, as a host whose GPU owns nothing does.
+    public bool ResidentReadsEnabled { get; set; }
+
+    public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) =>
+        ResidentReadsEnabled && memory.TryRead(address, destination);
+
     public bool TryCreateComputePipeline(ComputePipelineDescription description, out PipelineHandle handle)
     {
         handle = default;

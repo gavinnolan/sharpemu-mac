@@ -473,10 +473,10 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    // The module with its library and function, waiting for a compile still on the pool.
-    private MetalShaderModule RequireModule(in ShaderProgram program)
+    // The module of a program, as it is: its reflection is there from the start, its library
+    // and function may still be compiling or released.
+    private MetalShaderModule LookupModule(in ShaderProgram program)
     {
-        MetalShaderModule module;
         lock (_modules)
         {
             var index = (int)program.Module - 1;
@@ -485,12 +485,25 @@ internal sealed partial class MetalRenderHost
                 throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
             }
 
-            module = _modules[index];
+            return _modules[index];
         }
+    }
 
+    // The module with its library and function, waiting for a compile still on the pool. A
+    // pipeline compiler thread asks too (onWorker false); its waits are not the worker's.
+    private MetalShaderModule RequireModule(in ShaderProgram program, bool onWorker = true)
+    {
+        var module = LookupModule(program);
         if (module.Compiling is { } compiling)
         {
-            if (!compiling.IsCompleted)
+            if (!compiling.IsCompleted && !onWorker)
+            {
+                if (module.Job is not { } queued || !MetalLibraryCompilePool.Shared.TryRunHere(queued))
+                {
+                    ((IAsyncResult)compiling).AsyncWaitHandle.WaitOne();
+                }
+            }
+            else if (!compiling.IsCompleted)
             {
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 // A module still queued behind the pool's other compiles runs here and now:
@@ -543,16 +556,105 @@ internal sealed partial class MetalRenderHost
 
     public PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description)
     {
-        var parameters = description.StaticParameters;
-        var vertexModule = RequireModule(description.VertexProgram);
+        Interlocked.Increment(ref _pipelineWaitsBlocking);
+        RequireDrawableDescription(description);
+        // A draw that could be left out may have started this compile; it is waited for
+        // rather than built a second time.
+        if (_compiler is { } compiler && compiler.TryWait(GraphicsCompileKey(description), out var started))
+        {
+            return RegisterGraphicsPipeline(description, started!);
+        }
+
+        return RegisterGraphicsPipeline(description, BuildGraphicsPipelineStates(description, onWorker: true));
+    }
+
+    /// <summary>
+    /// The pipeline of a draw the executor may leave out, or false while the compiler threads
+    /// build it: the library compiles of its programs and the driver's back end both run there,
+    /// several pipelines at once, and the draw is left out until a later one finds it done.
+    /// </summary>
+    public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        if (!AsynchronousGraphics)
+        {
+            handle = CreateGraphicsPipeline(description);
+            return true;
+        }
+
+        handle = default;
+        RequireDrawableDescription(description);
+        if (!Compiler.TryTake(
+                GraphicsCompileKey(description),
+                () => BuildGraphicsPipelineStates(description, onWorker: false),
+                out var compiled))
+        {
+            Interlocked.Increment(ref _drawsSkippedCompiling);
+            return false;
+        }
+
+        handle = RegisterGraphicsPipeline(description, compiled!);
+        return true;
+    }
+
+    // What identifies a graphics compile: the parts of the description its states are built from.
+    private static GraphicsPipelineKey GraphicsCompileKey(GraphicsPipelineDescription description) => new()
+    {
+        Rendering = description.Rendering,
+        VertexProgramId = description.VertexProgram.Id,
+        PixelProgramId = description.PixelInfo is not null ? description.PixelProgram.Id : 0,
+        VertexInput = description.VertexInput,
+        StaticParameters = description.StaticParameters,
+    };
+
+    private static Gen5MslMeshInfo? MeshOf(MetalShaderModule vertexModule) =>
+        vertexModule.Shader.Stage == Gen5MslStage.Mesh ? vertexModule.Shader.MeshInfo : null;
+
+    // A rectangle list draws through the program's post-tessellation form (see
+    // Gen5MslRectangleList); the index type of its control points is part of the
+    // pipeline state, so one state is built for each kind of draw.
+    private static bool IsRectangleList(GraphicsPipelineDescription description, Gen5MslMeshInfo? mesh) =>
+        mesh is null && description.StaticParameters.Topology == GpuPrimitiveTopology.PatchList;
+
+    // Refused on the worker, before any compile starts.
+    private void RequireDrawableDescription(GraphicsPipelineDescription description)
+    {
+        var rectangleList = IsRectangleList(description, MeshOf(LookupModule(description.VertexProgram)));
+        if (rectangleList && description.VertexInput.BindingCount > Gen5MslRectangleList.IndexBufferIndex - VertexBufferSlotBase)
+        {
+            throw Fatal(
+                $"A rectangle list binds vertex buffers into the slots its draw block and index buffer use: " +
+                $"buffers={description.VertexInput.BindingCount} vertex=0x{description.VertexStage.Hash:X16}.");
+        }
+    }
+
+    // The render pipeline states of a description; on the worker, or on a compiler thread,
+    // which then waits for (or runs) the library compiles of its modules itself. Touches only
+    // the modules, the device, the archive and counters, all safe from any thread.
+    private MetalPipelineCompiler.Result BuildGraphicsPipelineStates(GraphicsPipelineDescription description, bool onWorker)
+    {
+        var vertexModule = RequireModule(description.VertexProgram, onWorker);
         var pixelModule = description.PixelStage is not null && description.PixelProgram.IsValid
-            ? RequireModule(description.PixelProgram)
+            ? RequireModule(description.PixelProgram, onWorker)
             : null;
-        var mesh = vertexModule.Shader.Stage == Gen5MslStage.Mesh ? vertexModule.Shader.MeshInfo : null;
-        // A rectangle list draws through the program's post-tessellation form (see
-        // Gen5MslRectangleList); the index type of its control points is part of the
-        // pipeline state, so there is one state for each kind of draw, built on first use.
-        var rectangleList = mesh is null && parameters.Topology == GpuPrimitiveTopology.PatchList;
+        var mesh = MeshOf(vertexModule);
+        var rectangleList = IsRectangleList(description, mesh);
+        var state = CreateRenderPipelineState(
+            description, vertexModule, pixelModule, mesh, rectangleList, Mtl.ControlPointIndexTypeNone, out var vertexLayout);
+        nint[]? rectangleStates = rectangleList ? [state, 0, 0] : null;
+        return new MetalPipelineCompiler.Result(state, rectangleStates, vertexLayout, ReleaseState);
+    }
+
+    // The pipeline entry for finished states. On the worker, so the entry table and the
+    // identifier counter stay single threaded; reads only the modules' reflection.
+    private PipelineHandle RegisterGraphicsPipeline(GraphicsPipelineDescription description, MetalPipelineCompiler.Result compiled)
+    {
+        var parameters = description.StaticParameters;
+        var vertexModule = LookupModule(description.VertexProgram);
+        var pixelModule = description.PixelStage is not null && description.PixelProgram.IsValid
+            ? LookupModule(description.PixelProgram)
+            : null;
+        var mesh = MeshOf(vertexModule);
+        var rectangleList = IsRectangleList(description, mesh);
         if (mesh is not null)
         {
             // One line per mesh pipeline: what the launch was sized from, for reading a
@@ -564,22 +666,11 @@ internal sealed partial class MetalRenderHost
                 $"max_v={mesh.MaxVertices} max_p={mesh.MaxPrimitives} threads={mesh.ThreadsPerThreadgroup}");
         }
 
-        if (rectangleList && description.VertexInput.BindingCount > Gen5MslRectangleList.IndexBufferIndex - VertexBufferSlotBase)
-        {
-            throw Fatal(
-                $"A rectangle list binds vertex buffers into the slots its draw block and index buffer use: " +
-                $"buffers={description.VertexInput.BindingCount} vertex=0x{description.VertexStage.Hash:X16}.");
-        }
-
-        var state = CreateRenderPipelineState(
-            description, vertexModule, pixelModule, mesh, rectangleList, Mtl.ControlPointIndexTypeNone, out var vertexLayout);
-        nint[]? rectangleStates = rectangleList ? [state, 0, 0] : null;
-
         Interlocked.Increment(ref _pipelineCreations);
         var entry = new MetalPipelineEntry
         {
             Id = ++_nextPipelineId,
-            State = state,
+            State = compiled.State,
             Graphics = true,
             PrimitiveType = MetalV2Formats.Topology(parameters.Topology),
             CullMode = parameters.CullFront && parameters.CullBack
@@ -593,14 +684,14 @@ internal sealed partial class MetalRenderHost
             HasDepth = depthFormatOf(description) != MtlFormat.Invalid,
             HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
             Mesh = mesh,
-            RectangleStates = rectangleStates,
+            RectangleStates = compiled.RectangleStates,
             RectangleVertexStrides = rectangleList ? RectangleVertexStrides(description.VertexInput) : null,
             WritesViewportIndex = vertexModule.Shader.WritesViewportIndex,
             ConstantPositions = mesh is null ? vertexModule.Shader.ConstantPositions : null,
             OverwriteMask = OverwriteMaskOf(description, pixelModule),
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
             VertexHash = vertexModule.Hash,
-            VertexLayout = vertexLayout,
+            VertexLayout = compiled.VertexLayout,
             GraphicsDescription = description,
             LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
         };
@@ -1102,15 +1193,14 @@ internal sealed partial class MetalRenderHost
         return descriptor;
     }
 
-    // Pipeline states can be built off the command-stream thread, which stops a long
-    // compile blocking every queue. Off by default: measured on Demon's Souls it
-    // removed the compile from the worker (pipeline_ms fell to four milliseconds a
-    // window) without making the title faster, because pipeline creation was never
-    // its cost — and a dispatch that suspends re-runs the program preparation and
-    // resource materialisation in front of the pipeline request, which are. Turning
-    // this on is worth it once a retry no longer repeats that work.
+    // Compute pipeline states are built off the command-stream thread, which stops a long
+    // compile blocking every queue: the dispatch suspends and runs again once it is done.
+    // Measured on Demon's Souls it removed the compile from the worker (pipeline_ms fell to
+    // four milliseconds a window), and a retry no longer repeats the program preparation
+    // and resource materialisation in front of the pipeline request (ComputeProgramRetry).
+    // SHARPEMU_METAL_V2_ASYNC_PIPELINES=0 builds them on the worker again.
     private static readonly bool AsynchronousPipelines =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ASYNC_PIPELINES") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ASYNC_PIPELINES") != "0";
 
     private static bool SynchronousPipelines => !AsynchronousPipelines;
 
@@ -1158,16 +1248,22 @@ internal sealed partial class MetalRenderHost
         }
 
         handle = default;
-        var module = RequireModule(description.Program);
-        var function = module.Function;
+        var program = description.Program;
         var hash = description.Stage.Hash;
-        var archiveKey = module.ArchiveKey;
-        if (!Compiler.TryTake(description.Program.Id, () => BuildComputePipelineState(function, hash, archiveKey), out var state))
+        // The library compile is waited for on the compiler thread too, not on the worker.
+        if (!Compiler.TryTake(
+                program.Id,
+                () =>
+                {
+                    var module = RequireModule(program, onWorker: false);
+                    return new MetalPipelineCompiler.Result(BuildComputePipelineState(module.Function, hash, module.ArchiveKey));
+                },
+                out var compiled))
         {
             return false;
         }
 
-        handle = RegisterComputePipeline(description, module, state);
+        handle = RegisterComputePipeline(description, LookupModule(program), compiled!.State);
         return true;
     }
 
@@ -1251,6 +1347,7 @@ internal sealed partial class MetalRenderHost
 
     public PipelineHandle CreateComputePipeline(ComputePipelineDescription description)
     {
+        Interlocked.Increment(ref _pipelineWaitsBlocking);
         var module = RequireModule(description.Program);
         nint error = 0;
         // The driver turns the function into a GPU binary here, on the worker thread,

@@ -86,6 +86,20 @@ public sealed partial class GpuCommandInterpreter
     // What the last predication found, for a zpass packet that continues the set.
     private bool _predicationVisible;
 
+    // Predication is set (not cleared): the draws that follow may be the ones it decides on,
+    // so a backend never leaves one out while its pipeline compiles (DrawsMustExecute).
+    private bool _predicationSet;
+
+    // Between an occlusion query's begin and end dumps (ZPASS_DONE at a block's even, then
+    // odd, qword): the draws inside are what the query counts.
+    private bool _occlusionQueryOpen;
+
+    /// <summary>
+    /// Draws a backend has to run even while their pipeline is still compiling: predicated
+    /// ones and those inside an occlusion query, whose outcome the guest reads back.
+    /// </summary>
+    internal bool DrawsMustExecute => _predicationSet || _occlusionQueryOpen;
+
     /// <summary>
     /// Sets the predicate the packets with header bit 0 obey.
     /// </summary>
@@ -104,6 +118,7 @@ public sealed partial class GpuCommandInterpreter
     /// </remarks>
     internal void SetPredication(uint condition, uint operation, uint waitOperation, ulong address, bool continueSet = false)
     {
+        _predicationSet = operation != 0;
         if (operation == 0)
         {
             // Clearing predication reads no memory, so no GPU result can be outstanding.

@@ -191,6 +191,15 @@ public interface IRenderHost
     {
     }
 
+    // True when a draw whose pipeline is still compiling may be left out of the frame instead
+    // of waiting for the compile (RenderExecutor.MayLeaveOutWhileCompiling decides which).
+    bool LeavesOutDrawsWhileCompiling => false;
+
+    // The host's part of that decision, for the attachments the draw has just acquired: true
+    // only for targets it knows are rebuilt from nothing every frame, so that the frame being
+    // recorded is the only one that misses the draw.
+    bool MayLeaveOutWhileCompiling(in RenderingState rendering) => false;
+
     void BindResources(IPreparedBindings prepared);
 
     void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages);
