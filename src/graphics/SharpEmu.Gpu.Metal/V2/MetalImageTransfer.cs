@@ -211,6 +211,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         // quietly comes back wrong.
         if (!SameTransferGrid(sourceDescription, targetDescription) ||
             !(IsDepth32ToColorAlias(sourceDescription, source, targetDescription, target) ||
+              (ColorToDepthDeviceCopyEnabled &&
+               IsDepth32ToColorAlias(targetDescription, target, sourceDescription, source)) ||
               (Depth16AliasOnDevice &&
                (IsDepth16ColorAlias(sourceDescription, source, targetDescription, target) ||
                 IsDepth16ColorAlias(targetDescription, target, sourceDescription, source)))) ||
@@ -220,7 +222,10 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             sourceDescription.Pitch != targetDescription.Pitch ||
             sourceDescription.Data.Size != targetDescription.Data.Size ||
             sourceDescription.Resources.Levels != 1 || targetDescription.Resources.Levels != 1 ||
-            targetDescription.HasStencil)
+            // A colour side with a stencil plane is no single-channel alias; a D32S8 depth
+            // side takes only its depth plane (DepthFromDepthStencil below).
+            (targetDescription.HasStencil && !targetDescription.IsDepth) ||
+            (sourceDescription.HasStencil && !sourceDescription.IsDepth))
         {
             return false;
         }
@@ -299,6 +304,13 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         var color = PlanFor(colorDescription);
         return depth.TransferBytes == depthDescription.BytesPerBlock && !color.Swap;
     }
+
+    // A single 32-bit channel alias handing back to its 32-bit depth plane: UE5's Nanite depth
+    // export writes the scene depth through an R32 view of it, and the round trip through
+    // guest memory left Black Myth: Wukong's base pass without its prepass depth (black
+    // characters). SHARPEMU_METAL_V2_ALIAS_COLOR_TO_DEPTH=0 sends it through guest memory again.
+    internal static bool ColorToDepthDeviceCopyEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_COLOR_TO_DEPTH") != "0";
 
     // An 8-bit view of a depth image's stencil plane into that image's stencil, through a
     // staging buffer: a combined depth-stencil texture takes stencil only from a buffer, with
