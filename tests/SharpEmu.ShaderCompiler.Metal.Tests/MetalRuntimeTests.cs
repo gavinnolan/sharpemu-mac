@@ -399,6 +399,17 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         }
     }
 
+    // A queue-draining loop over the whole program is a persistent-threads kernel; a loop that
+    // does not poll, and a program with no loop, are not.
+    [Fact]
+    public void OnlyAQueueDrainingLoopIsMarkedPersistentThreads()
+    {
+        Assert.True(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.PersistentQueueLoop).PersistentThreads);
+        Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.PollingLoop).PersistentThreads);
+        Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.CoherentBufferCopy).PersistentThreads);
+        Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop).PersistentThreads);
+    }
+
     [Fact]
     public void Vop3CompareIntoNullWritesNothingAndIntoExecMasksTheWave()
     {

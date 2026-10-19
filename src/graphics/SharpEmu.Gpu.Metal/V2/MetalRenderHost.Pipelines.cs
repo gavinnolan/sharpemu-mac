@@ -22,6 +22,9 @@ internal sealed partial class MetalRenderHost
         public ulong Id;
         public nint State;
         public bool Graphics;
+
+        /// <summary>See <see cref="Gen5MslShader.PersistentThreads"/>.</summary>
+        public bool PersistentThreads;
         public nuint PrimitiveType;
         public nint CullMode;
         public nint Winding;
@@ -1449,6 +1452,7 @@ internal sealed partial class MetalRenderHost
             Id = ++_nextPipelineId,
             State = state,
             Graphics = false,
+            PersistentThreads = module.Shader.PersistentThreads,
             ThreadsPerThreadgroup = threads,
             Profile = ProfileLabelFor(module, null, null),
             VertexHash = module.Hash,

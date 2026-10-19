@@ -183,11 +183,14 @@ public static partial class Gen5MslTranslator
         // of them one wait takes: UE5's Nanite culling needs up to ~370k iterations on an
         // M5 Pro once structured, more on a smaller GPU, and cutting it off leaves its
         // never-reset queues corrupt for every later frame. Such programs get a budget
-        // well past that; a genuinely stuck one still ends, just later.
+        // well past that; a genuinely stuck one still ends, just later. Only a persistent-thread
+        // kernel waits that long by design: any other program that polls (GTA V runs one whose
+        // wait never ends here) keeps the plain cap, since each of its capped dispatches holds
+        // the queue 64 times as long and stalled GTA's prologue load.
         private const int PollingStepMultiplier = 64;
 
         private int MaxDispatcherSteps =>
-            _maxDispatcherSteps > 0 && PollsCoherentMemory
+            _maxDispatcherSteps > 0 && PollsCoherentMemory && IsPersistentThreadsKernel()
                 ? (int)Math.Min((long)_maxDispatcherSteps * PollingStepMultiplier, int.MaxValue)
                 : _maxDispatcherSteps;
 
@@ -530,6 +533,7 @@ public static partial class Gen5MslTranslator
                         : null,
                     CannotDiscard = _stage == Gen5MslStage.Pixel && _usesPixelValidMask && !_validMaskFromExec,
                     ColorOutputMask = _stage == Gen5MslStage.Pixel ? ColorOutputLocations(_pixelOutputBindings) : 0,
+                    PersistentThreads = IsPersistentThreadsKernel(),
                 };
                 return true;
             }
@@ -1360,6 +1364,15 @@ public static partial class Gen5MslTranslator
 
             return _ldsBarriersBefore;
         }
+
+        /// <summary>A compute kernel that drains a shared queue and never reads its workgroup
+        /// ID, so its groups are interchangeable.</summary>
+        private bool IsPersistentThreadsKernel() =>
+            _stage == Gen5MslStage.Compute &&
+            _request.ComputeSystemRegisters is not { WorkGroupXRegister: not null } &&
+            _request.ComputeSystemRegisters is not { WorkGroupYRegister: not null } &&
+            _request.ComputeSystemRegisters is not { WorkGroupZRegister: not null } &&
+            Ir.Gen5PersistentThreadsAnalysis.IsPersistent(_request.Program);
 
         private bool ProgramHasBarrier()
         {

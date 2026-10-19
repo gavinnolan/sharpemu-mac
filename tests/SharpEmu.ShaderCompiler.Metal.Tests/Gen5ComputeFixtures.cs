@@ -530,6 +530,68 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 2048);
 
+    // GLC buffer accesses: each lane reads its dword coherently and writes it back 128
+    // bytes on, also coherently. Nanite polls node data written by other groups this way.
+    public static readonly Gen5ComputeFixture CoherentBufferCopy = new(
+        "coherent-buffer-copy",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0x34000082,             // v_lshlrev_b32 v0, 2, v0
+            0xE0305000, 0x80020100, // buffer_load_dword v1, v0, s[8:11], 0 offen glc
+            0xBF8C3F70,             // s_waitcnt vmcnt(0)
+            0xE0705080, 0x80020100, // buffer_store_dword v1, v0, s[8:11], 0 offen offset:128 glc
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
+    // A loop in a polling program (it has a GLC load): 5+4+3+2+1 = 15 per lane, stored at
+    // offset 128.
+    public static readonly Gen5ComputeFixture PollingLoop = new(
+        "polling-loop",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0x34000082,             // v_lshlrev_b32 v0, 2, v0
+            0xE0305000, 0x80020200, // buffer_load_dword v2, v0, s[8:11], 0 offen glc
+            0xBF8C3F70,             // s_waitcnt vmcnt(0)
+            0xBE800385,             // s_mov_b32 s0, 5
+            0x7E020280,             // v_mov_b32 v1, 0
+            0x4A020200,             // loop: v_add_nc_u32 v1, s0, v1
+            0x81808100,             // s_sub_i32 s0, s0, 1
+            0xBF078000,             // s_cmp_lg_u32 s0, 0
+            0xBF85FFFC,             // s_cbranch_scc1 loop
+            0xE0701080, 0x80020100, // buffer_store_dword v1, v0, s[8:11], 0 offen offset:128
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
+    // The shape of a persistent-threads kernel: one loop over most of the program that polls
+    // coherent memory and writes device memory, and nothing after it but the end.
+    public static readonly Gen5ComputeFixture PersistentQueueLoop = new(
+        "persistent-queue-loop",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0x34000082,             // v_lshlrev_b32 v0, 2, v0
+            0xBE800385,             // s_mov_b32 s0, 5
+            0xE0305000, 0x80020200, // loop: buffer_load_dword v2, v0, s[8:11], 0 offen glc
+            0xBF8C3F70,             // s_waitcnt vmcnt(0)
+            0xBF800000,             // s_nop 0
+            0xBF800000,             // s_nop 0
+            0xBF800000,             // s_nop 0
+            0xBF800000,             // s_nop 0
+            0xBF800000,             // s_nop 0
+            0xBF800000,             // s_nop 0
+            0x4A040400,             // v_add_nc_u32 v2, s0, v2
+            0xE0701080, 0x80020200, // buffer_store_dword v2, v0, s[8:11], 0 offen offset:128
+            0x81808100,             // s_sub_i32 s0, s0, 1
+            0xBF078000,             // s_cmp_lg_u32 s0, 0
+            0xBF85FFF1,             // s_cbranch_scc1 loop
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
     // The wave32 form: the compare's mask is the single SGPR s4, so s5 keeps 0xa5a5a5a5.
     public static readonly Gen5ComputeFixture Wave32Vop3CompareSgpr = new(
         "wave32-vop3-compare-sgpr",

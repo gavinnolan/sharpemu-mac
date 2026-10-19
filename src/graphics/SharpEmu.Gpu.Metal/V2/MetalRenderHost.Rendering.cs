@@ -1811,11 +1811,38 @@ internal sealed partial class MetalRenderHost
         ProfileWork(entry, "draw-indexed-indirect", "indirect");
     }
 
+    // A persistent-threads kernel (Gen5MslShader.PersistentThreads) launches at most this many
+    // workgroups, few enough that all of them stay resident on any Apple GPU, so none waits on
+    // queue work held by a group that cannot start. SHARPEMU_METAL_V2_PERSISTENT_GROUPS=<n>
+    // changes it; 0 launches the guest's count.
+    private static readonly uint PersistentThreadGroups =
+        uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PERSISTENT_GROUPS"), out var persistentGroups)
+            ? persistentGroups
+            : 64;
+
+    private readonly HashSet<ulong> _clampAnnounced = [];
+
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ?? throw Fatal("A dispatch has no bound Metal compute pipeline state.");
+        if (entry.PersistentThreads && PersistentThreadGroups != 0 && groupsY <= 1 && groupsZ <= 1 &&
+            groupsX > PersistentThreadGroups)
+        {
+            // UE5's Nanite culling sizes its dispatch to the groups the console GPU keeps
+            // resident (1440) and shares the work through a queue every group drains, so
+            // fewer groups compute the same thing, while groups the host cannot keep resident
+            // only wait behind the spinning ones.
+            if (_clampAnnounced.Add(entry.VertexHash))
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][CLAMP] hash=0x{entry.VertexHash:X16} groups {groupsX} -> {PersistentThreadGroups} (persistent threads)");
+            }
+
+            groupsX = PersistentThreadGroups;
+        }
+
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         MetalNative.SendDispatch(

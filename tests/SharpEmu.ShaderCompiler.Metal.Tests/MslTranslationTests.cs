@@ -714,11 +714,16 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
-    public void LoopsThatPollCoherentMemoryGetALargerStepBudget()
+    public void OnlyAPersistentThreadKernelGetsTheLargerStepBudget()
     {
         // A persistent-thread kernel spins on a GLC load until other workgroups publish
         // work, so its trip count follows the whole dispatch. Cutting it off early leaves
         // the queue it shares with later dispatches corrupt.
+        var persistent = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.PersistentQueueLoop).Source;
+        Assert.Contains("if (++steps >= 6400000u)", persistent, StringComparison.Ordinal);
+
+        // Any other loop that polls keeps the plain cap: one whose wait never ends (GTA V has
+        // one) would otherwise hold the queue 64 times as long on every dispatch.
         var polling = new Gen5ComputeFixture(
             "polling-loop",
             [
@@ -733,7 +738,7 @@ public sealed class MslTranslationTests
             StoreScalarResourceBase: 8,
             StoreBackingBytes: 256);
         var pollingSource = Gen5ComputeFixtures.CompileRequestOrThrow(polling).Source;
-        Assert.Contains("if (++steps >= 6400000u)", pollingSource, StringComparison.Ordinal);
+        Assert.Contains("if (++steps >= 100000u)", pollingSource, StringComparison.Ordinal);
 
         var plain = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop).Source;
         Assert.Contains("if (++steps >= 100000u)", plain, StringComparison.Ordinal);
