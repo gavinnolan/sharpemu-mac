@@ -4,6 +4,7 @@
 using System.Reflection;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Threading;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Pthread;
@@ -307,6 +308,137 @@ public sealed class PthreadMutexReleaseAndWakeTests
         finally
         {
             GuestThreadExecution.Scheduler = previousScheduler;
+        }
+    }
+
+    [Fact]
+    public void WokenGuestWaiterThatLostToABargerIsHandedTheMutexByTheNextUnlock()
+    {
+        const ulong memoryBase = 0xB_5000_0000;
+        const ulong mutexAddress = memoryBase + 0x100;
+        const ulong ownerThread = 0xB31;
+        const ulong waiterThread = 0xB32;
+        var memory = new PthreadMutexSemanticsTests.AllocatingCpuMemory(memoryBase, 0x4000);
+        var ownerContext = new CpuContext(memory, Generation.Gen5);
+        ownerContext[CpuRegister.Rdi] = mutexAddress;
+        Assert.True(ownerContext.TryWriteUInt64(mutexAddress, 1));
+
+        var scheduler = DispatchProxy.Create<IGuestThreadScheduler, RecordingScheduler>();
+        var recorder = (RecordingScheduler)(object)scheduler;
+        var previousScheduler = GuestThreadExecution.Scheduler;
+        GuestThreadExecution.Scheduler = scheduler;
+        try
+        {
+            WithHandoffMode(fifo: false, () =>
+                RunAsGuest(ownerThread, () => Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(ownerContext))));
+            var (blockWaiter, wakeKey) = ParkGuestWaiter(memory, mutexAddress, waiterThread);
+            recorder.OnWake = key => key == wakeKey && blockWaiter.TryWake();
+            RunAsGuest(ownerThread, () => Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext)));
+
+            // A barger takes the free mutex before the woken waiter runs.
+            var bargerContext = new CpuContext(memory, Generation.Gen5);
+            bargerContext[CpuRegister.Rdi] = mutexAddress;
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexTrylock(bargerContext));
+
+            using var acquired = new ManualResetEventSlim(false);
+            using var release = new ManualResetEventSlim(false);
+            var resumeResult = -1;
+            var unlockResult = -1;
+            var resumed = new Thread(() => RunAsGuest(waiterThread, () =>
+            {
+                resumeResult = blockWaiter.Resume();
+                acquired.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+                var waiterContext = new CpuContext(memory, Generation.Gen5);
+                waiterContext[CpuRegister.Rdi] = mutexAddress;
+                unlockResult = KernelPthreadCompatExports.PthreadMutexUnlock(waiterContext);
+            })) { IsBackground = true };
+            resumed.Start();
+            Assert.False(acquired.Wait(TimeSpan.FromMilliseconds(100)), "the woken waiter took an owned mutex");
+
+            // The waiter lost once, so this unlock passes the mutex to it: it is never free,
+            // and the barger cannot take it straight back.
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(bargerContext));
+            Assert.NotEqual(0, KernelPthreadCompatExports.PthreadMutexTrylock(bargerContext));
+            Assert.True(acquired.Wait(TimeSpan.FromSeconds(10)), "the starving waiter was not handed the mutex");
+            Assert.Equal(0, resumeResult);
+            Assert.Single(recorder.WakeKeys);
+
+            release.Set();
+            Assert.True(resumed.Join(TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, unlockResult);
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexTrylock(bargerContext));
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(bargerContext));
+        }
+        finally
+        {
+            GuestThreadExecution.Scheduler = previousScheduler;
+        }
+    }
+
+    [Theory]
+    [InlineData(true, 0xB_6000_0000UL)]
+    [InlineData(false, 0xB_7000_0000UL)]
+    public void HostWaiterThatOutwaitedASafetySliceIsHandedTheMutexOnlyWhenHandoffIsOn(bool handoff, ulong memoryBase)
+    {
+        var mutexAddress = memoryBase + 0x100;
+        var memory = new PthreadMutexSemanticsTests.AllocatingCpuMemory(memoryBase, 0x4000);
+        var ownerContext = new CpuContext(memory, Generation.Gen5);
+        ownerContext[CpuRegister.Rdi] = mutexAddress;
+        Assert.True(ownerContext.TryWriteUInt64(mutexAddress, 1));
+
+        var previous = KernelPthreadCompatExports.MutexStarvationHandoff;
+        KernelPthreadCompatExports.MutexStarvationHandoff = handoff;
+        try
+        {
+            WithHandoffMode(fifo: false, () => Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(ownerContext)));
+
+            using var acquired = new ManualResetEventSlim(false);
+            using var release = new ManualResetEventSlim(false);
+            var lockResult = -1;
+            var unlockResult = -1;
+            var waiter = new Thread(() =>
+            {
+                var context = new CpuContext(memory, Generation.Gen5);
+                context[CpuRegister.Rdi] = mutexAddress;
+                lockResult = KernelPthreadCompatExports.PthreadMutexLock(context);
+                acquired.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+                unlockResult = KernelPthreadCompatExports.PthreadMutexUnlock(context);
+            }) { IsBackground = true };
+            waiter.Start();
+
+            // Hold the mutex across two host-wait safety slices: the waiter wakes from each and
+            // finds the mutex owned, which marks it starving.
+            Thread.Sleep(GuestWait.HostWaitSafetySliceMilliseconds * 2 + 100);
+            Assert.False(acquired.IsSet);
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
+            var relocked = KernelPthreadCompatExports.PthreadMutexTrylock(ownerContext) == 0;
+            if (handoff)
+            {
+                // Handed over inside the unlock: the owner's immediate relock must fail.
+                Assert.False(relocked, "the unlocking thread barged past a starving waiter");
+            }
+            else if (relocked)
+            {
+                // Plain release-and-wake: the running thread may win the race, and the waiter
+                // gets the mutex once it is released again.
+                Assert.False(acquired.Wait(TimeSpan.FromMilliseconds(50)), "the waiter took an owned mutex");
+                Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
+            }
+
+            Assert.True(acquired.Wait(TimeSpan.FromSeconds(10)), "the waiter never got the mutex");
+            Assert.Equal(0, lockResult);
+            Assert.NotEqual(0, KernelPthreadCompatExports.PthreadMutexTrylock(ownerContext));
+            release.Set();
+            Assert.True(waiter.Join(TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, unlockResult);
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexTrylock(ownerContext));
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
+        }
+        finally
+        {
+            KernelPthreadCompatExports.MutexStarvationHandoff = previous;
         }
     }
 

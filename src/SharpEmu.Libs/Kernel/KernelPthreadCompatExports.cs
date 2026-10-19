@@ -92,6 +92,8 @@ public static class KernelPthreadCompatExports
         public int Type { get; set; } = MutexTypeErrorCheck;
         public int Protocol { get; set; }
         public LinkedList<PthreadMutexWaiter> Waiters { get; } = new();
+        // SHARPEMU_PERF_MUTEX only: the thread that last took the mutex.
+        public string? ProfileOwner;
 
         public bool TryAcquireUncontended(ulong threadId, bool allowWaiterBarge)
         {
@@ -161,6 +163,10 @@ public static class KernelPthreadCompatExports
         // later unlock need not wake it. The waiter clears it in the same SyncRoot section in
         // which it sees the mutex still owned, so that owner's unlock wakes it again.
         public int Woken;
+        // Release-and-wake only: set by the waiter once it has lost the mutex to a barging
+        // locker after being woken. The next unlock then hands the mutex straight to it
+        // (MutexStarvationHandoff) instead of waking it to re-contend.
+        public int Starving;
         // The scheduler thread parked on this waiter and the block waiter it parked with, so an
         // unlock readies exactly that thread (IGuestThreadScheduler.WakeBlockedWaiter) instead
         // of scanning every guest thread for the wake key. A cond waiter's mutex re-acquisition
@@ -170,6 +176,9 @@ public static class KernelPthreadCompatExports
         // DSTRACE only: Stopwatch timestamp at enqueue (0 = not a traced lock waiter).
         public long DsEnqueueTs;
         public ulong DsMutexAddress;
+        // SHARPEMU_PERF_MUTEX only: queue timestamp and the owner when this waiter queued.
+        public long ProfileStart;
+        public string? ProfileOwner;
     }
 
     private sealed class SyncBlockWaiter(Func<int> resume, Func<bool> tryWake) : IGuestThreadBlockWaiter
@@ -1116,6 +1125,7 @@ public static class KernelPthreadCompatExports
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
         if (state.TryAcquireUncontended(currentThreadId, allowWaiterBarge: tryOnly || !state.FifoHandoff))
         {
+            if (MutexContentionProfile.Enabled) state.ProfileOwner = MutexContentionProfile.CurrentThreadName();
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -1178,6 +1188,11 @@ public static class KernelPthreadCompatExports
             }
 
             waiter = EnqueueMutexWaiterLocked(state, currentThreadId, canCooperativelyBlock);
+            if (MutexContentionProfile.Enabled)
+            {
+                waiter.ProfileStart = Stopwatch.GetTimestamp();
+                waiter.ProfileOwner = state.ProfileOwner;
+            }
             acquiredWhileQueueing = TryGrantMutexWaiterLocked(state, waiter);
         }
 
@@ -1203,6 +1218,7 @@ public static class KernelPthreadCompatExports
 
         if (dsSpun)
         {
+            if (MutexContentionProfile.Enabled) RecordMutexContention(mutexAddress, state, waiter!);
             waiter!.HostSignal?.Dispose();
             TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1226,6 +1242,7 @@ public static class KernelPthreadCompatExports
         }
 
         var hostResult = WaitForHostMutexLock(ctx, state, waiter!, deadline: deadline);
+        if (MutexContentionProfile.Enabled && hostResult == (int)OrbisGen2Result.ORBIS_GEN2_OK) RecordMutexContention(mutexAddress, state, waiter!);
         if (dsSync)
         {
             DsTrace.Emit(
@@ -1301,7 +1318,11 @@ public static class KernelPthreadCompatExports
             }
 
             state.RecursionCount--;
-            if (state.RecursionCount == 0)
+            if (state.RecursionCount == 0 && TryHandOffToStarvingHeadLocked(state))
+            {
+                // Ownership moved to the starving head; it is running or host-signalled.
+            }
+            else if (state.RecursionCount == 0)
             {
                 state.OwnerThreadId = 0;
                 ProfileMutexHandoff(state, "Released", mutexAddress);
@@ -2635,6 +2656,47 @@ public static class KernelPthreadCompatExports
         }
     }
 
+    // SHARPEMU_MUTEX_STARVATION_HANDOFF=0 restores plain release-and-wake for starving waiters.
+    internal static bool MutexStarvationHandoff = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_MUTEX_STARVATION_HANDOFF"), "0", StringComparison.Ordinal);
+
+    // Release-and-wake lets a running locker barge past a woken waiter, which keeps a free
+    // mutex with a queued waiter from wedging (see the FIFO note in the unlock). A thread that
+    // relocks in a tight loop can then win every race against a waiter that needs a host wake-up
+    // to run: Silent Hill's Wwise audio thread polls its global lock hundreds of thousands of
+    // times a second, and the game thread waited up to 2 s for that lock, 21 ms on average.
+    // Once a waiter has lost such a race the unlock passes ownership to it directly, as the FIFO
+    // handoff does, but without the owner ever reading 0, so no barging CAS can take it on the
+    // way. Caller holds SyncRoot, owns the mutex and has just dropped RecursionCount to 0.
+    // A waiter only starves while it runs: a host waiter is signalled here, and a cooperative
+    // one is re-contending after its resume (ReacquireWokenMutex), never parked, so it sees
+    // Granted itself and needs no scheduler wake.
+    private static bool TryHandOffToStarvingHeadLocked(PthreadMutexState state)
+    {
+        if (!MutexStarvationHandoff ||
+            state.FifoHandoff ||
+            state.Waiters.First?.Value is not { } head ||
+            Volatile.Read(ref head.Starving) == 0 ||
+            Volatile.Read(ref head.Granted) != 0)
+        {
+            return false;
+        }
+
+        state.Waiters.Remove(head.Node!);
+        state.WaiterRemovedLocked();
+        head.Node = null;
+        state.OwnerThreadId = head.ThreadId;
+        state.RecursionCount = 1;
+        Volatile.Write(ref head.Granted, 1);
+        if (!head.Cooperative)
+        {
+            head.HostSignal!.Set();
+        }
+
+        ProfileMutexHandoff(state, "Granted", waiter: head);
+        return true;
+    }
+
     // Release-and-wake, caller holds SyncRoot right after releasing the mutex. Picks the queue
     // head to wake, or null when there is nothing to do: the mutex was already re-taken (that
     // owner's unlock wakes the head), the queue is empty, or the head is already woken and will
@@ -2681,6 +2743,12 @@ public static class KernelPthreadCompatExports
         {
             DsTrace.Emit(DsEv.MXH, dsMutexAddress, dsFrom, head.ThreadId, parked ? 1UL : 0UL, (ulong)state.QueuedWaiterCount);
         }
+    }
+
+    private static void RecordMutexContention(ulong mutexAddress, PthreadMutexState state, PthreadMutexWaiter waiter)
+    {
+        MutexContentionProfile.Record(mutexAddress, waiter.ProfileOwner, waiter.ProfileStart);
+        state.ProfileOwner = MutexContentionProfile.CurrentThreadName();
     }
 
     private static readonly long MutexWaiterSpinTicks = Stopwatch.Frequency * 40 / 1_000_000;
@@ -2843,6 +2911,12 @@ public static class KernelPthreadCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
 
+                    if (woke)
+                    {
+                        // Woken (or out of a safety slice) and the mutex is owned again.
+                        Volatile.Write(ref waiter.Starving, 1);
+                    }
+
                     // Still owned: from here on the owner's unlock must signal this waiter.
                     Volatile.Write(ref waiter.Woken, 0);
                     hostSignal.Reset();
@@ -2963,6 +3037,7 @@ public static class KernelPthreadCompatExports
 
         if (Volatile.Read(ref waiter.Granted) == 1)
         {
+            if (MutexContentionProfile.Enabled) RecordMutexContention(mutexAddress, state, waiter);
             TracePthreadMutex(ctx, "lock-resume", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -2989,6 +3064,9 @@ public static class KernelPthreadCompatExports
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
+
+            // Woken, and a barging locker took the mutex first.
+            Volatile.Write(ref waiter.Starving, 1);
         }
 
         if (SpinForMutexGrant(state, waiter))
