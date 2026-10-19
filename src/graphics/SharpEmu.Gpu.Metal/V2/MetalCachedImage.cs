@@ -717,6 +717,7 @@ internal sealed class MetalCachedImage : IDisposable
     /// </param>
     public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId, bool sameFormatSwizzle = false)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ImageViewLookup);
         resourceId = 0;
         if (Texture == 0)
         {

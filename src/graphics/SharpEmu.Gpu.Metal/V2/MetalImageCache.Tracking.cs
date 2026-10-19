@@ -1223,6 +1223,7 @@ internal sealed partial class MetalImageCache
     private void MaterializeDccClear(
         ResourceSlotIdentifier imageIdentifier, in ImageRequest request, uint metadataBaseLayer, long imageWriteSequence)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.DccClearScan);
         var description = request.Description;
         var range = description.Metadata.Range;
         var layers = description.TransferLayers;

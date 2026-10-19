@@ -124,6 +124,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public bool HasPendingGpuWrite(ulong address, ulong size)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.PendingGpuWriteQuery);
         if (size == 0 || (!_gpuWrites.MayCover(address, size) && !_imageCache.MayOwn(address, size)))
         {
             return false;

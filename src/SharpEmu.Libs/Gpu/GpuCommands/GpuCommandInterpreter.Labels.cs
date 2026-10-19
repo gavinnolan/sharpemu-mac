@@ -567,6 +567,7 @@ public sealed partial class GpuCommandInterpreter
     // areas in the Outpost Passage, which the synthetic pairs below never did.
     private void WriteSyntheticOcclusionDump(uint eventIndex, ulong eventAddress)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.OcclusionDump);
         if (eventIndex != 1 || eventAddress == 0 || (eventAddress & 0x7u) != 0)
         {
             throw _host.Fatal($"The occlusion-counter dump is invalid: index=0x{eventIndex:X8} address=0x{eventAddress:X16}.");

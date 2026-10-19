@@ -91,6 +91,7 @@ public sealed class ShaderHeaderRegistry
 
     public RegisteredShader Require(ulong codeAddress, string label)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ShaderHeaderLookup);
         var headerAddress = _headerOf(codeAddress);
         if (headerAddress == 0)
         {

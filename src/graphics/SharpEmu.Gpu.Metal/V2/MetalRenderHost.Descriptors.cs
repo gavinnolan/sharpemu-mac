@@ -560,6 +560,7 @@ internal sealed partial class MetalRenderHost
 
     public void BindResources(IPreparedBindings prepared)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ResourceBinding);
         var stage = (MetalStageBindings)prepared;
         var info = stage.Program.Resources!.Info;
         var snapshot = stage.StageResources.Resources;
@@ -934,6 +935,7 @@ internal sealed partial class MetalRenderHost
     // The stage's Tier 2 argument buffer, mirroring the binding layout in descriptor order.
     private void WriteArgumentBuffer(MetalStageBindings stage, int stageIndex)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var layout = stage.Program.Bindings!;
         var plan = ArgumentPlanOf(layout);
         var argumentLayout = plan.Layout;

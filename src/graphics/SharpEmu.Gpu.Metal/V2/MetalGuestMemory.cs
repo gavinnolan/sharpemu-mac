@@ -1016,6 +1016,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
     private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn = true)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GuestWindowResolve);
         resolved = default;
         if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
         {

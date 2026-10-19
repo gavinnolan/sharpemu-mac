@@ -736,6 +736,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandProcessorWrite);
         if (!GpuTimedLabels)
         {
             return false;

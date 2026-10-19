@@ -1115,6 +1115,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// </summary>
     public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GpuWriteFlush);
         if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
         {
             return;
@@ -1149,6 +1150,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // A GPU write into DCC metadata is the guest asking for, or replacing, a clear.
         if (_materializedDccSlices.Count != 0 || _deferredDccSlices.Count != 0 || _recordedDccFills.Count != 0)
         {
+            using var rearmPhase = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.DccRearm);
             using var rearmHeld = _lock.Hold();
             ReArmMaterializedDccLocked(address, size);
             NoteRecordedDccStoreLocked(address, size);

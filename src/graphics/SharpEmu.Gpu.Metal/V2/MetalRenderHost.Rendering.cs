@@ -805,6 +805,7 @@ internal sealed partial class MetalRenderHost
 
     public void BeginRendering(in RenderingState state)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.RenderPassBegin);
         // Before anything else, because this runs ahead of every draw and is therefore
         // the last moment at which a waiting clear is still invisible. Whatever this
         // pass cannot perform itself is encoded below, where no encoder is open.
@@ -1289,6 +1290,7 @@ internal sealed partial class MetalRenderHost
     // Everything the executor recorded before the pass opened lands on the encoder here.
     private void ApplyGraphicsState()
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GraphicsStateApply);
         if (_renderEncoder == 0)
         {
             throw Fatal("A draw has no open Metal render encoder.");

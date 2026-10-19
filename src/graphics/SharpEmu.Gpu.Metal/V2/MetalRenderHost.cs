@@ -2016,6 +2016,7 @@ internal sealed partial class MetalRenderHost :
     // because the executor cannot bind it.
     public ulong ClampMappedSize(ulong address, ulong size)
     {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.MappedSizeClamp);
         if (address == 0 || size == 0 || size > ulong.MaxValue - address || !_memory.CanRead(address, 1))
         {
             throw Fatal($"The buffer range starts in unmapped memory: address=0x{address:X16} size=0x{size:X16}.");
