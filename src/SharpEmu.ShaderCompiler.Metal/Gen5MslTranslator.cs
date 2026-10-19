@@ -176,6 +176,28 @@ public static partial class Gen5MslTranslator
                 ? maxSteps
                 : 100_000;
 
+        // A program that reads memory coherently (a GLC load, or an atomic returning its
+        // pre-op value) can be polling for another workgroup's writes: a persistent-thread
+        // kernel spins until a shared queue drains, so its trip count follows the whole
+        // dispatch's work rather than its own, and the faster each iteration runs the more
+        // of them one wait takes: UE5's Nanite culling needs up to ~370k iterations on an
+        // M5 Pro once structured, more on a smaller GPU, and cutting it off leaves its
+        // never-reset queues corrupt for every later frame. Such programs get a budget
+        // well past that; a genuinely stuck one still ends, just later.
+        private const int PollingStepMultiplier = 64;
+
+        private int MaxDispatcherSteps =>
+            _maxDispatcherSteps > 0 && PollsCoherentMemory
+                ? (int)Math.Min((long)_maxDispatcherSteps * PollingStepMultiplier, int.MaxValue)
+                : _maxDispatcherSteps;
+
+        private bool? _pollsCoherentMemory;
+
+        private bool PollsCoherentMemory => _pollsCoherentMemory ??= _request.Program.Instructions.Any(
+            static instruction =>
+                instruction.Control is Gen5BufferMemoryControl { Glc: true } or Gen5GlobalMemoryControl { Glc: true } &&
+                !instruction.Opcode.Contains("Store", StringComparison.Ordinal));
+
         // The call the dispatcher makes when it runs out of steps. The step-report word
         // is the last field of every stage argument buffer, so it is always in scope.
         private const string StepCapReportCall =
@@ -900,6 +922,11 @@ public static partial class Gen5MslTranslator
             {
                 body.AppendLine("    while (active)");
                 body.AppendLine("    {");
+                if (MaxDispatcherSteps > 0)
+                {
+                    body.AppendLine("        uint from_pc = pc;");
+                }
+
                 body.AppendLine("        switch (pc)");
                 body.AppendLine("        {");
                 body.Append(BuildDispatcherSwitchBody(blocks, baseIndent: 2));
@@ -907,9 +934,16 @@ public static partial class Gen5MslTranslator
                 body.AppendLine("            active = false;");
                 body.AppendLine("            break;");
                 body.AppendLine("        }");
-                if (_maxDispatcherSteps > 0)
+                if (MaxDispatcherSteps > 0)
                 {
-                    body.AppendLine($"        if (++steps >= {_maxDispatcherSteps}u)");
+                    // Blocks are numbered in address order, so every trip around a guest
+                    // loop moves pc to the block it left or an earlier one. Charging only
+                    // those moves gives the cap the structured form's meaning, one step
+                    // per loop iteration. Charging every block made a loop's budget
+                    // shrink with its block count, and cut off persistent-thread kernels
+                    // (UE5's Nanite culling needs over a million block moves) that wait
+                    // on other workgroups for longer than a single loop takes.
+                    body.AppendLine($"        if (pc <= from_pc && ++steps >= {MaxDispatcherSteps}u)");
                     body.AppendLine("        {");
                     body.AppendLine("            active = false;");
                     body.AppendLine($"            {StepCapReportCode}");

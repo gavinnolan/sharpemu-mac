@@ -565,14 +565,14 @@ public static partial class Gen5MslTranslator
         /// (<see cref="Gen5MslCodegenOptions.GraphicsLoopStepCap"/>).</summary>
         private void AppendBackEdge(StringBuilder text, int indent)
         {
-            if (_maxDispatcherSteps <= 0 ||
+            if (MaxDispatcherSteps <= 0 ||
                 (_stage is Gen5MslStage.Vertex or Gen5MslStage.Pixel && !_options.GraphicsLoopStepCap))
             {
                 return;
             }
 
             _structuredUsesSteps = true;
-            AppendIndented(text, $"if (++steps >= {_maxDispatcherSteps}u)", indent);
+            AppendIndented(text, $"if (++steps >= {MaxDispatcherSteps}u)", indent);
             AppendIndented(text, "{", indent);
             AppendIndented(text, StepCapReportCode, indent + 1);
             AppendExit(text, indent + 1);

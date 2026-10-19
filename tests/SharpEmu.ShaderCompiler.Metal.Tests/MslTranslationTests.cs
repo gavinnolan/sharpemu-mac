@@ -714,6 +714,32 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void LoopsThatPollCoherentMemoryGetALargerStepBudget()
+    {
+        // A persistent-thread kernel spins on a GLC load until other workgroups publish
+        // work, so its trip count follows the whole dispatch. Cutting it off early leaves
+        // the queue it shares with later dispatches corrupt.
+        var polling = new Gen5ComputeFixture(
+            "polling-loop",
+            [
+                0xBE800385,             // s_mov_b32 s0, 5
+                0xE0305000, 0x80020100, // loop: buffer_load_dword v1, v0, s[8:11], 0 offen glc
+                0xBF8C3F70,             // s_waitcnt vmcnt(0)
+                0x81808100,             // s_sub_i32 s0, s0, 1
+                0xBF078000,             // s_cmp_lg_u32 s0, 0
+                0xBF85FFFA,             // s_cbranch_scc1 loop
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 8,
+            StoreBackingBytes: 256);
+        var pollingSource = Gen5ComputeFixtures.CompileRequestOrThrow(polling).Source;
+        Assert.Contains("if (++steps >= 6400000u)", pollingSource, StringComparison.Ordinal);
+
+        var plain = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop).Source;
+        Assert.Contains("if (++steps >= 100000u)", plain, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ArgumentBufferCarriesBufferLengthsAndUsesSeparatePushData()
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);
