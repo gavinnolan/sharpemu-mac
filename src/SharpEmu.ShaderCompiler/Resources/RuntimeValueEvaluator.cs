@@ -443,6 +443,63 @@ public sealed class RuntimeValueEvaluator
         return true;
     }
 
+    // The compiled transactions read the table themselves, so the walk below that learns a
+    // pending data slot before reading it never runs for them. The same probe is made here,
+    // before the transaction reads (and waits for) the word, and only for a slot whose loads
+    // the shader has not learned yet: a learned shader costs a set lookup per slot, and a
+    // draw with no GPU write pending evaluates each unlearned slot's address and no more.
+    private static void LearnPendingDataSlots(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    {
+        if (inputs.DataWritePending is null || plan.DeviceDataSlots.Count == 0)
+        {
+            return;
+        }
+
+        RuntimeEvaluationScratch? scratch = null;
+        RuntimeValueEvaluator? evaluator = null;
+        try
+        {
+            foreach (var (slot, memoryIndices) in plan.DeviceDataSlots)
+            {
+                if (AllLearned(plan.Hash, memoryIndices))
+                {
+                    continue;
+                }
+
+                if (evaluator is null)
+                {
+                    scratch = RuntimeEvaluationScratch.Rent();
+                    evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
+                    inputs.TablePhase?.Invoke(true);
+                }
+
+                evaluator.LearnPendingDataSlot(slot, memoryIndices);
+            }
+        }
+        finally
+        {
+            if (evaluator is not null)
+            {
+                inputs.TablePhase?.Invoke(false);
+            }
+
+            scratch?.Dispose();
+        }
+    }
+
+    private static bool AllLearned(ulong hash, int[] memoryIndices)
+    {
+        foreach (var index in memoryIndices)
+        {
+            if (!DeviceDataLoads.Contains(hash, index))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // Evaluates descriptor sources and, when asked, the flattened table in one memoised
     // walk. On failure neither output changes.
     public static bool EvaluateSources(
@@ -473,12 +530,14 @@ public sealed class RuntimeValueEvaluator
         if (evaluateTable && sources.Count == 0 && !HasResourceStructure(plan) && ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) &&
             plan.CompiledTableTransaction is { } tableTransaction)
         {
+            LearnPendingDataSlots(plan, inputs);
             ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_table");
             return tableTransaction.Evaluate(inputs, additionalTableWords, out results, out table);
         }
         if (evaluateTable && ReferenceEquals(sources, plan.MaterializationSources) &&
             ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) && plan.CompiledTransaction is { } transaction)
         {
+            LearnPendingDataSlots(plan, inputs);
             ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_whole");
             // A failed transaction must not replay guest reads through the fallback evaluator.
             return transaction.Evaluate(inputs, additionalTableWords, out results, out table);

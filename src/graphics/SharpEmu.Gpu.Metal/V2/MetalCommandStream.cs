@@ -540,6 +540,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             bytes == sizeof(uint) ? (uint)write.Value : write.Value,
             MetalGpuWriteOrigin.EndOfPipeLabel, "eop label", null, (ulong)bytes);
         Interlocked.Increment(ref _gpuTimedLabels);
+
+        // The resource materializer reads the label as written until it lands (LabelOverlay).
+        NoteEndOfPipeLabelPending(write.Destination, value[..bytes], serial);
         if (EndOfPipeTrace)
         {
             var address = write.Destination;
@@ -800,6 +803,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         _ = kind;
         _cpOverlay.Forget(address, (ulong)source.Length);
+        _labelOverlay.Forget(address, (ulong)source.Length);
         return _memory.TryWrite(address, source);
     }
 

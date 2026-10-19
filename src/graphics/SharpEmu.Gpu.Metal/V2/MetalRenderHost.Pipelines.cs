@@ -1213,6 +1213,12 @@ internal sealed partial class MetalRenderHost
     public bool TryReadGuestWord(ulong address, out uint word)
     {
         _wordReads++;
+        if (_labelOverlay.Count != 0 && TryReadPendingLabelWord(address, out word))
+        {
+            // A label the GPU has yet to land, read as written (MetalRenderHost.LabelOverlay).
+            return true;
+        }
+
         if (_wordLineThread == Environment.CurrentManagedThreadId && TryReadWordFromLine(address, out word))
         {
             return true;
@@ -1244,6 +1250,7 @@ internal sealed partial class MetalRenderHost
         }
 
         ApplyPendingCommandProcessorBytes(address, bytes);
+        ApplyPendingLabelBytes(address, bytes);
         word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
         return true;
     }
@@ -1267,6 +1274,7 @@ internal sealed partial class MetalRenderHost
         }
 
         ApplyPendingCommandProcessorBytes(address, destination);
+        ApplyPendingLabelBytes(address, destination);
         return true;
     }
 

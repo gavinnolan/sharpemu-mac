@@ -110,6 +110,12 @@ internal static class MetalV2Diagnostics
     public static readonly bool OverlayPageFilter =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_OVERLAY_PAGE_FILTER"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_LABEL_OVERLAY=0 makes a resource materialization's read of an
+    // end-of-pipe label wait for the GPU to land it again, as before the label overlay. By
+    // default the value the label will hold is read as written (MetalRenderHost.LabelOverlay).
+    public static readonly bool LabelOverlay =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_OVERLAY"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_WAIT_TRACE=1 (or SHARPEMU_METAL_V2_EOP_TRACE=1) names, on each
     // SLOW-WAIT line, the shader whose resources were being materialized when the host waited.
     public static readonly bool WaitTrace =

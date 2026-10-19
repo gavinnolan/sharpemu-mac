@@ -53,6 +53,7 @@ internal sealed class MetalPendingWriteOverlay
         public required byte[] Bytes;
         public required ulong Serial;
         public required ulong Sequence;
+        public byte[]? Baseline;
         public bool[]? Dead;
         public bool Removed;
 
@@ -68,8 +69,15 @@ internal sealed class MetalPendingWriteOverlay
     /// </summary>
     public long Version => Volatile.Read(ref _version);
 
-    /// <summary>Records the bytes a write recorded into <paramref name="serial"/> will land.</summary>
-    public void Add(ulong address, ReadOnlySpan<byte> bytes, ulong serial)
+    /// <summary>Reads guest memory as it stands, without waiting for anything.</summary>
+    public delegate bool RawBytesReader(ulong address, Span<byte> destination);
+
+    /// <summary>
+    /// Records the bytes a write recorded into <paramref name="serial"/> will land.
+    /// <paramref name="baseline"/>, when given, is what memory held over them at that point:
+    /// <see cref="DropChangedBaselines"/> uses it to tell that someone else has written there since.
+    /// </summary>
+    public void Add(ulong address, ReadOnlySpan<byte> bytes, ulong serial, ReadOnlySpan<byte> baseline = default)
     {
         if (bytes.IsEmpty)
         {
@@ -80,6 +88,11 @@ internal sealed class MetalPendingWriteOverlay
         {
             Interlocked.Increment(ref _version);
             var entry = new Entry { Address = address, Bytes = bytes.ToArray(), Serial = serial, Sequence = ++_sequence };
+            if (baseline.Length == bytes.Length)
+            {
+                entry.Baseline = baseline.ToArray();
+            }
+
             for (var page = address >> PageShift; page <= (entry.End - 1) >> PageShift; page++)
             {
                 if (!_pages.TryGetValue(page, out var list))
@@ -124,6 +137,25 @@ internal sealed class MetalPendingWriteOverlay
         {
             var forget = new ForgetVisitor(this, address, size);
             ForEachOverlapping(address, size, ref forget);
+        }
+    }
+
+    /// <summary>
+    /// Drops the entries over the range whose baseline memory no longer holds: the guest CPU
+    /// wrote there after the entry was recorded, and the entry no longer speaks for it. A
+    /// read that fails also drops the entry, since nothing is known about those bytes.
+    /// </summary>
+    public void DropChangedBaselines(ulong address, ulong size, RawBytesReader read)
+    {
+        if (size == 0 || Count == 0 || !MayOverlap(address, size))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            var visit = new BaselineVisitor(this, read);
+            ForEachOverlapping(address, size, ref visit);
         }
     }
 
@@ -386,6 +418,23 @@ internal sealed class MetalPendingWriteOverlay
                     covered[at - address] = true;
                     Any = true;
                 }
+            }
+        }
+    }
+
+    private struct BaselineVisitor(MetalPendingWriteOverlay owner, RawBytesReader read) : IEntryVisitor
+    {
+        public void Visit(Entry entry)
+        {
+            if (entry.Baseline is null)
+            {
+                return;
+            }
+
+            Span<byte> now = stackalloc byte[entry.Baseline.Length];
+            if (!read(entry.Address, now) || !now.SequenceEqual(entry.Baseline))
+            {
+                owner.RemoveLocked(entry);
             }
         }
     }
