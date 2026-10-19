@@ -481,10 +481,15 @@ def _num(v):
     return float(m.group(0)) if '.' in m.group(0) else int(m.group(0))
 
 
+# [METAL-V2][PERF] fields that are running totals (MetalImageCache.Counters), not per window.
+PERF_CUMULATIVE_KEYS = ('uploads', 'writebacks', 'evictions')
+
+
 def parse_gamelog(path):
     g = {'present': [], 'perf': [], 'sched': [], 'sched_windows': [], 'dstrace_lines': [], 'lines': 0}
     if not path or not os.path.exists(path):
         return g
+    perf_totals = {}
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         for ln, line in enumerate(f):
             g['lines'] += 1
@@ -496,6 +501,13 @@ def parse_gamelog(path):
                 d = {k: _num(v) for k, v in KV_RE.findall(line)}
                 d['line'] = ln
                 d['after_present'] = len(g['present'])
+                # The image cache's counters on this line are running totals since launch;
+                # everything else is per window, so they become per-window deltas here.
+                for k in PERF_CUMULATIVE_KEYS:
+                    if k in d:
+                        total = d[k]
+                        d[k] = max(0, total - perf_totals.get(k, 0))
+                        perf_totals[k] = total
                 g['perf'].append(d)
             elif line.startswith('[PERF][GUEST_SCHED]'):
                 d = {k: _num(v) for k, v in KV_RE.findall(line)}
@@ -1892,13 +1904,29 @@ def write_hostcpu(C, path):
             nm = D.S(r[T['name']])
             if nm:
                 names[r[T['thread_id']]] = nm
+        # CPU over the gameplay window (first to last realtime frame), divided by that whole
+        # window: a thread that lived a few seconds at boot shows its share of the window,
+        # not its own lifetime's CPU/wall. Falls back to the whole trace without frames.
+        real = [r for r in (getattr(C, 'rows', None) or []) if r['phase'] == 'realtime']
+        if real:
+            w0, w1 = min(r['t_start_s'] for r in real), max(r['t_end_s'] for r in real)
+            label = 'realtime frames %.1f-%.1fs' % (w0, w1)
+        else:
+            w0 = min(lst[0][0] for lst in by.values())
+            w1 = max(lst[-1][0] for lst in by.values())
+            label = 'whole trace, no realtime frames'
         L.append('')
-        L.append('Per-thread CPU / wall (TCPU, whole trace):')
+        L.append('Per-thread CPU / wall (TCPU, %s):' % label)
         rows = []
         for tid, lst in by.items():
-            dt = lst[-1][0] - lst[0][0]
-            if dt > 0:
-                rows.append(((lst[-1][1] - lst[0][1]) / dt, tid, names.get(tid) or C.tname(C.threadid2tid.get(tid, -1))))
+            inw = [s for s in lst if w0 <= s[0] <= w1]
+            # The last sample at or before the window start is the baseline, so the CPU a
+            # thread spent between it and the first in-window sample counts.
+            before = [s for s in lst if s[0] < w0]
+            if before:
+                inw.insert(0, before[-1])
+            if len(inw) >= 2 and w1 > w0:
+                rows.append(((inw[-1][1] - inw[0][1]) / (w1 - w0), tid, names.get(tid) or C.tname(C.threadid2tid.get(tid, -1))))
         for v, tid, nm in sorted(rows, reverse=True)[:30]:
             L.append('  %-40s thread_id=%-8d %.3f' % (nm, tid, v))
         sp = [v for v, tid, nm in rows for w in (0, 9, 11) if C.w2tid.get(w) is not None and C.thr.get(C.w2tid[w], {}).get('thread_id') == tid]
