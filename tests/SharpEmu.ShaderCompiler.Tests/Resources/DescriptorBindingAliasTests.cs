@@ -129,4 +129,64 @@ public sealed class DescriptorBindingAliasTests
         Assert.Equal(new uint[] { 0, 1 }, info.ImageBindings);
         Assert.Equal(new uint[] { 0, 1 }, info.SamplerBindings);
     }
+
+    // Descriptors drawn from a small pool so equal ones recur; lengths mix the 4- and 8-dword forms.
+    private static uint[][] RandomDescriptors(Random random, int count, int pool)
+    {
+        var distinct = new uint[pool][];
+        for (var index = 0; index < pool; index++)
+        {
+            distinct[index] = new uint[random.Next(2) == 0 ? 4 : 8];
+            for (var word = 0; word < distinct[index].Length; word++) distinct[index][word] = (uint)random.Next(3);
+        }
+
+        var result = new uint[count][];
+        for (var index = 0; index < count; index++)
+        {
+            var pick = distinct[random.Next(pool)];
+            result[index] = random.Next(2) == 0 ? pick : [.. pick];
+        }
+        return result;
+    }
+
+    [Fact]
+    public void ReusedGroupingMatchesTheAllocatingGroupingOverRandomDescriptorSets()
+    {
+        var random = new Random(12345);
+        for (var round = 0; round < 400; round++)
+        {
+            var length = random.Next(0, 40);
+            var descriptors = RandomDescriptors(random, length, random.Next(1, 12));
+            // The sampler path groups a prefix of the table.
+            var count = random.Next(0, length + 1);
+            Assert.Equal(DescriptorBindingAliases.GroupAllocating(descriptors, count),
+                DescriptorBindingAliases.Group(descriptors, count));
+        }
+    }
+
+    [Fact]
+    public void GroupingKeepsNothingBetweenCallsAndSurvivesLargeTables()
+    {
+        uint[][] same = [[1, 2, 3, 4], [1, 2, 3, 4]];
+        uint[][] distinct = [[1, 2, 3, 4], [1, 2, 3, 5]];
+        Assert.Equal(new uint[] { 0, 0 }, DescriptorBindingAliases.Group(same, 2));
+        Assert.Empty(DescriptorBindingAliases.Group(distinct, 2));
+        Assert.Equal(new uint[] { 0, 0 }, DescriptorBindingAliases.Group(same, 2));
+        var large = RandomDescriptors(new Random(7), 3000, 40);
+        Assert.Equal(DescriptorBindingAliases.GroupAllocating(large, large.Length), DescriptorBindingAliases.Group(large, large.Length));
+        Assert.Empty(DescriptorBindingAliases.Group(distinct, 2));
+    }
+
+    [Fact]
+    public void GroupingSixteenDistinctDescriptorsAllocatesOnlyTheEmptyResult()
+    {
+        var descriptors = new uint[16][];
+        for (var index = 0; index < descriptors.Length; index++) descriptors[index] = [(uint)index, 1, 2, 3, 4, 5, 6, 7];
+        _ = DescriptorBindingAliases.Group(descriptors, descriptors.Length);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        _ = DescriptorBindingAliases.Group(descriptors, descriptors.Length);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        // Without the reuse this grew a dictionary through five sizes: several kilobytes.
+        Assert.True(allocated <= 64, $"allocated {allocated} bytes");
+    }
 }

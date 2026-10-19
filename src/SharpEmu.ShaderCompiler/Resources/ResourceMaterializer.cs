@@ -1635,8 +1635,8 @@ public static partial class ResourceMaterializer
             Buffers = buffers,
             Images = images,
             BufferCandidateTables = candidateTables,
-            ImageDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Images),
-            SamplerDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Samplers.Take(info.Samplers.Count).ToArray()),
+            ImageDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Images, snapshot.Images.Length),
+            SamplerDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Samplers, Math.Min(info.Samplers.Count, snapshot.Samplers.Length)),
             Samplers = samplers,
         };
         specializedSnapshot = snapshot;

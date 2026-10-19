@@ -18,12 +18,61 @@ internal static class DescriptorBindingAliases
         }
     }
 
-    public static List<uint> Group(IReadOnlyList<uint[]> descriptors)
+    // SHARPEMU_RESOURCE_GROUP_REUSE=0 groups through the allocating implementation.
+    internal static readonly bool Reuse = PerfSwitches.Enabled("SHARPEMU_RESOURCE_GROUP_REUSE");
+
+    private const int RetainedCapacityLimit = 1024;
+
+    [ThreadStatic]
+    private static Dictionary<uint[], uint>? _groups;
+
+    [ThreadStatic]
+    private static uint[]? _scratch;
+
+    // The group (index of the first equal descriptor) of each of the first count descriptors,
+    // or none when they are all distinct. A materialization miss calls this twice, so the
+    // dictionary and the group array are reused: growing a fresh dictionary per call was a
+    // twentieth of the Metal worker.
+    public static List<uint> Group(IReadOnlyList<uint[]> descriptors, int count)
     {
-        if (descriptors.Count < 2) return [];
+        if (!Reuse) return GroupAllocating(descriptors, count);
+        if (count < 2) return [];
+        var groups = _groups ??= new Dictionary<uint[], uint>(new WordComparer());
+        var scratch = _scratch;
+        if (scratch is null || scratch.Length < count) _scratch = scratch = new uint[Math.Max(count, 32)];
+        groups.EnsureCapacity(count);
+        try
+        {
+            for (var index = 0; index < count; index++)
+            {
+                if (!groups.TryGetValue(descriptors[index], out var group))
+                {
+                    group = (uint)index;
+                    groups.Add(descriptors[index], group);
+                }
+                scratch[index] = group;
+            }
+
+            return groups.Count == count ? [] : [.. scratch.AsSpan(0, count)];
+        }
+        finally
+        {
+            groups.Clear();
+            // A rare huge table is not kept alive for the life of the thread.
+            if (count > RetainedCapacityLimit)
+            {
+                _groups = null;
+                _scratch = null;
+            }
+        }
+    }
+
+    internal static List<uint> GroupAllocating(IReadOnlyList<uint[]> descriptors, int count)
+    {
+        if (count < 2) return [];
         var groups = new Dictionary<uint[], uint>(new WordComparer());
-        var result = new List<uint>(descriptors.Count);
-        for (var index = 0; index < descriptors.Count; index++)
+        var result = new List<uint>(count);
+        for (var index = 0; index < count; index++)
         {
             if (!groups.TryGetValue(descriptors[index], out var group))
             {
@@ -32,7 +81,7 @@ internal static class DescriptorBindingAliases
             }
             result.Add(group);
         }
-        return groups.Count == descriptors.Count ? [] : result;
+        return groups.Count == count ? [] : result;
     }
 
     public static void Apply(ShaderResourceInfo info, ShaderResourceInfo source, ResourceSpecialization specialization)
