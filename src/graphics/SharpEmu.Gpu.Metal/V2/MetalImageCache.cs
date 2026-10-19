@@ -2682,10 +2682,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private readonly long[] _uploadCauses = new long[5];
     private readonly long[] _writebackCauses = new long[7];
-    private readonly long[] _releaseCauses = new long[10];
+    private readonly long[] _releaseCauses = new long[11];
 
     private static readonly string[] _releaseCauseNames =
-        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped", "linear_promoted", "retired"];
+        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped", "linear_promoted", "retired", "stale"];
 
     /// <summary>The release reasons since the last read, as "name=count" pairs.</summary>
     public void AppendReleaseCauses(System.Text.StringBuilder target)

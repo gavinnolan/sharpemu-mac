@@ -38,6 +38,9 @@ internal enum MetalImageReleaseCause : byte
     LinearViewPromoted,
     // Not used for the retirement age (frames and seconds), whatever the budget.
     Retired,
+    // Never written by the GPU, behind guest memory already and unwatched: nothing a read could
+    // use without uploading it again, only the cache lock on every CPU store into its pages.
+    Stale,
 }
 
 // Why a GPU-written image had to be published into guest memory.
