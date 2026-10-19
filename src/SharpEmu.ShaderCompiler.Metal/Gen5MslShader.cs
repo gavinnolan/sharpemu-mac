@@ -161,6 +161,17 @@ public sealed record Gen5MslShader(
     /// <summary>The source declares per-vertex pixel inputs; see <see cref="PerVertexInputsLanguageVersion"/>.</summary>
     public bool UsesPerVertexInputs { get; init; }
 
+    /// <summary>The function constant that switches the GET_LOD_STATS counter sites on.</summary>
+    public const string MipStatisticsFunctionConstantName = "sharpemu_fc_mip_stats";
+
+    /// <summary>Its index (<c>[[function_constant(n)]]</c>).</summary>
+    public const uint MipStatisticsFunctionConstantIndex = 0;
+
+    /// <summary>The source declares <see cref="MipStatisticsFunctionConstantName"/>: its counter
+    /// sites run only in a function the host specialized with the constant true, and the
+    /// function must be made with a value for it (<c>newFunctionWithName:constantValues:error:</c>).</summary>
+    public bool UsesMipStatisticsConstant { get; init; }
+
     /// <summary>The vertex indices <see cref="ConstantPositions"/> covers, from zero.</summary>
     public const int ConstantPositionVertexCount = 6;
 

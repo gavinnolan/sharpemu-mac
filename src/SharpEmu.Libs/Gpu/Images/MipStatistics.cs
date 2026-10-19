@@ -30,6 +30,19 @@ public sealed class MipStatistics
 
     public static MipStatistics Shared { get; } = new();
 
+    private static int s_titleUsesCounters;
+
+    /// <summary>
+    /// The title has used LOD statistics: it bound a T# with MIP_STATS_ENABLE to a draw, or it
+    /// sent a GET_LOD_STATS packet. Until then nothing reads the counter bank, so a host that
+    /// can may leave the counters out of its pixel pipelines. Once set it stays set.
+    /// </summary>
+    public static bool TitleUsesCounters => Volatile.Read(ref s_titleUsesCounters) != 0;
+
+    /// <summary>Latches <see cref="TitleUsesCounters"/>; true when this call set it.</summary>
+    public static bool NoteTitleUsesCounters() =>
+        Volatile.Read(ref s_titleUsesCounters) == 0 && Interlocked.Exchange(ref s_titleUsesCounters, 1) == 0;
+
     private readonly uint[] _bindingsBySlot = new uint[SlotCount];
 
     /// <summary>Slots a draw has bound since the last report (diagnostic; racy by design).</summary>
@@ -42,6 +55,7 @@ public sealed class MipStatistics
     {
         if (texture.MipStatsEnabled && !texture.IsNull)
         {
+            NoteTitleUsesCounters();
             LodStatsTelemetry.NoteSampledBinding();
             _bindingsBySlot[texture.MipStatsSlot]++;
         }

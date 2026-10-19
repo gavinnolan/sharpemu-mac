@@ -20,6 +20,11 @@ public sealed class GraphicsPipelineDescription
     public ShaderProgram PixelProgram { get; init; }
     public ShaderProgramInfo? PixelStage { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
+
+    // The pixel program's LOD statistics counters are compiled in (the title uses LOD
+    // statistics, MipStatistics.TitleUsesCounters, and the host asked for the split in
+    // IShaderPipelineHost.PixelPipelinesFollowLodStatistics). Part of the pipeline key.
+    public bool LodStatistics { get; init; }
 }
 
 public sealed class ComputePipelineDescription
@@ -67,6 +72,12 @@ public interface IShaderPipelineHost
     bool ExecGuardElisionEnabled => true;
     ShaderPrewarmList? ShaderPrewarm => null;
     GraphicsPrewarmList? GraphicsPrewarm => null;
+    // The host makes a pixel pipeline with or without the LOD statistics counters, by whether
+    // the title uses them yet (MipStatistics.TitleUsesCounters): a pixel pipeline made before
+    // is not the one wanted after, so the pipeline cache keys on it. A host whose pipelines
+    // never differ answers false and keeps one pipeline.
+    bool PixelPipelinesFollowLodStatistics => false;
+
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
 

@@ -27,6 +27,55 @@ internal sealed partial class MetalRenderHost
     internal static readonly bool GpuLodStatistics =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOD_STATS"), "fallback", StringComparison.Ordinal);
 
+    /// <summary>
+    /// A pixel pipeline carries the counters only once the title uses LOD statistics
+    /// (MipStatistics.TitleUsesCounters): the sites sit behind a function constant
+    /// (Gen5MslShader.MipStatisticsFunctionConstantName) that a pipeline made before is
+    /// specialized false. SHARPEMU_LOD_STATS=always has them from the first draw, and
+    /// =fallback never records, so neither splits pipelines.
+    /// </summary>
+    internal static readonly bool LodStatisticsFollowDemand =
+        GpuLodStatistics && Gen5MslCodegenOptions.FromEnvironment.MipStatisticsFunctionConstant;
+
+    public bool PixelPipelinesFollowLodStatistics => LodStatisticsFollowDemand;
+
+    // A pixel pipeline was made with the counters compiled out. The first report after that is
+    // answered from the bound-slot fallback: the bank may lack the samples of the draws
+    // through it. Any thread.
+    private bool _lodStatsCompiledOut;
+    private bool _lodStatsPrimed;
+
+    /// <summary>
+    /// The function of a pixel (or any) library entry that declares the LOD statistics function
+    /// constant, specialized with <paramref name="enabled"/>; the caller owns it, or zero.
+    /// </summary>
+    internal static unsafe nint NewMipStatisticsFunction(nint library, string entry, bool enabled, out nint error)
+    {
+        error = 0;
+        var values = MetalNative.Send(
+            MetalNative.Send(MetalNative.Class("MTLFunctionConstantValues"), MetalNative.Selector("alloc")),
+            MetalNative.Selector("init"));
+        try
+        {
+            var value = enabled ? (byte)1 : (byte)0;
+            MetalNative.SendSetConstantValue(
+                values, MetalNative.Selector("setConstantValue:type:atIndex:"), (nint)(&value), MetalDataTypeBool,
+                Gen5MslShader.MipStatisticsFunctionConstantIndex);
+            return MetalNative.Send(
+                library,
+                MetalNative.Selector("newFunctionWithName:constantValues:error:"),
+                MetalNative.NsString(entry),
+                values,
+                ref error);
+        }
+        finally
+        {
+            MetalNative.SendVoid(values, MetalNative.Selector("release"));
+        }
+    }
+
+    private const nuint MetalDataTypeBool = 53;
+
     // After the bank: the slots the last report said were sampled, those whose finest mip
     // was coarser than 0, and the reports packed ([MEM] lod).
     private const int LodStatsTallyWords = 4;
@@ -201,6 +250,15 @@ internal sealed partial class MetalRenderHost
         if (!ResourceMaterializer.RecordMipStatistics || size < MipStatistics.ReportBytes || !DefersEndOfPipeLabels)
         {
             return false;
+        }
+
+        if (!_lodStatsPrimed)
+        {
+            _lodStatsPrimed = true;
+            if (Volatile.Read(ref _lodStatsCompiledOut))
+            {
+                return false;
+            }
         }
 
         const ulong reportBytes = MipStatistics.ReportBytes;

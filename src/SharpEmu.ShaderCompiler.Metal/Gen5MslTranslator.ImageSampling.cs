@@ -258,10 +258,19 @@ public static partial class Gen5MslTranslator
         // bit 15 set (MipStatistics.NoCounterField: the bound T# has MIP_STATS_ENABLE clear)
         // skips everything, the LOD computation included: one shader-data load and a branch
         // uniform across the draw. requestedLod emits that computation, inside the branch.
+        // The whole site is also behind a function constant, which the host sets once the title
+        // uses LOD statistics: until then the pipeline has no site at all.
         // Only lanes in EXEC that are not helper threads count (Templates/mip_stats_prelude.msl).
         private void RecordMipStatistics(int resourceIndex, Func<string> requestedLod)
         {
             _usesMipStatistics = true;
+            if (UsesMipStatisticsConstant)
+            {
+                Line($"if ({Gen5MslShader.MipStatisticsFunctionConstantName})");
+                Line("{");
+                _indent++;
+            }
+
             var field = Temp("uint", ShaderDataDword(_request.Bindings.MipStatisticsDword + (uint)resourceIndex));
             Line($"if (({field} & 0x8000u) == 0u)");
             Line("{");
@@ -271,6 +280,11 @@ public static partial class Gen5MslTranslator
                  $"{ExecCondition("!simd_is_helper_thread()")});");
             _indent--;
             Line("}");
+            if (UsesMipStatisticsConstant)
+            {
+                _indent--;
+                Line("}");
+            }
         }
 
         // The isotropic LOD of explicit derivatives: log2 of the longer screen-axis footprint

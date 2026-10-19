@@ -118,6 +118,10 @@ public static partial class Gen5MslTranslator
         // A sample records into them, so the module carries mip_stats_prelude.
         private bool _usesMipStatistics;
 
+        // The sites sit behind the function constant (Gen5MslCodegenOptions.MipStatisticsFunctionConstant),
+        // which the module then declares.
+        private bool UsesMipStatisticsConstant => _usesMipStatistics && _options.MipStatisticsFunctionConstant;
+
         private readonly record struct MslImageClass(
             string Field,
             string TextureType,

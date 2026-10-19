@@ -286,6 +286,12 @@ internal sealed partial class MetalRenderHost
             }
 
             MetalNative.SendVoid(module.Function, SelRelease);
+            if (module.LodFunction != 0)
+            {
+                MetalNative.SendVoid(module.LodFunction, SelRelease);
+                module.LodFunction = 0;
+            }
+
             ReleaseLibrary(module.Library);
             if (module.RectangleFunction != 0)
             {

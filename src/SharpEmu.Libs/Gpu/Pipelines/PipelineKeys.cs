@@ -237,16 +237,18 @@ public sealed class GraphicsPipelineKey : IEquatable<GraphicsPipelineKey>
     // Settable for the lookup key reused across draws; a key in the cache is never changed.
     public ulong VertexProgramId { get; set; }
     public ulong PixelProgramId { get; set; }
+    // The pixel program carries its LOD statistics counters (GraphicsPipelineDescription.LodStatistics).
+    public bool LodStatistics { get; set; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
 
     public bool Equals(GraphicsPipelineKey? other) =>
         other is not null && Rendering.Equals(other.Rendering) && VertexProgramId == other.VertexProgramId && PixelProgramId == other.PixelProgramId &&
-        VertexInput.Equals(other.VertexInput) && StaticParameters.Equals(other.StaticParameters);
+        LodStatistics == other.LodStatistics && VertexInput.Equals(other.VertexInput) && StaticParameters.Equals(other.StaticParameters);
 
     public override bool Equals(object? obj) => Equals(obj as GraphicsPipelineKey);
 
-    public override int GetHashCode() => HashCode.Combine(Rendering, VertexProgramId, PixelProgramId, VertexInput, StaticParameters);
+    public override int GetHashCode() => HashCode.Combine(Rendering, VertexProgramId, PixelProgramId, VertexInput, StaticParameters, LodStatistics);
 }
 
 public readonly record struct ComputePipelineKey(ulong ComputeProgramId);

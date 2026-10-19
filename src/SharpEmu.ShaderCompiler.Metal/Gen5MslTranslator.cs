@@ -502,6 +502,7 @@ public static partial class Gen5MslTranslator
                     WritesViewportIndex: _writesViewportIndex)
                 {
                     UsesPerVertexInputs = UsesVertexValueInputs,
+                    UsesMipStatisticsConstant = UsesMipStatisticsConstant,
                     ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition
                         ? EvaluateConstantPositions(_request.Program.Instructions, _request.ClipSpace)
                         : null,
@@ -606,6 +607,13 @@ public static partial class Gen5MslTranslator
             EmitResourceStruct(source);
 
             AppendTrailingPreludes(source, preludes);
+            if (UsesMipStatisticsConstant)
+            {
+                source.AppendLine(
+                    $"constant bool {Gen5MslShader.MipStatisticsFunctionConstantName} " +
+                    $"[[function_constant({Gen5MslShader.MipStatisticsFunctionConstantIndex})]];");
+            }
+
             source.AppendLine();
 
             if (_stage == Gen5MslStage.Mesh)

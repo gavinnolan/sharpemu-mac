@@ -403,6 +403,14 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
+    /// <summary>
+    /// The archive key of a pixel library for a pipeline made with its LOD statistics counters
+    /// (Gen5MslShader.UsesMipStatisticsConstant): another function of the same library, so
+    /// another pair. The key itself without them.
+    /// </summary>
+    internal static UInt128 LodStatisticsKey(UInt128 key, bool counters) =>
+        key == default || !counters ? key : key ^ new UInt128(0x4C4F44535441545FUL, 0x434F554E54455253UL);
+
     /// <summary>The key a shader pair is listed under in a segment's tail.</summary>
     internal static ulong PairKey(UInt128 vertexKey, UInt128 pixelKey)
     {

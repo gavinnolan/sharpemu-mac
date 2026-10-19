@@ -86,6 +86,10 @@ internal sealed partial class MetalRenderHost
     {
         public nint Library;
         public nint Function;
+        // The function with the LOD statistics counters compiled in, for a program that
+        // declares the function constant (Function is then the one without), built when a
+        // pipeline of a title that uses LOD statistics first needs it.
+        public nint LodFunction;
         public MetalCompiledGuestShader Compiled = null!;
         public ulong Hash;
 
@@ -230,13 +234,17 @@ internal sealed partial class MetalRenderHost
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
         {
-            var function = MetalNative.Send(
-                library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(shader.EntryPoint));
+            nint specializationError = 0;
+            var function = shader.UsesMipStatisticsConstant
+                ? NewMipStatisticsFunction(library, shader.EntryPoint, enabled: false, out specializationError)
+                : MetalNative.Send(
+                    library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(shader.EntryPoint));
             if (function == 0)
             {
                 ReleaseLibrary(library);
                 throw Fatal(
-                    $"The MSL library has no entry point: entry={shader.EntryPoint} hash=0x{module.Hash:X16}.");
+                    $"The MSL library has no entry point: entry={shader.EntryPoint} hash=0x{module.Hash:X16}" +
+                    (specializationError != 0 ? $" {MetalNative.DescribeError(specializationError)}." : "."));
             }
 
             module.Library = library;
@@ -253,6 +261,42 @@ internal sealed partial class MetalRenderHost
         MetalV2Diagnostics.Trace(
             $"compiled module hash=0x{module.Hash:X16} entry={shader.EntryPoint} " +
             $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
+    }
+
+    // The pixel function of a pipeline: the one with the LOD statistics counters compiled in
+    // when the pipeline is for a title that uses them and the program has the sites.
+    private nint PixelFunctionOf(MetalShaderModule module, bool lodStatistics)
+    {
+        if (!module.Shader.UsesMipStatisticsConstant)
+        {
+            return module.Function;
+        }
+
+        if (!lodStatistics)
+        {
+            // This pipeline has no counters: samples of draws through it never reach the bank.
+            Volatile.Write(ref _lodStatsCompiledOut, true);
+            return module.Function;
+        }
+
+        lock (module)
+        {
+            if (module.LodFunction != 0)
+            {
+                return module.LodFunction;
+            }
+
+            var function = NewMipStatisticsFunction(module.Library, module.Shader.EntryPoint, enabled: true, out var error);
+            if (function == 0)
+            {
+                throw Fatal(
+                    $"The pixel function with LOD statistics could not be made: hash=0x{module.Hash:X16} " +
+                    $"{MetalNative.DescribeError(error)}.");
+            }
+
+            module.LodFunction = function;
+            return function;
+        }
     }
 
     private nint RequireRectangleFunction(MetalShaderModule module)
@@ -602,6 +646,7 @@ internal sealed partial class MetalRenderHost
         Rendering = description.Rendering,
         VertexProgramId = description.VertexProgram.Id,
         PixelProgramId = description.PixelInfo is not null ? description.PixelProgram.Id : 0,
+        LodStatistics = description.LodStatistics,
         VertexInput = description.VertexInput,
         StaticParameters = description.StaticParameters,
     };
@@ -800,7 +845,7 @@ internal sealed partial class MetalRenderHost
 
             if (pixelModule is not null)
             {
-                MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), pixelModule.Function);
+                MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), PixelFunctionOf(pixelModule, description.LodStatistics));
             }
 
             if (parameters.AlphaToCoverageEnable)
@@ -890,7 +935,8 @@ internal sealed partial class MetalRenderHost
                     pixelModule?.SourceKey,
                     vertexModule.Shader.WritesLayer || vertexModule.Shader.WritesViewportIndex,
                     rectangleList,
-                    controlPointIndexType);
+                    controlPointIndexType,
+                    description.LodStatistics && pixelModule is { Shader.UsesMipStatisticsConstant: true });
                 if (_states.TryAcquire(shareKey, out var shared, out _))
                 {
                     Interlocked.Increment(ref _pipelineDedups);
@@ -903,7 +949,12 @@ internal sealed partial class MetalRenderHost
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var archive = MetalBinaryArchive.For(_device);
             var vertexArchiveKey = rectangleList ? vertexModule.RectangleArchiveKey : vertexModule.ArchiveKey;
-            var pixelArchiveKey = pixelModule?.ArchiveKey ?? default;
+            // The same library makes two pipelines, with the counters and without, so the pair
+            // the archive lists them under tells them apart.
+            var pixelArchiveKey = pixelModule is null
+                ? default
+                : MetalBinaryArchive.LodStatisticsKey(
+                    pixelModule.ArchiveKey, description.LodStatistics && pixelModule.Shader.UsesMipStatisticsConstant);
             var archives = archive?.AcquirePipelineArchives(vertexArchiveKey, pixelArchiveKey) ?? 0;
             state = 0;
             if (archives != 0)
@@ -1013,13 +1064,15 @@ internal sealed partial class MetalRenderHost
         UInt128? pixelSource,
         bool layered,
         bool rectangleList,
-        nuint controlPointIndexType)
+        nuint controlPointIndexType,
+        bool lodStatistics = false)
     {
         var parameters = description.StaticParameters;
         var key = new MetalPipelineStateKey.Builder()
             .Add(vertexSource)
             .Add(pixelSource is not null)
             .Add(pixelSource ?? default)
+            .Add(lodStatistics)
             .Add(rectangleList)
             .Add(rectangleList ? controlPointIndexType : 0)
             .Add(Math.Max(parameters.Samples, 1))
@@ -1696,6 +1749,11 @@ internal sealed partial class MetalRenderHost
             if (module.Function != 0)
             {
                 MetalNative.SendVoid(module.Function, SelRelease);
+            }
+
+            if (module.LodFunction != 0)
+            {
+                MetalNative.SendVoid(module.LodFunction, SelRelease);
             }
 
             if (module.Library != 0)

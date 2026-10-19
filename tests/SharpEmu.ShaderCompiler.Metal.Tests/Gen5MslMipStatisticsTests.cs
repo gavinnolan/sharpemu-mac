@@ -50,7 +50,8 @@ public sealed class Gen5MslMipStatisticsTests(ITestOutputHelper output)
 
     // recordStatistics is the host's switch (ResourceMaterializer.RecordMipStatistics);
     // mipStatsEnabled is the bound T#'s MIP_STATS_ENABLE.
-    private static Gen5MslShader PixelSample(string opcode, bool recordStatistics, bool mipStatsEnabled = true)
+    private static Gen5MslShader PixelSample(
+        string opcode, bool recordStatistics, bool mipStatsEnabled = true, Gen5MslCodegenOptions? options = null)
     {
         var program = SampleProgram(opcode);
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x4D49505354415453UL, 0, UserDataCount);
@@ -78,7 +79,7 @@ public sealed class Gen5MslMipStatisticsTests(ITestOutputHelper output)
         {
             PixelOutputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
         };
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
         return shader!;
     }
 
@@ -148,6 +149,64 @@ public sealed class Gen5MslMipStatisticsTests(ITestOutputHelper output)
         Assert.DoesNotContain(Gen5MslArgumentLayout.MipStatisticsName, shader.Source);
         Assert.DoesNotContain("sharpemu_mip_stats", shader.Source);
         Assert.DoesNotContain("atomic_fetch_min_explicit(", shader.Source);
+        Assert.DoesNotContain(Gen5MslShader.MipStatisticsFunctionConstantName, shader.Source);
+        Assert.False(shader.UsesMipStatisticsConstant);
+    }
+
+    // The counters compile out until the title asks for LOD statistics: the sites sit behind a
+    // function constant the host sets false until then, so the pipeline has no counter code.
+    [Theory]
+    [InlineData("ImageSample")]
+    [InlineData("ImageSampleL")]
+    [InlineData("ImageSampleD")]
+    public void TheSitesAreCompiledOutByDefaultBehindAFunctionConstant(string opcode)
+    {
+        var shader = PixelSample(opcode, recordStatistics: true);
+
+        Assert.True(shader.UsesMipStatisticsConstant);
+        var name = Gen5MslShader.MipStatisticsFunctionConstantName;
+        Assert.Contains(
+            $"constant bool {name} [[function_constant({Gen5MslShader.MipStatisticsFunctionConstantIndex})]];", shader.Source);
+        var constantGuard = shader.Source.IndexOf($"if ({name})", StringComparison.Ordinal);
+        var fieldGuard = shader.Source.IndexOf(" & 0x8000u) == 0u)", StringComparison.Ordinal);
+        var call = shader.Source.IndexOf("sharpemu_mip_stats(sharpemu_resources.", StringComparison.Ordinal);
+        Assert.True(constantGuard >= 0 && constantGuard < fieldGuard && fieldGuard < call, shader.Source);
+        // The shader-data load is behind the constant too, so a pipeline without the counters
+        // reads nothing for them.
+        var load = shader.Source.IndexOf("uint t", constantGuard, StringComparison.Ordinal);
+        Assert.True(load > constantGuard && load < fieldGuard, shader.Source);
+        Assert.Equal(CountOf(shader.Source, "sharpemu_mip_stats(sharpemu_resources."), CountOf(shader.Source, $"if ({name})"));
+        // The text does not depend on what the title asks for: the host picks the value.
+        Assert.Equal(shader.Source, PixelSample(opcode, recordStatistics: true).Source);
+        CompileWhenRequired(shader.Source);
+    }
+
+    // SHARPEMU_LOD_STATS=always: the counters are in the pipeline from the first draw.
+    [Fact]
+    public void WithoutTheFunctionConstantTheSitesAreAlwaysThere()
+    {
+        var shader = PixelSample(
+            "ImageSample", recordStatistics: true, options: new Gen5MslCodegenOptions(MipStatisticsFunctionConstant: false));
+
+        Assert.False(shader.UsesMipStatisticsConstant);
+        Assert.DoesNotContain(Gen5MslShader.MipStatisticsFunctionConstantName, shader.Source);
+        Assert.DoesNotContain("function_constant", shader.Source);
+        Assert.Contains("sharpemu_mip_stats(sharpemu_resources.", shader.Source);
+        // The text differs from the default's, so the library and archive keys (hashes of the text) do too.
+        Assert.NotEqual(PixelSample("ImageSample", recordStatistics: true).Source, shader.Source);
+        CompileWhenRequired(shader.Source);
+    }
+
+    private static int CountOf(string text, string value)
+    {
+        var count = 0;
+        for (var index = text.IndexOf(value, StringComparison.Ordinal); index >= 0;
+             index = text.IndexOf(value, index + value.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     private void CompileWhenRequired(string source)

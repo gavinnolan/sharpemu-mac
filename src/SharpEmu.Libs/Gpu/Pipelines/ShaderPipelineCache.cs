@@ -960,6 +960,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             _host.DepthBoundsInPipelineState);
         lookup.VertexProgramId = vertexProgram.Id;
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
+        var lodStatistics = pixelInput is not null && _host.PixelPipelinesFollowLodStatistics && MipStatistics.TitleUsesCounters;
+        lookup.LodStatistics = lodStatistics;
         lock (_pipelineGate)
         {
             if (_graphicsPipelines.TryGetValue(lookup, out handle))
@@ -970,7 +972,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsInPipelineState);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsInPipelineState, lodStatistics);
         var key = KeyOf(description);
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_gate)
@@ -1027,7 +1029,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
         GpuSampleCount noAttachmentSampleCounts,
-        bool depthBoundsInPipelineState = true)
+        bool depthBoundsInPipelineState = true,
+        bool lodStatistics = false)
     {
         var renderingState = new PipelineRenderingState();
         var parameters = new PipelineStaticParameters();
@@ -1046,6 +1049,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             PixelProgram = pixelProgram,
             PixelStage = pixelStage,
             StaticParameters = parameters,
+            LodStatistics = lodStatistics,
         };
     }
 
@@ -1254,6 +1258,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         Rendering = description.Rendering,
         VertexProgramId = description.VertexProgram.Id,
         PixelProgramId = description.PixelInfo is not null ? description.PixelProgram.Id : 0,
+        LodStatistics = description.LodStatistics,
         VertexInput = description.VertexInput,
         StaticParameters = description.StaticParameters,
     };

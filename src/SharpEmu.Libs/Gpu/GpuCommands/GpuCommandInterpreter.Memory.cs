@@ -541,6 +541,9 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The LOD statistics header is not supported: header=0x{packet.Header:X8}.");
         }
 
+        // The title reads LOD statistics: a host that left the counters out of its pipelines
+        // until now compiles them in from the next pipeline on.
+        MipStatistics.NoteTitleUsesCounters();
         var bufferSize = payload[0];
         var destination = (payload[1] & 0xFFFF_FFC0u) | ((ulong)payload[2] << 32);
         var slotsBound = SharpEmu.Libs.Gpu.Images.LodStatsTelemetry.Enabled

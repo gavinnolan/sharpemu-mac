@@ -614,10 +614,14 @@ internal static class MetalStaticPrecompile
                 return -1;
             }
 
-            function = MetalNative.Send(library, SelNewFunctionWithName, MetalNative.NsString(entry));
+            nint functionError = 0;
+            function = shader.UsesMipStatisticsConstant
+                ? MetalRenderHost.NewMipStatisticsFunction(library, entry, enabled: false, out functionError)
+                : MetalNative.Send(library, SelNewFunctionWithName, MetalNative.NsString(entry));
             if (function == 0)
             {
-                error = $"the library has no entry point {entry}";
+                error = $"the library has no entry point {entry}" +
+                    (functionError != 0 ? $": {MetalNative.DescribeError(functionError)}" : string.Empty);
                 return -1;
             }
 
