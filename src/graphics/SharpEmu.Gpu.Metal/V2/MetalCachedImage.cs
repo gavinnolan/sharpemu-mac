@@ -179,6 +179,35 @@ internal sealed class MetalCachedImage : IDisposable
         _publishedSourceVersion == source.DepthPlaneVersion &&
         _publishedOwnVersion == ContentVersion;
 
+    // The stencil plane a device copy last brought into this depth texture from an image
+    // over the plane's bytes (MetalImageCache.SynchronizeStencilPlanes): that image's
+    // texture and content version.
+    private nint _stencilSourceTexture;
+    private long _stencilSourceVersion;
+
+    /// <summary>
+    /// Set when an image that writes this depth image's stencil bytes takes them over: the
+    /// next time this image binds, its stencil plane is copied from that image on the
+    /// device, and the depth plane its texture holds stays as it is.
+    /// </summary>
+    public bool StencilPlaneStale { get; set; }
+
+    /// <summary>Records that this texture's stencil plane is a device copy of the source as it is.</summary>
+    public void NoteStencilFrom(MetalCachedImage source)
+    {
+        _stencilSourceTexture = source.Texture;
+        _stencilSourceVersion = source.ContentVersion;
+        StencilPlaneStale = false;
+    }
+
+    /// <summary>
+    /// True while the last stencil copy into this texture came from the source and the
+    /// source has not changed since: a copy now would write the same stencil.
+    /// </summary>
+    public bool HoldsStencilFrom(MetalCachedImage source) =>
+        Texture != 0 && source.Texture != 0 &&
+        _stencilSourceTexture == source.Texture && _stencilSourceVersion == source.ContentVersion;
+
     public ImageDescription Description;
 
     public MetalTextureShape Shape { get; private set; }

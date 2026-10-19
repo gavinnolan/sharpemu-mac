@@ -300,6 +300,52 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return depth.TransferBytes == depthDescription.BytesPerBlock && !color.Swap;
     }
 
+    // An 8-bit view of a depth image's stencil plane into that image's stencil, through a
+    // staging buffer: a combined depth-stencil texture takes stencil only from a buffer, with
+    // MTLBlitOptionStencilFromDepthStencil. The texels are the stencil values whatever the
+    // guest tiling, because both textures hold them detiled.
+    public bool TryEncodeStencilFromColor(
+        IMetalSubmissionContext context,
+        in ImageDescription colorDescription,
+        nint colorTexture,
+        in ImageDescription depthDescription,
+        nint depthTexture)
+    {
+        if (_disposed || context.CommandBuffer == 0 || colorTexture == 0 || depthTexture == 0 ||
+            colorDescription.IsBlock || colorDescription.BytesPerBlock != 1 ||
+            colorDescription.Extent.Width != depthDescription.Extent.Width ||
+            colorDescription.Extent.Height != depthDescription.Extent.Height ||
+            colorDescription.Resources.Levels != 1 || colorDescription.TransferLayers != 1 ||
+            depthDescription.TransferLayers != 1 ||
+            colorDescription.Samples != 1 || depthDescription.Samples != 1 ||
+            !MetalGuestFormats.TryDecodeHostFormat(depthDescription.PixelFormat, out var depthFormat) ||
+            !MetalGuestFormats.HasStencilPlane(depthFormat))
+        {
+            return false;
+        }
+
+        var width = depthDescription.Extent.Width;
+        var height = depthDescription.Extent.Height;
+        var rowBytes = ((ulong)width + 255) & ~255UL;
+        var sliceBytes = rowBytes * height;
+        var staging = _tiler.Acquire(context, sliceBytes);
+        if (!staging.IsValid)
+        {
+            return false;
+        }
+
+        var blit = _tiler.BeginBlit(context);
+        MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
+            colorTexture, 0, 0, default, new MtlSize { Width = width, Height = height, Depth = 1 },
+            staging.Buffer, (nuint)staging.Offset, (nuint)rowBytes, (nuint)sliceBytes, (nuint)MtlBlitOption.None);
+        MetalNative.SendCopyBufferToTextureOptions(blit, SelCopyBufferToTexture,
+            staging.Buffer, (nuint)staging.Offset, (nuint)rowBytes, (nuint)sliceBytes,
+            new MtlSize { Width = width, Height = height, Depth = 1 },
+            depthTexture, 0, 0, default, (nuint)MtlBlitOption.StencilFromDepthStencil);
+        MetalTiler.EndEncoding(blit);
+        return true;
+    }
+
     private static bool IsRawSingleChannel32(MtlPixelFormat format) =>
         format is MtlPixelFormat.R32Float or MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint;
 
