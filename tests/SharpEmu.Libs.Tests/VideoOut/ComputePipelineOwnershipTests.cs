@@ -9,6 +9,7 @@ using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Presentation;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 

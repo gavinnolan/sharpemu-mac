@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.GpuCommands;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using static SharpEmu.Libs.Tests.Gpu.Scheduling.SchedulingTestSupport;
 
 namespace SharpEmu.Libs.Tests.VideoOut;

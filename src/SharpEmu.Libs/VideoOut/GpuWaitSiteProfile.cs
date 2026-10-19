@@ -5,7 +5,7 @@ using System.Diagnostics;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal static class GpuWaitSiteProfile
+public static class GpuWaitSiteProfile
 {
     private const int SiteFrames = 9;
 

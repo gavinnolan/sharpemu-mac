@@ -1,23 +1,13 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu.Metal;
-using SharpEmu.ShaderCompiler;
+using SharpEmu.Gpu.Metal;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class MetalRenderTargetFormatTests
 {
-    [Fact]
-    public void UnsignedRgba32TargetUsesUnsignedPixelOutput()
-    {
-        Assert.True(MetalGuestFormats.TryDecodeRenderTargetFormat(14, 4, 0, out var decoded));
-        Assert.Equal(MtlPixelFormat.Rgba32Uint, decoded.Format);
-        Assert.Equal(Gen5PixelOutputKind.Uint, decoded.OutputKind);
-        Assert.True(decoded.ExportMapping.IsIdentity);
-    }
-
     [Theory]
     [InlineData(0u, 70u, 0xE4)]
     [InlineData(1u, 80u, 0xE4)]

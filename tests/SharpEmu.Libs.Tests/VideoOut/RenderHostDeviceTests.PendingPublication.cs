@@ -10,6 +10,7 @@ using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 

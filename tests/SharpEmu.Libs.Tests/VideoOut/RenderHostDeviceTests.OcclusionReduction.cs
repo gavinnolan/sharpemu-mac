@@ -4,13 +4,14 @@
 using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
-using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using Silk.NET.Vulkan;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Buffers;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 
 namespace SharpEmu.Libs.Tests.VideoOut;

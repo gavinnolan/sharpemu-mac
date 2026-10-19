@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.VideoOut;
 
@@ -37,21 +38,28 @@ public static unsafe class RenderDocCapture
 
     public static bool IsAvailable => _api is not null;
 
-    public static bool ApplyVulkanLoaderEnvironment()
-    {
-        if (!string.Equals(
-                Environment.GetEnvironmentVariable("SHARPEMU_VK_DISABLE_IMPLICITS"),
-                "1",
-                StringComparison.Ordinal))
-        {
-            return false;
-        }
+    // Letting RenderDoc's layer through a graphics API's loader is that API's business, so
+    // the backend package owns the variables and registers them here. With no backend that
+    // has a loader (Metal talks to the driver directly), there is nothing to apply.
+    private static Func<IReadOnlyList<string>>? _loaderEnvironment;
 
-        Environment.SetEnvironmentVariable("VK_LOADER_DEBUG", "error,warn,layer");
-        Environment.SetEnvironmentVariable("VK_LOADER_LAYERS_DISABLE", "~implicit~");
-        Environment.SetEnvironmentVariable("VK_LOADER_LAYERS_ALLOW", "*RENDERDOC*");
-        return true;
+    /// <summary>
+    /// Installs the backend's loader-environment setup; called from its composition root. The
+    /// delegate returns the names of the variables it set, so a caller that is preparing a
+    /// launch environment can undo exactly those.
+    /// </summary>
+    public static void RegisterLoaderEnvironment(Func<IReadOnlyList<string>> apply)
+    {
+        ArgumentNullException.ThrowIfNull(apply);
+        _loaderEnvironment = apply;
     }
+
+    /// <summary>
+    /// Applies whatever the graphics backend's loader needs for RenderDoc and returns the
+    /// environment variables it set — empty when the backend has no loader to configure.
+    /// </summary>
+    public static IReadOnlyList<string> ApplyGraphicsLoaderEnvironment() =>
+        _loaderEnvironment?.Invoke() ?? [];
 
     public static void Initialize()
     {
@@ -122,9 +130,7 @@ public static unsafe class RenderDocCapture
 
         try
         {
-            var directory = Path.Combine(
-                SharpEmuPaths.DataRoot,
-                "user",
+            var directory = SharpEmuPaths.UserPath(
                 "logs",
                 "capture_logs",
                 safeTitleId);

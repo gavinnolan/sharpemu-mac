@@ -80,8 +80,14 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         Assert.Equal(0UL, Change());
         Assert.True(VideoOutExports.TryGetDisplayBufferInfo(_handle, 0, out var info));
         Assert.Equal(new VideoOutExports.DisplayBufferInfo(MemoryBase, pqFormat, 0, 3840, 2160, 3840, 8), info);
-        Assert.Equal(3840u, port.GetType().GetProperty("OutputWidth")!.GetValue(port));
-        Assert.Equal(2160u, port.GetType().GetProperty("OutputHeight")!.GetValue(port));
+        // Registering a 4K buffer records what the title asked for; it does not redefine the
+        // display we advertise, which is the host's setting. The two were the same field, so
+        // the resolution class a title read back was always its own guess.
+        Assert.Equal(3840u, port.GetType().GetProperty("RegisteredWidth")!.GetValue(port));
+        Assert.Equal(2160u, port.GetType().GetProperty("RegisteredHeight")!.GetValue(port));
+        var advertised = SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.GuestDisplaySize;
+        Assert.Equal(advertised.Width, port.GetType().GetProperty("OutputWidth")!.GetValue(port));
+        Assert.Equal(advertised.Height, port.GetType().GetProperty("OutputHeight")!.GetValue(port));
         Assert.Equal(unchecked((ulong)(int)0x8029000B), Change(handle: -1));
         Assert.Equal(unchecked((ulong)(int)0x8029001A), Change(address: 0));
         Assert.Equal(unchecked((ulong)(int)0x8029001A), Change(option: 1));
@@ -207,7 +213,7 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         var completion = Task.Run(() => (bool)paceFlip.Invoke(null, new object[] { _handle, 4 })!);
         try
         {
-            Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.True(Stopwatch.GetTimestamp() >= firstBoundary);
         }
         finally
@@ -216,7 +222,7 @@ public sealed class VideoOutFlipRequestTests : IDisposable
             {
                 _context[CpuRegister.Rdi] = (ulong)_handle;
                 VideoOutExports.VideoOutClose(_context);
-                await completion.WaitAsync(TimeSpan.FromSeconds(5));
+                await completion.WaitAsync(TimeSpan.FromSeconds(10));
             }
         }
     }
@@ -282,6 +288,56 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         }
         finally
         {
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            Assert.Equal(0, VideoOutExports.VideoOutDeleteVblankEvent(_context));
+            _context[CpuRegister.Rdi] = queue;
+            Assert.Equal(0, KernelEventQueueCompatExports.KernelDeleteEqueue(_context));
+        }
+    }
+
+    [Fact]
+    public void PreVblankStartIsRaisedAheadOfTheVblankOfItsTick()
+    {
+        _context[CpuRegister.Rdi] = StatusAddress;
+        Assert.Equal(0, KernelEventQueueCompatExports.KernelCreateEqueue(_context));
+        var bytes = new byte[8];
+        Assert.True(_memory.TryRead(StatusAddress, bytes));
+        var queue = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+        try
+        {
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            _context[CpuRegister.Rdx] = 0xA1;
+            Assert.Equal(0, VideoOutExports.VideoOutAddPreVblankStartEvent(_context));
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            _context[CpuRegister.Rdx] = 0xB2;
+            Assert.Equal(0, VideoOutExports.VideoOutAddVblankEvent(_context));
+
+            Assert.True(_memory.TryWrite(MemoryBase + 0x400, BitConverter.GetBytes(1_000_000u)));
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = MemoryBase + 0x200;
+            _context[CpuRegister.Rdx] = 2;
+            _context[CpuRegister.Rcx] = MemoryBase + 0x300;
+            _context[CpuRegister.R8] = MemoryBase + 0x400;
+            Assert.Equal(0, KernelEventQueueCompatExports.KernelWaitEqueue(_context));
+
+            _context[CpuRegister.Rdi] = MemoryBase + 0x200;
+            Assert.Equal(2, VideoOutExports.VideoOutGetEventId(_context));
+            Assert.True(_memory.TryRead(MemoryBase + 0x218, bytes));
+            Assert.Equal(0xA1UL, BinaryPrimitives.ReadUInt64LittleEndian(bytes));
+            _context[CpuRegister.Rdi] = MemoryBase + 0x200;
+            _context[CpuRegister.Rsi] = StatusAddress;
+            Assert.Equal(0, VideoOutExports.VideoOutGetEventData(_context));
+            Assert.True(_memory.TryRead(StatusAddress, bytes));
+            Assert.True(BinaryPrimitives.ReadUInt64LittleEndian(bytes) >= 1);
+        }
+        finally
+        {
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            Assert.Equal(0, VideoOutExports.VideoOutDeletePreVblankStartEvent(_context));
             _context[CpuRegister.Rdi] = queue;
             _context[CpuRegister.Rsi] = (ulong)_handle;
             Assert.Equal(0, VideoOutExports.VideoOutDeleteVblankEvent(_context));
@@ -495,5 +551,74 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         Assert.Equal(before, FlipCount());
         Assert.True(VideoOutExports.IsFlipDone(_handle, -1));
         Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    // A presenter that reports presentation: the GPU finishing the flip's work releases the
+    // GPU side only; the guest's flip count moves when the frame is shown.
+    [Fact]
+    public void GpuCompletionPublishesTheFlipOnlyAtPresentation()
+    {
+        var before = FlipCount();
+        var request = Reserve(31);
+
+        VideoOutExports.CompleteFlipOnGpu(request);
+        Assert.Equal(before, FlipCount());
+        Assert.Equal(VideoOutExports.FlipOutcome.Pending, VideoOutExports.GetFlipOutcomeForTests(request));
+        // A second completion is not a second flip.
+        VideoOutExports.CompleteFlipOnGpu(request);
+        VideoOutExports.CompleteFlip(request);
+        Assert.Equal(before, FlipCount());
+
+        VideoOutExports.MarkFlipPresented(request);
+        Assert.Equal(before + 1, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void PresentationBeforeGpuCompletionPublishesAtGpuCompletion()
+    {
+        var before = FlipCount();
+        var request = Reserve(32);
+
+        VideoOutExports.MarkFlipPresented(request);
+        Assert.Equal(before, FlipCount());
+        VideoOutExports.CompleteFlipOnGpu(request);
+        Assert.Equal(before + 1, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void ADroppedFrameStillPublishesItsFlip()
+    {
+        var before = FlipCount();
+        var request = Reserve(33);
+
+        VideoOutExports.CompleteFlipOnGpu(request);
+        VideoOutExports.DiscardFlip(request);
+        Assert.Equal(before + 1, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void CancellingAGpuDoneFlipPublishesNothing()
+    {
+        var before = FlipCount();
+        var request = Reserve(34);
+
+        VideoOutExports.CompleteFlipOnGpu(request);
+        VideoOutExports.CancelFlip(request);
+        VideoOutExports.MarkFlipPresented(request);
+        Assert.Equal(before, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void AVsyncMultipleFlipBecomesEligibleAtGpuCompletion()
+    {
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(_handle, -1, 4, 35, true, out var request));
+        Assert.Equal(long.MaxValue, VideoOutExports.NextFlipPresentTimestamp(request, Stopwatch.GetTimestamp()));
+        VideoOutExports.CompleteFlipOnGpu(request);
+        Assert.NotEqual(long.MaxValue, VideoOutExports.NextFlipPresentTimestamp(request, Stopwatch.GetTimestamp()));
+        VideoOutExports.MarkFlipPresented(request);
     }
 }

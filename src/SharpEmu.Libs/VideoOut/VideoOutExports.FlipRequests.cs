@@ -4,6 +4,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -18,6 +19,9 @@ public static partial class VideoOutExports
     private enum FlipRequestState
     {
         Reserved,
+
+        // The GPU finished the work before the flip; the guest is told at presentation.
+        GpuDone,
         Completed,
     }
 
@@ -57,7 +61,7 @@ public static partial class VideoOutExports
             var result = TryReserveFlipRequest(handle, index, flipMode, flipArgument, gpuQueued: true, out var requestId);
             if (result != 0)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"Could not submit the GPU flip: result=0x{result:X8} handle={handle} index={index} mode={flipMode} arg={flipArgument}");
             }
 
@@ -150,6 +154,7 @@ public static partial class VideoOutExports
         }
 
         requestId = request.RequestId;
+        _frameTimes?.Record();
         return 0;
     }
 
@@ -183,9 +188,33 @@ public static partial class VideoOutExports
             if (_flipPacingDisabled || !request.GpuQueued) return true;
             if (request.FlipMode == VideoOutDisplayClock.FlipModeVsyncMultiple && request.ReadyTimestamp is null)
                 return false;
-            return VideoOutDisplayClock.NextFlipTimestamp(port.OpenTimestamp, port.LastPresentationTimestamp,
+            return VideoOutDisplayClock.NextFlipTimestamp(port.DisplayClock.AnchorTimestamp, port.LastPresentationTimestamp,
                     timestamp, port.RefreshRate, port.FlipRate, request.FlipMode, port.OutputHeight,
                     port.WindowTop, port.WindowBottom, request.ReadyTimestamp ?? timestamp) <= timestamp;
+        }
+    }
+
+    // The earliest timestamp at which CanPresentFlip can become true for this request;
+    // long.MaxValue while the request still waits on its ready signal or is gone.
+    internal static long NextFlipPresentTimestamp(ulong requestId, long timestamp)
+    {
+        if (requestId == 0)
+        {
+            return timestamp;
+        }
+        lock (_stateGate)
+        {
+            if (!_flipRequests.TryGetValue(requestId, out var request) ||
+                request.Outcome != FlipOutcome.Pending || !_ports.TryGetValue(request.Handle, out var port))
+            {
+                return long.MaxValue;
+            }
+            if (_flipPacingDisabled || !request.GpuQueued) return timestamp;
+            if (request.FlipMode == VideoOutDisplayClock.FlipModeVsyncMultiple && request.ReadyTimestamp is null)
+                return long.MaxValue;
+            return VideoOutDisplayClock.NextFlipTimestamp(port.DisplayClock.AnchorTimestamp, port.LastPresentationTimestamp,
+                timestamp, port.RefreshRate, port.FlipRate, request.FlipMode, port.OutputHeight,
+                port.WindowTop, port.WindowBottom, request.ReadyTimestamp ?? timestamp);
         }
     }
 
@@ -204,29 +233,83 @@ public static partial class VideoOutExports
                 return;
             }
 
-            request.State = FlipRequestState.Completed;
-            if (_ports.TryGetValue(request.Handle, out var port))
-            {
-                port.FlipCount++;
-                port.FlipProcessTime = KernelRuntimeCompatExports.ReadProcessTimeMicroseconds();
-                port.FlipProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
-                port.FlipArg = request.FlipArg;
-                port.CurrentBuffer = request.BufferIndex;
-                port.FlipPendingCount = Math.Max(0, port.FlipPendingCount - 1);
-                if (request.GpuQueued)
-                {
-                    port.GpuQueueCount = Math.Max(0, port.GpuQueueCount - 1);
-                }
+            ReleaseGpuQueueSlotLocked(request);
+            PublishFlipLocked(request);
+        }
 
-                var completedAt = Stopwatch.GetTimestamp();
-                request.ReadyTimestamp = completedAt;
-                port.CompletedLatencyFlipArgs[request.FlipArg] = completedAt;
-                port.CompletedLatencyFlipArgOrder.Enqueue((request.FlipArg, completedAt));
-                PruneTimestampHistory(port.CompletedLatencyFlipArgs, port.CompletedLatencyFlipArgOrder);
+        TriggerFlipEvents(request);
+    }
+
+    /// <summary>
+    /// The GPU finished the submission that ends in the flip. Only the GPU-side state moves:
+    /// the request becomes ready for the pacer and leaves the GPU queue count. The flip
+    /// count, current buffer, flip arg and the flip event are the guest's view of the
+    /// display, so they are published when the presenter shows (or drops) the frame; a
+    /// presenter that already decided publishes them here.
+    /// </summary>
+    internal static void CompleteFlipOnGpu(ulong requestId)
+    {
+        FlipRequest request;
+        lock (_stateGate)
+        {
+            if (!_flipRequests.TryGetValue(requestId, out request!) || request.State != FlipRequestState.Reserved)
+            {
+                return;
             }
 
-            RemoveIfFinishedLocked(request);
-            Monitor.PulseAll(_stateGate);
+            ReleaseGpuQueueSlotLocked(request);
+            if (request.Outcome == FlipOutcome.Pending)
+            {
+                request.State = FlipRequestState.GpuDone;
+                Monitor.PulseAll(_stateGate);
+                return;
+            }
+
+            PublishFlipLocked(request);
+        }
+
+        TriggerFlipEvents(request);
+    }
+
+    // Caller holds the state gate. The GPU no longer holds the request.
+    private static void ReleaseGpuQueueSlotLocked(FlipRequest request)
+    {
+        request.ReadyTimestamp = Stopwatch.GetTimestamp();
+        if (request.GpuQueued && _ports.TryGetValue(request.Handle, out var port))
+        {
+            port.GpuQueueCount = Math.Max(0, port.GpuQueueCount - 1);
+        }
+    }
+
+    // Caller holds the state gate. Publishes the counters the guest reads for a done flip.
+    private static void PublishFlipLocked(FlipRequest request)
+    {
+        request.State = FlipRequestState.Completed;
+        if (_ports.TryGetValue(request.Handle, out var port))
+        {
+            port.FlipCount++;
+            port.FlipProcessTime = KernelRuntimeCompatExports.ReadProcessTimeMicroseconds();
+            port.FlipProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
+            port.FlipArg = request.FlipArg;
+            ReleaseBufferLabelLocked(port, port.CurrentBuffer);
+            port.CurrentBuffer = request.BufferIndex;
+            port.FlipPendingCount = Math.Max(0, port.FlipPendingCount - 1);
+            var completedAt = Stopwatch.GetTimestamp();
+            port.CompletedLatencyFlipArgs[request.FlipArg] = completedAt;
+            port.CompletedLatencyFlipArgOrder.Enqueue((request.FlipArg, completedAt));
+            PruneTimestampHistory(port.CompletedLatencyFlipArgs, port.CompletedLatencyFlipArgOrder);
+        }
+
+        RemoveIfFinishedLocked(request);
+        Monitor.PulseAll(_stateGate);
+    }
+
+    // Outside the state gate: the equeue takes its own locks.
+    private static void TriggerFlipEvents(FlipRequest request)
+    {
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            DsTrace.Emit(DsEv.FLIPDONE, request.RequestId, (ulong)request.BufferIndex);
         }
 
         var flipEvents = request.FlipEvents;
@@ -268,6 +351,7 @@ public static partial class VideoOutExports
 
     private static bool SetFlipOutcome(ulong requestId, FlipOutcome outcome)
     {
+        FlipRequest? published = null;
         lock (_stateGate)
         {
             if (!_flipRequests.TryGetValue(requestId, out var request) || request.Outcome != FlipOutcome.Pending)
@@ -281,10 +365,27 @@ public static partial class VideoOutExports
             {
                 port.LastPresentationTimestamp = Stopwatch.GetTimestamp();
             }
-            RemoveIfFinishedLocked(request);
-            Monitor.PulseAll(_stateGate);
-            return true;
+
+            if (request.State == FlipRequestState.GpuDone)
+            {
+                // The GPU finished first; the guest learns of the flip now. A dropped
+                // frame is still a done flip to the guest, which waits on its event.
+                PublishFlipLocked(request);
+                published = request;
+            }
+            else
+            {
+                RemoveIfFinishedLocked(request);
+                Monitor.PulseAll(_stateGate);
+            }
         }
+
+        if (published is not null)
+        {
+            TriggerFlipEvents(published);
+        }
+
+        return true;
     }
 
     // Both responsibilities are done: the retirement ran and the presenter released the frame.
@@ -341,12 +442,12 @@ public static partial class VideoOutExports
 
     private static void CancelFlipLocked(FlipRequest request)
     {
-        if (request.State == FlipRequestState.Reserved)
+        if (request.State is FlipRequestState.Reserved or FlipRequestState.GpuDone)
         {
             if (_ports.TryGetValue(request.Handle, out var port))
             {
                 port.FlipPendingCount = Math.Max(0, port.FlipPendingCount - 1);
-                if (request.GpuQueued)
+                if (request.GpuQueued && request.State == FlipRequestState.Reserved)
                 {
                     port.GpuQueueCount = Math.Max(0, port.GpuQueueCount - 1);
                 }

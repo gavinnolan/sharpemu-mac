@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.VideoOut;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Presentation;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 

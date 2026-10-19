@@ -12,6 +12,9 @@ using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
+using SharpEmu.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 

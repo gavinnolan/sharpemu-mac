@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Images;
 using Silk.NET.Vulkan;
@@ -22,8 +23,8 @@ public sealed unsafe partial class RenderHostDeviceTests
         var metadataAddress = address + 0x10000;
         harness.Write(address, Bytes((ushort)0, (ushort)0, (ushort)0, (ushort)0));
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0xff, 4096).ToArray());
-        var request = AsColorTarget(LinearRequest(address, 256, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        var request = AsColorTarget(LinearRequest(address, 256, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 8, 1));
         request.Description.Metadata.Kind = MetadataKind.Dcc;
         request.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
         request.Description.Metadata.NativeColorClear = true;

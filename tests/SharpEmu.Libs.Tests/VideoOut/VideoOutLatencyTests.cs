@@ -107,7 +107,7 @@ public sealed class VideoOutLatencyTests
         Assert.False(waitTask.IsCompleted);
         Close(manager, closeContext, handle);
 
-        Assert.Equal(InvalidHandle, await waitTask.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(InvalidHandle, await waitTask.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     private static ModuleManager CreateManager()

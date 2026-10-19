@@ -125,4 +125,48 @@ public sealed class VideoOutDisplayClockTests
 
     private static long GetNextFlipTimestamp(long openedAt, long lastPresentedAt, long timestamp, uint refreshRate, int flipRate, int flipMode) =>
         VideoOutDisplayClock.NextFlipTimestamp(openedAt, lastPresentedAt, timestamp, refreshRate, flipRate, flipMode, 1000, 100, 900, timestamp);
+
+    [Fact]
+    public void RateChangeReanchorsAtTheLastVblankAndKeepsCountingUp()
+    {
+        var openedAt = Stopwatch.Frequency;
+        var fast = VideoOutDisplayClock.RefreshInterval(120);
+        var slow = VideoOutDisplayClock.RefreshInterval(60);
+        var clock = new VideoOutDisplayClock(openedAt, 0, 0, (ulong)Stopwatch.Frequency);
+        clock.Advance(openedAt + 10 * fast + 1, 120);
+        Assert.Equal(10UL, clock.Count);
+        var lastFast = clock.LastTimestamp;
+
+        // Halving the rate must not freeze the count or push the next vblank out.
+        Assert.Equal(lastFast + slow, clock.NextTimestamp(60));
+        Assert.Equal(lastFast, clock.AnchorTimestamp);
+        clock.Advance(lastFast + 3 * slow + 1, 60);
+        Assert.Equal(13UL, clock.Count);
+        Assert.Equal(lastFast + 3 * slow, clock.LastTimestamp);
+        Assert.Equal((ulong)(clock.LastTimestamp - openedAt), clock.ProcessCounter);
+
+        clock.Advance(clock.LastTimestamp + 2 * fast, 120);
+        Assert.Equal(15UL, clock.Count);
+    }
+
+    [Theory]
+    [InlineData("60", 60u, 60u)]
+    [InlineData("120", 120u, 120u)]
+    [InlineData("59.94", 59940u, 60u)]
+    [InlineData("119.88", 119880u, 120u)]
+    public void FractionalRatesUseMillihertz(string text, uint expectedRate, uint expectedNominal)
+    {
+        Assert.True(VideoOutDisplayClock.TryParseRefreshRate(text, out var rate));
+        Assert.Equal(expectedRate, rate);
+        Assert.Equal(expectedNominal, VideoOutDisplayClock.NominalHz(rate));
+        var expectedInterval = (double)Stopwatch.Frequency / (expectedRate >= 1000 ? expectedRate / 1000.0 : expectedRate);
+        Assert.InRange(VideoOutDisplayClock.RefreshInterval(rate), expectedInterval - 1, expectedInterval + 1);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("10")]
+    [InlineData("abc")]
+    public void InvalidRatesAreRejected(string text) =>
+        Assert.False(VideoOutDisplayClock.TryParseRefreshRate(text, out _));
 }

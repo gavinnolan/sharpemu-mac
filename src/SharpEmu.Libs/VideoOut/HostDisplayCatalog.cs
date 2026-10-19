@@ -1,9 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SDL;
-using static SDL.SDL3;
-
 namespace SharpEmu.Libs.VideoOut;
 
 public sealed record HostDisplayMode(int Width, int Height, int RefreshRate);
@@ -13,105 +10,67 @@ public sealed record HostDisplayInfo(
     string Name,
     IReadOnlyList<HostDisplayMode> Modes);
 
-public static unsafe class HostDisplayCatalog
+/// <summary>
+/// Enumerates the host's displays through the provider the application composed in:
+/// CoreGraphics/AppKit on macOS, SDL on Windows and Linux. The platform package registers
+/// its provider at startup, so this type carries no OS check and no windowing dependency —
+/// which is also why a macOS process never spins up an SDL video subsystem just to list modes.
+/// With no provider registered (unit tests, headless tools) the fallback mode list is returned.
+/// </summary>
+public static class HostDisplayCatalog
 {
-    private const SDL_InitFlags VideoFlag = SDL_InitFlags.SDL_INIT_VIDEO;
     private static int _queryFailureLogged;
+    private static Func<IReadOnlyList<HostDisplayInfo>?>? _provider;
+    private static string _providerName = "none";
+
+    /// <summary>
+    /// Installs the display enumerator. The provider returns null or an empty list when it
+    /// cannot enumerate; the caller then gets <see cref="CreateFallback"/> and one warning.
+    /// </summary>
+    public static void RegisterProvider(string name, Func<IReadOnlyList<HostDisplayInfo>?> provider)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(provider);
+        _providerName = name;
+        _provider = provider;
+    }
 
     public static IReadOnlyList<HostDisplayInfo> Query()
     {
-        var initializedHere = false;
-        var videoReady = false;
+        if (_provider is not { } provider)
+        {
+            return CreateFallback();
+        }
+
+        IReadOnlyList<HostDisplayInfo>? displays;
         try
         {
-            initializedHere = (SDL_WasInit(VideoFlag) & VideoFlag) == 0;
-            if (initializedHere && !SDL_InitSubSystem(VideoFlag))
-            {
-                LogQueryFailure(SDL_GetError() ?? "unknown SDL error");
-                return CreateFallback();
-            }
-            videoReady = true;
-
-            using var displays = SDL_GetDisplays();
-            if (displays is null || displays.Count == 0)
-            {
-                LogQueryFailure("SDL reported no displays");
-                return CreateFallback();
-            }
-
-            var result = new List<HostDisplayInfo>(displays.Count);
-            for (var index = 0; index < displays.Count; index++)
-            {
-                var display = displays[index];
-                var name = SDL_GetDisplayName(display);
-                var modes = ReadModes(display);
-                result.Add(new HostDisplayInfo(
-                    index,
-                    string.IsNullOrWhiteSpace(name) ? $"Display {index + 1}" : name,
-                    modes));
-            }
-
-            return result;
+            displays = provider();
         }
         catch (Exception exception)
         {
             LogQueryFailure(exception.Message);
             return CreateFallback();
         }
-        finally
-        {
-            if (initializedHere && videoReady)
-            {
-                SDL_QuitSubSystem(VideoFlag);
-            }
-        }
-    }
 
-    private static IReadOnlyList<HostDisplayMode> ReadModes(SDL_DisplayID display)
-    {
-        var modes = new HashSet<HostDisplayMode>();
-        using (var fullscreenModes = SDL_GetFullscreenDisplayModes(display))
+        if (displays is not { Count: > 0 })
         {
-            if (fullscreenModes is not null)
-            {
-                for (var index = 0; index < fullscreenModes.Count; index++)
-                {
-                    var mode = fullscreenModes[index];
-                    AddMode(modes, &mode);
-                }
-            }
+            LogQueryFailure("the display provider reported no displays");
+            return CreateFallback();
         }
 
-        AddMode(modes, SDL_GetDesktopDisplayMode(display));
-        if (modes.Count == 0)
-        {
-            return CreateFallbackModes();
-        }
-
-        return modes
-            .OrderByDescending(mode => (long)mode.Width * mode.Height)
-            .ThenByDescending(mode => mode.Width)
-            .ThenByDescending(mode => mode.RefreshRate)
+        // A display whose mode list came back empty still has to offer something selectable.
+        return displays
+            .Select(display => display.Modes.Count == 0
+                ? new HostDisplayInfo(display.Index, display.Name, CreateFallbackModes())
+                : display)
             .ToArray();
     }
 
-    private static void AddMode(HashSet<HostDisplayMode> modes, SDL_DisplayMode* mode)
-    {
-        if (mode is null || mode->w <= 0 || mode->h <= 0)
-        {
-            return;
-        }
-
-        var refreshRate = mode->refresh_rate > 0
-            ? Math.Max(1, (int)Math.Round(mode->refresh_rate, MidpointRounding.AwayFromZero))
-            : 0;
-        modes.Add(new HostDisplayMode(mode->w, mode->h, refreshRate));
-    }
-
-    private static IReadOnlyList<HostDisplayInfo> CreateFallback() =>
+    internal static IReadOnlyList<HostDisplayInfo> CreateFallback() =>
         [new HostDisplayInfo(0, "Display 1", CreateFallbackModes())];
 
-    private static IReadOnlyList<HostDisplayMode> CreateFallbackModes() =>
+    internal static IReadOnlyList<HostDisplayMode> CreateFallbackModes() =>
         [
             new HostDisplayMode(3840, 2160, 60),
             new HostDisplayMode(2560, 1440, 60),
@@ -123,7 +82,7 @@ public static unsafe class HostDisplayCatalog
     {
         if (Interlocked.Exchange(ref _queryFailureLogged, 1) == 0)
         {
-            Console.Error.WriteLine($"[GUI][WARN] SDL display query failed: {message}");
+            Console.Error.WriteLine($"[GUI][WARN] {_providerName} display query failed: {message}");
         }
     }
 }

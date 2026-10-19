@@ -5,7 +5,7 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
@@ -159,7 +159,7 @@ public sealed unsafe partial class RenderHostDeviceTests
         var instructions = new List<Gen5ShaderInstruction>();
         void Parameter(string opcode, uint source) => instructions.Add(new Gen5ShaderInstruction(
             (uint)instructions.Count * 4, Gen5ShaderEncoding.Vintrp, opcode, [source],
-            [Gen5Operand.Vector(source)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(0, 0)));
+            [Gen5Operand.Vector(source)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(0, 0) { Parameter = source }));
         Parameter("VInterpMovF32", selector);
         if (interpolate)
         {

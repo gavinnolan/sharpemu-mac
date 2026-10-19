@@ -1,12 +1,13 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler;
@@ -170,11 +171,12 @@ public sealed unsafe partial class RenderHostDeviceTests
 
         public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel,
             ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
-            bool pixelActive, bool depthBound) => throw new InvalidOperationException("The test requires mesh programs.");
+            bool pixelActive, bool depthBound, bool depthAspectBound, bool stencilAspectBound = false) =>
+            throw new InvalidOperationException("The test requires mesh programs.");
 
         public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth,
             VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering,
-            PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram,
+            GpuPrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram,
             ShaderProgram pixelProgram) => host.CreateGraphicsPipeline(ShaderPipelineCache.BuildGraphicsDescription(
                 colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled,
                 disableBlending, vertexProgram, pixelProgram, host.NoAttachmentSampleCounts));

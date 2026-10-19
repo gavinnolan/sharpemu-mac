@@ -5,13 +5,13 @@ using System.Diagnostics;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal static class DescriptorStallProfile
+public static class DescriptorStallProfile
 {
-    internal enum Operation { Prepare, ResolveImages, ResolveSamplers, FindAddressBuffers, FindBuffers, ValidateImages, Bind, BindBuffers, ObtainAddressRanges, BindImages, Count }
+    public enum Operation { Prepare, ResolveImages, ResolveSamplers, FindAddressBuffers, FindBuffers, ValidateImages, Bind, BindBuffers, ObtainAddressRanges, BindImages, Count }
     private static readonly long[] Ticks = new long[(int)Operation.Count];
     private static readonly long[] Calls = new long[(int)Operation.Count];
 
-    internal static void WriteReport(TextWriter? output = null)
+    public static void WriteReport(TextWriter? output = null)
     {
         if (!RenderPhaseProfile.FrameTraceEnabled) return;
         var parts = new string[(int)Operation.Count];
@@ -20,18 +20,18 @@ internal static class DescriptorStallProfile
         (output ?? Console.Error).WriteLine($"[PERF][DESCRIPTOR_DETAIL] cumulative=1 inclusive=1 {string.Join(" ", parts)}");
     }
 
-    internal static Scope Measure(Operation operation, ulong hash, int buffers, int images, int samplers) =>
+    public static Scope Measure(Operation operation, ulong hash, int buffers, int images, int samplers) =>
         RenderPhaseProfile.Enabled && RenderPhaseProfile.FrameTraceEnabled
             ? new Scope(operation, hash, buffers, images, samplers) : default;
 
-    internal readonly struct Scope : IDisposable
+    public readonly struct Scope : IDisposable
     {
         private readonly Operation _operation;
         private readonly ulong _hash;
         private readonly int _buffers, _images, _samplers, _generationZero, _generationOne, _generationTwo;
         private readonly long _started, _allocated;
 
-        internal Scope(Operation operation, ulong hash, int buffers, int images, int samplers)
+        public Scope(Operation operation, ulong hash, int buffers, int images, int samplers)
         {
             _operation = operation;
             _hash = hash;

@@ -16,10 +16,40 @@ namespace SharpEmu.Libs.VideoOut;
 /// Scopes nest: entering a phase suspends the enclosing one and resumes it on
 /// dispose, so a <see cref="Phase.QueueSubmit"/> inside
 /// <see cref="Phase.Flush"/> is never counted twice.
+///
+/// Backend contract: the phases a graphics backend package measures, plus the
+/// report provider seam, are public here; everything the shared engine charges
+/// for itself stays internal.
 /// </summary>
-internal static class RenderPhaseProfile
+public static class RenderPhaseProfile
 {
-    internal enum Phase
+    // Backend-owned cache counters append themselves to the per-window report. The shared
+    // profile cannot name them: the resource caches they measure live in the graphics backend
+    // package, which the shared engine does not reference.
+    private static readonly List<Func<string>> ReportProviders = [];
+
+    /// <summary>
+    /// Appends a backend-owned counter block to the per-window report.
+    /// </summary>
+    /// <remarks>
+    /// Backend contract: the resource caches these counters measure live in the
+    /// graphics backend package, which the shared engine does not reference, so
+    /// the backend hands in the formatter instead.
+    /// </remarks>
+    public static void RegisterReportProvider(Func<string> provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        lock (ReportProviders)
+        {
+            if (!ReportProviders.Contains(provider))
+            {
+                ReportProviders.Add(provider);
+            }
+        }
+    }
+
+    /// <summary>The render-thread phases the profile charges time to.</summary>
+    public enum Phase
     {
         /// <summary>Outside any measured phase — loop overhead.</summary>
         Unattributed = 0,
@@ -80,6 +110,8 @@ internal static class RenderPhaseProfile
         DrawVertexEvaluation,
         DrawBindingAssembly,
         ProgramPreparation,
+        // The part of program preparation that holds the pipeline cache's own lock.
+        ProgramPrepareLocked,
         ProgramSourceRead,
         VertexInputResolution,
         PixelInputResolution,
@@ -156,6 +188,29 @@ internal static class RenderPhaseProfile
         ProgramPlanning,
         ProgramLayoutRequest,
         ProgramTranslation,
+        DccClearScan,
+        GuestWindowResolve,
+        CommandProcessorWrite,
+        OcclusionDump,
+        ShaderHeaderLookup,
+        ImageViewLookup,
+        GraphicsStateApply,
+        ArgumentBufferWrite,
+        ResourceBinding,
+        RenderPassBegin,
+        PendingGpuWriteQuery,
+        DccRearm,
+        GpuWriteFlush,
+        MappedSizeClamp,
+        StorageBufferResolve,
+        // The command stream's own time on the Metal worker, split by what it was doing.
+        // Exclusive: nested scopes (draw translation, waits, label encoding) are carved out.
+        CommandPacketRead,
+        CommandRegisterWrite,
+        CommandDrawEntry,
+        CommandFlush,
+        CommandLabelEncode,
+        CommandCpBookkeeping,
         Count,
     }
 
@@ -200,7 +255,9 @@ internal static class RenderPhaseProfile
     private static long _lastSubmissionTimestamp;
     private static long _submissionCount;
 
-    internal static void RecordSubmissionArrival()
+    /// <summary>Marks the arrival of a guest submission in the current frame trace row.</summary>
+    /// <remarks>Backend contract: only the backend sees the submission arrive.</remarks>
+    public static void RecordSubmissionArrival()
     {
         if (!FrameTraceEnabled) return;
         Interlocked.Exchange(ref _lastSubmissionTimestamp, Stopwatch.GetTimestamp());
@@ -208,7 +265,9 @@ internal static class RenderPhaseProfile
     }
 
     // Keep recent presentation intervals in memory; format them only after the window stops.
-    internal static void WriteFrameTrace()
+    /// <summary>Flushes the per-frame trace rows collected since the last call.</summary>
+    /// <remarks>Backend contract: the backend decides where a frame ends.</remarks>
+    public static void WriteFrameTrace()
     {
         if (!FrameTraceEnabled) return;
         var stride = (int)Phase.Count + 4;
@@ -228,7 +287,7 @@ internal static class RenderPhaseProfile
         _frameTraceCount = 0;
         _previousFrameTimestamp = 0;
     }
-    internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Count }
+    internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Block, Count }
     private static readonly long[] _commandReadCalls = new long[(int)CommandReadKind.Count];
     private static readonly long[] _commandReadBytes = new long[(int)CommandReadKind.Count];
 
@@ -242,7 +301,12 @@ internal static class RenderPhaseProfile
         _commandReadCalls[(int)kind]++;
         _commandReadBytes[(int)kind] += bytes;
     }
-    internal static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
+    /// <summary>Whether <see cref="RecordImageUpload"/> would record anything.</summary>
+    /// <remarks>
+    /// Backend contract: lets a backend skip gathering upload timings when the
+    /// profile is off or the call is not on the render thread.
+    /// </remarks>
+    public static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
 
     private readonly record struct ImageUploadKey(ulong Address, uint Width, uint Height, uint Depth,
         uint Layers, uint Levels, uint Format, uint TileMode, string Reason,
@@ -269,7 +333,9 @@ internal static class RenderPhaseProfile
     private static readonly Dictionary<ImageUploadKey, ImageUploadStatistics> _imageUploads = new();
     private static ImageUploadStatistics _otherImageUploads = new();
 
-    internal static void RecordImageUpload(in SharpEmu.Libs.Gpu.Images.ImageDescription description,
+    /// <summary>Records the cost of one guest image upload, grouped by image.</summary>
+    /// <remarks>Backend contract: the backend owns the image cache that performs the upload.</remarks>
+    public static void RecordImageUpload(in SharpEmu.Libs.Gpu.Images.ImageDescription description,
         string reason, long watchTicks, long sourceTicks, long recordTicks,
         string uploadPath = "unknown", ulong writeAddress = 0, ulong writeSize = 0)
     {
@@ -340,7 +406,8 @@ internal static class RenderPhaseProfile
     [ThreadStatic] private static long _lastTimestamp;
     [ThreadStatic] private static int _scopeDepth;
 
-    internal readonly ref struct Scope
+    /// <summary>The scope returned by <see cref="Measure"/>; disposing it charges the elapsed time.</summary>
+    public readonly ref struct Scope
     {
         private readonly Phase _previous;
         private readonly bool _active;
@@ -390,10 +457,18 @@ internal static class RenderPhaseProfile
 
     // Cache calls on other threads must not enter the render-thread counters.
     // Check the switch first to avoid thread-local storage allocation when profiling is disabled.
-    internal static Scope MeasureDetail(Phase phase) =>
+    /// <summary>
+    /// Like <see cref="Measure"/>, but only inside an enclosing scope, so cache
+    /// work on other threads does not enter the render-thread counters.
+    /// </summary>
+    /// <remarks>Backend contract: the measurement entry point backends use.</remarks>
+    public static Scope MeasureDetail(Phase phase) =>
         Enabled && _scopeDepth > 0 ? Measure(phase) : default;
 
     internal static bool DetailMeasurementsEnabled => Enabled && _scopeDepth > 0;
+
+    /// <summary>The ticks charged to a phase in the current report window; for tests.</summary>
+    internal static long PhaseTicks(Phase phase) => Volatile.Read(ref _ticks[(int)phase]);
 
     /// <summary>
     /// Closes out the running phase and switches to <paramref name="next"/>,
@@ -415,6 +490,21 @@ internal static class RenderPhaseProfile
         _lastTimestamp = now;
         _current = next;
         return previous;
+    }
+
+    /// <summary>
+    /// Drives the report from the render thread without counting a frame.
+    /// </summary>
+    /// <remarks>
+    /// A title that presents nothing is the one whose breakdown is wanted most — where the
+    /// thread's second goes is the whole question when no frame comes out — and a report
+    /// driven only by presented frames never runs there. Callers pass through the same
+    /// window check, so this costs a timestamp per call.
+    /// </remarks>
+    public static void RecordProgress()
+    {
+        if (!Enabled) return;
+        ReportIfWindowElapsed();
     }
 
     /// <summary>Called once per presented frame; also drives the report.</summary>
@@ -441,6 +531,17 @@ internal static class RenderPhaseProfile
             _frameTraceCount++;
         }
 
+        ReportWindow(now);
+    }
+
+    private static void ReportIfWindowElapsed()
+    {
+        Charge(_current);
+        ReportWindow(Stopwatch.GetTimestamp());
+    }
+
+    private static void ReportWindow(long now)
+    {
         var elapsedTicks = now - _windowStart;
         if (elapsedTicks < _reportSeconds * Stopwatch.Frequency)
         {
@@ -486,14 +587,14 @@ internal static class RenderPhaseProfile
 
         GpuWaitSiteProfile.Report();
         ComputeCompileProfile.Report();
-        SharpEmu.ShaderCompiler.Vulkan.ShaderTranslationProfile.Report();
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
-        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());
-        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Vulkan.GpuSyncProfile.TakeReport());
-        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeLookupReport());
-        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeDccReport());
+        Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourcePlanBuildCounters.TakeReport());
+        foreach (var provider in ReportProviders)
+        {
+            Console.Error.WriteLine(provider());
+        }
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();
         DescriptorStallProfile.WriteReport();
         SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.WriteReport();

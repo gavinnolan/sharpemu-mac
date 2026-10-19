@@ -5,22 +5,22 @@ using System.Diagnostics;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal static class ComputeCompileProfile
+public static class ComputeCompileProfile
 {
-    internal enum Part { StartDelay, SlotWait, CacheLoad, DriverCompile, ConsumeDelay, Count }
+    public enum Part { StartDelay, SlotWait, CacheLoad, DriverCompile, ConsumeDelay, Count }
     private static readonly long[] Ticks = new long[(int)Part.Count];
     private static readonly long[] Calls = new long[(int)Part.Count];
 
-    internal static long Start() => RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
+    public static long Start() => RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
 
-    internal static void Record(Part part, long start)
+    public static void Record(Part part, long start)
     {
         if (!RenderPhaseProfile.Enabled || start == 0) return;
         Interlocked.Add(ref Ticks[(int)part], Stopwatch.GetTimestamp() - start);
         Interlocked.Increment(ref Calls[(int)part]);
     }
 
-    internal static void Report()
+    public static void Report()
     {
         if (!RenderPhaseProfile.Enabled) return;
         var parts = new List<string>();

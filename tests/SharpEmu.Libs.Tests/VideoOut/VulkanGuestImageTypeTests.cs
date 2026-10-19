@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Silk.NET.Vulkan;
-using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;

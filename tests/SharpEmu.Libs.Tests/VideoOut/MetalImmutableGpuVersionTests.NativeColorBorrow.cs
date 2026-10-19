@@ -1,0 +1,609 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+using System.Collections;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
+using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Memory;
+using SharpEmu.Gpu.Metal;
+using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.ShaderCompiler.Resources;
+using Xunit;
+
+namespace SharpEmu.Libs.Tests.VideoOut;
+
+public sealed partial class MetalImmutableGpuVersionTests
+{
+    private static object? nativeColorFixtureQuarantine;
+    [NativeColorBorrowFact]
+    public void ActualSelectedColorOriginalBorrowUsesLaterEncoderInSameCommandBuffer() => RunNativeColorBorrow(false);
+    [NativeColorBorrowFact]
+    public void ActualSelectedColorOriginalBorrowUsesOriginalSuccessfulStatus4Batch() => RunNativeColorBorrow(true);
+
+    [NativeColorBorrowFact]
+    public void ActualNativeColorPredecessorFailureConsumesEveryTemporaryRetainAndPreservesCause() =>
+        RunNativeColorBorrow(true, failPredecessorCleanup: true);
+
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerAllowsDisjointClosedMemoryWriteOnlyAfterRealGpuCompletion() =>
+        RunNativeColorBorrow(true, typedMemory: "disjoint");
+
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerRejectsClosedMemoryWriteThroughAnotherVirtualPhysicalAlias() =>
+        RunNativeColorBorrow(true, typedMemory: "physical-alias");
+
+    [NativeColorBorrowFact]
+    public void ActualClosedMemoryWriteCannotAdoptReplacementMappingAfterItsCohortCheck() =>
+        RunNativeColorBorrow(true, typedMemory: "replacement-before-prepare");
+
+    [NativeColorBorrowFact]
+    public void ActualOriginalClosedMemoryWritePreservesTrackedDestinationNotification() =>
+        RunNativeColorBorrow(true, typedMemory: "tracked-destination");
+
+    [NativeColorBorrowFact]
+    public void ActualClosedMemoryWriteRefusesOriginalRightsChangedAfterItsCohortCheck() =>
+        RunNativeColorBorrow(true, typedMemory: "rights-before-prepare");
+
+    [NativeColorBorrowFact]
+    public void ActualClosedMemoryWriteCancelsOriginalTicketOnChangedSessionWithoutBytesOrAck() =>
+        RunNativeColorBorrow(true, typedMemory: "session-before-prepare");
+
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerAllowsOriginalFourByteZeroFillAfterGpuCompletion() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-disjoint4");
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerAllowsOriginalPatternedFillWithFullGuestOracle() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-pattern");
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerRejectsOriginalFillPhysicalAliasWithoutConsumerOrAck() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-physical-alias");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillCannotAdoptReplacementAfterCohortValidation() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-replacement-before-prepare");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillRefusesRightsRevokedAfterCohortValidation() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-rights-before-prepare");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillRefusesChangedSessionWithoutBytesOrAck() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-session-before-prepare");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillPreservesTrackedDestinationDirtyNotification() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-tracked-destination");
+
+    // The typed receipt requires the production wrapper's exact execution
+    // scope. Keep its per-pass budget and bound all fixture passes to the same
+    // aggregate five seconds as the original direct-core fixture helper.
+    private static void DrainTypedWithActualRenderScope(NativeState state)
+    {
+        var deadline = Environment.TickCount64 + 5000;
+        while (true)
+        {
+            Call("TryDrainGuestWork", state.NativeFaceDevice, state.NativeFaceQueue);
+            lock (Field("_gate").GetValue(null)!)
+                if ((int)Field("_pendingGuestWorkCount").GetValue(null)! == 0) return;
+            Assert.True(Environment.TickCount64 < deadline,
+                "Typed native fixture did not finish its actual bounded render passes within five seconds.");
+        }
+    }
+
+    private void RunNativeColorBorrow(bool completedFirst, bool failPredecessorCleanup = false, string? typedMemory = null)
+    {
+        var originalFill = typedMemory?.StartsWith("fill-", StringComparison.Ordinal) == true;
+        if (originalFill) typedMemory = typedMemory![5..];
+        if (typedMemory == "disjoint4") typedMemory = "disjoint";
+        var fillBytes = typedMemory == "pattern" ? 4096ul : 4ul;
+        var fillValue = typedMemory == "pattern" ? 0x12345678u : 0u;
+        NativeDepthAssert(DeviceRequested());
+        Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH"), RuntimeInformation.ProcessArchitecture.ToString());
+        Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_FRAMEWORK"), RuntimeInformation.FrameworkDescription);
+        Assert.Null(nativeColorFixtureQuarantine);
+        output.WriteLine($"native-color-borrow architecture={RuntimeInformation.ProcessArchitecture} framework={RuntimeInformation.FrameworkDescription} completed_first={completedFirst}");
+        var oldPlacement = MetalColorMipPlacement.Enabled;
+        var oldBorrow = MetalVideoPresenter.NativeColorBorrowEnabled;
+        var oldMemory = Field("_guestMemory").GetValue(null);
+        var oldOwner = Field("_renderOwner").GetValue(null);
+        var oldQueue = Field("_batchQueue").GetValue(null);
+        var oldPredecessorControl = Field("_nativeColorPredecessorValidationForControl").GetValue(null);
+        var oldTemporaryRelease = Field("_computeTextureReleaseOverride").GetValue(null);
+        var oldTemporaryFailure = Field("_textureSourceCleanupFailure").GetValue(null);
+        var oldBeforeWrite = Field("_commandMemoryBeforeOriginalWriteForControl").GetValue(null);
+        var oldSession = Field("_selectedStorageMipSession").GetValue(null);
+        var oldFatal = GpuFatal.OnFatal;
+        var reports = new List<string>();
+        NativeState? state = null; PhysicalVirtualMemory? physical = null;
+        IDisposable? queueScope = null;
+        TrackedCpuMemory? memory = null;
+        GuestRenderTarget? target = null; GuestDrawTexture? snapshot = null;
+        ulong address = 0;
+        ulong typedAddress = 0;
+        Task<bool>? typedCaller = null;
+        GuestImageWriteTracker.ContentToken trackedDestinationBefore = default;
+        nint borrowed = 0, readback = 0;
+        var safe = false;
+        Exception? primary = null;
+        var phase = "native-state";
+        try
+        {
+            GpuFatal.OnFatal = reports.Add;
+            state = new NativeState();
+            Field("_textureSourceGraphEnabled").SetValue(null, false);
+            Field("_renderOwner").SetValue(null, Thread.CurrentThread);
+            Assert.Null(Field("_guestCommandBufferStatusOverride").GetValue(null));
+            Assert.Null(Field("_guestCommandBufferWaitOverride").GetValue(null));
+            Assert.Empty((IDictionary)Field("_guestImages").GetValue(null)!);
+            Assert.Empty((IDictionary)Field("_guestDepthImages").GetValue(null)!);
+            Assert.Empty((IDictionary)Field("_nativeColorBatches").GetValue(null)!);
+            Assert.Empty((IDictionary)Field("_transientTargets").GetValue(null)!);
+            phase = "physical-provider";
+            physical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
+                backingBytes: 8 * 1024 * 1024UL, preReserveGuestAddressSpace: false);
+            const ulong chainBytes = 0x2B0000;
+            NativeDepthAssert(physical.TryHoldRangeAtOrAbove(0x71FC_0000_00, chainBytes, 65536, out address));
+            NativeDepthAssert(address != 0 && (address & 65535) == 0 && address >> 48 == 0);
+            NativeDepthAssert(physical.TryHoldRange(address, chainBytes));
+            NativeDepthAssert(physical.TryMapBacked(address, chainBytes, 0, GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map_failure={mapFailure}");
+            var originalBytes = Enumerable.Range(0, (int)chainBytes).Select(i => (byte)(i * 37 + i / 251)).ToArray();
+            NativeDepthAssert(physical.TryWriteBacking(address, originalBytes));
+            byte[]? typedBaseline = null;
+            if (typedMemory is not null)
+            {
+                // All mappings exist before either immutable original capture.
+                // The alias variant has another VA but the same selected backing
+                // offset; virtual separation is never a disjointness oracle.
+                typedAddress = address + chainBytes + 0x10000;
+                NativeDepthAssert(physical.TryHoldRange(typedAddress, 65536));
+                var backingOffset = typedMemory == "physical-alias" ? 0xB0000UL : chainBytes + 0x10000;
+                NativeDepthAssert(physical.TryMapBacked(typedAddress, 65536, backingOffset,
+                    GuestPageProtection.Read | GuestPageProtection.Write, out var typedMapFailure), $"typed_map_failure={typedMapFailure}");
+                if (typedMemory != "physical-alias")
+                {
+                    typedBaseline = Enumerable.Range(0, 65536).Select(i => (byte)(i * 13 + 29)).ToArray();
+                    NativeDepthAssert(physical.TryWriteBacking(typedAddress, typedBaseline));
+                    if (typedMemory == "tracked-destination")
+                    {
+                        GuestImageWriteTracker.Track(typedAddress, 65536, source: "native typed command destination", protect: true);
+                        NativeDepthAssert(GuestImageWriteTracker.TryGetProtectedObservedContentToken(typedAddress, 65536, out trackedDestinationBefore));
+                    }
+                }
+            }
+            memory = new TrackedCpuMemory(physical);
+            MetalVideoPresenter.AttachGuestMemory(memory);
+            MetalColorMipPlacement.Enabled = true; MetalVideoPresenter.NativeColorBorrowEnabled = true;
+            queueScope = MetalVideoPresenter.EnterGuestQueue("native.selected.color", 1);
+            var words = new ColorTargetWords(address, 0, 0x40730, 0, 0x907FC1FF, 0x4DC6C000, 72, 0, 0, 0, 0);
+            phase = "original-color-projection";
+            var normalized = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false)!.Value;
+            target = MetalColorMipPlacement.Project(memory, normalized, words,
+                new GuestRenderTarget(address, 512, 512, (uint)words.Layout, (uint)words.NumberType, Registers: words, TileMode: 27));
+            NativeDepthAssert(MetalColorMipPlacement.TryGet(target, out var original));
+            Assert.Equal(address + 0xB0000, target.Address); Assert.Equal(chainBytes, original.BackingByteCount);
+            phase = "producer-submit";
+            var shaders = state.CreateNativeColorBorrowShaders();
+            MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shaders.Pixel, [], [], 0, [target], shaders.Vertex,
+                3, 1, 4, null, [], GuestRenderState.Default, null, 0);
+            // Actual frontend preparation leaves BEFORE the queue consumer.
+            MetalVideoPresenter.ReleasePreparedNativeColorTarget(target);
+            uint[] raw = [(uint)(target.Address >> 8), 0xC4700000 | (uint)(target.Address >> 40), 0x007FC07F, 0x91B00FAC, 0, 0x00700000, 0, 0];
+            NativeDepthAssert(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, false, 0, [], ResourceDescriptor: raw,
+                Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
+            phase = "sampled-original-snapshot";
+            snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out var fallbacks));
+            Assert.Equal(0, fallbacks); Assert.Empty(snapshot.RgbaPixels); Assert.Null(snapshot.TiledSource);
+            phase = "producer-execution";
+            if (completedFirst)
+            {
+                state.DrainWithControlledBudget();
+                Call("WaitForFlushedGuestCommands");
+            }
+            else
+            {
+                object?[] take = [null]; NativeDepthAssert((bool)Call("TryTakeGuestWork", take)!);
+                var pending = take[0]!;
+                Call("ExecuteOffscreenDraw", state.NativeFaceDevice, state.NativeFaceQueue, pending.GetType().GetProperty("Work")!.GetValue(pending)!);
+                Call("CompleteGuestWork", pending);
+            }
+            phase = "native-borrow";
+            var command = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
+            object?[] create = [state.NativeFaceDevice, command, snapshot, false];
+            borrowed = (nint)Call("CreateDrawTexture", create)!;
+            Assert.True((bool)create[3]!); Assert.NotEqual((nint)0, borrowed);
+            Assert.Equal((nint)MtlPixelFormat.Rgba16Float, MetalNative.Send(borrowed, MetalNative.Selector("pixelFormat")));
+            Assert.Equal((nint)2, MetalNative.Send(borrowed, MetalNative.Selector("textureType")));
+            phase = "native-readback";
+            readback = MetalNative.SendNewBuffer(state.NativeFaceDevice, MetalNative.Selector("newBufferWithLength:options:"), 0x200000, 0);
+            Assert.NotEqual((nint)0, readback);
+            var blit = MetalNative.Send(command, MetalNative.Selector("blitCommandEncoder")); Assert.NotEqual((nint)0, blit);
+            Exception? encodingFailure = null;
+            try
+            {
+                MetalNative.SendCopyTextureToBuffer(blit, MetalNative.Selector("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
+                    borrowed, 0, 0, default, new MtlSize { Width = 512, Height = 512, Depth = 1 }, readback, 0, 4096, 0x200000);
+            }
+            catch (Exception error) { encodingFailure = error; }
+            try { MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding")); } catch (Exception cleanup) { NativeDepthPreserve(ref encodingFailure, cleanup); }
+            if (encodingFailure is not null) ExceptionDispatchInfo.Capture(encodingFailure).Throw();
+            var encodedRetain = borrowed; borrowed = 0; MetalNative.SendVoid(encodedRetain, MetalNative.Selector("release"));
+            Call("WaitForFlushedGuestCommands"); Assert.Equal((nint)4, MetalNative.Send(command, MetalNative.Selector("status"))); safe = true;
+            var actual = new byte[0x200000];
+            var contents = MetalNative.Send(readback, MetalNative.Selector("contents")); Assert.NotEqual((nint)0, contents);
+            Marshal.Copy(contents, actual, 0, actual.Length);
+            ushort[] expected = [BitConverter.HalfToUInt16Bits((Half)0.25f), BitConverter.HalfToUInt16Bits((Half)0.5f),
+                BitConverter.HalfToUInt16Bits((Half)0.75f), BitConverter.HalfToUInt16Bits((Half)1f)];
+            for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                Assert.Equal(expected[component], BitConverter.ToUInt16(actual, pixel * 8 + component * 2));
+            var unchanged = new byte[(int)chainBytes]; NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+            if (failPredecessorCleanup)
+            {
+                var originalFailure = new NotSupportedException("controlled predecessor boundary failure");
+                var cleanupFailure = new InvalidOperationException("controlled release failure after exact native release");
+                var released = new List<nint>();
+                var next = MetalColorMipPlacement.Project(memory, normalized, words,
+                    new GuestRenderTarget(address, 512, 512, (uint)words.Layout, (uint)words.NumberType, Registers: words, TileMode: 27));
+                target = next;
+                // Independent CPU-seeded temporary textures reach the failing
+                // predecessor boundary without a simultaneous read/write alias
+                // of the original color attachment in this taken draw.
+                var temporaryOne = new GuestDrawTexture(0, 1, 1, 10, 0, [11, 22, 33, 255], false, false);
+                var temporaryTwo = new GuestDrawTexture(0, 1, 1, 10, 0, [44, 55, 66, 255], false, false);
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shaders.Pixel, [temporaryOne, temporaryTwo], [], 0, [next], shaders.Vertex,
+                    3, 1, 4, null, [], GuestRenderState.Default, null, 0);
+                MetalVideoPresenter.ReleasePreparedNativeColorTarget(next);
+                var completedSequence = Field("_completedGuestWorkSequence").GetValue(null);
+                Field("_nativeColorPredecessorValidationForControl").SetValue(null, (Action)(() => throw originalFailure));
+                Field("_computeTextureReleaseOverride").SetValue(null, (Action<nint>)(handle =>
+                {
+                    released.Add(handle); MetalNative.SendVoid(handle, MetalNative.Selector("release"));
+                    if (released.Count == 1) throw cleanupFailure;
+                }));
+                var rejected = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+                var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
+                Assert.Same(originalFailure, fatal.InnerException);
+                Assert.Single(reports);
+                Assert.Equal(2, released.Count); Assert.All(released, handle => Assert.NotEqual((nint)0, handle));
+                Assert.NotEqual(released[0], released[1]);
+                Assert.Same(cleanupFailure, Field("_textureSourceCleanupFailure").GetValue(null));
+                Assert.Equal(completedSequence, Field("_completedGuestWorkSequence").GetValue(null));
+                Field("_nativeColorPredecessorValidationForControl").SetValue(null, oldPredecessorControl);
+                Field("_computeTextureReleaseOverride").SetValue(null, oldTemporaryRelease);
+                output.WriteLine("native-color-borrow predecessor_failure_primary_preserved=1 temporary_owned_retains=2 each_release_attempted=1 no_ack=1 status=4 initial_full_native_bytes=2097152");
+                goto FixtureFinished;
+            }
+            if (typedMemory is not null)
+            {
+                phase = "typed-memory-consumer";
+                var consumer = state.CreateNativeColorReadShader();
+                var consumerBindings = new GuestStageBindings(GuestStageKind.Pixel, [], [0], [], [], null, [], [], false, false, 0);
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(consumer, [snapshot], [], 0,
+                    [target with { Address = 0, Registers = null }], shaders.Vertex,
+                    3, 1, 4, null, [], GuestRenderState.Default, null, 0, stageBindings: [consumerBindings]);
+                MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
+                var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+                byte[] ownedWrite = [11, 22, 33, 44, 55, 66, 77, 88];
+                var expectedWrite = originalFill ? new byte[checked((int)fillBytes)] : ownedWrite.ToArray();
+                if (originalFill)
+                    for (var byteIndex = 0; byteIndex < expectedWrite.Length; byteIndex++)
+                        expectedWrite[byteIndex] = (byte)(fillValue >> ((byteIndex & 3) * 8));
+                typedCaller = Task.Run(() =>
+                {
+                    using var submitting = MetalVideoPresenter.EnterGuestQueue("native.selected.color", 1);
+                    if (!originalFill) return host.TryWriteGuest(typedAddress, ownedWrite);
+                    host.FillBuffer(typedAddress, fillBytes, fillValue, isGds: false);
+                    return true;
+                });
+                var deadline = Environment.TickCount64 + 5000;
+                while (true)
+                {
+                    int pending;
+                    lock (Field("_gate").GetValue(null)!) pending = (int)Field("_pendingGuestWorkCount").GetValue(null)!;
+                    if (pending == 2) break;
+                    Assert.False(typedCaller.IsCompleted, "The writer must remain at its accepted queue position.");
+                    Assert.True(Environment.TickCount64 < deadline, "Typed command write was not admitted.");
+                    Thread.Yield();
+                }
+                Array.Fill(ownedWrite, (byte)0xEE);
+                var completedBefore = Field("_completedGuestWorkSequence").GetValue(null);
+                if (typedMemory == "physical-alias")
+                {
+                    var rejected = Assert.Throws<TargetInvocationException>(() => DrainTypedWithActualRenderScope(state));
+                    var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
+                    Assert.Contains("ORIGINAL physical image", fatal.InnerException!.Message);
+                    Assert.Equal(completedBefore, Field("_completedGuestWorkSequence").GetValue(null));
+                    Assert.ThrowsAny<Exception>(() => typedCaller.GetAwaiter().GetResult());
+                    NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+                    output.WriteLine("native-color-typed-memory physical_alias_veto=1 no_writer=1 no_consumer_encode=1 no_ack=1 initial_CBstatus=4 initial_full_native_bytes=2097152");
+                    goto FixtureFinished;
+                }
+                if (typedMemory is "replacement-before-prepare" or "rights-before-prepare" or "session-before-prepare")
+                {
+                    var replacements = 0;
+                    Field("_commandMemoryBeforeOriginalWriteForControl").SetValue(null, (Action)(() =>
+                    {
+                        Field("_commandMemoryBeforeOriginalWriteForControl").SetValue(null, oldBeforeWrite);
+                        Assert.False(Monitor.IsEntered(Field("_gate").GetValue(null)!));
+                        if (typedMemory == "replacement-before-prepare")
+                        {
+                            NativeDepthAssert(physical.TryUnmapBacked(typedAddress, 65536));
+                            NativeDepthAssert(physical.TryMapBacked(typedAddress, 65536, 0xB0000,
+                                GuestPageProtection.Read | GuestPageProtection.Write, out _));
+                        }
+                        else if (typedMemory == "rights-before-prepare") NativeDepthAssert(physical.TryProtect(typedAddress, 65536, GuestPageProtection.Read));
+                        else Field("_selectedStorageMipSession").SetValue(null, (long)oldSession! + 1);
+                        replacements++;
+                    }));
+                    var rejected = Assert.Throws<TargetInvocationException>(() => DrainTypedWithActualRenderScope(state));
+                    var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
+                    Assert.Contains(typedMemory == "session-before-prepare" ? "ORIGINAL complete writable mapping/session" : "reserve its ORIGINAL", fatal.InnerException!.Message);
+                    Assert.ThrowsAny<Exception>(() => typedCaller.GetAwaiter().GetResult());
+                    Assert.Equal(1, replacements);
+                    Assert.Equal((long)completedBefore! + 1, Field("_completedGuestWorkSequence").GetValue(null));
+                    NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+                    if (typedMemory != "replacement-before-prepare")
+                    {
+                        var unchangedDestination = new byte[65536]; NativeDepthAssert(memory.TryRead(typedAddress, unchangedDestination));
+                        Assert.Equal(typedBaseline, unchangedDestination);
+                    }
+                    var completedConsumer = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
+                    var completedPixels = ReadNativeColorThroughBlit(state, completedConsumer, readback, contents);
+                    for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                        Assert.Equal(expected[component], BitConverter.ToUInt16(completedPixels, pixel * 8 + component * 2));
+                    output.WriteLine($"native-color-typed-memory scenario={typedMemory} original_prepare_veto=1 no_writer_bytes_or_ack=1 completed_consumer_status=4 full_native_bytes=2097152 unchanged_original_chain=1");
+                    goto FixtureFinished;
+                }
+                if (typedMemory == "disjoint")
+                {
+                    lock (Field("_gate").GetValue(null)!)
+                    {
+                        var queues = (IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!;
+                        var admitted = queues.Values.Cast<IEnumerable>().SelectMany(items => items.Cast<object>())
+                            .Select(item => item.GetType().GetProperty("Work")!.GetValue(item)!)
+                            .Single(item => item.GetType().Name == "OrderedCommandMemoryOperation");
+                        Assert.NotNull(admitted.GetType().GetProperty("OriginalWatch")!.GetValue(admitted));
+                        var firstMapping = Assert.IsType<CpuMappedCopyObservation>(admitted.GetType().GetProperty("Mapping")!.GetValue(admitted));
+                        Assert.Equal(typedAddress, firstMapping.SourceAddress); Assert.Equal(originalFill ? fillBytes : 8ul, firstMapping.SourceByteCount);
+                        Assert.Equal(typedAddress, firstMapping.FootprintAddress); Assert.Equal(originalFill ? fillBytes : 8ul, firstMapping.FootprintByteCount);
+                    }
+                    // Advance the real same-backing completed-write history
+                    // AFTER the exact closed-write capture, without touching
+                    // its eight bytes or the original native color footprint.
+                    // Expected guest bytes include these intentional writes;
+                    // the sampled native oracle remains wholly unchanged.
+                    for (var churn = 0; churn < 2022; churn++)
+                    {
+                        var disjointBytes = BitConverter.GetBytes((ulong)churn + 0xABC0_0000UL);
+                        NativeDepthAssert(physical.TryWriteBacking(typedAddress + 32, disjointBytes));
+                        disjointBytes.CopyTo(typedBaseline!, 32);
+                    }
+                    output.WriteLine("native-color-typed-memory original_watched_capture=1 completed_disjoint_writes_after_admission=2022 history_capacity=512 refreshed_original=0 intentional_guest_churn_bytes=8");
+                }
+                DrainTypedWithActualRenderScope(state);
+                Assert.True(typedCaller.GetAwaiter().GetResult()); Call("WaitForFlushedGuestCommands");
+                var consumerOutput = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
+                var consumerBytes = ReadNativeColorThroughBlit(state, consumerOutput, readback, contents);
+                for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                    Assert.Equal(expected[component], BitConverter.ToUInt16(consumerBytes, pixel * 8 + component * 2));
+                expectedWrite.CopyTo(typedBaseline!, 0);
+                var actualWrite = new byte[65536]; NativeDepthAssert(memory.TryRead(typedAddress, actualWrite));
+                Assert.Equal(typedBaseline, actualWrite);
+                if (typedMemory == "tracked-destination")
+                {
+                    NativeDepthAssert(GuestImageWriteTracker.PeekDirty(typedAddress));
+                    NativeDepthAssert(GuestImageWriteTracker.TryGetContentToken(typedAddress, out var afterWrite));
+                    Assert.NotEqual(trackedDestinationBefore, afterWrite);
+                    output.WriteLine("native-color-typed-memory tracked_destination_actual_protection_before_capture=1 original_transaction_Applied=1 dirty_notification_before_bytes=1 content_token_changed=1 no_recapture=1");
+                }
+                NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+                const BindingFlags originalFields = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var actualProducer = ((IDictionary)Field("_nativeColorLatest").GetValue(null)!)[target.Address]!;
+                var nativeOriginal = actualProducer.GetType().GetField("Original", originalFields)!.GetValue(actualProducer)!;
+                Assert.True(((ICpuMappedCopySource)nativeOriginal.GetType().GetField("Source", originalFields)!.GetValue(nativeOriginal)!).IsMappedCopyObservationCurrent(
+                    (CpuMappedCopyObservation)nativeOriginal.GetType().GetField("Mapping", originalFields)!.GetValue(nativeOriginal)!));
+                // EOP remains an opaque callback; it is deliberately admitted
+                // only AFTER the real sampled consumer and typed write finish.
+                host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, typedAddress + 8, 0x1020304050607080));
+                DrainTypedWithActualRenderScope(state);
+                BitConverter.GetBytes(0x1020304050607080UL).CopyTo(typedBaseline, 8);
+                NativeDepthAssert(memory.TryRead(typedAddress, actualWrite)); Assert.Equal(typedBaseline, actualWrite);
+                output.WriteLine($"native-color-typed-memory operation={(originalFill ? "Fill" : "Write")} effect_bytes={expectedWrite.Length} value={(originalFill ? fillValue : 0):X8} no_native_mirror_destination=1 status=4 sampled_native_bytes=2097152 original_chain_unchanged=1 disjoint_full_guest_bytes=65536 owned_write_once=1 EOP_after_consumer=1");
+            }
+            else if (completedFirst)
+            {
+                // An already admitted readonly consumer must keep the prior
+                // status4 texture after a later writer is admitted. The later
+                // partial-mask encoder then loads that exact predecessor.
+                var consumer = state.CreateNativeColorReadShader();
+                var consumerBindings = new GuestStageBindings(GuestStageKind.Pixel, [], [0], [], [], null, [], [], false, false, 0);
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(consumer, [snapshot], [], 0,
+                    [target with { Address = 0, Registers = null }], shaders.Vertex,
+                    3, 1, 4, null, [], GuestRenderState.Default, null, 0, stageBindings: [consumerBindings]);
+                MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
+                var next = MetalColorMipPlacement.Project(memory, normalized, words,
+                    new GuestRenderTarget(address, 512, 512, (uint)words.Layout, (uint)words.NumberType, Registers: words, TileMode: 27));
+                target = next;
+                var partialShaders = state.CreateNativeColorBorrowShaders(redOnlySuccessor: true);
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(partialShaders.Pixel, [], [], 0, [next], partialShaders.Vertex,
+                    3, 1, 4, null, [], GuestRenderState.Default with { Blends = [GuestBlendState.Default with { WriteMask = 1 }] }, null, 0);
+                MetalVideoPresenter.ReleasePreparedNativeColorTarget(next);
+                state.DrainWithControlledBudget(); Call("WaitForFlushedGuestCommands");
+                // The queued fragment shader actually read every prior pixel;
+                // its distinct transient output must contain the original .25
+                // red, while the later partial writer produces .875 below.
+                var consumerOutput = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
+                Assert.Equal((nint)MtlPixelFormat.Rgba16Float, MetalNative.Send(consumerOutput, MetalNative.Selector("pixelFormat")));
+                var consumerBytes = ReadNativeColorThroughBlit(state, consumerOutput, readback, contents);
+                for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                    Assert.Equal(expected[component], BitConverter.ToUInt16(consumerBytes, pixel * 8 + component * 2));
+                output.WriteLine("native-color-borrow queued_gpu_consumer_full_native_bytes=2097152 prior_red=.25 successor_red=.875 original_argument_buffer_shader_read=1 status=4");
+                snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
+                command = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
+                create = [state.NativeFaceDevice, command, snapshot, false]; borrowed = (nint)Call("CreateDrawTexture", create)!;
+                Assert.True((bool)create[3]!); Assert.NotEqual((nint)0, borrowed);
+                blit = MetalNative.Send(command, MetalNative.Selector("blitCommandEncoder")); Assert.NotEqual((nint)0, blit);
+                encodingFailure = null;
+                try
+                {
+                    MetalNative.SendCopyTextureToBuffer(blit, MetalNative.Selector("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
+                        borrowed, 0, 0, default, new MtlSize { Width = 512, Height = 512, Depth = 1 }, readback, 0, 4096, 0x200000);
+                }
+                catch (Exception error) { encodingFailure = error; }
+                try { MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding")); } catch (Exception cleanup) { NativeDepthPreserve(ref encodingFailure, cleanup); }
+                if (encodingFailure is not null) ExceptionDispatchInfo.Capture(encodingFailure).Throw();
+                encodedRetain = borrowed; borrowed = 0; MetalNative.SendVoid(encodedRetain, MetalNative.Selector("release"));
+                Call("WaitForFlushedGuestCommands"); Assert.Equal((nint)4, MetalNative.Send(command, MetalNative.Selector("status")));
+                Marshal.Copy(contents, actual, 0, actual.Length);
+                expected[0] = BitConverter.HalfToUInt16Bits((Half)0.875f);
+                for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                    Assert.Equal(expected[component], BitConverter.ToUInt16(actual, pixel * 8 + component * 2));
+                NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+                output.WriteLine("native-color-borrow completed_predecessor_partial_mask=1 queued_consumer_before_next_writer=1 successor_full_half_components=1048576");
+            }
+            using (MetalVideoPresenter.EnterGuestQueue("other.native.color", 2))
+                Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
+            // Same ORIGINAL watched proof must reject an actual overlapping ordinary alias write.
+            NativeDepthAssert(physical.TryWriteBacking(target.Address, new byte[] { 0xF1 }));
+            var rejection = Assert.Throws<TargetInvocationException>(() => Call("CreateDrawTexture", state.NativeFaceDevice, state.Buffer(), snapshot, false));
+            Assert.IsType<NotSupportedException>(rejection.InnerException);
+            output.WriteLine($"native-color-borrow status=4 full_half_components=1048576 full_native_bytes=2097152 unchanged_original_chain_bytes={chainBytes} same_CB={!completedFirst} frontend_release_before_consume=1 wrong_queue_veto=1 overlapping_ordinary_writer_veto=1");
+            Assert.Empty(reports);
+            FixtureFinished: ;
+        }
+        catch (Exception error)
+        {
+            primary = error;
+            try { output.WriteLine($"native-color-borrow failed_phase={phase}; error={error.GetType().Name}"); }
+            catch { }
+        }
+        finally
+        {
+            Exception? cleanup = null;
+            void Attempt(Action action) { try { action(); } catch (Exception error) { NativeDepthPreserve(ref cleanup, error); } }
+            var callerJoined = true;
+            if (typedCaller is { IsCompleted: false })
+            {
+                Attempt(() => MetalVideoPresenter.LatchGuestCompletionFailure("native typed memory fixture unwound", primary));
+                try { callerJoined = typedCaller.Wait(10000); } catch { callerJoined = typedCaller.IsCompleted; }
+                if (!callerJoined) NativeDepthPreserve(ref cleanup, new InvalidOperationException("Native typed memory caller ownership is unknown."));
+            }
+            if (callerJoined)
+            {
+                Attempt(() => Field("_commandMemoryBeforeOriginalWriteForControl").SetValue(null, oldBeforeWrite));
+                Attempt(() => Field("_nativeColorPredecessorValidationForControl").SetValue(null, oldPredecessorControl));
+                Attempt(() => Field("_computeTextureReleaseOverride").SetValue(null, oldTemporaryRelease));
+            }
+            if (state is not null)
+                try { Call("WaitForFlushedGuestCommands"); safe = true; }
+                catch (Exception error) { NativeDepthPreserve(ref cleanup, error); safe = false; }
+            if (safe && callerJoined)
+            {
+                if (snapshot is not null) Attempt(() => MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]));
+                if (target is not null) Attempt(() => MetalVideoPresenter.ReleasePreparedNativeColorTarget(target));
+                Attempt(() => Field("_closed").SetValue(null, true));
+                Attempt(() => Call("RetireNativeColorFromRenderOwner"));
+                if (target is not null)
+                {
+                    var images = (IDictionary)Field("_guestImages").GetValue(null)!;
+                    var image = images[target.Address]; images.Remove(target.Address);
+                    ((IDictionary)Field("_guestImageExtents").GetValue(null)!).Remove(target.Address);
+                    if (image is not null)
+                    {
+                        var owned = (nint)Get(image, "Texture")!;
+                        image.GetType().GetField("Texture")!.SetValue(image, (nint)0);
+                        if (owned != 0) Attempt(() => MetalNative.SendVoid(owned, MetalNative.Selector("release")));
+                    }
+                    ((IDictionary)Field("_colorPhysicalAllocations").GetValue(null)!).Remove(address);
+                }
+                foreach (var owned in new[] { borrowed, readback }) if (owned != 0) Attempt(() => MetalNative.SendVoid(owned, MetalNative.Selector("release")));
+                borrowed = 0; readback = 0;
+                if (state is not null) Attempt(state.DisposeNativeDepthFixture);
+                if (address != 0) Attempt(() => GuestImageWriteTracker.Untrack(address + 0xB0000));
+                if (typedMemory == "tracked-destination" && typedAddress != 0) Attempt(() => GuestImageWriteTracker.Untrack(typedAddress));
+                if (cleanup is null && physical is not null) Attempt(physical.Dispose);
+            }
+            if (!safe || !callerJoined || cleanup is not null) nativeColorFixtureQuarantine = new object?[] { state, physical, memory, target, snapshot, borrowed, readback, typedCaller };
+            if (callerJoined)
+            {
+                Attempt(() => queueScope?.Dispose());
+                Attempt(() => Field("_guestMemory").SetValue(null, oldMemory));
+                Attempt(() => Field("_renderOwner").SetValue(null, oldOwner));
+                Attempt(() => Field("_batchQueue").SetValue(null, oldQueue));
+                Attempt(() => Field("_textureSourceCleanupFailure").SetValue(null, oldTemporaryFailure));
+                Attempt(() => Field("_selectedStorageMipSession").SetValue(null, oldSession));
+                MetalColorMipPlacement.Enabled = oldPlacement; MetalVideoPresenter.NativeColorBorrowEnabled = oldBorrow;
+                Attempt(() => GpuFatal.OnFatal = oldFatal);
+            }
+            if (cleanup is not null) NativeDepthPreserve(ref primary, cleanup);
+        }
+        if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
+    }
+    private sealed class NativeColorBorrowFact : FactAttribute
+    {
+        public NativeColorBorrowFact()
+        { if (Environment.GetEnvironmentVariable("SHARPEMU_METAL_NATIVE_COLOR_BORROW_TESTS") != "1") Skip = "Fresh required-device native color worker not requested."; }
+    }
+    private static byte[] ReadNativeColorThroughBlit(NativeState state, nint texture, nint buffer, nint contents)
+    {
+        var command = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
+        var blit = MetalNative.Send(command, MetalNative.Selector("blitCommandEncoder")); Assert.NotEqual((nint)0, blit);
+        Exception? primary = null;
+        try
+        {
+            MetalNative.SendCopyTextureToBuffer(blit, MetalNative.Selector("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
+                texture, 0, 0, default, new MtlSize { Width = 512, Height = 512, Depth = 1 }, buffer, 0, 4096, 0x200000);
+        }
+        catch (Exception error) { primary = error; }
+        try { MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding")); } catch (Exception cleanup) { NativeDepthPreserve(ref primary, cleanup); }
+        if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
+        Call("WaitForFlushedGuestCommands"); Assert.Equal((nint)4, MetalNative.Send(command, MetalNative.Selector("status")));
+        var bytes = new byte[0x200000]; Marshal.Copy(contents, bytes, 0, bytes.Length); return bytes;
+    }
+    private sealed partial class NativeState
+    {
+        public MetalCompiledGuestShader CreateNativeColorReadShader()
+        {
+            var kind = ImageDescriptorBinding.ForImage(new ImageResource { ResourceClass = ImageResourceClass.Sampled,
+                NumericClass = ImageNumericClass.Float, Dimension = ImageDimension.Dim2D, Read = true })!.Value;
+            var layout = Gen5MslArgumentLayout.Build(new BindingLayout { Descriptors = [new(kind, [0])] });
+            var texture = Assert.Single(layout.Fields.Where(field => field.FieldKind == MslArgumentFieldKind.Textures));
+            var source = $$"""
+                #include <metal_stdlib>
+                using namespace metal;
+                struct ColorVertex { float4 position [[position]]; };
+                struct Gen5StageResources {
+                    array<texture2d<float>,1> {{texture.Name}} [[id({{texture.FirstId}})]];
+                };
+                fragment float4 native_color_consume(ColorVertex input [[stage_in]], constant Gen5StageResources& resources [[buffer(0)]]) {
+                    return resources.{{texture.Name}}[0].read(uint2(input.position.xy));
+                }
+                """;
+            var shader = new MetalCompiledGuestShader(new Gen5MslShader(source, "native_color_consume", Gen5MslStage.Pixel, 0, ArgumentLayout: layout));
+            colorShaders.Add(shader); return shader;
+        }
+        public (MetalCompiledGuestShader Vertex, MetalCompiledGuestShader Pixel) CreateNativeColorBorrowShaders(bool redOnlySuccessor = false)
+        {
+            var vertex = new MetalCompiledGuestShader(new Gen5MslShader("""
+                #include <metal_stdlib>
+                using namespace metal;
+                struct ColorVertex { float4 position [[position]]; };
+                vertex ColorVertex native_color_vs(uint id [[vertex_id]]) {
+                    const float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };
+                    return ColorVertex{float4(p[id],0,1)};
+                }
+                """, "native_color_vs", Gen5MslStage.Vertex, 0));
+            var pixel = new MetalCompiledGuestShader(new Gen5MslShader("""
+                #include <metal_stdlib>
+                using namespace metal;
+                fragment float4 native_color_fs() { return float4(0.25,0.5,0.75,1.0); }
+                """.Replace("0.25", redOnlySuccessor ? "0.875" : "0.25"), "native_color_fs", Gen5MslStage.Pixel, 0));
+            colorShaders.Add(vertex); colorShaders.Add(pixel); return (vertex, pixel);
+        }
+    }
+}
