@@ -62,7 +62,15 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     internal const uint FormatVersion = 1;
     internal const string Extension = ".mtla";
     internal const string SegmentPrefix = "pipelines-";
-    internal const long DiskBudgetBytes = 1L << 30;
+    // A title's working set: Black Myth: Wukong's opening alone builds over a thousand render
+    // pipelines (about a gigabyte of GPU binaries) and three thousand libraries, so a 1 GiB
+    // bound evicted every run's pipelines before the next run could open them, and each boot
+    // compiled them all again (minutes of loading, seconds-long stalls in play).
+    // SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB=<n> sets it.
+    internal static readonly long DiskBudgetBytes =
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB"), out var budgetMb) && budgetMb > 0
+            ? budgetMb << 20
+            : 8L << 30;
     internal const long SegmentBytes = 8L << 20;
     internal const long ResidentSegmentBytes = 32L << 20;
     internal const int TrailerBytes = 24;
