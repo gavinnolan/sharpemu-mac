@@ -2296,9 +2296,10 @@ public static partial class Gen5MslTranslator
                 }
 
                 case "DsReadI8":
+                case "DsReadU8":
                 {
                     // The byte the low two bits of the offset address select,
-                    // sign-extended out of the word that holds it.
+                    // sign- or zero-extended out of the word that holds it.
                     var address = Temp("uint", RawSource(instruction, 0));
                     var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
                     var word = Temp("uint", LoadGlobalDataShareWord(
