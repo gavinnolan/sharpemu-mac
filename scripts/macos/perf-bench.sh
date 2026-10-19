@@ -16,20 +16,30 @@
 #            trace-0320.*; an ENV=VALUE argument replaces either)
 #   ENV=VALUE  further variables for the game, e.g. SHARPEMU_LOG_MEMORY=1 for GC pauses in the spike list
 #
-# Fixed: SHARPEMU_GAME_ENTRY_RUN=1, 480 s, SHARPEMU_MEM_LIMIT_MB=17000 (SH reaches 16.5 GB), and the keyplan
-# below (Enter every 10 s from 70 s to 470 s, stored in artifacts/perf-rework/sh-keyplan.txt of the main
-# checkout; PERF_BENCH_KEYPLAN replaces it). SHARPEMU_FRAME_TIMES is left to run-game.sh.
+# Fixed: SHARPEMU_GAME_ENTRY_RUN=1, at most 600 s (the plan's stop marker ends the run after the idle segment),
+# SHARPEMU_MEM_LIMIT_MB=17000 (SH reaches 16.5 GB), and the keyplan below (PERF_BENCH_KEYPLAN replaces it).
+# SHARPEMU_FRAME_TIMES is left to run-game.sh.
 # Before launching it waits until no dotnet build/test, MSBuild, VBCSCompiler or compiler server is busy
 # (PERF_BENCH_WAIT_S, default 3600, bounds the wait), so builds do not perturb the measurement; do not
 # start one while the run is going. Afterwards the run directory has perf-report.md and perf-report.json
 # (window 150 s to the end, PERF_BENCH_FROM / PERF_BENCH_TO change it; see perf_report.py for the metrics
-# and its --baseline Before / After table). Exit status is run-game.sh's.
+# and its --baseline Before / After table), and perf-report-cutscene.* / perf-report-idle.* for the plan's two
+# measured segments (perf_report.py --segment). Exit status is run-game.sh's.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DEFAULT_KEYPLAN="70:enter,80:enter,90:enter,100:enter,110:enter,120:enter,130:enter,140:enter,150:enter,160:enter,170:enter,180:enter,190:enter,200:enter,210:enter,220:enter,230:enter,240:enter,250:enter,260:enter,270:enter,280:enter,290:enter,300:enter,310:enter,320:enter,330:enter,340:enter,350:enter,360:enter,370:enter,380:enter,390:enter,400:enter,410:enter,420:enter,430:enter,440:enter,450:enter,460:enter,470:enter"
+# The keyplan follows the game, not the clock (flips are counted from the title movie's AVPLAYER log line, so a
+# faster or slower build meets the same content). Scene flow, flips after that line, measured on main 021538538:
+#   Konami / auto-save notice / content warning (Enter every 6 s until the title movie is opened)
+#   +0   title menu "NEW GAME"; Enter every 6 s: warning page 2, then the intro text "Seeking a connection..."
+#   +260 intro text (marker intro-text, Enter stops: more presses would open the cutscene's Skip prompt)
+#   +385 cutscene-start: shrine, Maya, the dark room with the phone in hand (heavy 3D, no input)
+#   +540 cutscene-end: the phone message "Maya: can you come to the villa?" is shown; Close is Circle, so Esc every 5 s
+#   +600 idle-start: the player stands still in the room, no input; idle-end 120 s later, then stop
+# perf_report.py --segment cutscene / idle reads the markers; a plan without them gets no segment reports.
+DEFAULT_KEYPLAN="0:rep:enter:6;@log=UI_TitleMovie01|0:mark:title,0:rep:enter:6;@flips=260|0:mark:intro-text;@flips=125|0:mark:cutscene-start;@flips=155|0:mark:cutscene-end,0:rep:esc:5;@flips=60|0:mark:idle-start;@after=120|0:mark:idle-end,1:mark:stop"
 KEYPLAN="${PERF_BENCH_KEYPLAN:-$DEFAULT_KEYPLAN}"
-SECONDS_LIMIT=480
+SECONDS_LIMIT=600
 
 usage() { sed -n '5,27p' "$0" >&2; exit 2; }
 [[ $# -ge 2 ]] || usage
@@ -96,4 +106,10 @@ echo "perf-bench: run directory $RUN_DIR"
 python3 -I "$REPO_ROOT/scripts/macos/perf_report.py" "$RUN_DIR" --from "${PERF_BENCH_FROM:-150}" \
   ${PERF_BENCH_TO:+--to "$PERF_BENCH_TO"} --json "$RUN_DIR/perf-report.json" --md "$RUN_DIR/perf-report.md" \
   || echo "perf-bench: perf_report.py failed" >&2
+for SEG in cutscene idle; do
+  grep -q "$(printf '\t')$SEG-start\$" "$RUN_DIR/markers.tsv" 2>/dev/null || { echo "perf-bench: no $SEG-start marker, no $SEG report" >&2; continue; }
+  python3 -I "$REPO_ROOT/scripts/macos/perf_report.py" "$RUN_DIR" --segment "$SEG" \
+    --json "$RUN_DIR/perf-report-$SEG.json" --md "$RUN_DIR/perf-report-$SEG.md" > /dev/null \
+    || echo "perf-bench: perf_report.py --segment $SEG failed" >&2
+done
 exit "$RC"
