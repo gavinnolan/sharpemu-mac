@@ -371,6 +371,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var image = _slots[imageIdentifier];
         var address = image.Description.Data.Address;
         var size = image.Description.Data.Size;
+        if (takesGpuOwnership)
+        {
+            // No lossy image may hold, or be made over, what this image is about to write.
+            NoteGpuWrittenImageLocked(image);
+        }
+
         SynchronizeStencilPlanes(imageIdentifier, image, takesGpuOwnership);
         if (ImageDescription.IsEmptyRange(image.Description.Data) || !_pageOwners.MayHaveOwners(address, size))
         {
@@ -1169,6 +1175,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             NoteRecordedDccStoreLocked(address, size);
         }
 
+        if (_lossyTextures)
+        {
+            // Recorded with no image over the bytes too: a sampled image made over them
+            // later holds what the GPU wrote, and is not made lossy (MetalImageCache.Lossy.cs).
+            _gpuWrittenBytes.Mark(address, size);
+        }
+
         if (!_pageOwners.MayHaveOwners(address, size))
         {
             return;
@@ -1180,6 +1193,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             if (_slots.TryGet(imageIdentifier) is not { } image || !image.Overlaps(address, size))
             {
                 continue;
+            }
+
+            if (image.Shape.Lossy && image.Texture != 0)
+            {
+                // It reloads what the GPU wrote, which it may not approximate. The new
+                // texture is dirty whole, as the reload below has to be.
+                ReshapeLevelsLocked(image, image.FirstLevel, dropLossy: true);
+                _lossyGpuBytePromotions++;
             }
 
             MetalV2Diagnostics.WarnOnce(

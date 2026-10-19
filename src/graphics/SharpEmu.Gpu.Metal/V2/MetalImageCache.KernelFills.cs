@@ -190,7 +190,9 @@ internal sealed partial class MetalImageCache
         var from = _slots[selectedSource];
         var to = _slots[selectedDestination];
         // The copy reads the texture, so the texture has to hold what guest memory and
-        // the source's aliases say first, as for any sampled read of it.
+        // the source's aliases say first, as for any sampled read of it - exactly, since
+        // the copy hands the bytes on as the guest's.
+        DropLossyCopySourceLocked(from);
         WatchImage(selectedSource);
         SynchronizeAliases(selectedSource, takesGpuOwnership: false);
         RefreshFromGuest(from);

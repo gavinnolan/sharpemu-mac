@@ -2346,6 +2346,11 @@ internal sealed partial class MetalRenderHost :
             $"cpu_write_locked={lockedCpuWrites.Owner}/{lockedCpuWrites.Metadata} " +
             $"cpu_write_owner_found={lockedCpuWrites.OwnerFound}/{lockedCpuWrites.OwnerNone}{StagedRangeCounters()}{GuestViewCounters()}" +
             TakeKernelFillCounters());
+        if (_imageCache.TakeLossyCensus() is { } lossy)
+        {
+            Console.Error.WriteLine(lossy);
+        }
+
         // On a tile-based GPU the attachments are the bandwidth: a pass loads every
         // one it does not clear and stores every one it keeps, so this says what the
         // passes cost in memory traffic and which splits are paying for it. Printed

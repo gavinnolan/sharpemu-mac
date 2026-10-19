@@ -182,6 +182,132 @@ public sealed unsafe class MetalLossyTextureTests(ITestOutputHelper output)
         Assert.Equal(Breaking, rig.Cache.GetImage(again).Shape.Usage & Breaking);
     }
 
+    // What a render target draws over the bytes of a sampled image reaches it through the
+    // alias hand-over. A lossy texture would hold an approximation of the rendered data
+    // (compressed again on every hand-over), which is how dark scenes turned to
+    // false-colour noise: the sampled image becomes lossless and holds the texels exactly.
+    [Fact]
+    public void ASampledImageOverRenderedBytesHoldsThemExactly()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.LossyTextures = true;
+        var textureRequest = rig.Request(ImageAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
+        var texture = rig.Cache.FindImage(ref textureRequest);
+        rig.Cache.AcquireTextureView(texture, textureRequest);
+        var image = rig.Cache.GetImage(texture);
+        Assert.True(image.Shape.Lossy);
+
+        const uint TargetRows = 16;
+        var targetAddress = ImageAddress + ((ulong)Side * (Side - TargetRows) * 4);
+        var targetRequest = rig.Request(targetAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.ColorTarget, TargetRows);
+        var target = rig.Cache.FindImage(ref targetRequest);
+        Assert.NotEqual(texture, target);
+        rig.Cache.AcquireColorTargetView(target, targetRequest);
+        var drawn = MetalTileOracle.Pattern((int)(Side * TargetRows * 4), 0xD7A3);
+        rig.FillTexture(rig.Cache.GetImage(target).Texture, drawn, TargetRows);
+
+        rig.Cache.AcquireTextureView(texture, textureRequest);
+
+        AssertExact(drawn, rig.ReadTexture(image.Texture).AsSpan((int)ImageSize - drawn.Length));
+        Assert.False(image.Shape.Lossy);
+        Assert.Equal(0, CompressionOf(image.Texture));
+        Assert.Equal(1, rig.Cache.LossyGpuBytePromotions);
+    }
+
+    // A shader store into the bytes of a lossy image makes it lossless before it reloads
+    // them, and a sampled image made later over bytes a shader stored is lossless from the
+    // start; bytes no GPU write touched still get a lossy texture.
+    [Fact]
+    public void BytesAShaderStoredAreNeverHeldLossy()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.LossyTextures = true;
+        var request = rig.Request(ImageAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
+        var identifier = rig.Cache.FindImage(ref request);
+        rig.Cache.AcquireTextureView(identifier, request);
+        var image = rig.Cache.GetImage(identifier);
+        Assert.True(image.Shape.Lossy);
+
+        var stored = MetalTileOracle.Pattern((int)ImageSize, 0x51);
+        rig.Write(ImageAddress, stored);
+        rig.Cache.InvalidateMemoryFromGpu(ImageAddress, ImageSize);
+        rig.Cache.AcquireTextureView(identifier, request);
+        AssertExact(stored, rig.ReadTexture(image.Texture));
+        Assert.False(image.Shape.Lossy);
+        Assert.Equal(1, rig.Cache.LossyGpuBytePromotions);
+
+        const ulong Stored = ImageAddress + 0x40000;
+        rig.Cache.InvalidateMemoryFromGpu(Stored, ImageSize);
+        Assert.False(rig.Cache.GetImage(rig.Find(Stored, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture)).Shape.Lossy);
+        Assert.Equal(1, rig.Cache.LossyRefusedGpuBytes);
+        Assert.True(rig.Cache.GetImage(rig.Find(ImageAddress + 0x80000, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture)).Shape.Lossy);
+    }
+
+    // A kernel copy hands its source's texels on as guest bytes: a lossy source is made
+    // lossless, holding the guest bytes exactly, before the copy reads it.
+    [Fact]
+    public void AKernelCopyReadsALossySourceAsItsExactBytes()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.LossyTextures = true;
+        const ulong SourceAddress = GuestBase + 0x20000;
+        var pattern = MetalTileOracle.Pattern((int)ImageSize, 0xC0);
+        rig.Write(SourceAddress, pattern);
+        var sourceRequest = rig.Request(SourceAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
+        var source = rig.Cache.FindImage(ref sourceRequest);
+        rig.Cache.AcquireTextureView(source, sourceRequest);
+        Assert.True(rig.Cache.GetImage(source).Shape.Lossy);
+        rig.Find(ImageAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
+
+        Assert.True(rig.Cache.TryBeginKernelCopy(
+            ImageAddress, SourceAddress, ImageSize, out var from, out _, out var destination, out var fallback), fallback);
+
+        Assert.Same(rig.Cache.GetImage(source), from);
+        AssertExact(pattern, rig.ReadTexture(from!.Texture));
+        Assert.False(from.Shape.Lossy);
+        Assert.Equal(0, CompressionOf(from.Texture));
+        rig.Cache.CompleteKernelCopy(destination);
+    }
+
+    [Fact]
+    public void GpuWrittenGranulesAreFoundAtTheirEdges()
+    {
+        var granules = new MetalGpuWrittenGranules();
+        Assert.False(granules.Overlaps(0x2_0000_0000, 0x1000));
+
+        // Two bytes across a granule boundary mark both granules.
+        granules.Mark(0x2_0000_FFFF, 2);
+        Assert.Equal(2, granules.Count);
+        Assert.True(granules.Overlaps(0x2_0000_0000, 0x1000));
+        Assert.True(granules.Overlaps(0x2_0001_FFFF, 1));
+        Assert.False(granules.Overlaps(0x2_0002_0000, 0x10000));
+
+        // A write across a 1 GiB bitmap boundary, partly marked already.
+        granules.Mark(0x2_0000_0000, 0x4001_0000);
+        Assert.Equal(16385, granules.Count);
+        Assert.True(granules.Overlaps(0x2_4000_0000, 1));
+        Assert.False(granules.Overlaps(0x2_4001_0000, 0x1000));
+        Assert.True(granules.Overlaps(0x1_FFFF_0000, 0x10001));
+    }
+
+    private void AssertExact(ReadOnlySpan<byte> expected, ReadOnlySpan<byte> actual)
+    {
+        var mismatches = 0;
+        var largest = 0;
+        for (var i = 0; i < expected.Length; i++)
+        {
+            var difference = Math.Abs(expected[i] - actual[i]);
+            mismatches += difference != 0 ? 1 : 0;
+            largest = Math.Max(largest, difference);
+        }
+
+        output.WriteLine($"bytes={expected.Length} mismatched={mismatches} largest_difference={largest}");
+        Assert.True(mismatches == 0, $"{mismatches} of {expected.Length} bytes differ, by up to {largest}");
+    }
+
     private static (long Kind, ulong Size) Create(ulong format, bool lossy)
     {
         var descriptor = MetalNative.Send(
@@ -256,6 +382,21 @@ public sealed unsafe class MetalLossyTextureTests(ITestOutputHelper output)
         {
             var request = Request(address, format, role, height);
             return Cache.FindImage(ref request);
+        }
+
+        // What a pass would draw: the bytes copied straight into the first rows of the texture.
+        public void FillTexture(nint texture, byte[] bytes, uint height)
+        {
+            var buffer = Harness.Buffer(bytes);
+            var blit = MetalNative.Send(Harness.CommandBuffer, MetalNative.Selector("blitCommandEncoder"));
+            MetalV2Native.SendCopyBufferToTextureOptions(
+                blit,
+                MetalNative.Selector(
+                    "copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:" +
+                    "toTexture:destinationSlice:destinationLevel:destinationOrigin:options:"),
+                buffer, 0, Side * 4, (nuint)bytes.Length, new MtlSize { Width = Side, Height = height, Depth = 1 },
+                texture, 0, 0, default, 0);
+            MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding"));
         }
 
         // Every recorded transfer runs, then the texture comes back through a buffer.

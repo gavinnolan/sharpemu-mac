@@ -238,6 +238,12 @@ internal sealed class MetalCachedImage : IDisposable
 
     public MetalImageUses Uses;
 
+    /// <summary>
+    /// The image's bytes are recorded as GPU-written (MetalImageCache.Lossy.cs); set the
+    /// first time it takes GPU ownership, so later writes skip the record.
+    /// </summary>
+    public bool GpuBytesNoted;
+
     public bool Registered;
 
     public uint QueryEpoch;
