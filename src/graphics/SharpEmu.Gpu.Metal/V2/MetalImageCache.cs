@@ -1565,8 +1565,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             requestedExtent.Width == cachedExtent.Width && requestedExtent.Height == cachedExtent.Height &&
             requestedBlock == cachedBlock;
 
-        // Same surface, reinterpreted: a compatible format binds through a view.
+        // Same surface, reinterpreted: a compatible format binds through a view. The block
+        // extent compares pitches, and a padded pitch hides the width: Black Myth: Wukong's
+        // transient heap puts a 30x34 and a 60x34 RGBA16F target (both pitch 128) at one
+        // address, and the 60x34 motion-blur tile target bound the 30x34 texture, so only
+        // the left half of its tiles was ever written.
         if (sameSurface && !exactFormat && requested.Data.Size == cachedInfo.Data.Size &&
+            SameExtent(requested.Extent, cachedInfo.Extent) &&
             requested.Resources == cachedInfo.Resources && requested.TileMode == cachedInfo.TileMode &&
             requested.Type == cachedInfo.Type && requested.IsBlock == cachedInfo.IsBlock &&
             ViewFormatRules.AreCompatible(cachedInfo.PixelFormat, requested.PixelFormat))
