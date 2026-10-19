@@ -849,7 +849,13 @@ public sealed partial class ResourceTracker
         image.Atomic |= atomic;
         image.Packed |= memory.ImagePacked;
         image.CubeAccess &= memory.ImageCube;
+        image.Atomic64 |= atomic && Is64BitImageAtomic(memory.Opcode, memory.Dmask);
     }
+
+    // An image atomic's DMASK gives its data width: one dword, or two for the 64-bit
+    // form. Compare-swap carries a comparator too, so its 64-bit form sets all four.
+    public static bool Is64BitImageAtomic(string opcode, uint dmask) =>
+        opcode is "ImageAtomicCmpswap" or "ImageAtomicFcmpswap" ? dmask == 0xF : dmask == 0x3;
 
     private uint AddSampler(uint source, uint pc)
     {

@@ -259,7 +259,8 @@ internal sealed partial class MetalRenderHost
         R128: image.R128,
         Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
         DepthCompare: image.DepthCompare,
-        Atomic: image.Atomic);
+        Atomic: image.Atomic,
+        Atomic64: image.Atomic64);
 
     public IPreparedBindings PrepareBindings(ShaderStageResources stage)
     {

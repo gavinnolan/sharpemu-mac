@@ -627,11 +627,12 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
             // A shader that runs IMAGE_ATOMIC_* on this image needs the atomic
             // usage bit, and Metal only accepts it on the single-channel 32-bit
-            // integer formats. Those are exactly the formats a guest atomic
+            // integer formats and on RG32Uint, which holds the 64-bit texels of
+            // a 64-bit atomic. Those are exactly the formats a guest atomic
             // image has (BindingLayout gives an atomic binding to a uint image
             // only), so the bit goes on by format rather than by waiting for a
             // shader to be compiled against the texture the cache already made.
-            if (format is MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint)
+            if (format is MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint or MtlPixelFormat.Rg32Uint)
             {
                 usage |= MtlTextureUsage.ShaderAtomic;
             }

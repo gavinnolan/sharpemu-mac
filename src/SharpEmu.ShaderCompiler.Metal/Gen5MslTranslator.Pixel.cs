@@ -396,8 +396,10 @@ public static partial class Gen5MslTranslator
             }
 
             // BindingLayout only gives an atomic binding to a uint image, so this
-            // is the one component kind the texel vector can have.
-            if (imageClass.ComponentKind != "uint")
+            // is the one component kind the texel vector can have, or ulong for
+            // a 64-bit atomic.
+            var wide = ResourceTracker.Is64BitImageAtomic(opcode, image.Dmask);
+            if (imageClass.ComponentKind != (wide ? "ulong" : "uint"))
             {
                 error = $"{opcode} on a {imageClass.ComponentKind} image has no Metal texture atomic";
                 return false;
@@ -434,11 +436,36 @@ public static partial class Gen5MslTranslator
                 "uint",
                 image.VectorData + 1 < VectorRegisterFileCount ? $"v[{image.VectorData + 1}]" : "0u");
             var access = $"{coordinate}{layerArgument}";
+            var suffix = opcode["ImageAtomic".Length..];
+            if (wide)
+            {
+                // Metal's 64-bit texture atomics (MSL 3.1, RG32Uint textures) are only
+                // the unsigned minimum and maximum, and neither returns the old texel.
+                // That covers a visibility buffer's depth-and-ID maximum.
+                var method = suffix switch { "Umax" => "atomic_max", "Umin" => "atomic_min", _ => null };
+                if (method is null || image.Glc)
+                {
+                    error = $"{opcode} on 64-bit texels{(image.Glc ? " returning the old value" : string.Empty)} has no Metal texture atomic";
+                    return false;
+                }
+
+                var wideData = Temp(
+                    "ulong",
+                    image.VectorData + 1 < VectorRegisterFileCount
+                        ? $"as_type<ulong>(uint2(v[{image.VectorData}], v[{image.VectorData + 1}]))"
+                        : $"(ulong)v[{image.VectorData}]");
+                Line($"if ({ExecCondition(string.Join(" && ", guards))})");
+                Line("{");
+                _indent++;
+                Line($"{texture}.{method}({access}, ulong4({wideData}));");
+                _indent--;
+                Line("}");
+                return true;
+            }
 
             Line($"if ({ExecCondition(string.Join(" && ", guards))})");
             Line("{");
             _indent++;
-            var suffix = opcode["ImageAtomic".Length..];
             var direct = suffix switch
             {
                 "Swap" => $"{texture}.atomic_exchange({access}, uint4({data}))",
