@@ -1326,6 +1326,7 @@ internal sealed partial class MetalImageCache
             {
                 Kind = SurfaceMetadataKind.HTile,
                 ClearMask = description.HtileClearMask,
+                Size = description.Metadata.Range.Size,
             });
             return;
         }
@@ -1337,12 +1338,29 @@ internal sealed partial class MetalImageCache
             metadata.FillValue = 0xffffffff;
             metadata.FillSize = 0;
         }
+
+        if (metadata.Kind == SurfaceMetadataKind.HTile)
+        {
+            metadata.Size = description.Metadata.Range.Size;
+        }
     }
 
     public bool IsMetadata(ulong address)
     {
         using var held = _lock.Hold();
         return _surfaceMetadata.TryGetValue(address, out var found) && found.Kind != SurfaceMetadataKind.PendingDcc;
+    }
+
+    /// <summary>
+    /// Whether a binding of <paramref name="size"/> bytes at the address spans the metadata
+    /// surface registered there. A surface whose size is not known is answered by its
+    /// address alone, as <see cref="IsMetadata"/> does.
+    /// </summary>
+    public bool CoversMetadata(ulong address, ulong size)
+    {
+        using var held = _lock.Hold();
+        return _surfaceMetadata.TryGetValue(address, out var found) && found.Kind != SurfaceMetadataKind.PendingDcc &&
+            (found.Size == 0 || size >= found.Size);
     }
 
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
