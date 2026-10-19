@@ -673,6 +673,7 @@ internal sealed partial class MetalRenderHost :
 
     private readonly nint[] _inFlightBuffers = new nint[MaxInFlightSubmissions];
     private readonly ulong[] _inFlightSerials = new ulong[MaxInFlightSubmissions];
+    private readonly double[] _inFlightCommitTimes = new double[MaxInFlightSubmissions];
     private int _inFlightHead;
     private int _inFlightCount;
     private long _unsampledSubmissions;
@@ -708,7 +709,26 @@ internal sealed partial class MetalRenderHost :
         var slot = (_inFlightHead + _inFlightCount) % MaxInFlightSubmissions;
         _inFlightBuffers[slot] = buffer;
         _inFlightSerials[slot] = serial;
+        _inFlightCommitTimes[slot] = _previousCommitTime;
         _inFlightCount++;
+    }
+
+    // The still-held command buffer a committed serial was recorded into, for the timing a
+    // wait reports; zero once the ring has let it go.
+    private nint InFlightBufferFor(ulong serial, out double commitTime)
+    {
+        for (var index = 0; index < _inFlightCount; index++)
+        {
+            var slot = (_inFlightHead + index) % MaxInFlightSubmissions;
+            if (_inFlightSerials[slot] == serial)
+            {
+                commitTime = _inFlightCommitTimes[slot];
+                return _inFlightBuffers[slot];
+            }
+        }
+
+        commitTime = 0;
+        return 0;
     }
 
     /// <summary>Reads and releases every submission the GPU has finished.</summary>
@@ -952,11 +972,12 @@ internal sealed partial class MetalRenderHost :
         }
 
         var profile = _completions.WaitFor(serial);
-        ReportWait(serial, started, committedAt, waited, in profile, reason, partial: false);
+        ReportWait(serial, started, committedAt, waited, _previousCommitTime, in profile, reason, partial: false);
         _guestMemory.NoteCompleted(serial);
         _gpuWrites.Clear(serial);
         RetirePendingCopies(serial);
         _cpOverlay.Retire(serial);
+        _labelOverlay.Retire(serial);
         InvalidateWordLines();
     }
 
@@ -991,12 +1012,15 @@ internal sealed partial class MetalRenderHost :
                 (ulong)reason, reason == MetalWaitReason.ReadRange ? _lastReadAddress : 0);
         }
 
-        ReportWait(serial, started, started, waited: 0, in profile, reason, partial: true);
+        // The buffer the wait was for, so the report can say what the GPU spent on it.
+        var buffer = InFlightBufferFor(serial, out var commitTime);
+        ReportWait(serial, started, started, buffer, commitTime, in profile, reason, partial: true);
         _guestMemory.NoteCompleted(serial);
         var completed = CompletedSerial;
         _gpuWrites.Retire(completed);
         RetirePendingCopies(completed);
         _cpOverlay.Retire(completed);
+        _labelOverlay.Retire(completed);
         InvalidateWordLines();
         Interlocked.Increment(ref _partialWaits);
     }
@@ -1006,6 +1030,7 @@ internal sealed partial class MetalRenderHost :
         long started,
         long committedAt,
         nint waited,
+        double commitTime,
         in MetalCompletionWait profile,
         MetalWaitReason reason,
         bool partial)
@@ -1025,30 +1050,51 @@ internal sealed partial class MetalRenderHost :
         // latency before it and from the time the completion took to reach us.
         _slowWaitReports++;
         var now = CACurrentMediaTime();
-        var gpuStart = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelGpuStartTime);
-        var gpuEnd = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelGpuEndTime);
-        var kernelStart = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelKernelStartTime);
-        var kernelEnd = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelKernelEndTime);
-        Console.Error.WriteLine(
-            $"[METAL-V2][SLOW-WAIT] serial={serial} reason={reason} partial={(partial ? 1 : 0)} " +
-            $"read=0x{_lastReadAddress:X16}+0x{_lastReadSize:X} " +
-            $"range=0x{_gpuWrites.LastMatch.Start:X16}..0x{_gpuWrites.LastMatch.End:X16} " +
-            $"range_from={_gpuWrites.LastMatch.Origin} range_serial={_gpuWrites.LastMatch.Serial} " +
-            $"total_ms={(finished - started) * 1000.0 / frequency:F1} " +
-            $"flush_ms={(committedAt - started) * 1000.0 / frequency:F1} " +
-            $"signal_ms={profile.SignalTicks * 1000.0 / frequency:F1} " +
-            $"drain_ms={profile.DrainTicks * 1000.0 / frequency:F1} " +
+        var line = new System.Text.StringBuilder(512);
+        line.Append($"[METAL-V2][SLOW-WAIT] serial={serial} reason={reason} partial={(partial ? 1 : 0)} ");
+        if (reason == MetalWaitReason.ReadRange)
+        {
+            // What was read, and the write it waited for. Another wait reason has no read of
+            // its own, and these fields would be left over from the last one that did.
+            line.Append($"read=0x{_lastReadAddress:X16}+0x{_lastReadSize:X} ")
+                .Append($"range=0x{_gpuWrites.LastMatch.Start:X16}..0x{_gpuWrites.LastMatch.End:X16} ")
+                .Append($"range_from={_gpuWrites.LastMatch.Origin} range_serial={_gpuWrites.LastMatch.Serial} ");
+        }
+
+        line.Append($"total_ms={(finished - started) * 1000.0 / frequency:F1} ")
+            .Append($"flush_ms={(committedAt - started) * 1000.0 / frequency:F1} ")
+            .Append($"signal_ms={profile.SignalTicks * 1000.0 / frequency:F1} ")
+            .Append($"drain_ms={profile.DrainTicks * 1000.0 / frequency:F1} ");
+        if (waited == 0)
+        {
+            // The ring no longer holds the buffer, so there is no timing to read; zero
+            // timestamps against a media-clock commit time would print as hours.
+            line.Append("commit_to_kernel_ms=n/a kernel_to_gpu_ms=n/a gpu_exec_ms=n/a gpu_end_age_ms=n/a ")
+                .Append("gpu_start_age_ms=n/a kernel_ms=n/a kernel_end_age_ms=n/a");
+        }
+        else
+        {
+            var gpuStart = MetalNative.SendDouble(waited, SelGpuStartTime);
+            var gpuEnd = MetalNative.SendDouble(waited, SelGpuEndTime);
+            var kernelStart = MetalNative.SendDouble(waited, SelKernelStartTime);
+            var kernelEnd = MetalNative.SendDouble(waited, SelKernelEndTime);
             // commit → the driver starting on it → the GPU starting on it: a long
             // commit-to-kernel gap is host or driver scheduling, not GPU work.
-            $"commit_to_kernel_ms={(kernelStart - _previousCommitTime) * 1000.0:F1} " +
-            $"kernel_to_gpu_ms={(gpuStart - kernelEnd) * 1000.0:F1} " +
-            $"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} " +
-            $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1} " +
-            $"kernel_ms={(kernelEnd - kernelStart) * 1000.0:F2} " +
-            $"kernel_end_age_ms={(now - kernelEnd) * 1000.0:F1} last={LastWorkDescription}" +
-            (MetalV2Diagnostics.WaitTrace
-                ? $" reader=0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}"
-                : string.Empty));
+            line.Append($"commit_to_kernel_ms={(kernelStart - commitTime) * 1000.0:F1} ")
+                .Append($"kernel_to_gpu_ms={(gpuStart - kernelEnd) * 1000.0:F1} ")
+                .Append($"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} ")
+                .Append($"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1} ")
+                .Append($"kernel_ms={(kernelEnd - kernelStart) * 1000.0:F2} ")
+                .Append($"kernel_end_age_ms={(now - kernelEnd) * 1000.0:F1}");
+        }
+
+        line.Append($" last={LastWorkDescription}");
+        if (MetalV2Diagnostics.WaitTrace)
+        {
+            line.Append($" reader=0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}");
+        }
+
+        Console.Error.WriteLine(line.ToString());
     }
 
     /// <summary>Counts the time the worker spent with nothing runnable.</summary>
@@ -1119,6 +1165,7 @@ internal sealed partial class MetalRenderHost :
         // Recorded after any pending command-processor bytes there, so it is what a read
         // of them has to see from now on, whenever it lands.
         _cpOverlay.Forget(address, size);
+        _labelOverlay.Forget(address, size);
         _stagedStorageCopies?.Forget(address, size);
         _stagedRanges?.OnGpuWrite(address, size, origin);
         if (_guard is not null && size != 0)
@@ -1136,6 +1183,7 @@ internal sealed partial class MetalRenderHost :
         {
             _gpuWrites.NoteUnbounded(SubmissionSerial);
             _cpOverlay.Clear();
+            _labelOverlay.Clear();
             return;
         }
 
@@ -1153,6 +1201,7 @@ internal sealed partial class MetalRenderHost :
     {
         _gpuWrites.NoteUnbounded(SubmissionSerial);
         _cpOverlay.Clear();
+        _labelOverlay.Clear();
     }
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
@@ -1206,6 +1255,7 @@ internal sealed partial class MetalRenderHost :
 
         WriteGuestPattern(address, size, value);
         _cpOverlay.Forget(address, size);
+        _labelOverlay.Forget(address, size);
         _imageCache.InvalidateMemory(address, size);
         _stagedStorageCopies?.Forget(address, size);
         _stagedRanges?.OnHostWrite(address, size);
@@ -1431,6 +1481,7 @@ internal sealed partial class MetalRenderHost :
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
     {
         _cpOverlay.Forget(destination, size);
+        _labelOverlay.Forget(destination, size);
         if (_guard is null)
         {
             CopyGuestBytesOnHostCore(destination, source, size);
@@ -2178,6 +2229,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_cp_writes=").Append(cpWrites.GpuTimed)
             .Append(" host_cp_writes=").Append(cpWrites.Host)
             .Append(" cp_overlay_reads=").Append(TakeOverlayReads())
+            .Append(" label_overlay_hits=").Append(TakeLabelOverlayHits())
             .Append(" cp_overlay=").Append(_cpOverlay.Count)
             .Append(TakeWordLineCounters())
             .Append(" poll_flushes=").Append(TakePollFlushes())

@@ -611,6 +611,133 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// A label the GPU has yet to land is read as written by the resource materializer
+    /// (TryReadGuestWord) without a wait, while every read the guest can observe - a wait
+    /// packet's operand, an ordinary read - still sees memory until the label lands.
+    /// </summary>
+    [Theory]
+    [InlineData(EndOfPipeWriteKind.Write32, 0x1234UL, 0x1234u)]
+    [InlineData(EndOfPipeWriteKind.Write64, 0x1122334455667788UL, 0x55667788u)]
+    public void AnUnlandedLabelIsReadAsWrittenByTheMaterializerAndNotByTheGuest(
+        EndOfPipeWriteKind kind, ulong value, uint low)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.RecordEndOfPipe(new EndOfPipeWrite(kind, 1, WindowedLabel, value));
+        Assert.Equal(1, host.PendingLabelOverlayEntries);
+        var completed = host.CompletedSerial;
+
+        Assert.True(host.TryReadGuestWord(WindowedLabel, out var word));
+        Assert.Equal(low, word);
+        Assert.Equal(1L, host.TakeLabelOverlayHits());
+        if (kind == EndOfPipeWriteKind.Write64)
+        {
+            Assert.True(host.TryReadGuestWord(WindowedLabel + 4, out var high));
+            Assert.Equal(0x11223344u, high);
+            Assert.Equal(1L, host.TakeLabelOverlayHits());
+        }
+
+        // Memory has not been written, and the materializer's read did not wait for it.
+        Assert.Equal(0u, rig.Backing.Read32(WindowedLabel));
+        Assert.Equal(completed, host.CompletedSerial);
+
+        // What a wait packet or a poll reads is memory: the label has not landed.
+        Span<byte> polled = stackalloc byte[sizeof(uint)];
+        Assert.True(host.TryReadGuestWaitOperand(WindowedLabel, polled, commitPendingWrite: false));
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(polled));
+        Assert.True(host.CommitPendingOperandWrite(WindowedLabel, sizeof(uint)));
+        Assert.Equal(0L, host.TakeLabelOverlayHits());
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(low, rig.Backing.Read32(WindowedLabel));
+
+        // Landed: memory answers, and the entry no longer does.
+        Assert.True(host.TryReadGuestWord(WindowedLabel, out var landed));
+        Assert.Equal(low, landed);
+        Assert.Equal(0L, host.TakeLabelOverlayHits());
+    }
+
+    [Fact]
+    public void ALaterWriteToTheSameBytesSupersedesTheOverlay()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+
+        // The newest label in record order wins.
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 1));
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 2));
+        Assert.Equal(1, host.PendingLabelOverlayEntries);
+        Assert.True(host.TryReadGuestWord(WindowedLabel, out var word));
+        Assert.Equal(2u, word);
+        Assert.Equal(1L, host.TakeLabelOverlayHits());
+
+        // A command-processor write after it is what a read sees from then on: the command
+        // processor overlay answers, and the label overlay has stopped speaking for the bytes.
+        host.RecordCommandProcessorWrite(WindowedLabel, BitConverter.GetBytes(7u), "WRITE_DATA");
+        Assert.Equal(0, host.PendingLabelOverlayEntries);
+        Assert.True(host.TryReadGuestWord(WindowedLabel, out word));
+        Assert.Equal(7u, word);
+        Assert.Equal(0L, host.TakeLabelOverlayHits());
+
+        // And a label after a command-processor write is the newer of the two.
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 9));
+        Assert.True(host.TryReadGuestWord(WindowedLabel, out word));
+        Assert.Equal(9u, word);
+        Assert.Equal(1L, host.TakeLabelOverlayHits());
+
+        // A host write or a write of unknown extent recorded after it drops it too.
+        Assert.True(host.TryWriteGuest(WindowedLabel, BitConverter.GetBytes(0x55u)));
+        Assert.Equal(0, host.PendingLabelOverlayEntries);
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, LaterLabel, 3));
+        Assert.Equal(1, host.PendingLabelOverlayEntries);
+        host.NoteUnboundedGuestMemoryWrite();
+        Assert.Equal(0, host.PendingLabelOverlayEntries);
+    }
+
+    [Fact]
+    public void AGuestCpuWriteOverTheLabelEndsTheOverlayAndTheReadWaits()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 0x1234));
+        Assert.Equal(1, host.PendingLabelOverlayEntries);
+
+        // The guest wrote the bytes after the label was encoded, which the overlay cannot
+        // see happen, only find out: memory no longer holds what it held at the encode.
+        Assert.True(rig.Backing.TryWrite(WindowedLabel, BitConverter.GetBytes(0x5555u)));
+        var completed = host.CompletedSerial;
+        Assert.True(host.TryReadGuestWord(WindowedLabel, out var word));
+        Assert.Equal(0L, host.TakeLabelOverlayHits());
+        Assert.Equal(0, host.PendingLabelOverlayEntries);
+
+        // The ordinary read ran: it waited for the submission, whose label then landed.
+        Assert.True(host.CompletedSerial > completed);
+        Assert.Equal(0x1234u, word);
+    }
+
+    [Fact]
+    public void TheOverlayOptOutLeavesTheMaterializerWaitingForTheLabel()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.LabelOverlayEnabled = false;
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 0x1234));
+        Assert.Equal(0, host.PendingLabelOverlayEntries);
+
+        var completed = host.CompletedSerial;
+        Assert.True(host.TryReadGuestWord(WindowedLabel, out var word));
+        Assert.Equal(0x1234u, word);
+        Assert.Equal(0L, host.TakeLabelOverlayHits());
+        Assert.True(host.CompletedSerial > completed);
+    }
+
     private static void WaitForGpu(MetalRenderHost host, ulong serial)
     {
         var deadline = Environment.TickCount64 + 10_000;

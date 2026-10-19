@@ -97,4 +97,80 @@ public sealed class DeviceDataLoadTests
         Assert.Equal(1, DeviceDataLoads.CountFor(LearnedHash + 1));
         Assert.Equal(5 - 1, ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash + 1, 0, 2).TableReads.Count);
     }
+
+    // The compiled transactions read the table themselves, so the learning probe is made
+    // for them before they read (and wait for) the word.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void CompiledPaths_LearnAPendingDataWord(int offset)
+    {
+        var hash = LearnedHash + 0x10 + (ulong)offset;
+        var program = BindingAndDataProgram();
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2);
+        plan.CompileEvaluatorNow();
+        var dataSlot = Assert.Single(plan.DeviceDataSlots);
+        var memory = new TestWordMemory { Base = TableBase, Words = new uint[16] };
+        memory.Words[DataOffset / sizeof(uint)] = 0x4321;
+        var pendingProbes = 0;
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [(uint)TableBase, 0],
+            ReadMemory = memory.Read,
+            DataWritePending = address =>
+            {
+                pendingProbes++;
+                return address == TableBase + DataOffset;
+            },
+        };
+
+        uint[] table;
+        if (offset == 2)
+        {
+            Assert.NotNull(plan.CompiledTableTransaction);
+            Assert.True(RuntimeValueEvaluator.EvaluateSources(
+                plan, [], inputs, plan.CleanFlatSlots, true, out _, out table));
+        }
+        else
+        {
+            Assert.NotNull(plan.CompiledTransaction);
+            Assert.True(RuntimeValueEvaluator.EvaluateSources(
+                plan, plan.MaterializationSources, inputs, plan.CleanFlatSlots, true, out _, out table));
+        }
+
+        Assert.Equal(0x4321u, table[dataSlot.Key]);
+        Assert.Equal(1, pendingProbes);
+        Assert.Equal(1, DeviceDataLoads.CountFor(hash));
+        Assert.True(DeviceDataLoads.Contains(hash, dataSlot.Value[0]));
+
+        // Learned: the next bind of the same plan makes no probe at all.
+        pendingProbes = 0;
+        Assert.True(RuntimeValueEvaluator.EvaluateSources(
+            plan, offset == 2 ? [] : plan.MaterializationSources, inputs, plan.CleanFlatSlots, true, out _, out _));
+        Assert.Equal(0, pendingProbes);
+    }
+
+    [Fact]
+    public void CompiledPaths_LearnNothingWhenNoDataWordIsPending()
+    {
+        var hash = LearnedHash + 0x20;
+        var plan = ShaderResourcePlan.Extract(BindingAndDataProgram(), ShaderStage.Compute, hash, 0, 2);
+        plan.CompileEvaluatorNow();
+        Assert.NotNull(plan.CompiledTableTransaction);
+        var memory = new TestWordMemory { Base = TableBase, Words = new uint[16] };
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [(uint)TableBase, 0],
+            ReadMemory = memory.Read,
+            DataWritePending = _ => false,
+        };
+        Assert.True(RuntimeValueEvaluator.EvaluateSources(plan, [], inputs, plan.CleanFlatSlots, true, out _, out _));
+        Assert.Equal(0, DeviceDataLoads.CountFor(hash));
+
+        // A host with no pending-write probe pays nothing and learns nothing.
+        Assert.True(RuntimeValueEvaluator.EvaluateSources(
+            plan, [], new ResourceRuntimeInputs { UserData = [(uint)TableBase, 0], ReadMemory = memory.Read },
+            plan.CleanFlatSlots, true, out _, out _));
+        Assert.Equal(0, DeviceDataLoads.CountFor(hash));
+    }
 }
