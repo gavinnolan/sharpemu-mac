@@ -144,6 +144,11 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // The segments on disk by shader pair, newest first, and the ones open now; under
     // _archivesLock.
     private readonly Dictionary<ulong, List<int>> _segmentsByPair = new();
+
+    // Segments another translator build wrote, by the negative id they are listed under. Their
+    // pairs are keyed by the MSL of both shaders, so a pair this build still makes is the same
+    // pipeline; a translator change then recompiles only the pipelines whose MSL it changed.
+    private readonly Dictionary<int, string> _foreignSegments = new();
     private readonly Dictionary<int, ResidentSegment> _resident = new();
     private long _residentBytes;
     private long _residentTick;
@@ -630,6 +635,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private string SegmentPath(int sequence) =>
         Path.Combine(_directory, $"{SegmentPrefix}{_translatorStamp}-{sequence.ToString("D5", CultureInfo.InvariantCulture)}{Extension}");
 
+    // Where a listed segment lives: this build's own by sequence, another build's by its file.
+    private string SegmentFile(int sequence) =>
+        sequence < 0 && _foreignSegments.TryGetValue(sequence, out var path) ? path : SegmentPath(sequence);
+
     private void Reject(UInt128 key, string path)
     {
         Interlocked.Increment(ref _rejected);
@@ -1085,15 +1094,22 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private void LoadSegments()
     {
         var segments = new List<(int Sequence, string Path)>();
+        var foreign = new List<FileInfo>();
         foreach (var path in System.IO.Directory.EnumerateFiles(_directory, SegmentPrefix + "*" + Extension))
         {
             var name = Path.GetFileNameWithoutExtension(path).AsSpan(SegmentPrefix.Length);
             var dash = name.IndexOf('-');
-            if (dash < 0 || !name[..dash].SequenceEqual(_translatorStamp.AsSpan()) ||
-                !int.TryParse(name[(dash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence))
+            if (dash < 0 || !int.TryParse(name[(dash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence))
             {
-                // Another translator's pipelines: functions this build does not make.
                 TryDelete(path);
+                continue;
+            }
+
+            if (!name[..dash].SequenceEqual(_translatorStamp.AsSpan()))
+            {
+                // Another translator's pipelines. The ones whose shaders it changed are never
+                // asked for again and age out under the budget like any unused file.
+                foreign.Add(new FileInfo(path));
                 continue;
             }
 
@@ -1102,6 +1118,21 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
         segments.Sort(static (left, right) => right.Sequence.CompareTo(left.Sequence));
         _segmentSequence = segments.Count == 0 ? 0 : segments[0].Sequence + 1;
+
+        // After this build's own, newest first: a pair asks its segments in list order.
+        foreign.Sort(static (left, right) => right.LastWriteTimeUtc.CompareTo(left.LastWriteTimeUtc));
+        foreach (var file in foreign)
+        {
+            int id;
+            lock (_archivesLock)
+            {
+                id = -1 - _foreignSegments.Count;
+                _foreignSegments[id] = file.FullName;
+            }
+
+            segments.Add((id, file.FullName));
+        }
+
         long listedBytes = 0;
         var listed = 0;
         foreach (var (sequence, path) in segments)
@@ -1137,7 +1168,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         _loadedSegmentBytes = listedBytes;
         Console.Error.WriteLine(
             $"[METAL-V2][ARCHIVE] opened {_directory} libraries={_known.Count} segments={listed} " +
-            $"segment_mb={listedBytes / 1048576.0:F1}");
+            $"segment_mb={listedBytes / 1048576.0:F1} other_translator_segments={foreign.Count}");
     }
 
     // Under _archivesLock. Opens a segment for a lookup, closing the least recently used
@@ -1151,7 +1182,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             return open.Archive;
         }
 
-        var path = SegmentPath(sequence);
+        var path = SegmentFile(sequence);
         if (!TryVerify(path, out var length))
         {
             Interlocked.Increment(ref _rejected);
