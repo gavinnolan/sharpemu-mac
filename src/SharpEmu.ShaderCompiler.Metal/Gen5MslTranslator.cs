@@ -440,6 +440,8 @@ public static partial class Gen5MslTranslator
                     }
                 }
 
+                AssignLaneSlotLds(blocks);
+
                 if (_stage is Gen5MslStage.Vertex or Gen5MslStage.Mesh)
                 {
                     DeclareAuxPositionOutputs();
@@ -866,7 +868,9 @@ public static partial class Gen5MslTranslator
                     // reading LDS it never wrote sees a previous wave's leftovers
                     // on hardware, and zero-filling 8 KB per fragment or vertex
                     // costs more than the shader that uses it.
-                    source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}];");
+                    source.AppendLine(_ldsLaneSlots is not null
+                        ? $"    thread uint sharpemu_lds[{_ldsLaneSlotCount}];"
+                        : $"    thread uint sharpemu_lds[{PrivateLdsDwordCount}];");
                 }
             }
 
@@ -2898,6 +2902,12 @@ public static partial class Gen5MslTranslator
                 case "DsWriteB32":
                 case "DsWriteAddtidB32":
                 {
+                    if (LaneSlotLdsElement(instruction) is { } slot)
+                    {
+                        Line(ExecGuarded($"{slot} = {RawSource(instruction, 1)};"));
+                        return true;
+                    }
+
                     var address = Temp("uint", RawSource(instruction, 0));
                     if (instruction.Opcode == "DsWriteAddtidB32")
                     {
@@ -2948,6 +2958,12 @@ public static partial class Gen5MslTranslator
                 case "DsReadB32":
                 case "DsReadAddtidB32":
                 {
+                    if (LaneSlotLdsElement(instruction) is { } slot)
+                    {
+                        StoreVector(instruction.Destinations[0].Value, slot);
+                        return true;
+                    }
+
                     var address = Temp("uint", RawSource(instruction, 0));
                     if (instruction.Opcode == "DsReadAddtidB32")
                     {
