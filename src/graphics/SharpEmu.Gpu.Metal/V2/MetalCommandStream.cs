@@ -593,6 +593,24 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         string profileWhat,
         string? profileKind,
         ulong profileBytes,
+        bool sourceIsFinal = true) =>
+        EncodeOrderedCopies(new ReadOnlySpan<DeferredLabelCopy>(in copy), guestAddress, landedKind, landedValue,
+            origin, profileWhat, profileKind, profileBytes, sourceIsFinal);
+
+    /// <summary>
+    /// <see cref="EncodeOrderedCopy"/> for several copies recorded back to back: they take the
+    /// same place in the stream, in the order given, with nothing between them. A diagnostic
+    /// <paramref name="landedKind"/> describes one copy, so it goes with a single one.
+    /// </summary>
+    private ulong EncodeOrderedCopies(
+        ReadOnlySpan<DeferredLabelCopy> copies,
+        ulong guestAddress,
+        string? landedKind,
+        ulong landedValue,
+        MetalGpuWriteOrigin origin,
+        string profileWhat,
+        string? profileKind,
+        ulong profileBytes,
         bool sourceIsFinal = true)
     {
         ulong serial;
@@ -611,8 +629,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // still only ever says that the work before it has finished. A compute
             // encoder is held open the same way: ending it per copy split each frame
             // into ~114 encoders, and the gaps between them outcost the dispatches.
-            _deferredLabelCopies.Add(copy);
-            Interlocked.Increment(ref _deferredLabelWrites);
+            _deferredLabelCopies.AddRange(copies);
+            Interlocked.Add(ref _deferredLabelWrites, copies.Length);
             NoteRecordedWork();
             serial = SubmissionSerial;
             if (DsTrace.Gpu)
@@ -623,7 +641,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         else
         {
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
-            EncodeLabelCopies(context.CommandBuffer, new ReadOnlySpan<DeferredLabelCopy>(in copy));
+            EncodeLabelCopies(context.CommandBuffer, copies);
 
             // Beginning the transfer marked this submission as carrying GPU work, which is
             // what keeps a completion queued behind it — the interrupt of this same packet
@@ -668,16 +686,27 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (landedKind is not null)
         {
             // SHARPEMU_GPU_CLOBBER_DIAG: the bytes are in guest memory once this serial completes.
-            var bytes = copy.Bytes;
+            var bytes = copies[0].Bytes;
             _completions.Enqueue(serial, () => CommandProcessorWriteHistory.Record(
                 -1, guestAddress, bytes, landedValue, landedKind, deferred: true));
         }
 
-        if (origin != MetalGpuWriteOrigin.EndOfPipeLabel)
+        foreach (ref readonly var copy in copies)
         {
-            // A command-processor store can land in bytes an image was made from; a label
-            // never has, and checking for one per label is not free.
-            _imageCache.InvalidateMemoryFromGpu(guestAddress, (ulong)copy.Bytes);
+            if (origin != MetalGpuWriteOrigin.EndOfPipeLabel)
+            {
+                // A command-processor store can land in bytes an image was made from; a label
+                // never has, and checking for one per label is not free.
+                _imageCache.InvalidateMemoryFromGpu(copy.GuestAddress, (ulong)copy.Bytes);
+            }
+
+            using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+                SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping))
+            {
+                NoteGuestMemoryWrite(copy.GuestAddress, (ulong)copy.Bytes, origin);
+            }
+
+            _pendingLabelWrites++;
         }
         else
         {
@@ -685,13 +714,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _imageCache.ForgetStandingDccClaims(guestAddress, (ulong)copy.Bytes);
         }
 
-        using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
-            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping))
-        {
-            NoteGuestMemoryWrite(guestAddress, (ulong)copy.Bytes, origin);
-        }
-
-        _pendingLabelWrites++;
         return serial;
     }
 
@@ -791,6 +813,136 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         _cpOverlay.Add(address, source, serial);
         return true;
+    }
+
+    /// <summary>
+    /// <paramref name="count"/> qword stores of one value, <paramref name="strideBytes"/> apart,
+    /// recorded as one write: the same bytes land at the same places, in the same order, as
+    /// <paramref name="count"/> calls to <see cref="RecordCommandProcessorWrite"/>.
+    /// </summary>
+    /// <remarks>
+    /// Nothing is recorded between the stores, so they sit back to back at the one place in the
+    /// stream a single store would (one staging block, one set of blits, one overlay hold). Any
+    /// case the batch does not cover - a range with no window, no staging room, a label still owed
+    /// by a completion, the clobber diagnostic - records them one by one before anything has been
+    /// recorded. SHARPEMU_GPU_CP_WRITE_BATCH=0 always does.
+    /// </remarks>
+    public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        if (count > 1 && strideBytes >= sizeof(ulong) && address != 0 && CommandProcessorWriteBatching.Enabled &&
+            !GpuClobberDiagnostics.Enabled &&
+            strideBytes <= (ulong.MaxValue - address - sizeof(ulong)) / (ulong)(count - 1) &&
+            TryEncodeCommandProcessorQwords(address, count, strideBytes, value, kind))
+        {
+            Interlocked.Add(ref _gpuTimedCommandProcessorWrites, count);
+            _batchedCommandProcessorRuns++;
+            return;
+        }
+
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        for (var index = 0; index < count; index++)
+        {
+            RecordCommandProcessorWrite(address + (ulong)index * strideBytes, bytes, kind);
+        }
+    }
+
+    private DeferredLabelCopy[] _cpBatchCopies = new DeferredLabelCopy[32];
+
+    private long _batchedCommandProcessorRuns;
+
+    /// <summary>Qword runs recorded as one write rather than store by store.</summary>
+    internal long BatchedCommandProcessorRuns => _batchedCommandProcessorRuns;
+
+    private bool TryEncodeCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
+    {
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandProcessorWrite);
+        // Declined, not counted: the one-by-one path that follows counts each store it forces.
+        if (!GpuTimedLabels || !MayEncodeLabelOnGpu(OrderedEndOfPipe, Volatile.Read(ref _owedHostLabels)))
+        {
+            return false;
+        }
+
+        if (_cpBatchCopies.Length < count)
+        {
+            _cpBatchCopies = new DeferredLabelCopy[count];
+        }
+
+        var copies = _cpBatchCopies.AsSpan(0, count);
+        for (var index = 0; index < count; index++)
+        {
+            var destination = _guestMemory.ResolveWritable(address + (ulong)index * strideBytes, sizeof(ulong));
+            if (!destination.IsValid)
+            {
+                return false;
+            }
+
+            copies[index] = new DeferredLabelCopy(
+                0, 0, destination.Buffer, destination.Offset, sizeof(ulong), address + (ulong)index * strideBytes);
+        }
+
+        var staging = _guestMemory.Allocate((ulong)count * sizeof(ulong), sizeof(ulong), out var payload);
+        if (!staging.IsValid)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < count; index++)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(payload[(index * sizeof(ulong))..], value);
+            copies[index] = copies[index] with
+            {
+                StagingBuffer = staging.Buffer,
+                StagingOffset = staging.Offset + (ulong)index * sizeof(ulong),
+            };
+        }
+
+        var serial = EncodeOrderedCopies(copies, address, null, 0, MetalGpuWriteOrigin.Copy,
+            "cp write", kind, (ulong)count * sizeof(ulong));
+
+        // Parse-time readers see the bytes as written until they land (MetalPendingWriteOverlay).
+        using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping))
+        {
+            if (_cpOverlay.Count >= MaxOverlayEntriesBeforeRetire)
+            {
+                _cpOverlay.Retire(CompletedSerial);
+            }
+
+            _cpOverlay.AddQwords(address, count, strideBytes, value, serial);
+        }
+
+        if (CommandProcessorWriteBatching.Verify)
+        {
+            VerifyCommandProcessorQwords(address, count, strideBytes, value);
+        }
+
+        return true;
+    }
+
+    /// <summary>Stores whose overlay readback disagreed with what was recorded; zero is the invariant.</summary>
+    internal static long CommandProcessorBatchVerifyMismatches;
+
+    // SHARPEMU_GPU_CP_WRITE_BATCH_VERIFY: a parse-time read of each store sees the staged value.
+    private void VerifyCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value)
+    {
+        Span<byte> read = stackalloc byte[sizeof(ulong)];
+        for (var index = 0; index < count; index++)
+        {
+            var at = address + (ulong)index * strideBytes;
+            read.Clear();
+            _cpOverlay.Apply(at, read);
+            if (System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(read) != value)
+            {
+                Interlocked.Increment(ref CommandProcessorBatchVerifyMismatches);
+                Console.Error.WriteLine(
+                    $"[METAL-V2][VERIFY] A batched command-processor write is not in the overlay: address=0x{at:X16} expected=0x{value:X16}.");
+            }
+        }
     }
 
     private const int MaxOverlayEntriesBeforeRetire = 256;

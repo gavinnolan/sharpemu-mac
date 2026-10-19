@@ -857,6 +857,9 @@ public sealed partial class GpuCommandInterpreter
     /// visible to other queues' waits until it lands.</summary>
     internal Action<ulong, int, ulong>? PendingLabelRecorded { get; init; }
 
+    /// <summary>The same for a run of eight-byte labels of one value at a fixed stride, as one call.</summary>
+    internal Action<ulong, int, ulong, ulong>? PendingQwordsRecorded { get; init; }
+
     internal PendingLabelReader? PendingLabelLookup { get; init; }
 
     internal delegate bool PendingLabelReader(ulong address, bool is64Bit, out ulong value);

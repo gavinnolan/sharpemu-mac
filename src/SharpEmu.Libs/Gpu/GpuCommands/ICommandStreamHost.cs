@@ -284,6 +284,22 @@ public interface ICommandStreamHost
         }
     }
 
+    /// <summary>
+    /// Writes <paramref name="count"/> copies of one eight-byte value, <paramref name="strideBytes"/>
+    /// apart, in record order with deferred labels: the same bytes, in the same order, as
+    /// <paramref name="count"/> calls to <see cref="RecordCommandProcessorWrite"/> with nothing between
+    /// them. A host that can record them as one write does; the default does exactly that.
+    /// </summary>
+    void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        for (var index = 0; index < count; index++)
+        {
+            RecordCommandProcessorWrite(address + (ulong)index * strideBytes, bytes, kind);
+        }
+    }
+
     /// <summary>A DMA fill of guest memory that lands in record order with deferred labels.</summary>
     void FillBufferInOrder(ulong address, ulong size, uint value) => FillBuffer(address, size, value, isGds: false);
 

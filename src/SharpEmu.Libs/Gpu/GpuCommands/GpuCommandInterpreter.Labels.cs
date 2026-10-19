@@ -579,10 +579,7 @@ public sealed partial class GpuCommandInterpreter
         // order with the command-processor stores recorded before it: UE4 zeroes each
         // query block with a WRITE_DATA right before its begin dump, and dumps written as
         // parsed were wiped when that deferred clear landed, so every query read occluded.
-        for (var depthBlock = 0u; depthBlock < 16u; depthBlock++)
-        {
-            WriteCommandProcessorQword(eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong)), result, "ZPASS_DUMP");
-        }
+        WriteCommandProcessorQwords(eventAddress, 16, 2 * sizeof(ulong), result, "ZPASS_DUMP");
     }
 
     // Flip packets first need a queue slot; without one the submission retries later.

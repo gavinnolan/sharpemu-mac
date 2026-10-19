@@ -928,6 +928,135 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         public bool CanRead(ulong address, ulong size) => Contains(address, size);
     }
 
+    /// <summary>
+    /// The synthetic occlusion dump's sixteen qword stores are recorded as one run. The same
+    /// sixteen values land at the same places as sixteen separate writes would put them, the
+    /// bytes between them are left alone, a parse-time read sees them before they land, and
+    /// a label recorded before and one after keep their places around the run.
+    /// </summary>
+    [Fact]
+    public void ABatchedQwordRunLandsTheSameBytesAsSeparateWritesAndInOrder()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        const ulong value = (1UL << 63) | 5;
+        const ulong gap = 0xAAAAAAAAAAAAAAAAUL;
+        const ulong batched = WindowedLabel + 0x1000;
+        const ulong separate = WindowedLabel + 0x2000;
+        for (var index = 0UL; index < 16; index++)
+        {
+            Assert.True(rig.Backing.TryWrite(batched + index * 16 + 8, BitConverter.GetBytes(gap)));
+            Assert.True(rig.Backing.TryWrite(separate + index * 16 + 8, BitConverter.GetBytes(gap)));
+        }
+
+        // The first store of the run is at the label's address: the older label lands first,
+        // then the run, then the newer label.
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, batched, 1));
+        host.RecordCommandProcessorQwords(batched, 16, 16, value, "ZPASS_DUMP");
+        Assert.Equal(1L, host.BatchedCommandProcessorRuns);
+        Span<byte> read = stackalloc byte[sizeof(ulong)];
+        for (var index = 0UL; index < 16; index++)
+        {
+            Assert.Equal(0UL, rig.Backing.Read64(batched + index * 16));
+            Assert.True(host.TryReadGuest(batched + index * 16, read));
+            Assert.Equal(value, BitConverter.ToUInt64(read));
+            Assert.True(host.TryReadGuest(batched + index * 16 + 8, read));
+            Assert.Equal(gap, BitConverter.ToUInt64(read));
+        }
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, batched + 16 * 5, 3));
+        for (var index = 0UL; index < 16; index++)
+        {
+            host.RecordCommandProcessorWrite(separate + index * 16, BitConverter.GetBytes(value), "ZPASS_DUMP");
+        }
+
+        Assert.Equal((32L, 0L), host.TakeCommandProcessorWriteCounters());
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        for (var index = 0UL; index < 16; index++)
+        {
+            Assert.Equal(index == 5 ? 3UL : value, rig.Backing.Read64(batched + index * 16));
+            Assert.Equal(value, rig.Backing.Read64(separate + index * 16));
+            Assert.Equal(gap, rig.Backing.Read64(batched + index * 16 + 8));
+            Assert.Equal(gap, rig.Backing.Read64(separate + index * 16 + 8));
+        }
+    }
+
+    [Fact]
+    public void ABatchedQwordRunInsideAnOpenComputeEncoderWaitsForItsEndAsOneRun()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        const ulong dump = WindowedLabel + 0x1000;
+        const ulong filled = GuestBase + 0x10000;
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordCommandProcessorQwords(dump, 16, 16, 0x77, "ZPASS_DUMP");
+        Assert.Equal(1L, host.BatchedCommandProcessorRuns);
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(16, host.DeferredLabelCopyCount);
+        Assert.Equal(16L, host.TakeDeferredLabelWrites());
+        Assert.Equal(0UL, rig.Backing.Read64(dump));
+
+        host.FillBufferInOrder(filled, 0x2000, 0x11);
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        for (var index = 0UL; index < 16; index++)
+        {
+            Assert.Equal(0x77UL, rig.Backing.Read64(dump + index * 16));
+        }
+    }
+
+    /// <summary>
+    /// A run with a store no window covers is not batched: every store is recorded on its
+    /// own, as before, and the ones the GPU cannot write are published by the completion.
+    /// </summary>
+    [Fact]
+    public void AQwordRunWithAnUnwindowedStoreIsRecordedStoreByStore()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        const ulong start = GuestBase + HoleOffset - 32;
+
+        host.RecordCommandProcessorQwords(start, 4, 16, 0x99, "ZPASS_DUMP");
+        Assert.Equal((2L, 2L), host.TakeCommandProcessorWriteCounters());
+        Assert.Equal(0L, host.BatchedCommandProcessorRuns);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        for (var index = 0UL; index < 4; index++)
+        {
+            Assert.Equal(0x99UL, rig.Backing.Read64(start + index * 16));
+        }
+    }
+
+    [Fact]
+    public void TheBatchedRunVerifyFindsEveryStoreInTheOverlay()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        var before = Interlocked.Read(ref MetalRenderHost.CommandProcessorBatchVerifyMismatches);
+
+        host.RecordCommandProcessorQwords(WindowedLabel + 0x1000, 16, 16, 0x1234, "ZPASS_DUMP");
+
+        // Only meaningful with SHARPEMU_PERF_VERIFY=1; the invariant holds either way.
+        Assert.Equal(before, Interlocked.Read(ref MetalRenderHost.CommandProcessorBatchVerifyMismatches));
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+    }
+
     private sealed class Rig : IDisposable
     {
         private readonly nint _queue;

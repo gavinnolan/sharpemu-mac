@@ -110,6 +110,64 @@ public sealed partial class GpuCommandInterpreter
         WriteCommandProcessorBytes(destination, bytes, kind);
     }
 
+    /// <summary>
+    /// Whether runs of identical qword stores (the synthetic occlusion dump) are handed to the host
+    /// as one call. SHARPEMU_GPU_CP_WRITE_BATCH=0 records each store on its own again.
+    /// </summary>
+    internal bool BatchCommandProcessorWrites { get; set; } = CommandProcessorWriteBatching.Enabled;
+
+    /// <summary>
+    /// <paramref name="count"/> qword stores of <paramref name="value"/>, <paramref name="strideBytes"/>
+    /// apart. They land exactly as <paramref name="count"/> calls to
+    /// <see cref="WriteCommandProcessorQword"/> would: in order, with nothing recorded between them.
+    /// </summary>
+    private void WriteCommandProcessorQwords(ulong destination, int count, ulong strideBytes, ulong value, string kind)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        if (!BatchCommandProcessorWrites || !DefersCommandProcessorWrites || strideBytes < sizeof(ulong) ||
+            count == 1 || PendingLabelRecorded is null)
+        {
+            for (var index = 0; index < count; index++)
+            {
+                WriteCommandProcessorQword(destination + (ulong)index * strideBytes, value, kind);
+            }
+
+            return;
+        }
+
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping))
+        {
+            for (var index = 0; index < count; index++)
+            {
+                CommandProcessorWriteHistory.Record(QueueId, destination + (ulong)index * strideBytes,
+                    sizeof(ulong), value, kind, deferred: true);
+            }
+
+            if (PendingQwordsRecorded is { } noteRun)
+            {
+                noteRun(destination, count, strideBytes, value);
+            }
+            else
+            {
+                for (var index = 0; index < count; index++)
+                {
+                    PendingLabelRecorded(destination + (ulong)index * strideBytes, sizeof(ulong), value);
+                }
+            }
+        }
+
+        _host.RecordCommandProcessorQwords(destination, count, strideBytes, value, kind);
+
+        _lastWriteAddress = destination + (ulong)(count - 1) * strideBytes;
+        _lastWriteValue = value;
+        _lastWriteLength = sizeof(ulong);
+        _lastWritePacket = _packetSerial;
+    }
+
     // Tells the queue what the bytes will hold once they land, so a wait on them - this
     // queue's or another's - reads them as written, as it does a deferred label.
     private void NotePendingBytes(ulong destination, ReadOnlySpan<byte> bytes)

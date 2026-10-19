@@ -236,6 +236,31 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         Calls.Add($"cp_write {kind} {address:X} {source.Length}");
     }
 
+    // A host that takes a run of identical qword stores as one call, as the Metal host does.
+    public bool RecordsQwordRuns { get; set; }
+
+    public bool PublishesSyntheticOcclusionDumps { get; set; }
+
+    public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
+    {
+        if (!RecordsQwordRuns)
+        {
+            var bytes = BitConverter.GetBytes(value);
+            for (var index = 0; index < count; index++)
+            {
+                RecordCommandProcessorWrite(address + (ulong)index * strideBytes, bytes, kind);
+            }
+
+            return;
+        }
+
+        Calls.Add($"cp_qwords {kind} {address:X} {count} {strideBytes}");
+        for (var index = 0; index < count; index++)
+        {
+            CommandProcessorWrites.Add((kind, address + (ulong)index * strideBytes, BitConverter.GetBytes(value)));
+        }
+    }
+
     public void FillBufferInOrder(ulong address, ulong size, uint value) =>
         Calls.Add($"fill_in_order {address:X} {size:X} {value:X8}");
 

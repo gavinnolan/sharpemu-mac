@@ -373,6 +373,84 @@ public sealed class CommandStreamQueueTests
         Assert.Contains($"cp_write WRITE_DATA {signal + 0x10:X} 4", host.Calls);
     }
 
+    private static uint[] WaitNotEqual(ulong address, uint reference) =>
+        StreamRunner.Packet(PacketOpcode.WaitRegisterMemory, 0x14u, StreamRunner.Low(address), StreamRunner.High(address), reference, 0xFFFF_FFFFu, 0);
+
+    /// <summary>
+    /// The synthetic occlusion dump is sixteen qword stores 16 bytes apart. A host that takes
+    /// them as a run gets one call; either way the host sees the same stores in the same
+    /// order, another queue's wait on one of them is met by the recorded label at once, a
+    /// wait on the bytes between them is not woken, and the labels are forgotten when their
+    /// tick lands.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnOcclusionDumpIsRecordedInOrderAndAnotherQueuesWaitSeesItUntilItLands(bool batch)
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PublishesSyntheticOcclusionDumps = true;
+        host.RecordsQwordRuns = true;
+        host.PendingLabelTick = 5;
+        var dump = Label + 0x200;
+        var seen = Label + 0x10;
+        var untouched = Label + 0x18;
+        host.WriteDword(dump + 48, 0);
+        host.WriteDword(dump + 56, 0);
+        host.WriteDword(seen, 0);
+        host.WriteDword(untouched, 0);
+        EnqueueCompute(host, queue, 0x20, Compute, 1, WaitNotEqual(dump + 48, 0), WriteLabel(seen, 7));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        EnqueueCompute(host, queue, 0x21, Compute + 0x1000, 2, WaitNotEqual(dump + 56, 0), WriteLabel(untouched, 9));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(2, queue.BlockedQueueCount);
+
+        var interpreter = queue.GetInterpreter(0);
+        interpreter.BatchCommandProcessorWrites = batch;
+        interpreter.RaiseEvent(0x39, 1, dump);
+
+        var stores = host.CommandProcessorWrites.Where(write => write.Kind == "ZPASS_DUMP").ToArray();
+        Assert.Equal(Enumerable.Range(0, 16).Select(index => dump + (ulong)index * 16), stores.Select(write => write.Address));
+        var value = BitConverter.ToUInt64(stores[0].Bytes);
+        Assert.Equal(1UL << 63, value & (1UL << 63));
+        Assert.All(stores, write => Assert.Equal(value, BitConverter.ToUInt64(write.Bytes)));
+        Assert.Equal(batch ? 1 : 0, host.Calls.Count(call => call.StartsWith("cp_qwords ", StringComparison.Ordinal)));
+        Assert.Equal(batch ? 0 : 16, host.Calls.Count(call => call.StartsWith("cp_write ZPASS_DUMP ", StringComparison.Ordinal)));
+
+        // The wait on a stored qword is met by the recorded label; the one on the bytes
+        // between two stores is not woken by them.
+        Assert.Equal(1, queue.BlockedQueueCount);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Contains($"cp_write WRITE_DATA {seen:X} 4", host.Calls);
+        Assert.DoesNotContain($"cp_write WRITE_DATA {untouched:X} 4", host.Calls);
+
+        // Once that tick completes the labels are memory's business again.
+        queue.NotifyCompletedGpuTick(5);
+        EnqueueCompute(host, queue, 0x22, Compute + 0x2000, 3, WaitNotEqual(dump + 96, 0), WriteLabel(seen + 0x40, 3));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+    }
+
+    [Fact]
+    public void AWaitMetByARecordedLabelDoesNotNeedTheBlockedHeadHintToBeRaised()
+    {
+        // Nothing is blocked when the label is recorded, so its wake is skipped; a wait that
+        // starts afterwards still reads the label, which was published before it.
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, ReleaseMemoryInterrupt(Label, 1));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(0, queue.BlockedQueueCount);
+
+        EnqueueCompute(host, queue, 0x20, Compute, 2, WaitEqual(Label, 1), WriteLabel(Label + 8, 7));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+        Assert.Equal(0, CommandStreamQueue.LabelWakeVerifyMismatches);
+    }
+
     [Fact]
     public void MemoryWaitWakesOnlyForAWriteThatTouchesItsOwnBytes()
     {

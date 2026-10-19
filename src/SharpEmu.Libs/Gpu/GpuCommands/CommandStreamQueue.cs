@@ -203,6 +203,7 @@ public sealed class CommandStreamQueue
             {
                 GuestMemoryWritten = NotifyGuestMemoryWritten,
                 PendingLabelRecorded = NotePendingLabel,
+                PendingQwordsRecorded = NotePendingQwords,
                 PendingLabelLookup = TryGetPendingLabel,
                 SyntheticOcclusionCounterBank = _syntheticOcclusionCounters,
             };
@@ -733,6 +734,39 @@ public sealed class CommandStreamQueue
     // the waiter reads someone else's bytes and never sees the value it was waiting for.
     private readonly Dictionary<ulong, (ulong Value, int Size, ulong Tick)> _pendingLabels = new();
 
+    // Guards _pendingLabels alone, so recording a label does not contend on _gate with the
+    // guest threads that submit through it. Taken inside _gate where both are held, never
+    // the other way round.
+    private readonly object _labelGate = new();
+
+    // Whether some parked head may be blocked. Raised when a slice parks one (under _gate) and
+    // lowered only by a scan that finds none (under _gate). Slices never overlap, and a label
+    // is recorded from inside one, so no head can park while this is read: a clear hint means
+    // nothing is blocked now, and a wake would have nothing to wake. Blocked heads only ever
+    // become unblocked behind the reader's back, which a stale raised hint merely over-reports.
+    private volatile bool _blockedHeadsPossible;
+
+    /// <summary>Label-wake skips that the verify mode found a blocked head behind; zero is the invariant.</summary>
+    internal static long LabelWakeVerifyMismatches;
+
+    private readonly record struct AddressRange(ulong Address, ulong Size);
+
+    private readonly record struct QwordRun(ulong Address, int Count, ulong Stride)
+    {
+        public bool TouchedBy(CommandWaitCondition wait)
+        {
+            for (var index = 0; index < Count; index++)
+            {
+                if (wait.TouchedBy(Address + (ulong)index * Stride, sizeof(ulong)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     private void NotePendingLabel(ulong address, int size, ulong value)
     {
         var tick = _host.PendingLabelTick;
@@ -741,17 +775,102 @@ public sealed class CommandStreamQueue
             return;
         }
 
-        lock (_gate)
+        // Published before any wait is evaluated: the dictionary is updated first, and the
+        // wake, when there is anything to wake, follows it.
+        lock (_labelGate)
         {
             _pendingLabels[address] = (value, size, tick);
-            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, (ulong)size),
+        }
+
+        if (!_blockedHeadsPossible)
+        {
+            VerifyNothingBlocked();
+            return;
+        }
+
+        lock (_gate)
+        {
+            WakeMatchingLocked(new AddressRange(address, (ulong)size),
+                static (range, wait) => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(range.Address, range.Size),
                 DsWakeSource.PendingLabel);
+            LowerBlockedHintLocked();
+        }
+    }
+
+    /// <summary>
+    /// Records <paramref name="count"/> eight-byte pending labels at a fixed stride as one
+    /// dictionary update and one wake pass, instead of one of each per label.
+    /// </summary>
+    private void NotePendingQwords(ulong address, int count, ulong strideBytes, ulong value)
+    {
+        var tick = _host.PendingLabelTick;
+        if (tick == 0 || count <= 0)
+        {
+            return;
+        }
+
+        lock (_labelGate)
+        {
+            for (var index = 0; index < count; index++)
+            {
+                _pendingLabels[address + (ulong)index * strideBytes] = (value, sizeof(ulong), tick);
+            }
+        }
+
+        if (!_blockedHeadsPossible)
+        {
+            VerifyNothingBlocked();
+            return;
+        }
+
+        lock (_gate)
+        {
+            WakeMatchingLocked(new QwordRun(address, count, strideBytes),
+                static (run, wait) => wait.Kind == CommandWaitKind.Unknown || run.TouchedBy(wait),
+                DsWakeSource.PendingLabel);
+            LowerBlockedHintLocked();
+        }
+    }
+
+    // Caller holds _gate.
+    private void LowerBlockedHintLocked()
+    {
+        foreach (var queue in _queues)
+        {
+            if (queue.First is { Value.Blocked: true })
+            {
+                return;
+            }
+        }
+
+        _blockedHeadsPossible = false;
+    }
+
+    // SHARPEMU_GPU_CP_WRITE_BATCH_VERIFY: the skipped wake would have woken nothing.
+    private void VerifyNothingBlocked()
+    {
+        if (!CommandProcessorWriteBatching.Verify)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            foreach (var queue in _queues)
+            {
+                if (queue.First is { Value.Blocked: true })
+                {
+                    Interlocked.Increment(ref LabelWakeVerifyMismatches);
+                    Console.Error.WriteLine("[GPU][VERIFY] A pending label skipped its wake while a head was blocked.");
+                    return;
+                }
+            }
         }
     }
 
     private bool TryGetPendingLabel(ulong address, bool is64Bit, out ulong value)
     {
-        lock (_gate)
+        lock (_labelGate)
         {
             if (_pendingLabels.TryGetValue(address, out var label) && label.Size >= (is64Bit ? 8 : 4))
             {
@@ -771,6 +890,9 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // The labels one completion lands, reused across ticks; only touched under _labelGate.
+    private readonly List<ulong> _landedLabels = [];
+
     public void NotifyCompletedGpuTick(ulong completedTick)
     {
         lock (_gate)
@@ -781,24 +903,25 @@ public sealed class CommandStreamQueue
             }
 
             _lastCompletedGpuTick = completedTick;
-            if (_pendingLabels.Count != 0)
+            lock (_labelGate)
             {
-                // A landed label is in memory now, where the guest may already have reused it.
-                List<ulong>? landed = null;
-                foreach (var (address, label) in _pendingLabels)
+                if (_pendingLabels.Count != 0)
                 {
-                    if (label.Tick <= completedTick)
+                    // A landed label is in memory now, where the guest may already have reused it.
+                    foreach (var (address, label) in _pendingLabels)
                     {
-                        (landed ??= []).Add(address);
+                        if (label.Tick <= completedTick)
+                        {
+                            _landedLabels.Add(address);
+                        }
                     }
-                }
 
-                if (landed is not null)
-                {
-                    foreach (var address in landed)
+                    foreach (var address in _landedLabels)
                     {
                         _pendingLabels.Remove(address);
                     }
+
+                    _landedLabels.Clear();
                 }
             }
 
@@ -928,7 +1051,11 @@ public sealed class CommandStreamQueue
     }
 
     // Caller holds the gate. Wakes the heads a condition predicate selects.
-    private void WakeMatchingLocked(Func<CommandWaitCondition, bool> matches, DsWakeSource dsSource)
+    private void WakeMatchingLocked(Func<CommandWaitCondition, bool> matches, DsWakeSource dsSource) =>
+        WakeMatchingLocked(matches, static (select, wait) => select(wait), dsSource);
+
+    // The same with the predicate's inputs passed in, so a static lambda selects without a closure.
+    private void WakeMatchingLocked<TState>(TState state, Func<TState, CommandWaitCondition, bool> matches, DsWakeSource dsSource)
     {
         _wakeGeneration++;
         var woke = false;
@@ -948,7 +1075,7 @@ public sealed class CommandStreamQueue
                 dsOldest = head.Value.BlockedSinceTicks;
             }
 
-            if (matches(head.Value.Wait))
+            if (matches(state, head.Value.Wait))
             {
                 head.Value.Blocked = false;
                 TargetedWakes++;
@@ -1169,6 +1296,11 @@ public sealed class CommandStreamQueue
                 var raced = _wakeGeneration != sliceWakeGeneration &&
                     submission!.RacedWakeGeneration != _wakeGeneration;
                 submission!.Blocked = !raced;
+                if (!raced)
+                {
+                    _blockedHeadsPossible = true;
+                }
+
                 if (raced)
                 {
                     // One more run for this wake, and only one: a head that re-ran on

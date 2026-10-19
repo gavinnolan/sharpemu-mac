@@ -49,15 +49,49 @@ internal sealed class MetalPendingWriteOverlay
 
     private sealed class Entry
     {
-        public required ulong Address;
-        public required byte[] Bytes;
-        public required ulong Serial;
-        public required ulong Sequence;
+        public ulong Address;
+        public byte[] Bytes = [];
+        public ulong Serial;
+        public ulong Sequence;
         public byte[]? Baseline;
         public bool[]? Dead;
         public bool Removed;
 
         public ulong End => Address + (ulong)Bytes.Length;
+    }
+
+    // A command-processor write is almost always a dword or a qword, and one entry with its
+    // byte array per write was garbage the worker made at every draw's occlusion dump. Entries
+    // of up to MaxPooledBytes are kept, by size, once they have left the page lists and the
+    // order queue, and reused by the next write of that size. Guarded by the gate.
+    private const int MaxPooledBytes = 16;
+    private const int MaxPooledPerSize = 256;
+    private readonly Stack<Entry>[] _spareEntries = [new(), new(), new(), new(), new()];
+
+    private Entry RentEntry(int length)
+    {
+        if (length <= MaxPooledBytes && (length & 3) == 0 && _spareEntries[length >> 2] is { Count: > 0 } spare)
+        {
+            return spare.Pop();
+        }
+
+        return new Entry { Bytes = new byte[length] };
+    }
+
+    // Only an entry dequeued from the order queue and removed: nothing lists it any more.
+    private void RecycleEntry(Entry entry)
+    {
+        var length = entry.Bytes.Length;
+        if (length == 0 || length > MaxPooledBytes || (length & 3) != 0 ||
+            _spareEntries[length >> 2].Count >= MaxPooledPerSize)
+        {
+            return;
+        }
+
+        entry.Baseline = null;
+        entry.Dead = null;
+        entry.Removed = false;
+        _spareEntries[length >> 2].Push(entry);
     }
 
     /// <summary>Entries not yet dropped. Zero is the fast path every read checks first.</summary>
@@ -86,30 +120,62 @@ internal sealed class MetalPendingWriteOverlay
 
         lock (_gate)
         {
-            Interlocked.Increment(ref _version);
-            var entry = new Entry { Address = address, Bytes = bytes.ToArray(), Serial = serial, Sequence = ++_sequence };
-            if (baseline.Length == bytes.Length)
-            {
-                entry.Baseline = baseline.ToArray();
-            }
-
-            for (var page = address >> PageShift; page <= (entry.End - 1) >> PageShift; page++)
-            {
-                if (!_pages.TryGetValue(page, out var list))
-                {
-                    _pages[page] = list = _spareLists.Count != 0 ? _spareLists.Pop() : new List<Entry>(2);
-                }
-
-                list.Add(entry);
-                if (_pageFilter is not null)
-                {
-                    Interlocked.Increment(ref _pageFilter[FilterSlot(page)]);
-                }
-            }
-
-            _order.Enqueue(entry);
-            _count++;
+            AddLocked(address, bytes, serial, baseline);
         }
+    }
+
+    /// <summary>
+    /// <see cref="Add"/> for <paramref name="count"/> eight-byte entries holding one value,
+    /// <paramref name="strideBytes"/> apart, under one hold of the gate. Each is its own entry, so a
+    /// later write over one of them forgets that one only, exactly as if added one by one.
+    /// </summary>
+    public void AddQwords(ulong address, int count, ulong strideBytes, ulong value, ulong serial)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        lock (_gate)
+        {
+            for (var index = 0; index < count; index++)
+            {
+                AddLocked(address + (ulong)index * strideBytes, bytes, serial, default);
+            }
+        }
+    }
+
+    private void AddLocked(ulong address, ReadOnlySpan<byte> bytes, ulong serial, ReadOnlySpan<byte> baseline)
+    {
+        Interlocked.Increment(ref _version);
+        var entry = RentEntry(bytes.Length);
+        entry.Address = address;
+        bytes.CopyTo(entry.Bytes);
+        entry.Serial = serial;
+        entry.Sequence = ++_sequence;
+        if (baseline.Length == bytes.Length)
+        {
+            entry.Baseline = baseline.ToArray();
+        }
+
+        for (var page = address >> PageShift; page <= (entry.End - 1) >> PageShift; page++)
+        {
+            if (!_pages.TryGetValue(page, out var list))
+            {
+                _pages[page] = list = _spareLists.Count != 0 ? _spareLists.Pop() : new List<Entry>(2);
+            }
+
+            list.Add(entry);
+            if (_pageFilter is not null)
+            {
+                Interlocked.Increment(ref _pageFilter[FilterSlot(page)]);
+            }
+        }
+
+        _order.Enqueue(entry);
+        _count++;
     }
 
     /// <summary>Drops every entry whose submission has completed.</summary>
@@ -119,7 +185,9 @@ internal sealed class MetalPendingWriteOverlay
         {
             while (_order.Count != 0 && (_order.Peek().Serial <= completedSerial || _order.Peek().Removed))
             {
-                RemoveLocked(_order.Dequeue());
+                var entry = _order.Dequeue();
+                RemoveLocked(entry);
+                RecycleEntry(entry);
             }
         }
     }
@@ -167,7 +235,9 @@ internal sealed class MetalPendingWriteOverlay
         {
             while (_order.Count != 0)
             {
-                RemoveLocked(_order.Dequeue());
+                var entry = _order.Dequeue();
+                RemoveLocked(entry);
+                RecycleEntry(entry);
             }
         }
     }

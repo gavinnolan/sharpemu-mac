@@ -120,6 +120,76 @@ public sealed class MetalPendingWriteOverlayTests
     }
 
     [Fact]
+    public void AQwordRunIsEntriesThatAnswerAndAreForgottenOneByOne()
+    {
+        var overlay = new MetalPendingWriteOverlay();
+        overlay.AddQwords(0x7000_0000, count: 4, strideBytes: 16, value: 0x1122334455667788UL, serial: 5);
+
+        Assert.Equal(4, overlay.Count);
+        for (ulong index = 0; index < 4; index++)
+        {
+            Span<byte> bytes = stackalloc byte[8];
+            overlay.Apply(0x7000_0000 + index * 16, bytes);
+            Assert.Equal(0x1122334455667788UL, BitConverter.ToUInt64(bytes));
+            Assert.Equal(MetalOverlayCoverage.None, overlay.Coverage(0x7000_0000 + index * 16 + 8, 8, () => 0));
+        }
+
+        overlay.Forget(0x7000_0010, 8);
+        Assert.Equal(3, overlay.Count);
+        Assert.Equal(MetalOverlayCoverage.None, overlay.Coverage(0x7000_0010, 8, () => 0));
+        Assert.Equal(MetalOverlayCoverage.Full, overlay.Coverage(0x7000_0020, 8, () => 0));
+    }
+
+    [Fact]
+    public void AReusedEntryCarriesNothingOfItsPreviousWrite()
+    {
+        var overlay = new MetalPendingWriteOverlay();
+        overlay.Add(0x7000_0000, [1, 2, 3, 4, 5, 6, 7, 8], serial: 5, baseline: [0, 0, 0, 0, 0, 0, 0, 0]);
+        // Half of it is overwritten, which marks those bytes dead on the entry.
+        overlay.Forget(0x7000_0000, 4);
+        overlay.Retire(completedSerial: 5);
+        Assert.Equal(0, overlay.Count);
+
+        overlay.Add(0x7000_0100, [9, 9, 9, 9, 9, 9, 9, 9], serial: 6);
+        Assert.Equal(MetalOverlayCoverage.Full, overlay.Coverage(0x7000_0100, 8, () => 0));
+        Span<byte> bytes = stackalloc byte[8];
+        overlay.Apply(0x7000_0100, bytes);
+        Assert.Equal([9, 9, 9, 9, 9, 9, 9, 9], bytes.ToArray());
+        Assert.Equal(MetalOverlayCoverage.None, overlay.Coverage(0x7000_0000, 8, () => 0));
+
+        // No baseline was recorded for the reused entry, so a changed memory does not drop it.
+        overlay.DropChangedBaselines(0x7000_0100, 8, static (_, destination) => { destination.Fill(0x55); return true; });
+        Assert.Equal(1, overlay.Count);
+    }
+
+    [Fact]
+    public void RetiredSmallEntriesAreReusedWithoutAllocating()
+    {
+        var overlay = new MetalPendingWriteOverlay();
+        ulong serial = 0;
+        void Round()
+        {
+            overlay.AddQwords(0x7000_0000, count: 16, strideBytes: 16, value: 7, serial: ++serial);
+            overlay.Add(0x7000_4000, [1, 2, 3, 4], serial: serial);
+            overlay.Retire(serial);
+        }
+
+        for (var warm = 0; warm < 8; warm++)
+        {
+            Round();
+        }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var round = 0; round < 200; round++)
+        {
+            Round();
+        }
+
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+        Assert.Equal(0, overlay.Count);
+    }
+
+    [Fact]
     public void ALongRangeIsWalkedRatherThanCounted()
     {
         var overlay = new MetalPendingWriteOverlay();
