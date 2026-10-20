@@ -486,7 +486,11 @@ public sealed partial class RenderExecutor
             (!_host.TakesIndirectDrawArguments(
                     state.Programs.Vertex, arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) ||
                 (IsRectangleList(banks.UserConfig.PrimitiveType) &&
-                    !_host.TakesIndirectRectangleListArguments)))
+                    !_host.TakesIndirectIndexedRectangleListArguments(
+                        state.Programs.VertexInput,
+                        arguments.IndirectArgumentsAddress,
+                        IndexedIndirectArgumentsSize,
+                        arguments.UnboundedIndexBuffer ? uint.MaxValue : arguments.IndexCount))))
         {
             // The backend runs this program as a mesh pipeline, or this rectangle list as
             // patches, whose launch is sized from the very counts the GPU would have read;

@@ -1784,11 +1784,12 @@ internal sealed partial class MetalRenderHost
 
         if (entry.RectangleStates is not null)
         {
-            // TakesIndirectRectangleListArguments answers false, so the executor reads
-            // the counts first; a patch draw sizes its patch count from them.
-            throw Fatal(
-                "An indexed indirect draw reached a rectangle-list pipeline with its counts still in guest memory: " +
-                $"pipeline={entry.Id} {entry.Profile}.");
+            // TakesIndirectIndexedRectangleListArguments let it through: the pass builds its
+            // patch draw from the record (MetalRenderHost.RectangleRebase.cs).
+            DrawRectanglesIndexedIndirect(entry, arguments);
+            CountDraw(started);
+            ProfileWork(entry, "draw-indexed-rect-indirect", "indirect");
+            return;
         }
 
         var passes = FacePassCount(entry);
