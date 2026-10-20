@@ -71,6 +71,7 @@ internal sealed partial class MetalRenderHost
         if (gathered)
         {
             pristine = _guestMemory.Allocate(staging.Size, 256, out _);
+            OrderAfterDeferredCopies(address, staging.Size);
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
             staged.EncodeGather(context.CommandBuffer, address, staging, pristine);
             if (context.WantsEncodedLabels)
@@ -179,6 +180,7 @@ internal sealed partial class MetalRenderHost
             // The CPU staged what guest memory holds now. Bytes the GPU has yet to write
             // there are copied in by the GPU, behind that work.
             entry.Gathered = true;
+            OrderAfterDeferredCopies(entry.Address, size);
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
             _stagedRanges!.Touch(entry, context.SubmissionSerial);
             staged.EncodeGather(context.CommandBuffer, entry.Address, entry.Staging, entry.Pristine);

@@ -45,7 +45,7 @@ public static partial class ImageRequestBuilders
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
         description.Extent = new GpuExtent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
-        description.BytesPerBlock = 4;
+        description.BytesPerBlock = shape.Atomic64 ? 8u : 4u;
         description.Samples = shape.Multisampled ? 4u : 1u;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0, Pitch = 1, Height = 1 };
         var view = ImageViewDescription.Default with
@@ -366,7 +366,9 @@ public static partial class ImageRequestBuilders
             request.TraceWriteCompress = descriptor.WriteCompress;
             request.TraceTextureDescriptor = string.Join(",", ((ReadOnlySpan<uint>)descriptor.Fields).ToArray().Select(word => word.ToString("X8")));
         }
-        return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
+        // Metal runs a texture atomic only on a texture created for it, never on a view of
+        // another format, so a 64-bit atomic asks for an RG32Uint image of its own.
+        return new TextureRequestResolution(request, shaderConversion || shape.Atomic64, pixelFormat, DestinationSwizzle(descriptor));
     }
 
     // After the lookup: a stencil association redirects to its depth owner; the view rules run
