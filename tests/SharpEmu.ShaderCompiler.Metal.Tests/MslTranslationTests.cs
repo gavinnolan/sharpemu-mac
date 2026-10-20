@@ -745,6 +745,67 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void APersistentThreadKernelsRecordsAreWrittenAndReadWholeUnderTheirLock()
+    {
+        // The persistent queue loop with its dword load and store made a GLC LOAD_DWORDX3 of
+        // v2..v4 and a STORE_DWORDX3 of the same: a record another workgroup reads.
+        var words = Gen5ComputeFixtures.PersistentQueueLoop.Words.ToArray();
+        static void Replace(uint[] program, uint word0, uint word1, uint newWord0)
+        {
+            var at = Array.FindIndex(program, word => word == word0);
+            Assert.True(at >= 0 && program[at + 1] == word1);
+            program[at] = newWord0;
+        }
+
+        Replace(words, 0xE0305000, 0x80020200, 0xE03C5000); // buffer_load_dwordx3 v[2:4], v0, s[8:11], 0 offen glc
+        Replace(words, 0xE0701080, 0x80020200, 0xE07C1080); // buffer_store_dwordx3 v[2:4], v0, s[8:11], 0 offen offset:128
+        var fixture = Gen5ComputeFixtures.PersistentQueueLoop with { Name = "persistent-queue-records", Words = words };
+        static string Body(string source) => source[source.IndexOf("kernel void ", StringComparison.Ordinal)..];
+
+        var locked = Body(Gen5ComputeFixtures.CompileRequestOrThrow(fixture).Source);
+        Assert.Contains("sharpemu_load_record_coherent(", locked, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_pair_try_lock(", locked, StringComparison.Ordinal);
+
+        Assert.True(Gen5MslTranslator.TryCompileProgram(
+            Gen5ComputeFixtures.CreateComputeRequest(fixture), out var unlocked, out var error,
+            new Gen5MslCodegenOptions(PersistentRecordLocks: false)), error);
+        Assert.DoesNotContain("sharpemu_load_record_coherent(", Body(unlocked.Source), StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_pair_try_lock(", Body(unlocked.Source), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void APersistentThreadKernelsWaitsAreDeviceFencesAndNoOtherKernelsAre()
+    {
+        // Workgroups of a persistent-thread kernel hand work to each other through memory, and
+        // the guest's waits are what make a store visible before the atomic that publishes it.
+        const string Fence = "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);";
+        static string Body(string source) => source[source.IndexOf("kernel void ", StringComparison.Ordinal)..];
+        var persistent = Body(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.PersistentQueueLoop).Source);
+        Assert.Contains(Fence, persistent, StringComparison.Ordinal);
+
+        Assert.True(Gen5MslTranslator.TryCompileProgram(
+            Gen5ComputeFixtures.CreateComputeRequest(Gen5ComputeFixtures.PersistentQueueLoop),
+            out var unfenced, out var error, new Gen5MslCodegenOptions(PersistentWaitFences: false)), error);
+        Assert.DoesNotContain(Fence, Body(unfenced.Source), StringComparison.Ordinal);
+
+        // A kernel that only polls (its own wait, no handing over) keeps S_WAITCNT a no-op.
+        var polling = new Gen5ComputeFixture(
+            "polling-loop-fence",
+            [
+                0xBE800385,             // s_mov_b32 s0, 5
+                0xE0305000, 0x80020100, // loop: buffer_load_dword v1, v0, s[8:11], 0 offen glc
+                0xBF8C3F70,             // s_waitcnt vmcnt(0)
+                0x81808100,             // s_sub_i32 s0, s0, 1
+                0xBF078000,             // s_cmp_lg_u32 s0, 0
+                0xBF85FFFA,             // s_cbranch_scc1 loop
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 8,
+            StoreBackingBytes: 256);
+        Assert.DoesNotContain(Fence, Body(Gen5ComputeFixtures.CompileRequestOrThrow(polling).Source), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ArgumentBufferCarriesBufferLengthsAndUsesSeparatePushData()
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);

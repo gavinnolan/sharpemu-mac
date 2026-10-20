@@ -1392,7 +1392,11 @@ public static partial class Gen5MslTranslator
 
         /// <summary>A compute kernel that drains a shared queue and never reads its workgroup
         /// ID, so its groups are interchangeable.</summary>
-        private bool IsPersistentThreadsKernel() =>
+        private bool LocksPersistentRecords => _options.PersistentRecordLocks && IsPersistentThreadsKernel();
+
+        private bool? _persistentThreads;
+
+        private bool IsPersistentThreadsKernel() => _persistentThreads ??=
             _stage == Gen5MslStage.Compute &&
             _request.ComputeSystemRegisters is not { WorkGroupXRegister: not null } &&
             _request.ComputeSystemRegisters is not { WorkGroupYRegister: not null } &&
@@ -1767,6 +1771,12 @@ public static partial class Gen5MslTranslator
                 case "SSubvectorLoopEnd":
                     error = $"{instruction.Opcode} is subroutine/subvector control flow the translator does not follow";
                     return false;
+                // The emitted MSL has no counters to wait on, but a persistent-thread kernel's
+                // waits are where its stores become visible to other workgroups
+                // (Gen5MslCodegenOptions.PersistentWaitFences).
+                case "SWaitcnt" when _options.PersistentWaitFences && IsPersistentThreadsKernel():
+                    Line("atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);");
+                    return true;
                 case "SNop":
                 case "SWaitcnt":
                 // A dependency-counter wait: the emitted MSL has no hardware
@@ -3756,6 +3766,17 @@ public static partial class Gen5MslTranslator
                         : $"(v[{sourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.At(0)}, {source}, {storeBytes}u);");
                 }
+                else if (dwordCount >= 2 && byteAddress.Contiguous && LocksPersistentRecords)
+                {
+                    // One record to other workgroups (Gen5MslCodegenOptions.PersistentRecordLocks).
+                    EmitPairLocked($"b{bindingIndex} + (({byteAddress.Base}) >> 2)", () =>
+                    {
+                        for (uint index = 0; index < dwordCount; index++)
+                        {
+                            Line(StoreDwordStatement(bindingIndex, $"{byteAddress.Base} + {index * 4}u", $"v[{sourceVectorRegister + index}]"));
+                        }
+                    });
+                }
                 else
                 {
                     for (uint index = 0; index < dwordCount; index++)
@@ -3805,6 +3826,21 @@ public static partial class Gen5MslTranslator
                     StorePairLoad(
                         destinationVectorRegister,
                         $"sharpemu_load_pair_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {DwordAddress(0)}, {DwordAddress(1)}, {PairLockArguments})");
+                    return true;
+                }
+
+                if (glc && dwordCount is 3 or 4 && byteAddress.Contiguous && LocksPersistentRecords)
+                {
+                    // One snapshot of the record (Gen5MslCodegenOptions.PersistentRecordLocks).
+                    _usesPairLocks = true;
+                    var record = Temp("uint4", "uint4(0u)");
+                    var load = $"sharpemu_load_record_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {DwordAddress(0)}, {dwordCount}u, {PairLockArguments})";
+                    Line(!_execKnownFull ? $"if (exec) {{ {record} = {load}; }}" : $"{record} = {load};");
+                    for (uint index = 0; index < dwordCount; index++)
+                    {
+                        StoreVector(destinationVectorRegister + index, $"{record}[{index}]");
+                    }
+
                     return true;
                 }
 
