@@ -314,6 +314,8 @@ internal sealed partial class MetalRenderHost :
     }
 
     // Everything the cache and the transfers encode needs the encoders closed first.
+    void IMetalImageCacheOwner.LandHeldCopies(ulong address, ulong size) => OrderAfterDeferredCopies(address, size);
+
     IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(MetalTransferCause cause) =>
         BeginTransferTouching(cause, 0, 0);
 
@@ -417,6 +419,7 @@ internal sealed partial class MetalRenderHost :
         if (DeferredLabelCopiesTouch(guestAddress, size) ||
             (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(guestAddress, size)))
         {
+            _landDeferredLabels |= DeferredLabelCopiesTouch(guestAddress, size);
             ((IMetalSubmissionContext)this).ReleaseSharedEncoder();
             return 0;
         }
@@ -568,6 +571,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _flushCauses[(int)why]++;
+        _landDeferredLabels = true;
         EndEncoders(cause);
         MaterializePendingClears();
         _stagedStorageCopies?.EndSubmission();
@@ -1370,6 +1374,8 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        // A label held for the commit over these bytes lands first, so the fill overwrites it in stream order.
+        OrderAfterDeferredCopies(address, size);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -1506,6 +1512,9 @@ internal sealed partial class MetalRenderHost :
         }
 
         FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
+        // A label held for the commit over the source or the destination lands first, as a boundary used to land it.
+        OrderAfterDeferredCopies(source, size);
+        OrderAfterDeferredCopies(destination, size);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();

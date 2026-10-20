@@ -1830,6 +1830,15 @@ internal sealed partial class MetalRenderHost
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        // A persistent-thread kernel spins on memory other work publishes, which can be what a
+        // label copy held for the commit writes: the copy would land only after the kernel had
+        // waited out its budget for it (UE5's Nanite culling took twice as long per dispatch).
+        // Everything held lands ahead of such a dispatch instead.
+        if (LabelsAtCommit && _deferredLabelCopies.Count != 0 && _pendingComputePipeline is { PersistentThreads: true })
+        {
+            OrderAfterDeferredCopies(0, ulong.MaxValue);
+        }
+
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ?? throw Fatal("A dispatch has no bound Metal compute pipeline state.");
         if (entry.PersistentThreads && PersistentThreadGroups != 0 && groupsY <= 1 && groupsZ <= 1 &&

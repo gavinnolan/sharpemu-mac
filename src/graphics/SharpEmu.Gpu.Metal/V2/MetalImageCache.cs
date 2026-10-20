@@ -28,6 +28,12 @@ internal interface IMetalImageCacheOwner
     // Ends any open encoder and hands over the command buffer being recorded.
     IMetalSubmissionContext BeginTransfer(MetalTransferCause cause);
 
+    // Lands the command-processor copies held for the commit that write these guest bytes, so
+    // a transfer reading them next sees them (MetalRenderHost.LabelsAtCommit).
+    void LandHeldCopies(ulong address, ulong size)
+    {
+    }
+
     // The same, for a transfer that reads or writes only these textures (zero for an
     // unused one). A clear still waiting for its pass has to land before the transfer
     // only when the transfer touches the cleared texture; every other one keeps waiting.
@@ -1498,6 +1504,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
+        _owner.LandHeldCopies(description.Data.Address + aligned, alignedEnd - aligned);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeTextureToGuest(
@@ -2037,6 +2044,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         PrepareSparseUpload(image, residentStart, residentEnd);
+        _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var residentSize = residentEnd - residentStart;
         var whole = residentSize <= MaxTransferPieceBytes
@@ -2106,6 +2114,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         PrepareSparseUpload(image, start, end);
+        _owner.LandHeldCopies(description.Data.Address + start, end - start);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         _transfer.EncodeGuestToTexture(
             context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
@@ -2291,6 +2300,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
+        _owner.LandHeldCopies(description.Data.Address, description.Data.Size);
         var destination = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;

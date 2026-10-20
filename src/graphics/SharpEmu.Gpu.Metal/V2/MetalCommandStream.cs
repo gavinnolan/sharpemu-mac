@@ -618,9 +618,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // pixel or compute shader appends to) cannot wait for the boundary: it would copy
         // what that later work left there.
         if (sourceIsFinal &&
-            ((MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
+            (LabelsAtCommit ||
+             (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
              (DefersCopiesInCompute && _computeEncoder != 0)))
         {
+            // Held to the commit, the copies need a command buffer to land in.
+            if (LabelsAtCommit)
+            {
+                EnsureCommandBuffer();
+            }
+
             // Four bytes are not worth a framebuffer. Ending the open pass to copy them
             // stores and reloads every attachment, which at 3840x2160 is tens of
             // megabytes for a label the guest polls, so the copy waits for the next
@@ -640,6 +647,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
         else
         {
+            // A copy that cannot wait lands after the held ones: copies land in stream order.
+            if (LabelsAtCommit && _deferredLabelCopies.Count != 0)
+            {
+                OrderAfterDeferredCopies(0, ulong.MaxValue);
+            }
+
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
             EncodeLabelCopies(context.CommandBuffer, copies);
 
@@ -1079,6 +1092,23 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
+
+    // Label copies wait for the command buffer's commit instead of the next encoder boundary,
+    // and land there behind one barrier. The barrier is a shared event (EncodeLabelBarrier),
+    // which publishes the earlier stores before the label but costs far more than the encoder
+    // boundary it sits at: GTA V's prologue wrote about 170 labels a frame, each behind its own
+    // barrier, and ran at 16 fps against 22.5 with no barrier at all. Work that binds a held
+    // copy's bytes lands it first (OrderAfterDeferredCopies), as does a depth-only join or a
+    // transfer sharing the compute encoder over them, and a commit lands whatever is left. A
+    // label that lands later still only says that the work before it has finished.
+    // SHARPEMU_METAL_V2_LABELS_AT_COMMIT=0 lands them at each encoder boundary again.
+    internal static readonly bool DefaultLabelsAtCommit =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABELS_AT_COMMIT") != "0";
+
+    internal bool LabelsAtCommit { get; set; } = DefaultLabelsAtCommit;
+
+    // Set by whatever needs the held copies in the stream now; the next encode lands them.
+    private bool _landDeferredLabels;
     private long _deferredLabelWrites;
 
     /// <summary>Labels whose bytes waited for a boundary instead of ending a pass.</summary>
@@ -1268,11 +1298,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     internal void OrderAfterDeferredCopies(ulong address, ulong size)
     {
-        if (_computeEncoder != 0 && _deferredLabelCopies.Count != 0 &&
-            (size == ulong.MaxValue || DeferredLabelCopiesTouch(address, size)))
+        if (_deferredLabelCopies.Count == 0 || (_computeEncoder == 0 && !LabelsAtCommit) ||
+            (size != ulong.MaxValue && !DeferredLabelCopiesTouch(address, size)))
+        {
+            return;
+        }
+
+        // Held to the commit, a copy whose bytes this work binds lands here instead: the work
+        // reads or writes them, and must see the copy, or overwrite it, in stream order.
+        _landDeferredLabels = true;
+        if (_computeEncoder != 0 || _renderEncoder != 0)
         {
             EndEncoders(PassEndCause.Other);
         }
+
+        EncodeDeferredLabelCopies();
     }
 
     private void EncodeDeferredLabelCopies()
@@ -1281,6 +1321,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         {
             return;
         }
+
+        if (LabelsAtCommit && !_landDeferredLabels)
+        {
+            return;
+        }
+
+        _landDeferredLabels = false;
 
         _encodingDeferredLabels = true;
         try
