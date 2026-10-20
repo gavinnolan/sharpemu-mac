@@ -74,7 +74,51 @@ public sealed partial class DirectExecutionBackend
         if (!TryPatchHotSite(rip, in instruction))
         {
             _unpatchableHotSites.TryAdd(rip, 0);
+            if (_unpatchableHotSites.Count <= 8)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] Hot {instruction.Mnemonic} at 0x{rip:X16} could not be rewritten; it keeps faulting.");
+            }
         }
+    }
+
+    // Stubs of hot sites, in pages placed near them: the jump into a stub and the jump back are
+    // rel32. They used to come from the TLS stub region active at the time, which once every
+    // module has loaded is the last one's: GTA V's hot INSERTQ at 0x802780034 was terabytes from
+    // it, so it was never rewritten and trapped some 800 times a second for the whole game.
+    private const int HotSiteStubPageBytes = 0x4000;
+    private readonly List<(nint Base, int Used)> _hotSiteStubPages = [];
+
+    /// <summary>Room for one stub within rel32 reach of <paramref name="site"/>, writable;
+    /// 0 when none can be placed. Called under ImportStubPatchGate.</summary>
+    private unsafe nint AllocateHotSiteStub(ulong site)
+    {
+        nint stub = 0;
+        for (var index = 0; index < _hotSiteStubPages.Count && stub == 0; index++)
+        {
+            var (pageBase, used) = _hotSiteStubPages[index];
+            if (used + HotSiteStubBytes <= HotSiteStubPageBytes &&
+                WithinTlsReach(pageBase, site) && WithinTlsReach(pageBase + HotSiteStubPageBytes, site))
+            {
+                _hotSiteStubPages[index] = (pageBase, used + HotSiteStubBytes);
+                stub = pageBase + used;
+            }
+        }
+
+        if (stub == 0)
+        {
+            stub = (nint)TryAllocateNear(site, HotSiteStubPageBytes);
+            if (stub == 0)
+            {
+                return 0;
+            }
+
+            _hotSiteStubPages.Add((stub, HotSiteStubBytes));
+        }
+
+        // An earlier stub sealed the page execute-read.
+        uint previousProtection = 0;
+        return VirtualProtect((void*)stub, HotSiteStubBytes, 64u, &previousProtection) ? stub : 0;
     }
 
     private unsafe bool TryPatchHotSite(ulong rip, in Instruction instruction)
@@ -96,7 +140,7 @@ public sealed partial class DirectExecutionBackend
                 return true;
             }
 
-            var stub = AllocateTlsPatchStub(HotSiteStubBytes);
+            var stub = AllocateHotSiteStub(rip);
             if (stub == 0)
             {
                 return false;
