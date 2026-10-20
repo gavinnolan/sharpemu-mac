@@ -1314,7 +1314,8 @@ internal sealed partial class MetalRenderHost
                     var module = RequireModule(program, onWorker: false);
                     return new MetalPipelineCompiler.Result(BuildComputePipelineState(module.Function, hash, module.ArchiveKey));
                 },
-                out var compiled))
+                out var compiled,
+                $"cs=0x{hash:X16}"))
         {
             return false;
         }

@@ -2459,6 +2459,11 @@ internal sealed partial class MetalRenderHost :
                 waited = $" value=0x{watched[1]:X8}{watched[0]:X8} gpu_pending={_gpuWrites.MayCover(wait.Address, wait.Size)}";
             }
 
+            if (wait.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandWaitKind.Pipeline && _compiler is { } compiler)
+            {
+                waited = $" compiling=[{compiler.DescribeInFlight()}]";
+            }
+
             if (wait.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandWaitKind.GuestMemory && wait.Address != 0)
             {
                 var now = System.Diagnostics.Stopwatch.GetTimestamp();
