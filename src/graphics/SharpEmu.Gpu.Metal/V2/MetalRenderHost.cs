@@ -1937,6 +1937,10 @@ internal sealed partial class MetalRenderHost :
     private long _scheduledLabelSubmissions;
     private long _transientCommits;
 
+    // What the budget commits found lent, rings and staging apart, since the last report.
+    private long _transientCommitRingBytes;
+    private long _transientCommitStagingBytes;
+
     // The shared memory a submission borrows while it is recorded - the upload rings
     // that carry a range no window serves, a staged storage copy or a transient
     // binding, and the staging a transfer detiles or writes back through - returns to
@@ -1989,6 +1993,9 @@ internal sealed partial class MetalRenderHost :
         }
 
         Interlocked.Increment(ref _transientCommits);
+        var ringBytes = _guestMemory.RecordingBytes;
+        Interlocked.Add(ref _transientCommitRingBytes, (long)ringBytes);
+        Interlocked.Add(ref _transientCommitStagingBytes, (long)(RecordingTransientBytes - ringBytes));
         var committed = FlushCommandBuffer(PassEndCause.Transfer);
         // A commit hands the memory back only once the GPU has run the buffer, and
         // nothing else stopped the worker from recording the next budget meanwhile. In
@@ -2325,6 +2332,8 @@ internal sealed partial class MetalRenderHost :
             .Append(TakeWordLineCounters())
             .Append(" poll_flushes=").Append(TakePollFlushes())
             .Append(" transient_commits=").Append(TakeTransientCommits())
+            .Append(" transient_ring_mb=").Append(Interlocked.Exchange(ref _transientCommitRingBytes, 0) / (1024 * 1024))
+            .Append(" transient_staging_mb=").Append(Interlocked.Exchange(ref _transientCommitStagingBytes, 0) / (1024 * 1024))
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" label_barriers=").Append(TakeLabelBarriers())
