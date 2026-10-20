@@ -636,7 +636,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // still only ever says that the work before it has finished. A compute
             // encoder is held open the same way: ending it per copy split each frame
             // into ~114 encoders, and the gaps between them outcost the dispatches.
-            _deferredLabelCopies.AddRange(copies);
+            HoldLabelCopies(copies);
             Interlocked.Add(ref _deferredLabelWrites, copies.Length);
             NoteRecordedWork();
             serial = SubmissionSerial;
@@ -1093,6 +1093,41 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
 
+    // The span of guest bytes, and of destination bytes when they all go to one buffer
+    // (_deferredLabelBuffer, -1 for several), the held copies land in: every storage binding
+    // asks DeferredLabelCopiesTouch, and with copies held to the commit a scan of all of them
+    // per binding grew with the command buffer. Bindings outside the span need no scan.
+    private ulong _deferredLabelLow = ulong.MaxValue;
+    private ulong _deferredLabelHigh;
+    private nint _deferredLabelBuffer;
+    private ulong _deferredLabelDestinationLow = ulong.MaxValue;
+    private ulong _deferredLabelDestinationHigh;
+
+    private void HoldLabelCopies(ReadOnlySpan<DeferredLabelCopy> copies)
+    {
+        foreach (ref readonly var copy in copies)
+        {
+            _deferredLabelLow = Math.Min(_deferredLabelLow, copy.GuestAddress);
+            _deferredLabelHigh = Math.Max(_deferredLabelHigh, copy.GuestAddress + (ulong)copy.Bytes);
+            _deferredLabelBuffer = _deferredLabelCopies.Count == 0 && _deferredLabelBuffer == 0
+                ? copy.DestinationBuffer
+                : _deferredLabelBuffer == copy.DestinationBuffer ? _deferredLabelBuffer : -1;
+            _deferredLabelDestinationLow = Math.Min(_deferredLabelDestinationLow, copy.DestinationOffset);
+            _deferredLabelDestinationHigh = Math.Max(_deferredLabelDestinationHigh, copy.DestinationOffset + (ulong)copy.Bytes);
+            _deferredLabelCopies.Add(copy);
+        }
+    }
+
+    private void ClearHeldLabelCopies()
+    {
+        _deferredLabelCopies.Clear();
+        _deferredLabelLow = ulong.MaxValue;
+        _deferredLabelHigh = 0;
+        _deferredLabelBuffer = 0;
+        _deferredLabelDestinationLow = ulong.MaxValue;
+        _deferredLabelDestinationHigh = 0;
+    }
+
     // Label copies wait for the command buffer's commit instead of the next encoder boundary,
     // and land there behind one barrier. The barrier is a shared event (EncodeLabelBarrier),
     // which publishes the earlier stores before the label but costs far more than the encoder
@@ -1260,6 +1295,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // Whether a copy waiting for the end of the open encoder lands in these guest bytes.
     private bool DeferredLabelCopiesTouch(ulong address, ulong size)
     {
+        if (address >= _deferredLabelHigh || address + size <= _deferredLabelLow)
+        {
+            return false;
+        }
+
         foreach (ref readonly var copy in
             System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
         {
@@ -1276,6 +1316,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // for the open encoder to end lands in the window bytes the range names.
     private bool DeferredLabelCopiesTouch(in MetalGuestRange range)
     {
+        if (_deferredLabelBuffer != -1 &&
+            (range.Buffer != _deferredLabelBuffer ||
+             range.Offset >= _deferredLabelDestinationHigh || range.Offset + range.Size <= _deferredLabelDestinationLow))
+        {
+            return false;
+        }
+
         foreach (ref readonly var copy in
             System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
         {
@@ -1336,7 +1383,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             EncodeLabelCopies(
                 EnsureCommandBuffer(),
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
-            _deferredLabelCopies.Clear();
+            ClearHeldLabelCopies();
             // The barrier and the blit encoder are gap the pass profile cannot sample.
             if (PassProfileEnabled)
             {

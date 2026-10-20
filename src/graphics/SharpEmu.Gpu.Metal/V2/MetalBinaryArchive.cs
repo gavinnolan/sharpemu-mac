@@ -1469,36 +1469,59 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     }
 
     /// <summary>Whether a file is a whole archive this format wrote; its length when it is.</summary>
+    // The segment is hashed through a pooled buffer rather than read whole: segments run to
+    // tens of megabytes, and one array per segment opened during play was a large object each
+    // (Black Myth: Wukong's full collections).
     internal static bool TryVerify(string path, out long length)
     {
         length = 0;
-        byte[] bytes;
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(1 << 20);
         try
         {
-            bytes = File.ReadAllBytes(path);
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1);
+            var total = stream.Length;
+            if (total <= TrailerBytes)
+            {
+                return false;
+            }
+
+            Span<byte> trailer = stackalloc byte[TrailerBytes];
+            stream.Seek(total - TrailerBytes, SeekOrigin.Begin);
+            stream.ReadExactly(trailer);
+            var payloadLength = total - TrailerBytes;
+            if (BinaryPrimitives.ReadUInt32LittleEndian(trailer) != TrailerMagic ||
+                BinaryPrimitives.ReadUInt32LittleEndian(trailer[4..]) != FormatVersion ||
+                BinaryPrimitives.ReadInt64LittleEndian(trailer[8..]) != payloadLength)
+            {
+                return false;
+            }
+
+            stream.Seek(0, SeekOrigin.Begin);
+            var hash = new XxHash64();
+            for (var remaining = payloadLength; remaining > 0;)
+            {
+                var chunk = buffer.AsSpan(0, (int)Math.Min(remaining, buffer.Length));
+                stream.ReadExactly(chunk);
+                hash.Append(chunk);
+                remaining -= chunk.Length;
+            }
+
+            if (BinaryPrimitives.ReadUInt64LittleEndian(trailer[16..]) != hash.GetCurrentHashAsUInt64())
+            {
+                return false;
+            }
+
+            length = total;
+            return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return false;
         }
-
-        if (bytes.Length <= TrailerBytes)
+        finally
         {
-            return false;
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
-
-        var payload = bytes.AsSpan(0, bytes.Length - TrailerBytes);
-        var trailer = bytes.AsSpan(bytes.Length - TrailerBytes);
-        if (BinaryPrimitives.ReadUInt32LittleEndian(trailer) != TrailerMagic ||
-            BinaryPrimitives.ReadUInt32LittleEndian(trailer[4..]) != FormatVersion ||
-            BinaryPrimitives.ReadInt64LittleEndian(trailer[8..]) != payload.Length ||
-            BinaryPrimitives.ReadUInt64LittleEndian(trailer[16..]) != XxHash64.HashToUInt64(payload))
-        {
-            return false;
-        }
-
-        length = bytes.Length;
-        return true;
     }
 
     // Autoreleased.

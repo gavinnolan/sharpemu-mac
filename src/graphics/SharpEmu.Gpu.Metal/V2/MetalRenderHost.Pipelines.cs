@@ -590,7 +590,8 @@ internal sealed partial class MetalRenderHost
     }
 
     /// <summary>A rectangle list draws one patch per rectangle, so its count is needed up
-    /// front; see <see cref="DrawRectangles"/>.</summary>
+    /// front; see <see cref="DrawRectangles"/>. An indexed one whose counts the GPU writes
+    /// is built in the pass instead (<see cref="TakesIndirectIndexedRectangleListArguments"/>).</summary>
     public bool TakesIndirectRectangleListArguments => false;
 
     /// <summary>Metal has no fan primitive; the executor hands fans over as triangle lists.</summary>
@@ -667,10 +668,10 @@ internal sealed partial class MetalRenderHost
     private void RequireDrawableDescription(GraphicsPipelineDescription description)
     {
         var rectangleList = IsRectangleList(description, MeshOf(LookupModule(description.VertexProgram)));
-        if (rectangleList && description.VertexInput.BindingCount > Gen5MslRectangleList.IndexBufferIndex - VertexBufferSlotBase)
+        if (rectangleList && description.VertexInput.BindingCount > RectangleRebaseFirstSlot - VertexBufferSlotBase)
         {
             throw Fatal(
-                $"A rectangle list binds vertex buffers into the slots its draw block and index buffer use: " +
+                $"A rectangle list binds vertex buffers into the slots its draw block, index buffer and rebase draw use: " +
                 $"buffers={description.VertexInput.BindingCount} vertex=0x{description.VertexStage.Hash:X16}.");
         }
     }

@@ -61,7 +61,7 @@ internal sealed partial class MetalRenderHost
 
         // The CPU staged what guest memory holds now. Bytes the GPU has yet to write
         // there are copied in by the GPU, behind that work.
-        var gathered = _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0;
+        var gathered = PendingSerialHinted(address, size) != 0;
         if (!written && !gathered)
         {
             return staging;
@@ -111,7 +111,7 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        if (_gpuWrites.PendingSerial(address, size, CompletedSerial) >= SubmissionSerial)
+        if (PendingSerialHinted(address, size) >= SubmissionSerial)
         {
             Interlocked.Increment(ref _guestViewRefusedWrites);
             return false;

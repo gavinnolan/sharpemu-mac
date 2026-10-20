@@ -276,6 +276,12 @@ public interface IRenderHost
     bool TakesIndirectAutoRectangleListArguments(VertexInputInfo vertexInput, ulong argumentsAddress, ulong argumentsSize) =>
         TakesIndirectRectangleListArguments;
 
+    // The same for an indexed rectangle list with this vertex input, whose count the bound
+    // index range limits to indexLimit (uint.MaxValue when unbounded).
+    bool TakesIndirectIndexedRectangleListArguments(
+        VertexInputInfo vertexInput, ulong argumentsAddress, ulong argumentsSize, uint indexLimit) =>
+        TakesIndirectRectangleListArguments;
+
     void InsertDrawTraceMarker(string label) { }
 
     void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>

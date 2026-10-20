@@ -1217,24 +1217,31 @@ public static partial class Gen5MslTranslator
                 table.Append($" 0x{dataFormat | (numberFormat << 8):X}u,");
             }
 
-            var layoutCases = new StringBuilder();
-            var first = true;
+            // Component layouts, keyed component * 16 + data format (format_prelude.msl).
+            var layouts = new uint[64];
             foreach (var (component, format, bytes, bitOffset, bitCount) in Gfx10UnifiedFormat.ComponentLayouts)
             {
-                if (!first)
+                var key = component * 16 + format;
+                if (key >= layouts.Length || bytes > 0xFF || bitOffset > 0xFF || bitCount > 32)
                 {
-                    layoutCases.AppendLine();
+                    throw new InvalidOperationException(
+                        $"A GFX10 component layout does not fit the packed table: component={component} format={format}.");
                 }
 
-                first = false;
-                layoutCases.Append(
-                    $"    case {component * 16 + format}u: byteOff = {bytes}u; bitOff = {bitOffset}u; bits = {bitCount}u; break;");
+                layouts[key] = bytes | (bitOffset << 8) | (bitCount << 16);
+            }
+
+            var layoutTable = new StringBuilder();
+            for (var key = 0; key < layouts.Length; key++)
+            {
+                layoutTable.Append(key % 16 == 0 ? (key == 0 ? "   " : Environment.NewLine + "   ") : string.Empty);
+                layoutTable.Append($" 0x{layouts[key]:X}u,");
             }
 
             source.AppendLine(MslTemplates.Render(
                 "format_prelude",
                 ("format_table", table.ToString()),
-                ("layout_cases", layoutCases.ToString())));
+                ("layout_table", layoutTable.ToString())));
         }
 
         private void EmitRegisterFile(StringBuilder source)
