@@ -1235,8 +1235,11 @@ internal sealed partial class MetalRenderHost :
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
 
+    // The image cache asks per DCC slice per lookup, thousands of times a frame: the completed
+    // serial's message send (CompletedSerial) made this 8% of Black Myth: Wukong's GPU worker, so
+    // the hint answers first and the send only confirms a range something still covers.
     bool IMetalImageCacheOwner.HasPendingGpuWrite(ulong address, ulong size) =>
-        _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0;
+        _gpuWrites.MayCover(address, size) && PendingSerialHinted(address, size) != 0;
 
     // A guest thread waiting for a recorded writeback (MetalImageCache.WritebackFence.cs). The
     // GPU finishes a committed submission without the guest's help, so the one thing the wait
