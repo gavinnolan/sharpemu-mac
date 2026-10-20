@@ -6876,6 +6876,12 @@ public sealed unsafe partial class DirectExecutionBackend :
 		}
 	}
 
+	// Guest threads a stall snapshot lists; SHARPEMU_SNAPSHOT_MAX_THREADS=<n> raises it.
+	private static readonly int SnapshotMaxThreads =
+		int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SNAPSHOT_MAX_THREADS"), out var snapshotThreads) && snapshotThreads > 0
+			? snapshotThreads
+			: 48;
+
 	// The continuation trampoline is rebuilt on every blocked-thread resume.
 	// Keep its tiny writer on the stack: capturing local emit functions create a
 	// managed display-class allocation on this extremely hot path.
@@ -7755,7 +7761,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 						$"rdi=0x{Volatile.Read(ref thread.LastImportRdi):X16} rsi=0x{Volatile.Read(ref thread.LastImportRsi):X16} " +
 						$"rdx=0x{Volatile.Read(ref thread.LastImportRdx):X16} block={thread.BlockReason ?? "none"}{hostContextText}");
 					logged++;
-					if (logged >= 48 && threads.Length > logged)
+					if (logged >= SnapshotMaxThreads && threads.Length > logged)
 					{
 						Console.Error.WriteLine($"[LOADER][ERROR] Stall guest-thread: ... {threads.Length - logged} more");
 						break;

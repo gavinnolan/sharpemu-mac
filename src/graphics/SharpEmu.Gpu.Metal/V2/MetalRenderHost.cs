@@ -1182,10 +1182,18 @@ internal sealed partial class MetalRenderHost :
     {
         // Recorded after any pending command-processor bytes there, so it is what a read
         // of them has to see from now on, whenever it lands.
-        _cpOverlay.Forget(address, size);
-        _labelOverlay.Forget(address, size);
-        _stagedStorageCopies?.Forget(address, size);
-        _stagedRanges?.OnGpuWrite(address, size, origin);
+        using (var overlayScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteOverlays))
+        {
+            _cpOverlay.Forget(address, size);
+            _labelOverlay.Forget(address, size);
+        }
+
+        using (var stagedScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteStaged))
+        {
+            _stagedStorageCopies?.Forget(address, size);
+            _stagedRanges?.OnGpuWrite(address, size, origin);
+        }
+
         if (_guard is not null && size != 0)
         {
             // A fill, copy or writeback has just been encoded, so the last transfer label
@@ -1205,6 +1213,7 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        using var rangesScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteRanges);
         var serial = SubmissionSerial;
         var sequence = _gpuWrites.Note(address, size, serial, origin);
         NotePendingCopyDestination(address, size, origin, serial, sequence);
