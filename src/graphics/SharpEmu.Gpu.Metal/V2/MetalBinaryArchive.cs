@@ -218,6 +218,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// cannot be made on demand.</summary>
     internal Func<nint, bool>? RefusedByArchiver { get; set; }
 
+    // Tests: the archiver refuses an archive of more pipelines than this, as it refused a whole
+    // segment of Black Myth: Wukong's every part of which it took.
+    internal int? RefusesArchivesOver { get; set; }
+
     public (int LibraryHits, int LibraryMisses, int Rejected, int LibrariesWritten,
         int PipelineHits, int PipelineMisses, int PipelinesAdded, int LoadedSegments) Counters =>
         (Volatile.Read(ref _libraryHits), Volatile.Read(ref _libraryMisses), Volatile.Read(ref _rejected),
@@ -823,10 +827,11 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             bytes = RebuildWithoutRefused(path);
         }
 
-        if (bytes < 0 || bytes >= SegmentBytes)
+        if (bytes < 0 || bytes >= SegmentBytes || _closeAfterFlush)
         {
-            // Full (or unwritable): the next pipeline starts the next segment, and this
-            // one's memory goes with its archive.
+            // Full, unwritable or written in pieces: the next pipeline starts the next segment,
+            // and this one's memory goes with its archive.
+            _closeAfterFlush = false;
             CloseSegment();
         }
         else
@@ -862,7 +867,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // pipelines it refuses.
     private long WriteSegment(nint archive, List<SegmentEntry> entries, string path)
     {
-        if (RefusedByArchiver is { } refused && entries.Exists(entry => refused(entry.Descriptor)))
+        if ((RefusedByArchiver is { } refused && entries.Exists(entry => refused(entry.Descriptor))) ||
+            entries.Count > RefusesArchivesOver)
         {
             Console.Error.WriteLine("[METAL-V2][ARCHIVE][WARN] An archive could not be written: a pipeline was refused.");
             return -1;
@@ -886,7 +892,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         TryDelete(path + ".probe");
         if (refused.Count == 0)
         {
-            return -1;
+            return WriteWithoutRefusal(entries, path);
         }
 
         var good = entries.Where(entry => !refused.Contains(entry)).ToList();
@@ -929,6 +935,96 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         return bytes;
     }
 
+    /// <summary>
+    /// Writes a segment no pipeline of which the archiver refuses alone, though it refused the
+    /// segment's archive whole: in Black Myth: Wukong's gameplay every half archived and the whole
+    /// did not ("expecting 'fragment' stage in pipeline no. 5"), and the segment was dropped, so
+    /// its dozens of pipelines were built again on the next run, each a stall of 0.3-1.4 s. The
+    /// segment is written from a fresh archive of its pipelines, and failing that in pieces, each
+    /// a segment of its own at the next sequence numbers, halved only as far as the archiver needs.
+    /// </summary>
+    private long WriteWithoutRefusal(SegmentEntry[] entries, string path)
+    {
+        var fresh = NewArchive(null);
+        if (fresh == 0)
+        {
+            return -1;
+        }
+
+        foreach (var entry in entries)
+        {
+            Add(fresh, entry.Kind, entry.Descriptor);
+        }
+
+        var bytes = WriteSegment(fresh, entries.ToList(), path);
+        if (bytes >= 0)
+        {
+            Interlocked.Increment(ref _segmentsRewrittenFresh);
+            MetalNative.SendVoid(_segment, SelRelease);
+            _segment = fresh;
+            return bytes;
+        }
+
+        MetalNative.SendVoid(fresh, SelRelease);
+        var sequence = _segmentSequence;
+        var written = WritePieces(entries, 0, entries.Length, ref sequence);
+        Interlocked.Increment(ref _segmentsWrittenInPieces);
+        // The pieces are segments of their own, so this one ends: the next pipeline starts the
+        // segment after the last piece (CloseSegment moves past the current sequence).
+        _segmentSequence = Math.Max(sequence - 1, _segmentSequence);
+        _closeAfterFlush = true;
+        return written;
+    }
+
+    // Writes entries[start..start + count] as one segment at the sequence, or in halves when the
+    // archiver refuses it whole; a single pipeline it refuses is dropped. The bytes written.
+    private long WritePieces(SegmentEntry[] entries, int start, int count, ref int sequence)
+    {
+        var piece = entries.AsSpan(start, count).ToArray();
+        var archive = NewArchive(null);
+        if (archive == 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            foreach (var entry in piece)
+            {
+                Add(archive, entry.Kind, entry.Descriptor);
+            }
+
+            var refusedHere = (RefusedByArchiver is { } refused && piece.Any(entry => refused(entry.Descriptor))) ||
+                count > RefusesArchivesOver;
+            var bytes = refusedHere
+                ? -1
+                : Serialize(archive, SegmentPath(sequence), piece.Select(static entry => entry.Pair).Distinct().ToArray(), quiet: true);
+            if (bytes >= 0)
+            {
+                sequence++;
+                return bytes;
+            }
+        }
+        finally
+        {
+            MetalNative.SendVoid(archive, SelRelease);
+        }
+
+        if (count == 1)
+        {
+            Console.Error.WriteLine($"[METAL-V2][ARCHIVE][WARN] The archiver refused a pipeline, which is not stored: {Describe(entries[start])}");
+            Interlocked.Increment(ref _pipelinesRefused);
+            return 0;
+        }
+
+        var half = count / 2;
+        return WritePieces(entries, start, half, ref sequence) + WritePieces(entries, start + half, count - half, ref sequence);
+    }
+
+    private long _segmentsRewrittenFresh;
+    private long _segmentsWrittenInPieces;
+    private bool _closeAfterFlush;
+
     // Narrows entries[start..start + count], which do not archive as a whole, to the ones
     // that do not archive alone.
     private void FindRefused(SegmentEntry[] entries, int start, int count, string probe, List<SegmentEntry> refused)
@@ -953,7 +1049,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     private bool Archives(SegmentEntry[] entries, int start, int count, string probe)
     {
-        if (RefusedByArchiver is { } refused && entries.Skip(start).Take(count).Any(entry => refused(entry.Descriptor)))
+        if ((RefusedByArchiver is { } refused && entries.Skip(start).Take(count).Any(entry => refused(entry.Descriptor))) ||
+            count > RefusesArchivesOver)
         {
             return false;
         }

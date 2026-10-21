@@ -479,6 +479,52 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Release(pixel, vertex, pixelLibrary, vertexLibrary);
     }
 
+    // The archiver refused a whole segment of Black Myth: Wukong's gameplay pipelines though it took
+    // every part of it, and the segment was dropped, so each run built those pipelines again. It
+    // is written in pieces instead, each a segment of its own, and the next run finds them all.
+    [Fact]
+    public void ASegmentTheArchiverRefusesOnlyWholeIsWrittenInPiecesAndKeepsEveryPipeline()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(PixelSource);
+        var vertex = Function(vertexLibrary, "gen5_vs");
+        var pixel = Function(pixelLibrary, "gen5_ps");
+        var formats = new nuint[] { PixelFormatRgba8Unorm, PixelFormatBgra8Unorm, PixelFormatRgba8UnormSrgb, PixelFormatRgba16Float };
+        var descriptors = formats.Select(format => RenderDescriptor(vertex, pixel, format)).ToArray();
+        using (var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+        {
+            Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+            writing.RefusesArchivesOver = 2;
+            foreach (var descriptor in descriptors)
+            {
+                writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, 1, 2, missed: true);
+            }
+
+            writing.Flush(wait: true);
+            Assert.Equal(4, writing.Counters.PipelinesAdded);
+            Assert.Equal(0, writing.SegmentCounters.PipelinesRefused);
+            Assert.Equal(2, System.IO.Directory.GetFiles(writing.Directory, MetalBinaryArchive.SegmentPrefix + "*").Length);
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
+        Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
+        Assert.Equal(2, reading.Counters.LoadedSegments);
+        var archives = reading.AcquirePipelineArchives(1, 2);
+        Assert.NotEqual(0, archives);
+        foreach (var descriptor in descriptors)
+        {
+            var state = NewRender(descriptor, archives, MetalBinaryArchive.FailOnBinaryArchiveMiss);
+            Assert.NotEqual(0, state);
+            Release(state);
+        }
+
+        Release(archives);
+        Release(descriptors);
+        Release(pixel, vertex, pixelLibrary, vertexLibrary);
+    }
+
     [Fact]
     public void ASegmentsTailListsItsPairsWithoutBeingTheOneThatIsChecked()
     {
