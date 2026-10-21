@@ -623,7 +623,7 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     private static byte[] BuildArgumentBuffer(Gen5MslShader shader) =>
         new byte[Math.Max(shader.ArgumentLayout?.ByteSize ?? 0, 8)];
 
-    // Gen5MeshDrawInfo, in the order docs/mac/ngg-mesh-shaders.md records.
+    // Gen5MeshDrawInfo, in field order.
     private static byte[] BuildDrawInfo(Gen5MslMeshInfo mesh)
     {
         var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];

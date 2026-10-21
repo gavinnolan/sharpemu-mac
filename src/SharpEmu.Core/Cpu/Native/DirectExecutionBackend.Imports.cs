@@ -2851,7 +2851,7 @@ public sealed partial class DirectExecutionBackend
 			}
 		}
 
-		// Named deviation (docs/deviations.md): Unity's runtime allocator hooks.
+		// Named deviation: Unity's runtime allocator hooks.
 		return TryResolveRuntimeSymbolAlias(symbolName, out address);
 	}
 

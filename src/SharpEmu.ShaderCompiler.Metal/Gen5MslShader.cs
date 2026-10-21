@@ -37,7 +37,7 @@ public enum Gen5MslMeshInputTopology : uint
 
 // Everything the render host needs to build an MTLMeshRenderPipelineDescriptor around a
 // translated primitive shader and to launch it, plus the buffer slots the mesh entry reads
-// its NGG system values from. docs/mac/ngg-mesh-shaders.md is the host-side contract.
+// its NGG system values from.
 public sealed record Gen5MslMeshInfo(
     uint ThreadsPerThreadgroup,
     uint WavesPerThreadgroup,

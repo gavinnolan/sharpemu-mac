@@ -4,7 +4,7 @@
 #
 # Pulls sharpemu/sharpemu into this fork, by merge and never by rewrite.
 #
-# The branch model is documented in docs/mac/upstream-sync.md. In short:
+# The branch model, in short:
 #   upstream  pristine mirror of sharpemu/sharpemu main, fast-forward only
 #   main      our work; upstream arrives through merge PRs
 #   sync/*    the integration branch for one such merge
@@ -15,7 +15,6 @@
 #      anything that is not a fast-forward (that would mean upstream rewrote
 #      history, which is a decision for a human).
 #   3. Branches sync/upstream-<shortsha> off main and merges `upstream` into it.
-#   4. Records the fetched and integrated SHAs in docs/mac/upstream-sync.md.
 #
 # It never pushes, never rebases, and never touches main itself.
 #
@@ -151,20 +150,6 @@ if [ "${merge_status}" -ne 0 ]; then
 else
     integrated="$(git rev-parse --short HEAD)"
     echo "==> Merged cleanly as ${integrated}"
-fi
-
-# -------------------------------------------------------------- 4. record ----
-
-log="docs/mac/upstream-sync.md"
-if [ -f "${log}" ] && grep -q '^<!-- sync-log -->$' "${log}"; then
-    row="| $(date -u +%Y-%m-%d) | \`${fetched_short}\` | ${new_commits} | \`${integrated}\` | \`${sync_branch}\` |"
-    # Appended at end of file. The sync-log table is the last thing in the
-    # document precisely so a row can be appended without parsing it; the
-    # marker above the table header is what confirms that shape.
-    printf '%s\n' "${row}" >> "${log}"
-    echo "==> Recorded in ${log}"
-else
-    echo "==> ${log} has no '<!-- sync-log -->' marker; skipping the record." >&2
 fi
 
 echo

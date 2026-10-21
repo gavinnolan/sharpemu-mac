@@ -23,7 +23,7 @@ public static class KernelRuntimeCompatExports
     /// <summary>
     /// The guest's pid. A console title runs as a small fixed pid in its own
     /// process namespace, not the host's; getpid, sysctl kern.proc.* and kill
-    /// all agree on this value (docs/deviations.md, "Process ids").
+    /// all agree on this value (an intentional deviation).
     /// </summary>
     internal const int GuestProcessId = 74;
 
@@ -501,7 +501,7 @@ public static class KernelRuntimeCompatExports
 
     /// <summary>
     /// <c>sceKernelGetProcessTimeCounterFrequency</c>: a fixed 1 GHz on every
-    /// host (docs/deviations.md, "Process-time counter"). The counter is
+    /// host (an intentional deviation). The counter is
     /// scaled to it, so counter / frequency stays real seconds.
     /// </summary>
     internal const ulong ProcessTimeCounterFrequency = 1_000_000_000UL;

@@ -14,7 +14,7 @@ namespace SharpEmu.Libs.Kernel;
 // size, i.e. about 12288 MiB (12 GiB, 0x3_0000_0000) at the 448 MiB default, and lowering
 // flexible memory enlarges direct by the same amount (the same direct + flexible invariant
 // holds on PS4). Source: https://github.com/blackbearreloaded/ProsperoEden/pull/156 (real
-// hardware, homebrew process, firmware 6.02; see docs/macos/ps5-internals.md). The earlier
+// hardware, homebrew process, firmware 6.02). The earlier
 // 13824 MiB came from Kyty's assumed PhysicalMemory::TotalSize() and gave titles ~1.5 GiB more
 // than a console does (Demon's Souls premaps the excess as "debug memory" above its retail
 // constant 0x3_0000_0000). SHARPEMU_DIRECT_MEMORY_MB sets the direct size outright, ignoring

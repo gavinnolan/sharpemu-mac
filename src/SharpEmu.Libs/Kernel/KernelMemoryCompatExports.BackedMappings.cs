@@ -360,8 +360,8 @@ public static partial class KernelMemoryCompatExports
     // Every chunk of the backing that the freed bytes touch and that lies wholly inside the free
     // range goes back to the host, so a chunk only partly freed now is released by whichever
     // later free completes it. The PS5 leaves released memory's contents undefined (a fresh
-    // allocation is not promised zero: docs/macos/ps5-internals.md §6 points 3-4 and the open
-    // question on dmem zeroing), and a released chunk reads zero, which is one such value.
+    // allocation is not promised zero, and dmem zeroing is an open question), and a released
+    // chunk reads zero, which is one such value.
     private static void ReleaseFreedBackingLocked(ulong start, ulong length, (ulong Start, ulong Length) freeRun)
     {
         if (_backingOwner is not { } space || length == 0 || freeRun.Length == 0)

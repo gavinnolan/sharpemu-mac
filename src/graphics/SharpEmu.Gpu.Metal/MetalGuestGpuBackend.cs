@@ -35,7 +35,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
 
     // The legacy host records and replays per-draw snapshots and has no mesh pipeline path,
     // so it cannot run the merged ES/GS stage however the translator emits it. v2 can, and
-    // does by default (see MetalV2Backend and docs/mac/ngg-mesh-shaders.md); claiming the
+    // does by default (see MetalV2Backend); claiming the
     // capability here would only turn a skipped draw into a failed pipeline.
     public bool SupportsPrimitiveShaderMeshPipelines => false;
 

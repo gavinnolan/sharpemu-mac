@@ -171,7 +171,7 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
         return double.IsNaN(quotient) ? 0xFFF8000000000000 : BitConverter.DoubleToUInt64Bits(quotient);
     }
 
-    // F32 denormals are flushed (docs/deviations.md): an operand is the zero of its sign and a
+    // F32 denormals are flushed (an intentional deviation): an operand is the zero of its sign and a
     // denormal quotient is a signed zero.
     private static uint Float32Quotient(uint n, uint d)
     {

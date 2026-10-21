@@ -82,7 +82,7 @@ public static partial class KernelMemoryCompatExports
     private const nuint DefaultLibcHeapAlignment = 16;
     // S_IFDIR | 0755 and S_IFREG | 0644: the host's permission bits are not the
     // console's, so report the FreeBSD defaults rather than blanket 0777
-    // (docs/deviations.md, "stat modes").
+    // (an intentional deviation).
     private const ushort KernelStatModeDirectory = 0x41ED;
     private const ushort KernelStatModeRegular = 0x81A4;
     // S_IFCHR | 0666 for device nodes (/dev/random, /dev/urandom).

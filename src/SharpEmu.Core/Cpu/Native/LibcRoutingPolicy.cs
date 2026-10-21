@@ -24,7 +24,7 @@ internal static class LibcRoutingPolicy
 
     /// <summary>
     /// libc exports that stay on HLE even when the loaded module provides
-    /// them. Each entry is a named deviation (docs/deviations.md).
+    /// them. Each entry is a named deviation.
     /// </summary>
     internal static readonly IReadOnlyList<Deviation> HleDeviations =
     [

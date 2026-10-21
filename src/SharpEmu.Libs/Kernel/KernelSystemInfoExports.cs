@@ -760,8 +760,7 @@ public static class KernelSystemInfoExports
 
     // Host memory backing guest pages is never paged out by the guest's
     // view and is coherent with every host reader, so mlock/munlock/msync
-    // validate their arguments and succeed (docs/deviations.md, "Memory
-    // residency calls").
+    // validate their arguments and succeed (an intentional deviation).
     [SysAbiExport(
         Nid = "3k6kx-zOOSQ",
         ExportName = "sceKernelMlock",

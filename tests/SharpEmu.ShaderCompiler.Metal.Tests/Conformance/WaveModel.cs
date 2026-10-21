@@ -217,7 +217,7 @@ internal static class WaveModel
         var omodApplies = form.Omod != 0 && !mode.Ieee && !mode.RequestsOutputDenormals(format);
         if (omodApplies && SoftFloat.IsNaN(value, format))
         {
-            // The scaling multiply gives a NaN of unspecified sign and payload (docs/deviations.md, "NaN payloads").
+            // The scaling multiply gives a NaN of unspecified sign and payload (an intentional deviation).
             loose = format.ValueMask;
         }
         else if (omodApplies)

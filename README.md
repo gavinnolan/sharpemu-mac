@@ -152,8 +152,7 @@ or create a `portable.txt` next to `SharpEmu.app` to keep the data beside the
 bundle instead.
 
 The `.app` bundle cannot update itself in place; the GUI reports new releases
-and opens the releases page. Upstream tracking is described in
-[`docs/mac/upstream-sync.md`](./docs/mac/upstream-sync.md).
+and opens the releases page.
 <!-- /macos-fork -->
 
 ## Disclaimer

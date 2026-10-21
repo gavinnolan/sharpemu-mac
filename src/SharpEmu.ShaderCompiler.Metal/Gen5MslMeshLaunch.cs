@@ -5,7 +5,7 @@ namespace SharpEmu.ShaderCompiler.Metal;
 
 /// <summary>
 /// How a draw of a primitive shader is launched: the subgroup count and the draw-info words
-/// (Gen5MeshDrawInfo, docs/mac/ngg-mesh-shaders.md) of a draw of whole subgroups, and a
+/// (Gen5MeshDrawInfo) of a draw of whole subgroups, and a
 /// compute kernel that writes the very same words and the launch grid from a guest indirect
 /// record on the GPU, so a draw whose counts a GPU culling pass just wrote need not wait for
 /// them on the CPU.

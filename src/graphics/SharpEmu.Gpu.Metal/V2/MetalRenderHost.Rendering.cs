@@ -2021,7 +2021,7 @@ internal sealed partial class MetalRenderHost
 
     // One NGG subgroup per threadgroup, one instance per grid row. The counts the
     // geometry engine would have put in registers travel in the draw-info block the
-    // mesh prologue reads (docs/mac/ngg-mesh-shaders.md).
+    // mesh prologue reads.
     private void DrawMesh(
         Gen5MslMeshInfo mesh,
         uint count,

@@ -91,7 +91,7 @@ internal static partial class Rdna2Ops
 
         // --- Hardware-approximate f32 functions (1 ULP per ISA 12.8; special values exact).
         yield return Op("v_exp_f32", Vop1, F32, [F32], FloatModel.Exp2, "ISA 12.8 V_EXP_F32", VectorFlags.Approximate) with { UlpTolerance = 1, Pool = FloatModel.ExpPool };
-        // Metal's fast::log2 is within 2 ULP just above 1.0 where the ISA says 1 ULP (docs/deviations.md, "V_LOG_F32 accuracy").
+        // Metal's fast::log2 is within 2 ULP just above 1.0 where the ISA says 1 ULP (an intentional deviation).
         yield return Op("v_log_f32", Vop1, F32, [F32], FloatModel.Log2, "ISA 12.8 V_LOG_F32", VectorFlags.Approximate) with { UlpTolerance = Deviations.LogUlps };
         yield return Op("v_rcp_f32", Vop1, F32, [F32], FloatModel.Rcp32, "ISA 12.8 V_RCP_F32", VectorFlags.Approximate) with { UlpTolerance = 1 };
         yield return Op("v_rcp_iflag_f32", Vop1, F32, [F32], FloatModel.Rcp32, "ISA 12.8 V_RCP_IFLAG_F32", VectorFlags.Approximate) with { UlpTolerance = 1 };
@@ -220,7 +220,7 @@ internal static class FloatModel
 
     /// <summary>V_MULLIT_F32: the RDNA2 ISA states "0.0 * x = 0.0" and "specific INF, NaN, overflow
     /// rules" without giving them, so only the stated rule is asserted: the product with the DX9 zero
-    /// rule, as V_MUL_LEGACY_F32 (docs/deviations.md, "V_MULLIT_F32").</summary>
+    /// rule, as V_MUL_LEGACY_F32 (an intentional deviation).</summary>
     public static LaneResult MulLit(in LaneInputs lane) => MulLegacy(lane);
 
     // ---------------------------------------------------------------- min / max

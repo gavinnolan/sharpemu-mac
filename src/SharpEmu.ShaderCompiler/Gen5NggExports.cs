@@ -5,8 +5,7 @@ namespace SharpEmu.ShaderCompiler;
 
 // The Gen5 (RDNA2/GFX10.3) NGG hardware encodings a primitive shader speaks, in one place
 // so every backend decodes them the same way. Each layout is stated as the field offsets
-// the emitters shift by; docs/mac/ngg-mesh-shaders.md records where they come from and
-// which ones are still unconfirmed against the guest.
+// the emitters shift by.
 public static class Gen5NggExports
 {
     // EXP targets, from the RDNA2 ISA's EXP encoding table: 12..16 are POS0..POS4, 20 is

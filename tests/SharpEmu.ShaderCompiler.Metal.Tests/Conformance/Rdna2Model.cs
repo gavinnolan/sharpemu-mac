@@ -181,24 +181,23 @@ internal sealed record VectorOp(
     public override string ToString() => Mnemonic;
 }
 
-/// <summary>Intentional deviations from the ISA the model asserts, each recorded in
-/// docs/deviations.md ("Shader ALU").</summary>
+/// <summary>Intentional deviations from the ISA the model asserts.</summary>
 internal static class Deviations
 {
     /// <summary>Metal flushes f32 denormals (inputs and results) whatever FP_DENORM says, so a
-    /// program asking to keep them gets them flushed: docs/deviations.md, "f32 denormals".</summary>
+    /// program asking to keep them gets them flushed.</summary>
     public const bool F32DenormalsFlushed = true;
 
     /// <summary>The translator keeps f64 and f16 denormals (inputs and results) whatever FP_DENORM
-    /// asks, the mode titles run with: docs/deviations.md, "f64 and f16 denormals".</summary>
+    /// asks, the mode titles run with.</summary>
     public const bool F64F16DenormalsKept = true;
 
     /// <summary>V_LOG_F32 error in ULPs the translator delivers (Metal's fast::log2): the ISA says 1,
-    /// the result for 1 + 2^-23 is 2 ULP off. docs/deviations.md, "V_LOG_F32 accuracy".</summary>
+    /// the result for 1 + 2^-23 is 2 ULP off.</summary>
     public const int LogUlps = 2;
 
     /// <summary>Metal detects f32 tininess before rounding: an exact result below the smallest normal
     /// is flushed to a zero of its sign even where rounding would carry it up to 2^-126. The ISA does
-    /// not say which; docs/deviations.md, "f32 tininess".</summary>
+    /// not say which.</summary>
     public const bool F32FlushesBeforeRounding = true;
 }

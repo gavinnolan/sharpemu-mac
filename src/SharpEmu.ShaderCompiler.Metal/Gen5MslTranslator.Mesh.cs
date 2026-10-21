@@ -299,8 +299,7 @@ public static partial class Gen5MslTranslator
             }
 
             // What the geometry engine would hand the merged stage in hardware registers.
-            // The host fills one block per draw; docs/mac/ngg-mesh-shaders.md is the
-            // field-by-field contract and must stay in step with this struct.
+            // The host fills one block per draw and must stay in step with this struct.
             source.AppendLine($"struct {MeshDrawInfoStructName}");
             source.AppendLine("{");
             source.AppendLine("    uint vertices_per_subgroup;");

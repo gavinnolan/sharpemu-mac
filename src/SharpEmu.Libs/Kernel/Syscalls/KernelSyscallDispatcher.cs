@@ -79,7 +79,7 @@ internal static class KernelSyscallDispatcher
         if (!OrbisSyscallTable.TryGet(number, out var entry))
         {
             // FreeBSD maps an out-of-range number to sysent[0], which is nosys.
-            Report(number, $"#{number}", "out of range: nosys, SIGSYS not delivered (docs/deviations.md)");
+            Report(number, $"#{number}", "out of range: nosys, SIGSYS not delivered");
             return SyscallOutcome.Error(OrbisErrno.ENOSYS, incomingRdx);
         }
 
@@ -93,7 +93,7 @@ internal static class KernelSyscallDispatcher
             arguments[1..].CopyTo(shifted);
             if (OrbisSyscallTable.TryGet(inner, out var innerEntry) && innerEntry.Kind == OrbisSyscallKind.Indirect)
             {
-                Report(inner, innerEntry.Name, "nested indirect syscall: nosys, SIGSYS not delivered (docs/deviations.md)");
+                Report(inner, innerEntry.Name, "nested indirect syscall: nosys, SIGSYS not delivered");
                 return SyscallOutcome.Error(OrbisErrno.ENOSYS, incomingRdx);
             }
 
@@ -103,7 +103,7 @@ internal static class KernelSyscallDispatcher
         switch (entry.Kind)
         {
             case OrbisSyscallKind.NoSys:
-                Report(number, entry.Name, "nosys slot: ENOSYS, SIGSYS not delivered (docs/deviations.md)");
+                Report(number, entry.Name, "nosys slot: ENOSYS, SIGSYS not delivered");
                 return SyscallOutcome.Error(OrbisErrno.ENOSYS, incomingRdx);
             case OrbisSyscallKind.Compat:
                 Report(number, entry.Name, "FreeBSD compat shim is not modelled: ENOSYS");

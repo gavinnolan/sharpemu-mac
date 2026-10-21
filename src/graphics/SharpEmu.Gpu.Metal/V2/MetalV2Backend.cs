@@ -31,8 +31,8 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
 
     /// <summary>
     /// v2 builds MTLMeshRenderPipelineDescriptor pipelines and launches
-    /// drawMeshThreadgroups, so the merged ES/GS stage runs as what it is
-    /// (docs/mac/ngg-mesh-shaders.md). On by default on a Metal 3 device: without it
+    /// drawMeshThreadgroups, so the merged ES/GS stage runs as what it is.
+    /// On by default on a Metal 3 device: without it
     /// the executor drops every culling primitive-shader draw, which is most of what
     /// a UE4/UE5 title renders. SHARPEMU_METAL_MESH_SHADERS=0 opts out and restores
     /// the per-vertex path for comparison.

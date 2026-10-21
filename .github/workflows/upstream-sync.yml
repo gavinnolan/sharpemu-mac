@@ -4,10 +4,9 @@
 # Keeps this fork's `upstream` mirror branch current with sharpemu/sharpemu and
 # opens a merge PR into main when upstream has commits we do not have.
 #
-# The branch model and the manual equivalent (scripts/mac/sync-upstream.sh) are
-# documented in docs/mac/upstream-sync.md. The point of running it on a schedule
-# is that a stalled sync shows up as an open PR rather than as nothing
-# happening.
+# The manual equivalent is scripts/mac/sync-upstream.sh. The point of running it
+# on a schedule is that a stalled sync shows up as an open PR rather than as
+# nothing happening.
 #
 # Conflicts are deliberately not resolved here. A conflicted merge cannot be
 # pushed, and committing conflict markers would be worse than failing, so the
@@ -142,4 +141,4 @@ jobs:
               "The merge applied cleanly. Build and macOS-specific behaviour still need review before this lands —" \
               "a clean merge is not evidence that the Metal path, the Rosetta GC policy or the app bundle still work." \
               "" \
-              "Branch model: [docs/mac/upstream-sync.md](docs/mac/upstream-sync.md). Do not rebase this branch.")"
+              "Do not rebase this branch.")"
