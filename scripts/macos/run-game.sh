@@ -6,8 +6,8 @@
 #
 #   scripts/macos/run-game.sh <game|path/to/eboot.bin> <tag> <seconds> [keyplan] [ENV=VALUE ...]
 #
-#   game     ds | sarah | octo | poppy | quake | sh | superl | oregon | void (looked up under
-#            $SHARPEMU_GAMES_DIR, which the shortcuts require), or a path to an eboot.bin
+#   game     ds | sarah | gta | poppy | quake | sh | superl | oregon | void (looked up under
+#            $SHARPEMU_GAMES_DIR, which the shortcuts require), or a path to an eboot.bin or .zar
 #   seconds  run length, capped at 150 (600 with SHARPEMU_GAME_ENTRY_RUN=1, 2400 with
 #            SHARPEMU_GAME_SESSION_RUN=1 for 30-minute play sessions)
 #   keyplan  comma list "t:key[:hold]" pressed through SHARPEMU_INPUT_FILE, e.g. "20:enter,30:down:1",
@@ -60,19 +60,19 @@ usage() { sed -n '5,15p' "$0" >&2; exit 2; }
 [[ $# -ge 3 ]] || usage
 
 case "$1" in
-  ds|sarah|octo|poppy|quake|sh|superl|oregon|void)
+  ds|sarah|gta|poppy|quake|sh|superl|oregon|void)
     [[ -n "$GAMES_DIR" ]] || { echo "set SHARPEMU_GAMES_DIR to the directory holding the games, or pass a path to an eboot.bin" >&2; exit 2; } ;;
 esac
 case "$1" in
   ds) EBOOT="$GAMES_DIR/Demon Souls/PPSA01342-app0/eboot.bin" ;;
   sarah) EBOOT="$GAMES_DIR/Dreaming Sarah/PPSA02929-app0/eboot.bin" ;;
-  octo) EBOOT="$GAMES_DIR/OCTOPATH TRAVELER II/eboot.bin" ;;
-  poppy) EBOOT="$GAMES_DIR/Poppy Playtime Chapter 1/eboot.bin" ;;
-  quake) EBOOT="$GAMES_DIR/Quake/eboot.bin" ;;
-  sh) EBOOT="$GAMES_DIR/SILENT HILL The Short Message/PPSA10112-app/eboot.bin" ;;
-  superl) EBOOT="$GAMES_DIR/Superliminal/PPSA06084-app0/eboot.bin" ;;
-  oregon) EBOOT="$GAMES_DIR/The Oregon Trail/PPSA19244-app0/eboot.bin" ;;
-  void) EBOOT="$GAMES_DIR/void tRrLM Void Terrarium/eboot.bin" ;;
+  gta) EBOOT="$GAMES_DIR/GTA V/eboot.bin" ;;
+  poppy) EBOOT="$GAMES_DIR/Poppy Playtime Chapter 1.zar" ;;
+  quake) EBOOT="$GAMES_DIR/quake.zar" ;;
+  sh) EBOOT="$GAMES_DIR/silent hill short message.zar" ;;
+  superl) EBOOT="$GAMES_DIR/Superliminal.zar" ;;
+  oregon) EBOOT="$GAMES_DIR/The Oregon Trail/PPSA19244-2.000.001.zar" ;;
+  void) EBOOT="$GAMES_DIR/void terrarium.zar" ;;
   *) EBOOT="$1" ;;
 esac
 GAME="$(basename "$1" .bin)"
