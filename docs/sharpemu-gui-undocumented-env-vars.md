@@ -24,6 +24,10 @@ The GUI exposes these variables on its **Options** and **Game options** pages:
 The list contains 270 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
+On macOS the Vulkan, RenderDoc and Windows-only entries in this list do not
+apply, because that build has no Vulkan presenter. The variables that the Metal
+backend reads are in [macOS configuration](macos/configuration.md).
+
 ## Ray-tracing compute skip (GUI Debug option)
 
 `SHARPEMU_SKIP_RT` is off by default. Set it to `1` to skip ray-tracing compute.
