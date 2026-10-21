@@ -358,13 +358,17 @@ public sealed class SelfLoader : ISelfLoader
 
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
         {
+            // Reserved first: see GuestRedZonePatcher.ReserveSpinNapArena.
+            var spinNapArena = SpinNapRuntime.IsEnabled
+                ? GuestRedZonePatcher.ReserveSpinNapArena(patchableMemory, imageBase, totalImageSize)
+                : null;
             _ = GuestRedZonePatcher.Patch(
                 virtualMemory,
                 patchableMemory,
                 programHeaders,
                 imageBase,
                 totalImageSize);
-            ApplySpinLoopNap(virtualMemory, patchableMemory, programHeaders, imageBase, totalImageSize, applicationInfo.Title);
+            ApplySpinLoopNap(virtualMemory, patchableMemory, programHeaders, imageBase, totalImageSize, applicationInfo.Title, spinNapArena);
         }
 
         _ = GuestVaHolePatcher.Patch(virtualMemory, programHeaders, imageBase);
@@ -644,7 +648,8 @@ public sealed class SelfLoader : ISelfLoader
         IReadOnlyList<ProgramHeader> programHeaders,
         ulong imageBase,
         ulong imageSize,
-        string? title)
+        string? title,
+        GuestRedZonePatcher.SpinNapArena? reservedArena)
     {
         if (!SpinNapRuntime.IsEnabled)
         {
@@ -664,7 +669,7 @@ public sealed class SelfLoader : ISelfLoader
                 : [];
             _ = GuestRedZonePatcher.PatchSpinLoops(
                 virtualMemory, physicalMemory, programHeaders, imageBase, imageSize, probe,
-                string.IsNullOrEmpty(title) ? "guest" : title, lockedProbe);
+                string.IsNullOrEmpty(title) ? "guest" : title, lockedProbe, reservedArena);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {

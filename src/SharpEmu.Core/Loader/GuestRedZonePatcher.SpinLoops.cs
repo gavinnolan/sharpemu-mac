@@ -34,6 +34,33 @@ internal static partial class GuestRedZonePatcher
         int LockedSites = 0,
         int LockedNonLoopSites = 0);
 
+    /// <summary>
+    /// A trampoline range reserved for the spin-nap pass before the red-zone pass runs
+    /// (<see cref="ReserveSpinNapArena"/>).
+    /// </summary>
+    internal readonly record struct SpinNapArena(ulong Address, ulong Size);
+
+    // Enough for the trampolines of every title seen (Demon's Souls patches 2092 sites, ~270 KB; Black
+    // Myth: Wukong 27), so each takes the reserved range; a larger need allocates as before.
+    internal const ulong SpinNapArenaBytes = 0x80000;
+
+    /// <summary>
+    /// Reserves the spin-nap trampolines' range right after the image, before the red-zone pass.
+    /// That pass spends seconds writing a large executable's trampolines, and host mappings made
+    /// meanwhile can take the range after the image; the spin-nap pass, run next, then found room
+    /// only far below the image, out of rel32 reach of the data its relocated loops read. Black
+    /// Myth: Wukong lost 14 of its 27 spin loops that way in about half its runs (whenever the
+    /// pipeline archive's mappings came first), and with them its C# job workers' timing: the
+    /// game hung for good on the first gameplay load.
+    /// </summary>
+    internal static SpinNapArena? ReserveSpinNapArena(PhysicalVirtualMemory physicalMemory, ulong imageBase, ulong imageSize)
+    {
+        var imageEnd = checked(imageBase + imageSize);
+        return physicalMemory.TryAllocateWithinRange(imageEnd, imageEnd + (MaximumRelativeJumpDistance >> 1), SpinNapArenaBytes, out var address)
+            ? new SpinNapArena(address, SpinNapArenaBytes)
+            : null;
+    }
+
     public static SpinPatchResult PatchSpinLoops(
         IVirtualMemory memory,
         PhysicalVirtualMemory physicalMemory,
@@ -42,7 +69,8 @@ internal static partial class GuestRedZonePatcher
         ulong imageSize,
         ReadOnlySpan<byte> probeCode,
         string moduleName,
-        ReadOnlySpan<byte> lockedProbeCode = default)
+        ReadOnlySpan<byte> lockedProbeCode = default,
+        SpinNapArena? reservedArena = null)
     {
         ArgumentNullException.ThrowIfNull(memory);
         ArgumentNullException.ThrowIfNull(physicalMemory);
@@ -66,13 +94,21 @@ internal static partial class GuestRedZonePatcher
         sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
         // The probe sits at the arena's start so every site's `call rel32` reaches it.
         var requiredBytes = AlignUp(checked((ulong)sites.Count * 128UL + (ulong)probeCode.Length + (ulong)lockedProbeCode.Length + 16UL + PageSize), PageSize);
-        if (!TryAllocateTrampolines(physicalMemory, imageBase, imageSize, requiredBytes, sites, out var cursor))
+        var (reachStart, reachEnd) = TrampolineReach(sites);
+        ulong cursor;
+        if (reservedArena is { } arena && arena.Size >= requiredBytes &&
+            arena.Address >= reachStart && arena.Address <= reachEnd - requiredBytes)
+        {
+            cursor = arena.Address;
+        }
+        else if (!TryAllocateTrampolines(physicalMemory, imageBase, imageSize, requiredBytes, sites, out cursor))
         {
             Console.Error.WriteLine(
                 $"[LOADER][WARN] {moduleName} spin-nap: no trampoline range for {sites.Count} sites.");
             return result with { FailedSites = sites.Count };
         }
 
+        var arenaAddress = cursor;
         var end = cursor + requiredBytes;
         var probeAddress = cursor;
         if (!memory.TryWrite(cursor, probeCode))
@@ -121,7 +157,7 @@ internal static partial class GuestRedZonePatcher
         Console.Error.WriteLine(
             $"[LOADER] {moduleName} spin-nap: functions={result.Functions} pause_sites={result.PauseSites} " +
             $"patched={result.PatchedSites} failed={result.FailedSites} unrelocatable={result.UnrelocatableSites} " +
-            $"non_loop={result.NonLoopSites}" +
+            $"non_loop={result.NonLoopSites} arena=0x{arenaAddress:X}" +
             (includeLocked
                 ? $" locked_sites={result.LockedSites} locked_patched={lockedPatched} locked_non_loop={result.LockedNonLoopSites}."
                 : "."));

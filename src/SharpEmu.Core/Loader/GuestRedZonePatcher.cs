@@ -1309,19 +1309,25 @@ internal static partial class GuestRedZonePatcher
         IReadOnlyList<PatchSite> sites,
         out ulong address)
     {
-        var minimumSite = sites.Min(static site => site.Address);
-        var maximumReturn = sites.Max(static site => checked(site.Address + (ulong)site.ByteLength));
-        // Keep the complete allocation in reach of every site and return address.
-        // Leave room for the five-byte jump when calculating either displacement.
-        var distance = MaximumRelativeJumpDistance - MinimumJumpBytes;
-        var start = maximumReturn > distance ? maximumReturn - distance : AllocationAlignment;
-        var end = minimumSite > ulong.MaxValue - distance ? ulong.MaxValue : minimumSite + distance;
+        var (start, end) = TrampolineReach(sites);
         address = 0;
         if (start >= end) return false;
         var imageEnd = checked(imageBase + imageSize);
         var preferred = Math.Clamp(imageEnd, start, end);
         return memory.TryAllocateWithinRange(preferred, end, requiredBytes, out address) ||
             memory.TryAllocateWithinRange(start, preferred, requiredBytes, out address);
+    }
+
+    // The range a trampoline allocation must lie in to be in reach of every site and return address,
+    // with room for the five-byte jump in either displacement.
+    private static (ulong Start, ulong End) TrampolineReach(IReadOnlyList<PatchSite> sites)
+    {
+        var minimumSite = sites.Min(static site => site.Address);
+        var maximumReturn = sites.Max(static site => checked(site.Address + (ulong)site.ByteLength));
+        var distance = MaximumRelativeJumpDistance - MinimumJumpBytes;
+        var start = maximumReturn > distance ? maximumReturn - distance : AllocationAlignment;
+        var end = minimumSite > ulong.MaxValue - distance ? ulong.MaxValue : minimumSite + distance;
+        return (start, end);
     }
 
     private static bool TryDecodeFunctionStarts(

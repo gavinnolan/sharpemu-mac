@@ -79,6 +79,55 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
     }
 
+    // The loader reserves the spin-nap range before the red-zone pass (GuestRedZonePatcher.ReserveSpinNapArena):
+    // a reserved range that is big enough and in reach takes the trampolines; a smaller one is left alone and
+    // the pass allocates as before.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TrampolinesGoToTheReservedArenaWhenItFits(bool bigEnough)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        byte[] function =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00, // mov ecx, 4
+            0xF3, 0x90,                   // loop: pause
+            0xFF, 0xC9,                   // dec ecx
+            0x75, 0xFA,                   // jnz loop
+            0xB8, 0x44, 0x33, 0x22, 0x11, // mov eax, 0x11223344
+            0xC3,                         // ret
+        ];
+
+        var arenaSize = bigEnough ? GuestRedZonePatcher.SpinNapArenaBytes : 0x1000UL;
+        using var image = SpinImage.Create(function, reserveAt: 0x200000, reservedSize: arenaSize);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0xE9, image.ReadByte(5));
+        var trampoline = (ulong)((long)image.Base + 5 + 5 + BinaryPrimitives.ReadInt32LittleEndian(image.Read(6, 4)));
+        var arena = image.Arena!.Value;
+        Assert.Equal(bigEnough, trampoline >= arena.Address && trampoline < arena.Address + arena.Size);
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void TheSpinNapArenaIsReservedJustAfterTheImage()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var memory = new PhysicalVirtualMemory();
+        const ulong holeSize = 0x4000000, imageSize = 0x10000;
+        var hole = (ulong)HostMemory.Alloc(null, (nuint)holeSize, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+        Assert.NotEqual(0UL, hole);
+        Assert.True(HostMemory.Free((void*)hole, 0, HostMemory.MEM_RELEASE));
+        var imageBase = memory.AllocateAt(hole, imageSize);
+        var arena = GuestRedZonePatcher.ReserveSpinNapArena(memory, imageBase, imageSize);
+        Assert.NotNull(arena);
+        Assert.InRange(arena.Value.Address, imageBase + imageSize, imageBase + holeSize - arena.Value.Size);
+        Assert.Equal(GuestRedZonePatcher.SpinNapArenaBytes, arena.Value.Size);
+    }
+
     [Fact]
     public void LeavesAPauseThatDoesNotCloseALoopAlone()
     {
@@ -297,18 +346,23 @@ public sealed unsafe class SpinLoopNapPatcherTests
         private const ulong ImageSize = 0x10000;
         private readonly PhysicalVirtualMemory _memory;
 
-        private SpinImage(PhysicalVirtualMemory memory, ulong imageBase, GuestRedZonePatcher.SpinPatchResult result)
+        private SpinImage(PhysicalVirtualMemory memory, ulong imageBase, GuestRedZonePatcher.SpinPatchResult result,
+            GuestRedZonePatcher.SpinNapArena? arena = null)
         {
             _memory = memory;
             Base = imageBase;
             Result = result;
+            Arena = arena;
         }
 
         public ulong Base { get; }
 
+        public GuestRedZonePatcher.SpinNapArena? Arena { get; }
+
         public GuestRedZonePatcher.SpinPatchResult Result { get; }
 
-        public static SpinImage Create(byte[] function, bool locked = false, byte[]? lockedProbe = null)
+        public static SpinImage Create(byte[] function, bool locked = false, byte[]? lockedProbe = null,
+            ulong reserveAt = 0, ulong reservedSize = 0)
         {
             var memory = new PhysicalVirtualMemory();
             const ulong holeSize = 0x4000000;
@@ -331,10 +385,17 @@ public sealed unsafe class SpinLoopNapPatcherTests
                 CreateProgramHeader(ProgramHeaderType.GnuEhFrame, ProgramHeaderFlags.Read, 0x1000, (ulong)exceptionFrameHeader.Length),
             ];
 
+            GuestRedZonePatcher.SpinNapArena? arena = null;
+            if (reservedSize != 0)
+            {
+                Assert.True(memory.TryAllocateWithinRange(imageBase + reserveAt, imageBase + holeSize, reservedSize, out var arenaAddress));
+                arena = new GuestRedZonePatcher.SpinNapArena(arenaAddress, reservedSize);
+            }
+
             var probe = SpinNapRuntime.EnsureProbeBytes(1_000_000_000);
             lockedProbe ??= locked ? SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000) : [];
-            var result = GuestRedZonePatcher.PatchSpinLoops(memory, memory, headers, imageBase, ImageSize, probe, "test", lockedProbe);
-            return new SpinImage(memory, imageBase, result);
+            var result = GuestRedZonePatcher.PatchSpinLoops(memory, memory, headers, imageBase, ImageSize, probe, "test", lockedProbe, arena);
+            return new SpinImage(memory, imageBase, result, arena);
         }
 
         public byte ReadByte(ulong offset) => Read(offset, 1)[0];
