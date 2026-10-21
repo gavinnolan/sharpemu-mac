@@ -9,7 +9,7 @@ using System.Runtime.InteropServices;
 namespace SharpEmu.HLE.DsTrace;
 
 /// <summary>
-/// Guest-state sampler <c>SharpEmu-DsSampler</c> (§5). Polls Demon's Souls' job
+/// Guest-state sampler <c>SharpEmu-DsSampler</c>. Polls Demon's Souls' job
 /// system at SHARPEMU_DSTRACE_SAMPLER_HZ (default 1000) once armed and emits
 /// edge-triggered records. All guest reads go through <see cref="DsGuestMem"/>
 /// (ICpuMemory.TryRead unless SHARPEMU_DSTRACE_RAW_READS=1). The roots are
@@ -23,7 +23,7 @@ internal static class DsSampler
     private static readonly ConcurrentQueue<WatchMessage>? _watchQueue = DsTrace.Sampler ? new() : null;
     private static volatile bool _running;
 
-    /// <summary>FSJ hand-off: a job suspended on a counter (§4.3).</summary>
+    /// <summary>FSJ hand-off: a job suspended on a counter.</summary>
     internal static void Watch(ulong job, ulong counter, ulong target, uint cond, uint affinity, long suspendTs)
     {
         if (_running)
@@ -48,7 +48,7 @@ internal static class DsSampler
         thread.Start();
     }
 
-    // ---- guest layout (runtime addresses, §5) ----
+    // ---- guest layout (runtime addresses) ----
 
     private const ulong JobSystemRootPtr = 0x8030fd5b0UL;
     private const ulong RenderThreadPtrPtr = 0x803181450UL;

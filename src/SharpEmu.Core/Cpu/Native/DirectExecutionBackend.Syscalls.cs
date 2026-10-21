@@ -5,7 +5,7 @@ using System.Threading;
 
 namespace SharpEmu.Core.Cpu.Native;
 
-// Raw guest `syscall` instructions (SPEC §5.6). Two traps lead here: the ud2
+// Raw guest `syscall` instructions. Two traps lead here: the ud2
 // the loader put over a recognised syscall site, and the SIGSYS XNU/Rosetta
 // raise for a classless syscall the scanner did not recognise. Both only
 // redirect the guest into GuestSyscallTrap's thunk; the syscall itself runs

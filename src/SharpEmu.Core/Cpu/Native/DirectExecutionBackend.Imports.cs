@@ -121,7 +121,7 @@ public sealed partial class DirectExecutionBackend
         *(nint*)transferStubAddress = stub;
     }
 
-	// DSTRACE §4.2: times the unchanged gateway body (PERF_HLE branch, ImportProfile
+	// DSTRACE: times the unchanged gateway body (PERF_HLE branch, ImportProfile
 	// branch or the plain dispatch) and records HLEA / HLE / CPUPT. Only reached while
 	// SHARPEMU_DSTRACE's hle group is armed.
 	private static unsafe ulong DispatchImportWithDsTrace(DirectExecutionBackend backend, int importIndex, nint argPackPtr)

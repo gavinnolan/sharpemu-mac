@@ -11,7 +11,7 @@ using Xunit;
 namespace SharpEmu.Gpu.Metal.Tests;
 
 /// <summary>
-/// Single-copy textures next to device-address programs (artifacts/memopt/single-copy-device-address.md (d)):
+/// Single-copy textures next to device-address programs:
 /// the ranges the host evaluated pin and give back the chunks they cover, a program it cannot
 /// bound takes the global fallback, the shader's trap sees a released chunk read through the
 /// page table and the host gives it back and pins it, the shadow mode releases nothing, and

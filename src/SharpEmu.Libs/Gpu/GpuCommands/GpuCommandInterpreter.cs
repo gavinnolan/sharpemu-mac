@@ -40,7 +40,7 @@ public sealed partial class GpuCommandInterpreter
     private bool _chainRequested;
     private ulong _packetSerial;
 
-    // DSTRACE §4.7 SLICE: packets run so far, read by the queue around a slice.
+    // DSTRACE SLICE: packets run so far, read by the queue around a slice.
     internal ulong DsPacketSerial => _packetSerial;
     private ulong _lastWriteAddress;
     private ulong _lastWriteValue;
@@ -358,7 +358,7 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
-    // DSTRACE §4.7 CPS: the compare operands of the memory wait about to suspend. Only the
+    // DSTRACE CPS: the compare operands of the memory wait about to suspend. Only the
     // queue's own (worker) thread runs this interpreter, so plain fields suffice.
     private bool _dsHasWaitOperands;
     private ulong _dsWaitReference;

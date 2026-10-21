@@ -10,7 +10,7 @@ namespace SharpEmu.Core.Cpu.Native;
 
 /// <summary>
 /// Which libc implementation an import binds to when the title ships its own
-/// libc.prx (SPEC §0.1). The default keeps the historical routing: HLE first,
+/// libc.prx. The default keeps the historical routing: HLE first,
 /// with a short allowlist going to the loaded module.
 /// <c>SHARPEMU_LIBC_LLE_FIRST=1</c> flips it so the loaded libc.prx wins for
 /// every export it provides, and HLE is only the fallback for symbols the

@@ -9,8 +9,7 @@ using SharpEmu.Libs.Kernel.Syscalls;
 namespace SharpEmu.Core.Loader;
 
 /// <summary>
-/// Load-time pass that makes raw guest <c>syscall</c> instructions trap
-/// (SPEC §5.6).
+/// Load-time pass that makes raw guest <c>syscall</c> instructions trap.
 /// </summary>
 /// <remarks>
 /// Guest code runs natively, so a raw <c>syscall</c> would reach the host

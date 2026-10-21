@@ -10,7 +10,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Kernel;
 
 /// <summary>
-/// fd table, errno and VFS semantics of the file exports (SPEC §5.6), plus the
+/// fd table, errno and VFS semantics of the file exports, plus the
 /// POSIX exports added beside them (access, lstat, getcwd, pipe, readv/writev,
 /// statfs/fstatfs).
 /// </summary>
