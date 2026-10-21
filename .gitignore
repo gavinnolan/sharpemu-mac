@@ -46,3 +46,12 @@ ehthumbs.db
 .vscode/
 clean_test/
 .debug/
+
+# Local tooling and profiling output
+.claude/
+.codex/
+*.nettrace
+*.gcdump
+*.dmp
+*.crash
+*.ips
