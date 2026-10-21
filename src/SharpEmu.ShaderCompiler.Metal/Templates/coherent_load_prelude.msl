@@ -1,0 +1,96 @@
+// A GLC raw dword load (RDNA2 ISA 8.1.10: GLC on a load forces a miss in the per-CU
+// caches, so the read comes from the device-coherent level). A plain Metal load can be
+// served from one GPU core's cache, which does not see another core's stores before the
+// kernel ends, so a workgroup polling a word another workgroup publishes (a decoupled
+// look-back scan's flags) re-reads the stale copy until the step cap kills it. A relaxed
+// device atomic load is the coherent read. Out of range reads zero, like
+// sharpemu_load_dword.
+static inline uint sharpemu_load_dword_coherent(device uint* b, uint bytes, uint addr)
+{
+    uint index = addr >> 2;
+    return index < (bytes >> 2)
+        ? atomic_load_explicit((device atomic_uint*)(b + index), memory_order_relaxed)
+        : 0u;
+}
+
+// The coherent forms of the other bound-buffer reads a GLC load can take. Each reads
+// whole dwords with a relaxed device atomic load and then does what its plain twin does
+// with them: sharpemu_load_word's straddled dword, sharpemu_load_words' run and
+// sharpemu_load_bytes' sub-dword value, with the same out-of-range zeros.
+static inline uint sharpemu_coherent_word_at(device uint* b, uint index)
+{
+    return atomic_load_explicit((device atomic_uint*)(b + index), memory_order_relaxed);
+}
+
+static inline uint sharpemu_load_word_coherent(device uint* b, uint bytes, uint addr)
+{
+    if ((addr & 3u) == 0u)
+    {
+        return addr + 4u <= bytes ? sharpemu_coherent_word_at(b, addr >> 2) : 0u;
+    }
+    uint shift = (addr & 3u) * 8u;
+    uint aligned = addr & ~3u;
+    uint low = sharpemu_load_dword_coherent(b, bytes, aligned);
+    uint high = sharpemu_load_dword_coherent(b, bytes, aligned + 4u);
+    return (low >> shift) | (high << (32u - shift));
+}
+
+template <int N>
+static inline uint4 sharpemu_load_words_coherent(device uint* b, uint bytes, uint addr)
+{
+    uint4 result = uint4(0u);
+    if ((addr & 3u) == 0u && addr <= bytes && (uint)(4 * N) <= bytes - addr)
+    {
+        uint index = addr >> 2;
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = sharpemu_coherent_word_at(b, index + (uint)i);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = sharpemu_load_word_coherent(b, bytes, addr + (uint)(4 * i));
+        }
+    }
+    return result;
+}
+
+static inline uint sharpemu_load_bytes_coherent(device uint* b, uint bytes, uint addr, uint count, bool signExtend)
+{
+    uint value = 0u;
+    for (uint i = 0u; i < count; i++)
+    {
+        uint at = addr + i;
+        if (at < bytes)
+        {
+            value |= ((sharpemu_coherent_word_at(b, at >> 2) >> ((at & 3u) * 8u)) & 0xFFu) << (i * 8u);
+        }
+    }
+    if (signExtend && count < 4u)
+    {
+        uint shift = 32u - (count * 8u);
+        value = (uint)(((int)(value << shift)) >> shift);
+    }
+    return value;
+}
+
+// The device-address forms: sharpemu_load_device_dword and
+// sharpemu_load_device_unaligned with the resolved word read atomically.
+static inline uint sharpemu_load_device_dword_coherent(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address)
+{
+    bool valid = false;
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
+    return valid ? atomic_load_explicit((device atomic_uint*)word, memory_order_relaxed) : 0u;
+}
+
+static inline uint sharpemu_load_device_unaligned_coherent(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint count)
+{
+    uint alignment = (uint)(address & 3ul);
+    ulong aligned = address & ~3ul;
+    uint shift = alignment * 8u;
+    uint low = sharpemu_load_device_dword_coherent(ranges, range_count, faults, fault_words, cache, aligned);
+    uint high = (alignment + count > 4u) ? sharpemu_load_device_dword_coherent(ranges, range_count, faults, fault_words, cache, aligned + 4ul) : 0u;
+    return (low >> shift) | (shift == 0u ? 0u : (high << (32u - shift)));
+}

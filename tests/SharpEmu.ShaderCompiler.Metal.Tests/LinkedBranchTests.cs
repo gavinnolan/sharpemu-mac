@@ -21,7 +21,11 @@ public sealed class LinkedBranchTests
             new(4, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null),
             new(target, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null)]);
         var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var error), error);
+        // The block dispatcher names each target block by number; the structured emitter that
+        // is the default nests the same blocks instead, so the target is checked on the dispatcher.
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out error,
+            new Gen5MslCodegenOptions(StructuredControlFlow: false)), error);
         var assignment = opcode switch
         {
             "SCbranchScc0" => "pc = (!scc) ? 2u : 1u;",

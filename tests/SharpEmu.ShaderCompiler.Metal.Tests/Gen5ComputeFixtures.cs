@@ -194,14 +194,290 @@ internal static class Gen5ComputeFixtures
         return shader;
     }
 
+    // Per-lane wave64 programs. Every lane stores its results at lane * 8 (v4), so a
+    // test can read each of the 64 lanes back. v0 = the full 0..63 lane index.
+    private static readonly uint[] Wave64LaneIndex =
+    [
+        0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0
+        0xD7660000, 0x000200C1, // v_mbcnt_hi_u32_b32 v0, -1, v0        lane 0..63
+    ];
+
+    // v1 = 3 * lane + 7; every lane reads lane 63 and lane 5 of the whole wave.
+    public static readonly Gen5ComputeFixture Wave64ReadLane = new(
+        "wave64-readlane",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xD7600000, 0x00017F01, // v_readlane_b32 s0, v1, 63
+            0xD7600001, 0x00010B01, // v_readlane_b32 s1, v1, 5
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x7E060201,             // v_mov_b32 v3, s1
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // v1 = 3 * lane + 7. Two V_READFIRSTLANEs back to back under narrowed EXECs: the first
+    // active lane is 44 (upper half only), then 8 (lower half only). Every lane, with EXEC
+    // restored, stores both: 139 and 31.
+    public static readonly Gen5ComputeFixture Wave64ReadFirstLane = new(
+        "wave64-readfirstlane",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xBEFE0380,             // s_mov_b32 exec_lo, 0
+            0xBEFF03FF, 0xF0F0F000, // s_mov_b32 exec_hi, 0xf0f0f000     lanes 44.. of 32..63
+            0x7E000501,             // v_readfirstlane_b32 s0, v1
+            0xBEFE03FF, 0x00000100, // s_mov_b32 exec_lo, 0x100          lane 8
+            0xBEFF0380,             // s_mov_b32 exec_hi, 0
+            0x7E020501,             // v_readfirstlane_b32 s1, v1
+            0xBEFE04C1,             // s_mov_b64 exec, -1
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x7E060201,             // v_mov_b32 v3, s1
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // v1 = 3 * lane + 7. With EXEC empty in both halves the first lane is lane 0 (ISA
+    // V_READFIRSTLANE_B32), so every lane stores 7.
+    public static readonly Gen5ComputeFixture Wave64ReadFirstLaneEmptyExec = new(
+        "wave64-readfirstlane-empty-exec",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xBEFE0480,             // s_mov_b64 exec, 0
+            0x7E000501,             // v_readfirstlane_b32 s0, v1
+            0xBEFE04C1,             // s_mov_b64 exec, -1
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // A loop of 64 trips, each with two exchanges: V_READLANE of lane i (3i + 7) and the
+    // 64-bit VCC of lane > i (63 - i lanes, counted by S_BCNT1). The sum, 6496 + 2016 =
+    // 8512, is only right if no trip reads a slot the next exchange has overwritten.
+    public static readonly Gen5ComputeFixture Wave64ExchangeLoop = new(
+        "wave64-exchange-loop",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xBE820380,             // s_mov_b32 s2, 0                   sum
+            0xBE830380,             // s_mov_b32 s3, 0                   i
+            0xD7600000, 0x00000701, // loop: v_readlane_b32 s0, v1, s3
+            0x80020002,             // s_add_u32 s2, s2, s0
+            0x7D820003,             // v_cmp_lt_u32 vcc, s3, v0
+            0xBE84106A,             // s_bcnt1_i32_b64 s4, vcc
+            0x80020402,             // s_add_u32 s2, s2, s4
+            0x80038103,             // s_add_u32 s3, s3, 1
+            0xBF0AC003,             // s_cmp_lt_u32 s3, 64
+            0xBF85FFF7,             // s_cbranch_scc1 loop
+            0x7E040202,             // v_mov_b32 v2, s2
+            0x34080082,             // v_lshlrev_b32 v4, 2, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
+    // v1 = lane, then v_writelane_b32 v1, 55, 40 must change only lane 40.
+    public static readonly Gen5ComputeFixture Wave64WriteLane = new(
+        "wave64-writelane",
+        [
+            .. Wave64LaneIndex,
+            0x7E020300,             // v_mov_b32 v1, v0
+            0xD7610001, 0x000150B7, // v_writelane_b32 v1, 55, 40
+            0x34080082,             // v_lshlrev_b32 v4, 2, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
+    // No s_barrier: lane l writes l + 1 to LDS slot l, then reads slot (l + 32) & 63, which the
+    // other 32-wide half wrote. A guest wave's LDS ops are in order, so this must see l' + 1.
+    public static readonly Gen5ComputeFixture Wave64LdsExchange = new(
+        "wave64-lds-exchange",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x02050300, // v_mad_u32_u24 v1, v0, 1, 1           lane + 1
+            0x34080082,             // v_lshlrev_b32 v4, 2, v0
+            0xD8340000, 0x00000104, // ds_write_b32 v4, v1
+            0xD5430005, 0x02810300, // v_mad_u32_u24 v5, v0, 1, 32          lane + 32
+            0x360A0ABF,             // v_and_b32 v5, 63, v5
+            0x340A0A82,             // v_lshlrev_b32 v5, 2, v5
+            0xD8D80000, 0x03000005, // ds_read_b32 v3, v5
+            0xE0701000, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
+    // s[4:5] = 0xF0F0F0F0_0000FFFF. v2 = the lane's bit of s[4:5] through a VOP3
+    // v_cndmask_b32; v3 = 1 only on lanes that survive s_and_saveexec_b64 s[6:7], s[4:5].
+    public static readonly Gen5ComputeFixture Wave64MaskBits = new(
+        "wave64-mask-bits",
+        [
+            .. Wave64LaneIndex,
+            0xBE8403FF, 0x0000FFFF, // s_mov_b32 s4, 0x0000ffff
+            0xBE8503FF, 0xF0F0F0F0, // s_mov_b32 s5, 0xf0f0f0f0
+            0xD5010002, 0x00110280, // v_cndmask_b32 v2, 0, 1, s[4:5]
+            0x7E060280,             // v_mov_b32 v3, 0
+            0xBE862404,             // s_and_saveexec_b64 s[6:7], s[4:5]
+            0x7E060281,             // v_mov_b32 v3, 1
+            0xBEFE0406,             // s_mov_b64 exec, s[6:7]
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // A VOP3-encoded V_CMP names its mask SGPR pair: s[4:5] = (lane & 3) == 0, with VCC
+    // preset to 0x0f0f0f0f_0f0f0f0f and left alone. Per lane at lane * 32: the s[4:5]
+    // bit (v_cndmask), the VCC bit, s4, s5, vcc_lo, and whether the lane survives
+    // s_and_saveexec_b64 s[6:7], s[4:5].
+    public static readonly Gen5ComputeFixture Wave64Vop3CompareSgpr = new(
+        "wave64-vop3-compare-sgpr",
+        [
+            .. Wave64LaneIndex,
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBEEB03FF, 0x0F0F0F0F, // s_mov_b32 vcc_hi, 0x0f0f0f0f
+            0x36040083,             // v_and_b32 v2, 3, v0
+            0xD4C20004, 0x00010102, // v_cmp_eq_u32_e64 s[4:5], v2, 0
+            0xD5010001, 0x00110280, // v_cndmask_b32 v1, 0, 1, s[4:5]
+            0xD5010002, 0x01A90280, // v_cndmask_b32 v2, 0, 1, vcc
+            0x7E060204,             // v_mov_b32 v3, s4
+            0x7E0A0205,             // v_mov_b32 v5, s5
+            0x7E0C026A,             // v_mov_b32 v6, vcc_lo
+            0x7E0E0280,             // v_mov_b32 v7, 0
+            0xBE862404,             // s_and_saveexec_b64 s[6:7], s[4:5]
+            0x7E0E0281,             // v_mov_b32 v7, 1
+            0xBEFE0406,             // s_mov_b64 exec, s[6:7]
+            0x34080085,             // v_lshlrev_b32 v4, 5, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:8
+            0xE070100C, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:12
+            0xE0701010, 0x80020604, // buffer_store_dword v6, v4, s[8:11], 0 offen offset:16
+            0xE0701014, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:20
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 2048);
+
+    // The wave32 form: the compare's mask is the single SGPR s4, so s5 keeps 0xa5a5a5a5.
+    public static readonly Gen5ComputeFixture Wave32Vop3CompareSgpr = new(
+        "wave32-vop3-compare-sgpr",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBE8503FF, 0xA5A5A5A5, // s_mov_b32 s5, 0xa5a5a5a5
+            0x36040083,             // v_and_b32 v2, 3, v0
+            0xD4C20004, 0x00010102, // v_cmp_eq_u32_e64 s4, v2, 0
+            0xD5010001, 0x00110280, // v_cndmask_b32 v1, 0, 1, s4
+            0xD5010002, 0x01A90280, // v_cndmask_b32 v2, 0, 1, vcc_lo
+            0x7E060204,             // v_mov_b32 v3, s4
+            0x7E0A0205,             // v_mov_b32 v5, s5
+            0x7E0C026A,             // v_mov_b32 v6, vcc_lo
+            0x7E0E0280,             // v_mov_b32 v7, 0
+            0xBE863C04,             // s_and_saveexec_b32 s6, s4
+            0x7E0E0281,             // v_mov_b32 v7, 1
+            0xBEFE0306,             // s_mov_b32 exec_lo, s6
+            0x34080085,             // v_lshlrev_b32 v4, 5, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:8
+            0xE070100C, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:12
+            0xE0701010, 0x80020604, // buffer_store_dword v6, v4, s[8:11], 0 offen offset:16
+            0xE0701014, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:20
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
+    // VOP3 compares into NULL (writes nothing) and into EXEC. Per lane at lane * 16: the
+    // EXEC bit after the NULL compare (all lanes), the VCC bit (preset, untouched), and 1
+    // only on lanes the EXEC compare kept ((lane & 3) == 0).
+    public static readonly Gen5ComputeFixture Wave64Vop3CompareNullAndExec = new(
+        "wave64-vop3-compare-null-exec",
+        [
+            .. Wave64LaneIndex,
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBEEB03FF, 0x0F0F0F0F, // s_mov_b32 vcc_hi, 0x0f0f0f0f
+            0x36040083,             // v_and_b32 v2, 3, v0
+            0x7E0E0280,             // v_mov_b32 v7, 0
+            0xD4C2007D, 0x00010102, // v_cmp_eq_u32_e64 null, v2, 0
+            0xD5010001, 0x01F90280, // v_cndmask_b32 v1, 0, 1, exec
+            0xD4C2007E, 0x00010102, // v_cmp_eq_u32_e64 exec, v2, 0
+            0x7E0E0281,             // v_mov_b32 v7, 1
+            0xBEFE04C1,             // s_mov_b64 exec, -1
+            0xD5010002, 0x01A90280, // v_cndmask_b32 v2, 0, 1, vcc
+            0x34080084,             // v_lshlrev_b32 v4, 4, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:8
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
+    // VOP3B carry-out in wave32: v_add_co_u32 v3, s4, v0, -16 carries on lanes >= 16 into
+    // the single SGPR s4 (s5 keeps 0xa5a5a5a5); a second add sends its carry to NULL and
+    // must leave EXEC and VCC alone. Per lane at lane * 32: the s4 bit, s4, s5, vcc_lo,
+    // exec_lo, the sum.
+    public static readonly Gen5ComputeFixture Wave32Vop3CarryOutSgpr = new(
+        "wave32-vop3-carry-out-sgpr",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBE8503FF, 0xA5A5A5A5, // s_mov_b32 s5, 0xa5a5a5a5
+            0xD70F0403, 0x0001A100, // v_add_co_u32 v3, s4, v0, -16
+            0xD70F7D08, 0x0001A100, // v_add_co_u32 v8, null, v0, -16
+            0xD5010001, 0x00110280, // v_cndmask_b32 v1, 0, 1, s4
+            0x7E040204,             // v_mov_b32 v2, s4
+            0x7E0A0205,             // v_mov_b32 v5, s5
+            0x7E0C026A,             // v_mov_b32 v6, vcc_lo
+            0x7E0E027E,             // v_mov_b32 v7, exec_lo
+            0x34080085,             // v_lshlrev_b32 v4, 5, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:8
+            0xE070100C, 0x80020604, // buffer_store_dword v6, v4, s[8:11], 0 offen offset:12
+            0xE0701010, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:16
+            0xE0701014, 0x80020804, // buffer_store_dword v8, v4, s[8:11], 0 offen offset:20
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
     // The request path: the fixture's own resource plan, default specialization and layout.
     private const ulong RequestHash = 0x5348_4152_5045_4D55;
     private const uint UserDataCount = 16;
 
     public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
-        IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null)
+        IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null,
+        Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0, uint scratchDwords = 0,
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint positionExportControl = 0,
+        bool supportsClipDistance = true, bool enableGraphicsSubgroupOperations = true,
+        ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false,
+        ulong excludedUserDataRegisters = 0, bool ieeeMode = false, Gen5ColorExportFormat? pixelDepthExportFormat = null,
+        bool pixelStencilExportEnable = false, bool pixelSampleMaskExportEnable = false,
+        uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true, bool pixelGuestWave32 = false,
+        uint meshPerVertexParameterMask = 0, IReadOnlyList<uint>? vertexInterpolants = null)
     {
-        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount);
+        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
+            excludedUserDataRegisters: excludedUserDataRegisters);
         var specialization = ResourceSpecialization.Default(plan.Info);
         if (runtimeInputs is not null)
         {
@@ -212,22 +488,41 @@ internal static class Gen5ComputeFixtures
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, 0, UserDataCount),
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, UserDataCount, excludedUserDataRegisters),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
-            BindingLayout.ReadsShaderBase(program));
+            BindingLayout.ReadsShaderBase(program),
+            pushDataStartDword);
         return new ShaderCompileRequest(plan, resources, layout)
         {
             WaveSize = waveLaneCount,
+            IeeeMode = ieeeMode,
+            FloatMode = floatMode,
+            Dx10Clamp = dx10Clamp,
+            PixelGuestWave32 = pixelGuestWave32,
             LocalSizeX = stage == ShaderStage.Compute ? localSizeX : 1,
             PixelOutputs = pixelOutputs ?? (stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : []),
             RequiredVertexOutputCount = requiredVertexOutputCount,
+            PrimitiveShader = primitiveShader,
+            MeshPerVertexParameterMask = meshPerVertexParameterMask,
+            VertexInterpolants = vertexInterpolants ?? [],
+            ScratchDwords = scratchDwords,
+            LocalDataShareDwords = localDataShareDwords,
+            PositionExportControl = positionExportControl,
+            SupportsClipDistance = supportsClipDistance,
+            EnableGraphicsSubgroupOperations = enableGraphicsSubgroupOperations,
+            ClipSpace = clipSpace,
+            PixelDepthExportEnable = pixelDepthExportEnable,
+            PixelDepthExportFormat = pixelDepthExportFormat,
+            PixelStencilExportEnable = pixelStencilExportEnable,
+            PixelSampleMaskExportEnable = pixelSampleMaskExportEnable,
         };
     }
 
-    public static Gen5MslShader CompileRequestOrThrow(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32)
+    public static Gen5MslShader CompileRequestOrThrow(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32,
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint floatMode = ShaderCompileRequest.DefaultFloatMode)
     {
-        var request = CreateComputeRequest(fixture, waveLaneCount, localSizeX);
+        var request = CreateComputeRequest(fixture, waveLaneCount, localSizeX, localDataShareDwords, pushDataStartDword, floatMode);
         if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
             throw new InvalidOperationException($"[{fixture.Name}] MSL request emit failed: {error}");
@@ -236,7 +531,8 @@ internal static class Gen5ComputeFixtures
         return shader;
     }
 
-    public static ShaderCompileRequest CreateComputeRequest(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32)
+    public static ShaderCompileRequest CreateComputeRequest(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32,
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint floatMode = ShaderCompileRequest.DefaultFloatMode)
     {
         var program = DecodeOrThrow(fixture);
         var hasBufferDescriptor = program.Instructions.Any(instruction => instruction.Control is Gen5BufferMemoryControl);
@@ -248,7 +544,10 @@ internal static class Gen5ComputeFixtures
             userData[fixture.StoreScalarResourceBase + 3] = DescriptorConstants.IdentityDestinationSelect;
         }
         return RequestOrThrow(program, ShaderStage.Compute, waveLaneCount, localSizeX,
-            runtimeInputs: hasBufferDescriptor ? new ResourceRuntimeInputs { UserData = userData } : null);
+            runtimeInputs: hasBufferDescriptor ? new ResourceRuntimeInputs { UserData = userData } : null,
+            localDataShareDwords: localDataShareDwords,
+            pushDataStartDword: pushDataStartDword,
+            floatMode: floatMode);
     }
 
     public static Gen5MslShader CompileStageRequestOrThrow(uint[] words, ShaderStage stage, int requiredVertexOutputCount = 0)

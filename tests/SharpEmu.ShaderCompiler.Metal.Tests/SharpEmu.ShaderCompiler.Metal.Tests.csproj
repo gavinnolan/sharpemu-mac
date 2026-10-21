@@ -9,12 +9,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- The Metal runtime harness pins buffers and uses source-generated interop. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- These tests drive the Metal runtime through libobjc, which only exists on macOS;
+         elsewhere the project still builds but `dotnet test` skips it. -->
+    <IsTestProject Condition="!$([MSBuild]::IsOSPlatform('OSX'))">false</IsTestProject>
   </PropertyGroup>
 
   <!-- Deliberately self-contained: this project is the model for how per-backend shader
        codegen gets tested, so it depends only on the codegen under test (which brings
        the shared decoder and HLE contract transitively) — never on other test projects
        or the CLI tools. Helpers that exist elsewhere are copied, not referenced. -->
+  <ItemGroup>
+    <Compile Include="..\..\src\graphics\SharpEmu.Gpu.Metal\V2\MetalDeviceAddressIndex.cs" Link="MetalDeviceAddressIndex.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
   </ItemGroup>
@@ -31,6 +38,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <None Include="Goldens\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Conformance\Rdna2Encodings.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

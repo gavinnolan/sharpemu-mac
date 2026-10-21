@@ -10,17 +10,52 @@ struct Gen5AddressRange
     device uint* base;
 };
 
+// The range this invocation resolved last. Guest accesses cluster: a loop-invariant
+// base read every trip, a stream walking one buffer, a read-modify-write of the word it
+// just read. A hit skips the binary search; the ranges cannot change while a dispatch
+// runs, and the cache lives only as long as the invocation, so it is never stale. A
+// zero page_count matches nothing, which is the empty cache.
+struct Gen5RangeCache
+{
+    ulong first_page;
+    ulong page_count;
+    device uint* base;
+};
+
 // Finds the mapped range of a guest address; a miss records the page in the fault bitmap.
-static inline device uint* sharpemu_resolve_device_address(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, thread bool& valid)
+static inline device uint* sharpemu_resolve_device_address(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, thread bool& valid)
 {
     ulong masked = address & 0xFFFFFFFFFFFFul;
     ulong page = masked >> 14u;
+    if (page - cache.first_page < cache.page_count)
+    {
+        valid = true;
+        ulong byte_offset = ((page - cache.first_page) << 14u) + (masked & 0x3FFFul);
+        return (device uint*)((device uchar*)cache.base + byte_offset);
+    }
+
+    // range_count carries the table's entry count in its low 31 bits and, in bit 31, whether
+    // the host appended a granule index after the entries. The index narrows the search to
+    // the entries that can matter for this page; the result is the same upper bound the
+    // full search finds, and a page outside the index's coverage takes the full search.
+    uint entry_count = range_count & 0x7FFFFFFFu;
     uint low = 0u;
-    uint high = range_count;
-    for (uint step = 0u; step < 7u; step++)
+    uint high = entry_count;
+    if ((range_count & 0x80000000u) != 0u)
+    {
+        device const uint* index = (device const uint*)(ranges + entry_count);
+        ulong granule = (page >> index[0]) - (ulong(index[3]) << 32 | ulong(index[2]));
+        if (granule < ulong(index[1]))
+        {
+            uint2 bucket = *(device const uint2*)(index + 4u + (uint)granule * 2u);
+            low = bucket.x;
+            high = bucket.y;
+        }
+    }
+    for (uint step = 0u; step < 15u && low < high; step++)
     {
         uint middle = low + ((high - low) >> 1u);
-        bool move_up = low < high && ranges[middle].first_page <= page;
+        bool move_up = ranges[middle].first_page <= page;
         low = move_up ? middle + 1u : low;
         high = move_up ? high : middle;
     }
@@ -28,9 +63,48 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
     if (low != 0u)
     {
         Gen5AddressRange range = ranges[low - 1u];
-        if (page - range.first_page < range.page_count)
+        // The low 32 bits of page_count are the page count. Bit 63 marks a range in a guest
+        // memory window this submission did not name resident, bits 32..61 its granule.
+        // The access still goes through - the window's pages are mapped for the life of
+        // the buffer - and the granule is reported in the feedback words (word 0 counts such
+        // lookups, then from word 8 one bit per granule) so the host names it from then on.
+        ulong page_count = range.page_count & 0xFFFFFFFFul;
+        if (page - range.first_page < page_count)
         {
+            ulong flags = range.page_count >> 62u;
+            if (flags == 1ul)
+            {
+                // Bit 62: the range's backing chunks are single-copy released (their GPU alias
+                // pages are a hole), bits 32..61 its first backing page. The hit is counted in
+                // word 1 and its backing page set in the bitmap words 2 and 3 locate, so the
+                // host gives the chunk back and keeps it. Word 4 set is the shadow mode, where
+                // nothing was emptied and the access goes through; otherwise it reads zero and
+                // a store is dropped. Never cached: every access to the range is seen.
+                uint backing_page = ((uint)(range.page_count >> 32u) & 0x3FFFFFFFu) + (uint)(page - range.first_page);
+                uint bitmap_word = backing_page >> 5u;
+                if (bitmap_word < faults[3])
+                {
+                    atomic_fetch_or_explicit((device atomic_uint*)(faults + faults[2] + bitmap_word), 1u << (backing_page & 31u), memory_order_relaxed);
+                }
+                atomic_fetch_add_explicit((device atomic_uint*)(faults + 1u), 1u, memory_order_relaxed);
+                if (faults[4] == 0u)
+                {
+                    return nullptr;
+                }
+                valid = true;
+                ulong trap_offset = ((page - range.first_page) << 14u) + (masked & 0x3FFFul);
+                return (device uint*)((device uchar*)range.base + trap_offset);
+            }
+            if (flags != 0ul)
+            {
+                uint granule = (uint)(range.page_count >> 32u) & 0x3FFFFFFFu;
+                atomic_fetch_or_explicit((device atomic_uint*)(faults + 8u + (granule >> 5u)), 1u << (granule & 31u), memory_order_relaxed);
+                atomic_fetch_add_explicit((device atomic_uint*)faults, 1u, memory_order_relaxed);
+            }
             valid = true;
+            cache.first_page = range.first_page;
+            cache.page_count = page_count;
+            cache.base = range.base;
             ulong byte_offset = ((page - range.first_page) << 14u) + (masked & 0x3FFFul);
             return (device uint*)((device uchar*)range.base + byte_offset);
         }
@@ -44,42 +118,53 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
     return nullptr;
 }
 
-static inline uint sharpemu_load_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address)
+static inline uint sharpemu_load_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address)
 {
     bool valid = false;
-    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
     return valid ? *word : 0u;
 }
 
+// Resolves the first dword of a contiguous multi-dword read once for the whole span.
+// A span that stays inside one 16 KB page is contiguous host memory, so its dwords
+// index off the one pointer; one that crosses a page reports invalid and the caller
+// reads it dword by dword, which is what every dword would have cost before.
+static inline device uint* sharpemu_resolve_device_span(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint bytes, thread bool& valid)
+{
+    device uint* first = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
+    valid = valid && (address & 0x3FFFul) + bytes <= 0x4000ul;
+    return first;
+}
+
 // An unaligned value assembled from the two aligned dwords it spans.
-static inline uint sharpemu_load_device_unaligned(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint count)
+static inline uint sharpemu_load_device_unaligned(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint count)
 {
     uint alignment = (uint)(address & 3ul);
     ulong aligned = address & ~3ul;
     uint shift = alignment * 8u;
-    uint low = sharpemu_load_device_dword(ranges, range_count, faults, fault_words, aligned);
-    uint high = (alignment + count > 4u) ? sharpemu_load_device_dword(ranges, range_count, faults, fault_words, aligned + 4ul) : 0u;
+    uint low = sharpemu_load_device_dword(ranges, range_count, faults, fault_words, cache, aligned);
+    uint high = (alignment + count > 4u) ? sharpemu_load_device_dword(ranges, range_count, faults, fault_words, cache, aligned + 4ul) : 0u;
     return (low >> shift) | (shift == 0u ? 0u : (high << (32u - shift)));
 }
 
-static inline void sharpemu_store_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value)
+static inline void sharpemu_store_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value)
 {
     bool valid = false;
-    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
     if (valid)
     {
         *word = value;
     }
 }
 
-static inline void sharpemu_store_device_masked_word(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value, uint mask)
+static inline void sharpemu_store_device_masked_word(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value, uint mask)
 {
     if (mask == 0u)
     {
         return;
     }
     bool valid = false;
-    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
     if (!valid)
     {
         return;
@@ -97,7 +182,7 @@ static inline void sharpemu_store_device_masked_word(device const Gen5AddressRan
 }
 
 // A sub-dword store merges into the dwords it touches.
-static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value, uint count)
+static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value, uint count)
 {
     uint element_mask = count == 1u ? 0xFFu : 0xFFFFu;
     uint alignment = (uint)(address & 3ul);
@@ -106,14 +191,61 @@ static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ra
     uint carry_shift = 32u - shift;
     bool crosses = alignment + count > 4u;
     uint masked = value & element_mask;
-    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, aligned, masked << shift, element_mask << shift);
-    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, aligned + 4ul, crosses ? (masked >> carry_shift) : 0u, crosses ? (element_mask >> carry_shift) : 0u);
+    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, cache, aligned, masked << shift, element_mask << shift);
+    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, cache, aligned + 4ul, crosses ? (masked >> carry_shift) : 0u, crosses ? (element_mask >> carry_shift) : 0u);
 }
 
-static inline uint sharpemu_atomic_step(device atomic_uint* word, bool increment)
+// BUFFER/GLOBAL/GDS ATOMIC_INC_U32 and ATOMIC_DEC_U32 wrap against DATA (RDNA2 ISA MUBUF/FLAT atomics):
+// INC stores (old >= DATA) ? 0 : old + 1, DEC stores (old == 0 || old > DATA) ? DATA : old - 1.
+static inline uint sharpemu_atomic_step(device atomic_uint* word, uint limit, bool increment)
 {
     uint observed = atomic_load_explicit(word, memory_order_relaxed);
-    while (!atomic_compare_exchange_weak_explicit(word, &observed, increment ? observed + 1u : observed - 1u, memory_order_relaxed, memory_order_relaxed))
+    while (!atomic_compare_exchange_weak_explicit(word, &observed, increment ? (observed >= limit ? 0u : observed + 1u) : ((observed == 0u || observed > limit) ? limit : observed - 1u), memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+    return observed;
+}
+
+// BUFFER/GLOBAL_ATOMIC_FMIN/FMAX and the GDS DS_MIN/MAX_F32: a float minimum or
+// maximum of the word and the operand. A failed swap re-reads memory, so the
+// comparison is decided against the word that is actually there.
+static inline uint sharpemu_atomic_float_minmax(device atomic_uint* word, uint value, bool maxValue)
+{
+    uint observed = atomic_load_explicit(word, memory_order_relaxed);
+    while ((maxValue ? as_type<float>(value) > as_type<float>(observed)
+                     : as_type<float>(value) < as_type<float>(observed)) &&
+           !atomic_compare_exchange_weak_explicit(word, &observed, value, memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+    return observed;
+}
+
+// BUFFER/GLOBAL_ATOMIC_CSUB (RDNA2 ISA 12.14): the word becomes old - DATA, clamped at
+// zero when DATA exceeds it. Returns the value observed.
+static inline uint sharpemu_atomic_clamped_sub(device atomic_uint* word, uint value)
+{
+    uint observed = atomic_load_explicit(word, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(word, &observed, observed < value ? 0u : observed - value, memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+    return observed;
+}
+
+// BUFFER/GLOBAL_ATOMIC_FCMPSWAP: the word becomes "value" when it equals "compare" as a
+// float - a NaN equals nothing and -0 equals +0 - so the swap succeeds on a word whose
+// bits differ from the comparator's. The ISA's compare "handles NaN/INF/denorm", so it is
+// made on the bits: a float compare on the GPU flushes denormals, and would call two
+// different denormals equal. Returns the value observed.
+static inline bool sharpemu_f32_bits_equal(uint a, uint b)
+{
+    return ((a | b) << 1) == 0u || (a == b && (a & 0x7FFFFFFFu) <= 0x7F800000u);
+}
+
+static inline uint sharpemu_atomic_float_compare_swap(device atomic_uint* word, uint compare, uint value)
+{
+    uint observed = atomic_load_explicit(word, memory_order_relaxed);
+    while (sharpemu_f32_bits_equal(observed, compare) &&
+           !atomic_compare_exchange_weak_explicit(word, &observed, value, memory_order_relaxed, memory_order_relaxed))
     {
     }
     return observed;
@@ -133,24 +265,58 @@ struct Gen5StageResources
 {
     array<device uint*, 1> buffers [[id(0)]];
     array<uint, 1> buffer_bytes [[id(1)]];
+    device atomic_uint* step_report [[id(2)]];
 };
 
+// A raw dword load: the address truncates to the dword it lands in, which is what the
+// hardware does for S_BUFFER_LOAD_DWORD and BUFFER_LOAD_DWORD and what the SPIR-V
+// backend emits. Out of range reads zero.
+static inline uint sharpemu_load_dword(device uint* b, uint bytes, uint addr)
+{
+    uint index = addr >> 2;
+    return index < (bytes >> 2) ? b[index] : 0u;
+}
+
+// A dword a format access may straddle, assembled from the two it spans. Only the
+// format path needs this: a descriptor's stride is a byte count, so a component can
+// start at any byte.
 static inline uint sharpemu_load_word(device uint* b, uint bytes, uint addr)
 {
     if ((addr & 3u) == 0u)
     {
         return addr + 4u <= bytes ? b[addr >> 2] : 0u;
     }
-    uint value = 0u;
-    device const uchar* p = (device const uchar*)b;
-    for (uint i = 0u; i < 4u; i++)
+    uint shift = (addr & 3u) * 8u;
+    uint aligned = addr & ~3u;
+    uint low = sharpemu_load_dword(b, bytes, aligned);
+    uint high = sharpemu_load_dword(b, bytes, aligned + 4u);
+    return (low >> shift) | (high << (32u - shift));
+}
+
+// Up to four consecutive dwords starting at a byte address, for a format whose components
+// are whole dwords. An aligned run that lies inside the binding is plain dword loads;
+// anything else (an odd bias, a run that crosses the end) reads each dword through
+// sharpemu_load_word, which assembles a straddled dword and reads zero past the end.
+template <int N>
+static inline uint4 sharpemu_load_words(device uint* b, uint bytes, uint addr)
+{
+    uint4 result = uint4(0u);
+    if ((addr & 3u) == 0u && addr <= bytes && (uint)(4 * N) <= bytes - addr)
     {
-        if (addr + i < bytes)
+        uint index = addr >> 2;
+        for (int i = 0; i < N; i++)
         {
-            value |= (uint)p[addr + i] << (i * 8u);
+            result[i] = b[index + (uint)i];
         }
     }
-    return value;
+    else
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = sharpemu_load_word(b, bytes, addr + (uint)(4 * i));
+        }
+    }
+    return result;
 }
 
 static inline uint sharpemu_load_bytes(device uint* b, uint bytes, uint addr, uint count, bool signExtend)
@@ -172,6 +338,21 @@ static inline uint sharpemu_load_bytes(device uint* b, uint bytes, uint addr, ui
     return value;
 }
 
+// A raw dword store, the counterpart of sharpemu_load_dword: BUFFER_STORE_DWORD and
+// GLOBAL_STORE_DWORD are dword-addressed by the GCN ISA, so the address truncates and
+// the dword is written. Out of range is dropped. Going through the byte path instead
+// turned one dword store into four byte stores, each with its own bounds check, which
+// device memory charges for four times over.
+static inline void sharpemu_store_dword(device uint* b, uint bytes, uint addr, uint value)
+{
+    uint index = addr >> 2;
+    if (index < (bytes >> 2))
+    {
+        b[index] = value;
+    }
+}
+
+// A sub-dword store: the bytes it names, each merged in place.
 static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, uint value, uint count)
 {
     device uchar* p = (device uchar*)b;
@@ -230,11 +411,142 @@ static inline uint sharpemu_ballot(bool value)
     return (uint)(uint64_t)simd_ballot(value);
 }
 
+// The guest reciprocal, square-root, log and exp units read an F32 denormal input
+// as a zero of the same sign, so rcp/rsq/sqrt/log/exp flush it before the MSL call
+// rather than letting the denormal through to a finite result.
+static inline float sharpemu_flush_f32_denorm(float value)
+{
+    uint bits = as_type<uint>(value);
+    uint magnitude = bits & 0x7FFFFFFFu;
+    return magnitude != 0u && magnitude < 0x00800000u ? as_type<float>(bits & 0x80000000u) : value;
+}
+
+// V_MIN/V_MAX/V_MIN3/V_MAX3/V_MED3 on f32 and f16 bits (RDNA2 ISA 12.7, 12.12): with
+// MODE.IEEE a signalling NaN operand (src0 first) is returned quieted; otherwise a NaN
+// operand yields the other one, and -0 orders below +0. Metal's fmin/fmax pick either
+// zero and read f32 denormals as zero, so the order is taken on the bits.
+static inline uint sharpemu_order_f32(uint bits)
+{
+    return (bits & 0x80000000u) != 0u ? ~bits : (bits | 0x80000000u);
+}
+
+static inline bool sharpemu_is_nan_f32(uint bits)
+{
+    return (bits & 0x7FFFFFFFu) > 0x7F800000u;
+}
+
+static inline uint sharpemu_min_f32(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f32(a) && (a & 0x00400000u) == 0u) return a | 0x00400000u;
+    if (ieee && sharpemu_is_nan_f32(b) && (b & 0x00400000u) == 0u) return b | 0x00400000u;
+    if (sharpemu_is_nan_f32(a)) return b;
+    if (sharpemu_is_nan_f32(b)) return a;
+    return sharpemu_order_f32(a) < sharpemu_order_f32(b) ? a : b;
+}
+
+static inline uint sharpemu_max_f32(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f32(a) && (a & 0x00400000u) == 0u) return a | 0x00400000u;
+    if (ieee && sharpemu_is_nan_f32(b) && (b & 0x00400000u) == 0u) return b | 0x00400000u;
+    if (sharpemu_is_nan_f32(a)) return b;
+    if (sharpemu_is_nan_f32(b)) return a;
+    return sharpemu_order_f32(a) > sharpemu_order_f32(b) ? a : b;
+}
+
+// V_MED3: MIN3 when any operand is NaN, else the max of the two operands other than the
+// one MAX3 equals (a float equality, so +0 and -0 match).
+static inline uint sharpemu_med3_f32(uint a, uint b, uint c, bool ieee)
+{
+    if (sharpemu_is_nan_f32(a) || sharpemu_is_nan_f32(b) || sharpemu_is_nan_f32(c))
+        return sharpemu_min_f32(sharpemu_min_f32(a, b, ieee), c, ieee);
+    uint top = sharpemu_max_f32(sharpemu_max_f32(a, b, ieee), c, ieee);
+    if (top == a || ((top | a) & 0x7FFFFFFFu) == 0u) return sharpemu_max_f32(b, c, ieee);
+    if (top == b || ((top | b) & 0x7FFFFFFFu) == 0u) return sharpemu_max_f32(a, c, ieee);
+    return sharpemu_max_f32(a, b, ieee);
+}
+
+static inline uint sharpemu_order_f16(uint bits)
+{
+    return (bits & 0x8000u) != 0u ? (~bits & 0xFFFFu) : (bits | 0x8000u);
+}
+
+static inline bool sharpemu_is_nan_f16(uint bits)
+{
+    return (bits & 0x7FFFu) > 0x7C00u;
+}
+
+static inline uint sharpemu_min_f16(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f16(a) && (a & 0x0200u) == 0u) return a | 0x0200u;
+    if (ieee && sharpemu_is_nan_f16(b) && (b & 0x0200u) == 0u) return b | 0x0200u;
+    if (sharpemu_is_nan_f16(a)) return b;
+    if (sharpemu_is_nan_f16(b)) return a;
+    return sharpemu_order_f16(a) < sharpemu_order_f16(b) ? a : b;
+}
+
+static inline uint sharpemu_max_f16(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f16(a) && (a & 0x0200u) == 0u) return a | 0x0200u;
+    if (ieee && sharpemu_is_nan_f16(b) && (b & 0x0200u) == 0u) return b | 0x0200u;
+    if (sharpemu_is_nan_f16(a)) return b;
+    if (sharpemu_is_nan_f16(b)) return a;
+    return sharpemu_order_f16(a) > sharpemu_order_f16(b) ? a : b;
+}
+
+static inline uint sharpemu_med3_f16(uint a, uint b, uint c, bool ieee)
+{
+    if (sharpemu_is_nan_f16(a) || sharpemu_is_nan_f16(b) || sharpemu_is_nan_f16(c))
+        return sharpemu_min_f16(sharpemu_min_f16(a, b, ieee), c, ieee);
+    uint top = sharpemu_max_f16(sharpemu_max_f16(a, b, ieee), c, ieee);
+    if (top == a || ((top | a) & 0x7FFFu) == 0u) return sharpemu_max_f16(b, c, ieee);
+    if (top == b || ((top | b) & 0x7FFFu) == 0u) return sharpemu_max_f16(a, c, ieee);
+    return sharpemu_max_f16(a, b, ieee);
+}
+
+// Guest sin/cos take revolutions and reduce them to one cycle as x - floor(x), the
+// SPIR-V translator's Fract (MSL fract clamps just below 1.0, so it is not used).
+// A finite magnitude of 2^23 or more has no fraction and reduces to exactly zero;
+// infinity and NaN reduce to NaN. Sine passes a signed zero through so sin(-0) is -0.
+static inline float sharpemu_trig_cycle_f32(float value, bool preserveSignedZero)
+{
+    uint magnitude = as_type<uint>(value) & 0x7FFFFFFFu;
+    if (preserveSignedZero && magnitude < 0x00800000u)
+    {
+        // A zero, or a denormal flushed to a zero of its sign: sin(-0) is -0.
+        return as_type<float>(as_type<uint>(value) & 0x80000000u);
+    }
+
+    if (magnitude >= 0x4B000000u && magnitude < 0x7F800000u)
+    {
+        return 0.0f;
+    }
+
+    return value - floor(value);
+}
+
+// A NaN a function made from a non-NaN operand is the ISA's 0xFFC00000 (RDNA2 ISA 12.8
+// V_SQRT/RSQ/LOG/SIN/COS_F32 examples), not Metal's positive NaN; a NaN operand passes through.
+static inline float sharpemu_invalid_nan_f32(float result, float operand)
+{
+    return (isnan(result) && !isnan(operand)) ? as_type<float>(0xFFC00000u) : result;
+}
+
 static constant float sharpemu_off_i4_table[16] =
 {
     0.0f, 0.0625f, 0.1250f, 0.1875f, 0.2500f, 0.3125f, 0.3750f, 0.4375f,
     -0.5000f, -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,
 };
+
+// A dispatcher invocation that ran out of steps. The host binds one word per shader
+// hash and reads it back when the submission completes, so a mistranslated loop-exit
+// condition reports itself as [METAL-V2][STEP-CAP] instead of only looking slow.
+static inline void sharpemu_note_step_cap(device atomic_uint* report)
+{
+    if (report != nullptr)
+    {
+        atomic_fetch_add_explicit(report, 1u, memory_order_relaxed);
+    }
+}
 
 kernel void gen5_cs(
     constant Gen5StageResources& sharpemu_resources [[buffer(0)]],
@@ -243,98 +555,74 @@ kernel void gen5_cs(
     uint3 sharpemu_group_id [[threadgroup_position_in_grid]],
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s0, s8, s9, s10, s11, s106, s107, s126, s127;
+    uint v0, v1, v2, v3, v4, v5, v6;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
     bool active = true;
-    uint steps = 0u;
     device uint* b0 = sharpemu_resources.buffers[0];
-    uint bias[1] = {};
-    s[0] = sharpemu_push_data[0];
-    s[8] = sharpemu_push_data[1];
-    s[9] = sharpemu_push_data[2];
-    s[10] = sharpemu_push_data[3];
-    s[11] = sharpemu_push_data[4];
-    bias[0] = (sharpemu_push_data[5] >> 0u) & 0xFFu;
-    v[0] = sharpemu_local_id.x;
-    v[1] = sharpemu_local_id.y;
-    v[2] = sharpemu_local_id.z;
+    s0 = sharpemu_push_data[0];
+    s8 = sharpemu_push_data[1];
+    s9 = sharpemu_push_data[2];
+    s10 = sharpemu_push_data[3];
+    s11 = sharpemu_push_data[4];
+    v0 = sharpemu_local_id.x;
+    v1 = sharpemu_local_id.y;
+    v2 = sharpemu_local_id.z;
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < 0xFFFFFFFFu
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < 0xFFFFFFFFu
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < 0xFFFFFFFFu;
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
+    if (!active)
     {
-        switch (pc)
+        return;
+    }
+
+    {
+        uint t0 = 0x3FC00000u;
+        v0 = t0;
+        uint t1 = 0x40100000u;
+        v1 = t1;
+        uint t2 = 0x41200000u;
+        v2 = t2;
+        uint t3 = as_type<uint>((fma(as_type<float>(v0), as_type<float>(v1), as_type<float>(v2))));
+        v2 = t3;
+        uint t4 = 0x7FFFFFFFu;
+        v3 = t4;
+        uint t5 = 0x10003u;
+        v4 = t5;
+        uint t6 = as_type<uint>(mulhi(as_type<int>(v3), as_type<int>(v4)));
+        v5 = t6;
+        uint t7 = ((v3) * (v4));
+        v6 = t7;
+        uint t8 = (0x0u + 0u + 0u + (0u * 0u));
+        sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v2);
+        uint t9 = (0x4u + 0u + 0u + (0u * 0u));
+        sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t9 + 0u, v5);
+        uint t10 = (0x8u + 0u + 0u + (0u * 0u));
+        sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t10 + 0u, v6);
+        uint t11 = 0u;
+        uint t12 = t11;
+        s126 = t12;
+        exec = ((t12) >> sharpemu_lane & 1u) != 0u;
+        uint t13 = (0xCu + 0u + 0u + (0u * 0u));
+        if (exec)
         {
-        case 0u:
-        {
-            uint t0 = 0x3FC00000u;
-            if (exec) { v[0] = t0; }
-            uint t1 = 0x40100000u;
-            if (exec) { v[1] = t1; }
-            uint t2 = 0x41200000u;
-            if (exec) { v[2] = t2; }
-            uint t3 = as_type<uint>((fma(as_type<float>(v[0]), as_type<float>(v[1]), as_type<float>(v[2]))));
-            if (exec) { v[2] = t3; }
-            uint t4 = 0x7FFFFFFFu;
-            if (exec) { v[3] = t4; }
-            uint t5 = 0x10003u;
-            if (exec) { v[4] = t5; }
-            uint t6 = as_type<uint>(mulhi(as_type<int>(v[3]), as_type<int>(v[4])));
-            if (exec) { v[5] = t6; }
-            uint t7 = ((v[3]) * (v[4]));
-            if (exec) { v[6] = t7; }
-            uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v[2], 4u);
-            }
-            uint t9 = ((0x4u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t9 + 0u, v[5], 4u);
-            }
-            uint t10 = ((0x8u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t10 + 0u, v[6], 4u);
-            }
-            uint t11 = 0u;
-            uint t12 = t11;
-            s[126] = t12;
-            exec = ((t12) >> sharpemu_lane & 1u) != 0u;
-            uint t13 = ((0xCu + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t13 + 0u, v[2], 4u);
-            }
-            uint t14 = 0xFFFFFFFFu;
-            uint t15 = t14;
-            s[126] = t15;
-            exec = ((t15) >> sharpemu_lane & 1u) != 0u;
-            uint t16 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t16 + 0u, v[0], 4u);
-            }
-            active = false;
+            sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t13 + 0u, v2);
         }
-        break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
+        uint t14 = 0xFFFFFFFFu;
+        uint t15 = t14;
+        s126 = t15;
+        exec = ((t15) >> sharpemu_lane & 1u) != 0u;
+        uint t16 = (0x10u + 0u + 0u + (0u * 0u));
+        if (exec)
         {
-            active = false;
+            sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t16 + 0u, v0);
         }
     }
 }

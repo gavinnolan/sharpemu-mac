@@ -162,6 +162,239 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64LdsExchangeIsOrderedAcrossHalvesWithoutABarrier()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LdsExchange, waveLaneCount: 64, localSizeX: 64);
+        var write = shader.Source.IndexOf("sharpemu_lds[", StringComparison.Ordinal);
+        Assert.True(write >= 0, shader.Source);
+        var barrier = shader.Source.IndexOf("threadgroup_barrier", write, StringComparison.Ordinal);
+        Assert.True(barrier > write, $"no threadgroup_barrier after the LDS write\n{shader.Source}");
+        var read = shader.Source.IndexOf("sharpemu_lds[", barrier, StringComparison.Ordinal);
+        Assert.True(read > barrier, $"no LDS read after the barrier\n{shader.Source}");
+    }
+
+    [Fact]
+    public void Wave64LdsExchangeSeesTheOtherHalfsWrites()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        for (var round = 0; round < 20; round++)
+        {
+            var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LdsExchange, new byte[256],
+                waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+            for (var lane = 0; lane < 64; lane++)
+            {
+                Assert.Equal((uint)(((lane + 32) & 63) + 1), ReadDword(result, lane * 4));
+            }
+        }
+    }
+
+    [Fact]
+    public void Wave64ReadLaneReadsTheFullWaveInBothHalves()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ReadLane, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        // Lane l holds 3 * l + 7: every lane, in either half, sees lane 63's and lane 5's.
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(3u * 63u + 7u, ReadDword(result, lane * 8));
+            Assert.Equal(3u * 5u + 7u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64ReadFirstLaneTakesTheFirstActiveLaneOfEitherHalf()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ReadFirstLane, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        // Lane 44 when only the upper half has EXEC, lane 8 when only the lower half does.
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(3u * 44u + 7u, ReadDword(result, lane * 8));
+            Assert.Equal(3u * 8u + 7u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64ReadFirstLaneWithEmptyExecReadsLaneZero()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ReadFirstLaneEmptyExec, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(7u, ReadDword(result, lane * 8));
+        }
+    }
+
+    [Fact]
+    public void Wave64ExchangesInALoopNeverReadAnOverwrittenSlot()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        // 128 exchanges back to back at one barrier each: a trip that read a slot the next
+        // exchange had already rewritten would add another trip's value into the sum.
+        for (var round = 0; round < 20; round++)
+        {
+            var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ExchangeLoop, new byte[256],
+                waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+            for (var lane = 0; lane < 64; lane++)
+            {
+                Assert.Equal(8512u, ReadDword(result, lane * 4));
+            }
+        }
+    }
+
+    [Fact]
+    public void Wave64WriteLaneChangesOnlyTheAddressedLane()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64WriteLane, new byte[256],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        // Lane 40 is in the upper half; lane 8 (its twin in the lower half) must not change.
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(lane == 40 ? 55u : (uint)lane, ReadDword(result, lane * 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64MaskBitsAreReadAtTheFullLaneIndex()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64MaskBits, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        const ulong Mask = 0xF0F0F0F0_0000FFFFul;
+        for (var lane = 0; lane < 64; lane++)
+        {
+            var expected = (uint)((Mask >> lane) & 1ul);
+            Assert.Equal(expected, ReadDword(result, lane * 8));      // SGPR mask bit
+            Assert.Equal(expected, ReadDword(result, lane * 8 + 4));  // saveexec EXEC bit
+        }
+    }
+
+    [Fact]
+    public void Vop3CompareDecodesItsScalarDestination()
+    {
+        var compare = Gen5ComputeFixtures.DecodeOrThrow(Gen5ComputeFixtures.Wave64Vop3CompareSgpr)
+            .Instructions.Single(static instruction => instruction.Opcode == "VCmpEqU32");
+        Assert.Equal(Gen5ShaderEncoding.Vop3, compare.Encoding);
+        Assert.Equal([Gen5Operand.Scalar(4)], compare.Destinations);
+    }
+
+    [Fact]
+    public void Vop3ClassCompareWritesTheScalarRegisterItNames()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(new Gen5ComputeFixture(
+            "vop3-cmp-class-sgpr",
+            [
+                0xD4880004, 0x00020300, // v_cmp_class_f32_e64 s4, v0, v1
+                0xBF810000,             // s_endpgm
+            ],
+            0,
+            0));
+
+        // Registers may be emitted as s[4] or promoted to a local s4.
+        Assert.Matches(@"s\[?4\]? = sharpemu_ballot\(", shader.Source);
+        Assert.DoesNotMatch(@"s\[?106\]? = sharpemu_ballot\(", shader.Source);
+    }
+
+    [Theory]
+    [InlineData(64u)]
+    [InlineData(32u)]
+    public void Vop3CompareWritesTheScalarRegisterItNamesAndLeavesVccAlone(uint waveLanes)
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var wave64 = waveLanes == 64;
+        var fixture = wave64
+            ? Gen5ComputeFixtures.Wave64Vop3CompareSgpr
+            : Gen5ComputeFixtures.Wave32Vop3CompareSgpr;
+        var result = ExecuteRequestOrThrow(fixture, new byte[fixture.StoreBackingBytes],
+            waveLaneCount: waveLanes, localSizeX: waveLanes, threadsPerThreadgroup: waveLanes);
+
+        for (var lane = 0; lane < (int)waveLanes; lane++)
+        {
+            var hit = (lane & 3) == 0 ? 1u : 0u;
+            var offset = lane * 32;
+            Assert.Equal(hit, ReadDword(result, offset));                         // s[4:5] bit
+            Assert.Equal((0x0F0F0F0Fu >> (lane & 31)) & 1u, ReadDword(result, offset + 4)); // VCC bit
+            Assert.Equal(0x11111111u, ReadDword(result, offset + 8));            // s4
+            Assert.Equal(wave64 ? 0x11111111u : 0xA5A5A5A5u, ReadDword(result, offset + 12)); // s5
+            Assert.Equal(0x0F0F0F0Fu, ReadDword(result, offset + 16));           // vcc_lo
+            Assert.Equal(hit, ReadDword(result, offset + 20));                    // saveexec
+        }
+    }
+
+    [Fact]
+    public void Vop3CompareIntoNullWritesNothingAndIntoExecMasksTheWave()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var fixture = Gen5ComputeFixtures.Wave64Vop3CompareNullAndExec;
+        var result = ExecuteRequestOrThrow(fixture, new byte[fixture.StoreBackingBytes],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(1u, ReadDword(result, lane * 16));                           // EXEC intact
+            Assert.Equal((0x0F0F0F0Fu >> (lane & 31)) & 1u, ReadDword(result, lane * 16 + 4)); // VCC
+            Assert.Equal((lane & 3) == 0 ? 1u : 0u, ReadDword(result, lane * 16 + 8)); // EXEC = mask
+        }
+    }
+
+    [Fact]
+    public void Vop3CarryOutWritesOnlyTheWave32ScalarAndNothingForNull()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var fixture = Gen5ComputeFixtures.Wave32Vop3CarryOutSgpr;
+        var result = ExecuteRequestOrThrow(fixture, new byte[fixture.StoreBackingBytes],
+            waveLaneCount: 32, localSizeX: 32, threadsPerThreadgroup: 32);
+
+        for (var lane = 0; lane < 32; lane++)
+        {
+            var offset = lane * 32;
+            Assert.Equal(lane >= 16 ? 1u : 0u, ReadDword(result, offset));  // s4 carry bit
+            Assert.Equal(0xFFFF0000u, ReadDword(result, offset + 4));       // s4
+            Assert.Equal(0xA5A5A5A5u, ReadDword(result, offset + 8));       // s5
+            Assert.Equal(0x0F0F0F0Fu, ReadDword(result, offset + 12));      // vcc_lo
+            Assert.Equal(0xFFFFFFFFu, ReadDword(result, offset + 16));      // exec_lo
+            Assert.Equal(unchecked((uint)lane - 16u), ReadDword(result, offset + 20)); // sum
+        }
+    }
+
+    [Fact]
+    public void Wave64InALargerWorkgroupTranslatesWithoutTheThreadgroupBridge()
+    {
+        // The SPIR-V translator bridges only a 64-thread (one-wave) workgroup; a 256-thread
+        // group would share the half-indexed scratch between its four waves.
+        var bridged = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 64);
+        Assert.Contains("sharpemu_wave_scratch", bridged.Source);
+
+        foreach (var fixture in new[] { Gen5ComputeFixtures.Wave64Broadcast, Gen5ComputeFixtures.Wave64ReadLane })
+        {
+            var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 256);
+            Assert.DoesNotContain("sharpemu_wave_scratch", shader.Source);
+            Assert.DoesNotContain("threadgroup_barrier", shader.Source);
+        }
+    }
+
+    [Fact]
     public void TypedLoadFixtureReturnsInstructionFormatComponents()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;

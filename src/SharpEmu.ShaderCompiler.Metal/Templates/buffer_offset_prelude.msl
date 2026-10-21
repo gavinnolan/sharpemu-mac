@@ -1,0 +1,31 @@
+// The byte offset from a V#'s base at which one dword of a MUBUF/MTBUF access lands,
+// before the SGPR offset (RDNA2 ISA 8.1.5, "Swizzled Buffer Addressing"). index is
+// the access's index, the lane already added for ADD_TID_ENABLE; offset is its
+// unswizzled byte offset (VGPR offset + instruction offset + the dword's distance into
+// the access). The SGPR offset is not part of it and is added after. On gfx10 the swizzle
+// element is fixed at four bytes, so every dword is placed on its own. A zero
+// index_stride is a linear V#, offset + index * stride.
+static inline uint sharpemu_buffer_offset(uint index, uint offset, uint stride, uint index_stride)
+{
+    if (index_stride == 0u)
+    {
+        return offset + index * stride;
+    }
+    return ((index / index_stride) * stride + (offset & ~3u)) * index_stride +
+        (index % index_stride) * 4u + (offset & 3u);
+}
+
+// The bytes a swizzled V# reaches, where num_records counts records of stride bytes
+// (RDNA2 ISA Table 33): one past the last byte of record records - 1 at offset
+// stride - 1. BufferDescriptorWords.Footprint sizes the host binding with the same rule.
+static inline ulong sharpemu_swizzled_footprint(uint records, uint stride, uint index_stride)
+{
+    if (records == 0u || stride == 0u)
+    {
+        return 0ul;
+    }
+    uint last = records - 1u;
+    uint end = stride - 1u;
+    return ((ulong)(last / index_stride) * stride + (ulong)(end & ~3u)) * index_stride +
+        (ulong)(last % index_stride) * 4ul + (ulong)(end & 3u) + 1ul;
+}

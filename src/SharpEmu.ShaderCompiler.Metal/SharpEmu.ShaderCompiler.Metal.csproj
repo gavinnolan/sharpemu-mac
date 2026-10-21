@@ -18,6 +18,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.ShaderCompiler.Metal.Tests" />
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Metal.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Static MSL blocks (prelude helpers, fixed shaders) authored as real
          Metal source; the emitter renders them with placeholder substitution. -->
     <EmbeddedResource Include="Templates\**\*.msl" />

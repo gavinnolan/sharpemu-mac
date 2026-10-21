@@ -15,6 +15,21 @@ public enum MslArgumentFieldKind
     Samplers,
     Pointer,
     Word,
+    // The per-pipeline dispatcher step-cap counter. Metal-only and not a guest
+    // descriptor: the host binds one word per shader hash and reads it back when the
+    // submission completes, so a shader that hits the cap says so instead of only
+    // looking slow.
+    StepReport,
+    // The sequence-lock table that makes a guest dword pair (a qword atomic, a GLC
+    // LOAD_DWORDX2) one atomic access (Templates/pair_atomic_prelude.msl). Metal-only and
+    // not a guest descriptor: the host binds one zeroed table shared by every program, so
+    // two programs touching the same pair take the same lock. A program declares the
+    // field only when it takes a lock; the others leave the trailing bytes unread.
+    PairLocks,
+    // The device handle tables of the program's V#-described image tables, one pointer per
+    // bindless slot (BindingLayout.BindlessImageTableCount). Each entry is 16 bytes: a
+    // texture's gpuResourceID and the class variant that reads it (sharpemu_bindless_entry).
+    BindlessImageTables,
 }
 
 // One field of the stage argument buffer: its binding kind, id range and byte range.
@@ -34,6 +49,24 @@ public sealed class Gen5MslArgumentLayout
     public const int ResourcesBufferIndex = 0;
     public const int PushDataBufferIndex = 1;
     public const string StructName = "Gen5StageResources";
+    public const string StepReportName = "step_report";
+    public const string PairLocksName = "pair_locks";
+    public const string BindlessImagesName = "bindless_images";
+    public const string MipStatisticsName = "mip_stats";
+
+    /// <summary>The bytes of one bindless table entry: gpuResourceID, variant, reserved.</summary>
+    public const int BindlessEntryBytes = 16;
+
+    /// <summary>The 32-bit sequence words in the pair-lock table; the shader picks one by
+    /// bits 3..13 of a pair's address (sharpemu_pair_lock_slots).</summary>
+    public const int PairLockSlots = 2048;
+
+    /// <summary>The words after the lock slots holding the state of the 64 GWS resources,
+    /// four each (sharpemu_gws_resource).</summary>
+    public const int GwsResourceWords = 64 * 4;
+
+    /// <summary>The whole table the host allocates zeroed for the pair_locks field.</summary>
+    public const int PairLockTableWords = PairLockSlots + GwsResourceWords;
     private const uint ResourceBytes = 8;
     private const uint WordBytes = 4;
 
@@ -87,11 +120,28 @@ public sealed class Gen5MslArgumentLayout
                     Add(binding.Kind, MslArgumentFieldKind.Pointer, "shader_data", 1, ResourceBytes);
                     Add(binding.Kind, MslArgumentFieldKind.Word, "shader_data_words", 1, WordBytes);
                     break;
+                case DescriptorBindingKind.MipStatistics:
+                    // The GET_LOD_STATS counter bank (MipStatistics.CounterBufferBytes): the
+                    // finest level, clamped and unclamped sample counts of each counter id.
+                    Add(binding.Kind, MslArgumentFieldKind.Pointer, MipStatisticsName, 1, ResourceBytes);
+                    break;
                 default:
                     Add(binding.Kind, MslArgumentFieldKind.Textures, ImageClassName(binding.Kind), count, ResourceBytes);
                     break;
             }
         }
+
+        // After the descriptors and before the trailing pointers: a program declares the
+        // pair-lock pointer only when it takes a lock, so nothing may follow it.
+        if (layout.BindlessImageTableCount != 0)
+        {
+            Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BindlessImageTables, BindlessImagesName,
+                layout.BindlessImageTableCount, ResourceBytes);
+        }
+
+        // Always last, so adding them never moves a descriptor field.
+        Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.StepReport, StepReportName, 1, ResourceBytes);
+        Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.PairLocks, PairLocksName, 1, ResourceBytes);
 
         return new Gen5MslArgumentLayout(fields, Align(offset, ResourceBytes));
 
@@ -116,10 +166,12 @@ public sealed class Gen5MslArgumentLayout
             throw new InvalidOperationException($"binding kind {kind} is not an image class");
         }
 
-        var classPart = atomic ? "atomic" : resourceClass == ImageResourceClass.Storage ? "storage" : "sampled";
+        var classPart = atomic ? "atomic" : resourceClass == ImageResourceClass.Storage ? "storage" :
+            ImageDescriptorBinding.IsDepthCompare(kind) ? "sampled_compare" : "sampled";
         var numericPart = numericClass switch
         {
             ImageNumericClass.Uint => "uint",
+            ImageNumericClass.Uint64 => "uint64",
             ImageNumericClass.Sint => "sint",
             _ => "float",
         };
@@ -139,12 +191,26 @@ public sealed class Gen5MslArgumentLayout
     };
 
     // The Metal texture type of an image class with the given component and access.
-    public static string TextureType(ImageDimension dimension, string componentType, string? access, bool cube = false)
+    //
+    // Guest cube maps are not declared as texturecube. Gen5 shaders resolve the cube
+    // face themselves (V_CUBEID/V_CUBESC/V_CUBETC/V_CUBEMA) and then address the image
+    // as a 2D array with the face in the layer coordinate, so ImageDescriptorBinding
+    // describes every cube binding as Dim2DArray and the host binds a 2D-array view.
+    // A texturecube declaration would instead demand a float3 direction vector. This
+    // mirrors the SPIR-V backend, which likewise declares cube bindings Dim2D+Arrayed.
+    public static string TextureType(ImageDimension dimension, string componentType, string? access, bool depthCompare = false)
     {
-        var typeName = cube ? "texturecube" : dimension switch
+        if (depthCompare)
         {
-            ImageDimension.Dim1D => "texture1d",
-            ImageDimension.Dim1DArray => "texture1d_array",
+            if (componentType != "float" || access is not null ||
+                dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
+                throw new NotSupportedException($"Metal depth comparison does not support {dimension}/{componentType}/{access}.");
+            return dimension == ImageDimension.Dim2D ? "depth2d<float>" : "depth2d_array<float>";
+        }
+        var typeName = dimension switch
+        {
+            ImageDimension.Dim1D => "texture2d",
+            ImageDimension.Dim1DArray => "texture2d_array",
             ImageDimension.Dim2DArray => "texture2d_array",
             ImageDimension.Dim2DMsaa => "texture2d_ms",
             ImageDimension.Dim2DMsaaArray => "texture2d_ms_array",

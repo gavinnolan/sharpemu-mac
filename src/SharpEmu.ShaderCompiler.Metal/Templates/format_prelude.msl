@@ -130,3 +130,25 @@ static inline uint sharpemu_format_encode(uint value, uint bits, uint nfmt, uint
     default: return value & mask;
     }
 }
+
+// A D16 formatted load narrows a converted component to 16 bits: UINT and SINT keep the
+// low 16 bits, every other number format converts to a float and narrows it to a half.
+static inline uint sharpemu_format_d16(uint value, uint nfmt)
+{
+    return (nfmt == 4u || nfmt == 5u) ? (value & 0xFFFFu) : (uint)as_type<ushort>((half)as_type<float>(value));
+}
+
+// A D16 formatted store widens its 16-bit half back to the value the format encodes from:
+// UINT zero extends, SINT sign extends and every other number format widens a half.
+static inline uint sharpemu_format_d16_expand(uint value, uint nfmt)
+{
+    if (nfmt == 4u)
+    {
+        return value & 0xFFFFu;
+    }
+    if (nfmt == 5u)
+    {
+        return (uint)extract_bits(as_type<int>(value), 0u, 16u);
+    }
+    return as_type<uint>((float)as_type<half>((ushort)(value & 0xFFFFu)));
+}

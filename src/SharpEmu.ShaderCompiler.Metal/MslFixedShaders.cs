@@ -52,6 +52,14 @@ public static class MslFixedShaders
     /// </summary>
     public static string CreatePresentFragment() => MslTemplates.Render("present_fragment");
 
+    /// <summary>
+    /// The presenter's blit stage for an extended-dynamic-range drawable, the
+    /// counterpart of SpirvFixedShaders' scaled copy and PQ-to-scRGB stages: an SDR
+    /// frame is decoded to linear, a PQ (BT.2100) frame to luminance relative to the
+    /// reference white in BT.709 primaries. Parameters bind at buffer 0.
+    /// </summary>
+    public static string CreatePresentHdrFragment() => MslTemplates.Render("present_hdr_fragment");
+
     public static string CreateSolidFragment(float red, float green, float blue, float alpha) =>
         MslTemplates.Render(
             "solid_fragment",
