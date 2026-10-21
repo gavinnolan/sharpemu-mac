@@ -3,14 +3,23 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-# SharpEmu
+# SharpEmu for macOS
 
 <p align="center">
   <img src="./assets/images/logo.png" width=30% height=30% />
 </p>
 
 <p align="center">
-  An experimental PlayStation 5 emulator for Windows, Linux and macOS.  
+  An experimental PlayStation 5 emulator for macOS, rendering natively with Metal.
+</p>
+
+<p align="center">
+  <a href="https://github.com/sharpemu/sharpemu-mac/actions/workflows/workflow.yml">
+    <img src="https://github.com/sharpemu/sharpemu-mac/actions/workflows/workflow.yml/badge.svg" alt="Build and Release">
+  </a>
+  <a href="./LICENSE.txt">
+    <img src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue" alt="License: GPL-2.0-or-later">
+  </a>
 </p>
 
 ---
@@ -27,168 +36,147 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ---
 
-<p align="center">
-  <a href="#support">
-    <img src="https://img.shields.io/badge/Support-GitHub%20Sponsors%20%26%20Crypto-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Support SharpEmu">
-  </a>
-</p>
-
----
-
 > [!IMPORTANT]
 > **Official channels:** Only **sharpemu.app** and the links listed in this GitHub repository are affiliated with SharpEmu. Any other websites, accounts, or donation pages are unofficial and unauthorized.
 
-> [!NOTE]  
-> SharpEmu supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
-> can run the macOS x64 build through Rosetta 2, and Windows on ARM devices
-> (e.g. Snapdragon) can run the Windows x64 build through Windows' built-in
-> x64 emulation.
+> [!WARNING]
+> SharpEmu is an experimental PS5 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility. Compatibility and performance vary by game and by Mac.
 
-> [!WARNING]  
-> SharpEmu is an experimental PS5 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
+## About
 
-## Info
+SharpEmu-mac is the macOS edition of [SharpEmu](https://github.com/sharpemu/sharpemu), an experimental
+PlayStation 5 emulator written in C#. It runs on macOS with a native Metal
+renderer ("Metal V2", in `src/graphics/SharpEmu.Gpu.Metal/V2`) that translates
+the console's GPU work to Metal directly, with no MoltenVK and no Vulkan on the
+macOS path. Guest x86-64 code runs directly on the host CPU, which is why the
+shipped build is `osx-x64` and runs under Rosetta 2 on Apple Silicon.
 
-SharpEmu is an emulator project currently in its early stages of development.
+SharpEmu is developed purely for research and educational purposes, with no
+commercial goals. It focuses exclusively on the PlayStation 5; for PS4 games,
+see [ShadPS4](https://github.com/shadps4-emu/shadPS4).
 
-This project is developed purely for research and educational purposes. There are no commercial goals associated with it. We enjoy learning about system architecture and reverse engineering.
+This fork tracks upstream SharpEmu, which targets Windows and Linux with Vulkan.
+All credit for the emulator core belongs to the upstream project and its
+contributors.
 
-SharpEmu focuses exclusively on the PlayStation 5.  
-Our goal is **not** to emulate PS4 games, as there is already an excellent emulator dedicated to that platform: **ShadPS4**.
+## Requirements
 
-## Games Tested
+- macOS 15 or later.
+- An Apple Silicon Mac with Rosetta 2, or an Intel Mac. The CPU backend runs the
+  guest's x86-64 code natively, so the host process must be x86-64; `osx-x64` is
+  the only macOS build, and `osx-arm64` is not supported.
+- A GPU that supports Metal. Games that draw with primitive (NGG) shaders need a
+  Metal 3 device, because the backend runs them as Metal mesh pipelines.
+- Game dumps from a console you own. Titles can use a lot of memory, so a Mac
+  with little free memory may page heavily.
 
-|               Demon's Souls Remake                   |                     ASTRO BOT                        |
-| :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![DeS screenshot](./.github/images/demons-souls.jpg) | ![Astro Bot](./.github/images/astro-bot.jpg) |
-
-|                  ASTRO's PLAYROOM                    |                 Gran Turismo 7                    |
-| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Astro's Playroom](./.github/images/astros-playroom.jpg) | ![GT7](./.github/images/gt7.jpg) |
-
-|                  God of War: Sons of Sparta                    |                 Tomb Raider V Remastered                    |
-| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![GoW SOS](./.github/images/gow-sos.jpg) | ![Tomb Raider V](./.github/images/tomb-raider-v-remastered.jpg) |
-
-## Status
-
-The emulator can currently load the `eboot.bin` of real games, execute native CPU instructions, and partially handle gpu-related functionality. Included 3D games.
-
-SharpEmu supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
-Windows and Linux, and native Metal on macOS. Platform support is still experimental,
-so compatibility and performance vary by game, operating system, and GPU driver.
-
-## Using
-
-Download the release archive for your operating system, extract it, and launch
-SharpEmu with the path to a legally obtained game's `eboot.bin`.
-
-Or command line;
-
-Windows PowerShell:
-
-```powershell
-.\SharpEmu.exe "C:\path\to\game\eboot.bin" --log-to-file
-```
-
-Linux and macOS:
-
-```bash
-chmod +x ./SharpEmu
-
-./SharpEmu "/path/to/game/eboot.bin" --log-to-file
-```
-
-SharpEmu supports environment variables that can be configured from the GUI. Undocumented variables are listed here: [docs/sharpemu-gui-undocumented-env-vars.md](docs/sharpemu-gui-undocumented-env-vars.md)
-
-You can set them per game or globally in the GUI, or pass them directly through the CLI.
-
-Windows and Linux require a Vulkan-capable GPU and current graphics driver.
-macOS uses Metal directly; the macOS build runs as an x86-64 process, so Apple
-Silicon Macs need Rosetta 2 (`softwareupdate --install-rosetta`).
-
-See [Game patches](docs/patches.md) for downloading, enabling and writing game patches.
-
-> [!IMPORTANT]  
-> This project does **not** support or condone piracy.  
-> All games used during development and testing are dumped from consoles that we personally own.  
-> Users are expected to use legally obtained copies of their games.
-
-## Build
-
-1. Install the .NET SDK version specified in [`global.json`](./global.json).
-2. Clone the repository: `git clone https://github.com/sharpemu/sharpemu.git`
-3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
-4. Build the project: `dotnet build` or `dotnet publish`
-5. Build artifacts will be located in the `artifacts` directory.
-
-<!-- macos-fork: keep this one block together so upstream merges stay trivial -->
-### macOS
-
-This fork targets macOS natively with Metal. There is no MoltenVK and no Vulkan
-on the macOS path.
+On Apple Silicon, install Rosetta 2 once if you have not already:
 
 ```sh
-scripts/macos/build-app.sh        # -> artifacts/macos/SharpEmu.app + a .zip
+softwareupdate --install-rosetta
 ```
 
-The script publishes `osx-x64`, assembles and ad-hoc signs `SharpEmu.app`, and
-verifies it. Set `SHARPEMU_CODESIGN_IDENTITY` to sign with a real identity;
-notarization runs only when `SHARPEMU_NOTARY_APPLE_ID`,
-`SHARPEMU_NOTARY_PASSWORD` and `SHARPEMU_NOTARY_TEAM_ID` are all set. Local
-builds never need it.
+See [Building on macOS](docs/macos/building.md#requirements) for the details behind these requirements.
 
-**Rosetta 2 is required on Apple Silicon.** The CPU backend executes guest
-x86-64 instructions natively, so the host process has to be x86-64 — `osx-x64`
-is the only macOS target, and `osx-arm64` is rejected at build time. Install
-Rosetta with `softwareupdate --install-rosetta` if `arch -x86_64 /usr/bin/true`
-fails. Intel Macs run it natively.
+## Download and install
 
-Settings, logs, save data and caches live next to the executable as on every
-other platform, except when running from `SharpEmu.app`: writing inside a
-signed bundle would invalidate its signature, so the bundle uses
-`~/Library/Application Support/SharpEmu`. Override it with `SHARPEMU_DATA_ROOT`,
-or create a `portable.txt` next to `SharpEmu.app` to keep the data beside the
-bundle instead.
+Download a build from the [Releases page](https://github.com/sharpemu/sharpemu-mac/releases).
+Each release publishes two assets, both for `osx-x64`:
 
-The `.app` bundle cannot update itself in place; the GUI reports new releases
-and opens the releases page.
-<!-- /macos-fork -->
+| Asset | Contents |
+| --- | --- |
+| `sharpemu-<version>-osx-x64-app.zip` | `SharpEmu.app`, the macOS app bundle. This is the one to use for the GUI. |
+| `sharpemu-<version>-osx-x64.tar.gz` | The plain self-contained directory with the `SharpEmu` executable, for command-line use. |
 
-## Disclaimer
+Unzip the app, move `SharpEmu.app` where you like (for example `/Applications`)
+and open it.
 
-SharpEmu is an experimental emulator intended for research and educational purposes.
+**First launch and Gatekeeper.** Release bundles are ad-hoc signed and are not
+notarized, so macOS may refuse to open a downloaded copy. Either allow it in
+System Settings, Privacy and Security, or remove the quarantine attribute:
 
-This project does not contain any copyrighted system firmware, game data, or proprietary PlayStation assets.
+```sh
+xattr -dr com.apple.quarantine SharpEmu.app
+```
 
-## Special Thanks
+The app cannot update itself in place. The GUI reports new releases and opens
+the releases page. If something does not start, see
+[macOS troubleshooting](docs/macos/troubleshooting.md).
 
-The following projects were extremely helpful during development:
+## Quick start
 
-* **[ShadPS4](https://github.com/shadps4-emu/shadPS4)**  
-Helped with understanding the basic architecture of the PlayStation 4.
+> [!IMPORTANT]
+> This project does **not** support or condone piracy. All games used during
+> development and testing are dumped from consoles that we personally own.
+> Users are expected to use legally obtained copies of their games.
 
-* **[Kyty](https://github.com/InoriRus/Kyty)**  
-One of the few PS5 emulator projects available and very useful for studying native code execution.
+**GUI.** Open `SharpEmu.app` (or run the `SharpEmu` executable with no
+arguments), add your game folders in the library settings, select a game and
+press Play. Environment variables can be set globally or per game in the GUI.
 
-* **Ryujinx**  
-Provided valuable references for filesystem handling and low-level C# implementation patterns.
+**Command line.** Pass the game's `eboot.bin` (or a `.zar` archive):
 
-# License
+```sh
+SharpEmu.app/Contents/MacOS/SharpEmu "/path/to/game/eboot.bin" --log-file
+```
 
-- [**GPL-2.0 license**](https://github.com/sharpemu/sharpemu/blob/main/LICENSE)
+**Supported game formats:**
 
-## Support
+- A dumped application folder: the folder that contains `eboot.bin`, normally
+  with `sce_sys/param.json` and the game's data and modules beside it.
+- A `.zar` archive of a whole game folder, with `eboot.bin` at its root. The GUI
+  can pack a game folder into a `.zar`.
 
-Support SharpEmu via GitHub Sponsors or cryptocurrency. Every contribution helps fund ongoing development and long-term maintenance. GitHub Sponsors is the preferred way to support the project, but cryptocurrency donations are also appreciated.
+Settings, logs, save data and shader caches live under one data root. Inside
+`SharpEmu.app` that is `~/Library/Application Support/SharpEmu`; see
+[Running games on macOS](docs/macos/running-games.md) for the full usage line,
+the data folder, controls, and the performance display. Game patches are described in
+[Game patches](docs/patches.md), and environment variables in
+[macOS configuration](docs/macos/configuration.md).
 
-### ETH/USDT
+The first run of a game compiles its shaders, so it starts slowly; later runs
+reuse the caches.
 
-`0xF315F5d986c790bB3A58DbE60F1B2760997dEd82`
+## Games
 
-### BTC
+Screenshots of titles running on SharpEmu-mac will be added here.
 
-`bc1qmr9k8899njys5ny63xsues4jgmkk96erslrkmv`
+<!-- GALLERY -->
+
+## Performance
+
+Measured frame rates and the hardware they were taken on will be added here.
+
+<!-- BENCHMARKS -->
+
+## Building from source
+
+You need the .NET SDK named in [`global.json`](./global.json), the Xcode command
+line tools (`xcode-select --install`) and Python 3. Full Xcode is not required.
+
+```sh
+git clone https://github.com/sharpemu/sharpemu-mac.git
+cd sharpemu-mac
+dotnet build SharpEmu.slnx -c Release
+dotnet test SharpEmu.slnx -c Release
+scripts/macos/build-app.sh        # -> artifacts/macos/SharpEmu.app and a .zip
+```
+
+`build-app.sh` publishes `osx-x64`, assembles and ad-hoc signs `SharpEmu.app`,
+and verifies it. Signing with a Developer ID and notarization are optional. See
+[Building on macOS](docs/macos/building.md) for requirements, build options,
+signing and entitlements.
+
+## Documentation
+
+- [Documentation index](docs/README.md)
+- macOS guides:
+  [Building](docs/macos/building.md),
+  [Running games](docs/macos/running-games.md),
+  [Configuration](docs/macos/configuration.md),
+  [Metal backend](docs/macos/metal-backend.md),
+  [Testing](docs/macos/testing.md),
+  [Troubleshooting](docs/macos/troubleshooting.md)
 
 ## Contributing
 
@@ -202,3 +190,48 @@ The guide covers:
 - Pull request expectations
 - Testing guidelines
 - Legal and reverse engineering policy
+
+## Upstream sync
+
+This repository is a fork of [sharpemu/sharpemu](https://github.com/sharpemu/sharpemu).
+Upstream changes arrive in `main` through merge pull requests from a pristine
+`upstream` mirror branch, never by rewriting history. A scheduled workflow
+(`.github/workflows/upstream-sync.yml`) keeps that mirror current and opens the
+pull request; `scripts/mac/sync-upstream.sh` does the same by hand when a merge
+has conflicts.
+
+## Disclaimer
+
+SharpEmu is an experimental emulator intended for research and educational purposes.
+
+This project does not contain any copyrighted system firmware, game data, or proprietary PlayStation assets.
+
+## Special Thanks
+
+The following projects were extremely helpful during development of SharpEmu:
+
+* **[ShadPS4](https://github.com/shadps4-emu/shadPS4)**
+Helped with understanding the basic architecture of the PlayStation 4.
+
+* **[Kyty](https://github.com/InoriRus/Kyty)**
+One of the few PS5 emulator projects available and very useful for studying native code execution.
+
+* **Ryujinx**
+Provided valuable references for filesystem handling and low-level C# implementation patterns.
+
+## License
+
+SharpEmu is licensed under the [**GPL-2.0-or-later**](./LICENSE.txt) license; see
+the [`LICENSES`](./LICENSES) folder for the license texts of bundled components.
+
+## Support
+
+Support SharpEmu via GitHub Sponsors or cryptocurrency. Every contribution helps fund ongoing development and long-term maintenance. GitHub Sponsors is the preferred way to support the project, but cryptocurrency donations are also appreciated.
+
+### ETH/USDT
+
+`0xF315F5d986c790bB3A58DbE60F1B2760997dEd82`
+
+### BTC
+
+`bc1qmr9k8899njys5ny63xsues4jgmkk96erslrkmv`
