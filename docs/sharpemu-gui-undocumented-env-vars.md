@@ -21,7 +21,7 @@ The GUI exposes these variables on its **Options** and **Game options** pages:
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
 `SHARPEMU_RENDERDOC`, `SHARPEMU_SKIP_RT`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
 
-The list contains 270 variables. The source was examined on 2026-09-19, branch `dev`.
+The list contains 260 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
 ## Ray-tracing compute skip (GUI Debug option)
@@ -53,7 +53,6 @@ result filters, mutex warning sampling, and diagnostic selection.
 | --- | --- |
 | Behavior switches | 19 |
 | GPU and Vulkan | 59 |
-| Metal | 10 |
 | Audio and video | 6 |
 | Input | 5 |
 | Memory and CPU | 20 |
@@ -147,7 +146,7 @@ These variables change the GPU path or the Vulkan presenter.
 | `SHARPEMU_RESOURCE_PREFETCH` | `0` | `0` makes the shader resource materialization read each guest word one at a time. The default reads adjacent words of descriptors and the flattened resource table in one read of resident guest memory. A range that the GPU may still own is read word by word as before. | `ShaderProgramCache.cs`, `RawReadPrefetch.cs` |
 | `SHARPEMU_SHADER_MAX_STEPS` | number | Set the maximum number of dispatcher loop steps in each translated shader invocation. The limit makes sure that an incorrect loop stops. `0` removes the limit. The default is 100000. | `Gen5SpirvTranslator.cs`, `Gen5MslTranslator.cs` |
 | `SHARPEMU_SHADER_PREWARM` | `0` | `0` turns off the shader prewarm list. By default, each compute program that a game compiles is added at once to `shader-prewarm.bin` in `user/pipeline_cache/<title id>/`, so a stopped game keeps the list. At the next launch after a change of the shader translator or of the GPU driver, background threads translate the listed programs again and create their pipelines, so that the driver compiles them before the game asks for them. The `shader-prewarm.stamp` file names the build and driver that last did this; with the same build and driver, the launch does no prewarm work. The log shows `Shader prewarm done` and `Shader prewarm hits`. On Windows it replaces the cache file by default; on Linux it works beside the cache file. It has no effect with the per-shader cache files of `SHARPEMU_VK_PIPELINE_CACHE_SHARDS`. | `VulkanVideoPresenter.ShaderPrewarm.cs`, `ShaderPrewarmList.cs`, `ShaderProgramCache.cs` |
-| `SHARPEMU_SKIP_ALL_COMPUTE` | `1` | Set to `1` to make the Metal presenter skip all compute dispatches. The Vulkan presenter reads the value but does not use it. The default is off. | `MetalVideoPresenter.Compute.cs`, `VulkanVideoPresenter.cs` |
+| `SHARPEMU_SKIP_ALL_COMPUTE` | `1` | The Vulkan presenter reads the value but does not use it. The default is off. | `VulkanVideoPresenter.cs` |
 | `SHARPEMU_SKIP_TALL_COMPUTE_Z` | number | Effect not clear from the code. The Vulkan presenter reads the number into a field for a minimum Z group count. No code uses that field. The default is 0. | `VulkanVideoPresenter.cs` |
 | `SHARPEMU_SRT_NATIVE` | `0` | `0` turns off the compiled shader resource (SRT) evaluator. By default, the resource plan of each shader is compiled once to .NET code (`DynamicMethod`) on a low-priority background thread named `SRT compiler`; until it is ready, the plan is evaluated by the interpreter, so the first use of a new shader does not wait for the compilation. With `0`, every plan always uses the interpreter. The compiled path is also off when the runtime does not support dynamic code, for example in a Native AOT build. | `CompiledResourceEvaluator.cs`, `ShaderResourcePlan.cs`, `RuntimeValueEvaluator.cs` |
 | `SHARPEMU_SUSPEND_POINTS_IN_FLIGHT` | `0` | `0` makes `sceAgcSuspendPoint` wait until the frame boundary it queued is processed. The default lets one boundary wait behind the graphics commands, so the guest CPU can run one frame ahead. A wait that follows its own queue's store to the same label still sees that value when the title rewrites the label for the next frame (Dead Cells). | `CommandStreamQueue.cs`, `GpuCommandInterpreter.cs` |
@@ -157,23 +156,6 @@ These variables change the GPU path or the Vulkan presenter.
 | `SHARPEMU_VK_PIPELINE_CACHE` | `0`, `1` or `file` | Selects the Vulkan pipeline cache file, which keeps the driver's compiled pipelines. `1` or `file` saves and loads one cache file. `0` keeps the cache in memory only on every system. The default is memory only on Windows: the GPU driver keeps its own shader cache on disk, and the shader prewarm list (`SHARPEMU_SHADER_PREWARM`) rebuilds it after an update. Linux keeps a cache file by default, and macOS keeps per-shader files. | `VulkanVideoPresenter.Device.Setup.cs` |
 | `SHARPEMU_VK_PIPELINE_CACHE_SHARDS` | `1` or `0` | `1` keeps one Vulkan pipeline cache file for each compute shader and for each vertex and pixel shader pair, in `vulkan-pipeline-cache.bin.shards`, also on Windows. `0` keeps the whole cache in one file. The default is `1` on macOS and `0` on other systems: NVIDIA adds about 2 MB of driver data to every cache file, so a file for each shader uses much more disk. A shard file loads when its pipeline is first created, and a save writes only the files that got new pipelines. The shard mode removes the old single file when `SHARPEMU_VK_PIPELINE_CACHE_PATH` is not set. A cache file that grows over 256 MiB is emptied, so the next launch starts it again. | `VulkanVideoPresenter.Device.Setup.cs`, `VulkanVideoPresenter.PipelineCacheShards.cs` |
 | `SHARPEMU_VK_PIPELINE_CACHE_LEGACY_SHARDS` | `1` | `1` names the per-shader cache files by the guest shader hash. The default names them by a hash of the translated SPIR-V, so a translator change does not load records that no longer match. | `VulkanVideoPresenter.PipelineCacheShards.cs` |
-
-## Metal
-
-These variables apply to the Metal backend.
-
-| Variable | Value | Function | Code that reads it |
-| --- | --- | --- | --- |
-| `SHARPEMU_GPU_DETILE` | `0` | The Metal backend decodes supported tiled texture data on the GPU by default. Set `0` to decode all tiled textures on the CPU. | `MetalTextureSnapshots.cs`, `GuestGpuTypes.cs` |
-| `SHARPEMU_LOG_GPU_DETILE` | `1` | Writes each texture tile mode and each GPU detile decision one time to stderr. It applies to the Metal texture path only. The emulator reads the value one time at start. | `MetalTextureSnapshots.cs` |
-| `SHARPEMU_METAL_CAP_DRAWABLE` | `1` | Limits the long edge of the Metal drawable to 1920 pixels and keeps the aspect ratio. The default is off, so the drawable uses the full window pixel size. | `MetalVideoPresenter.cs` |
-| `SHARPEMU_METAL_DBG` | `solid` or `uv` | Replaces the Metal present fragment shader with a test shader. `solid` shows a green frame. `uv` shows the value of vertex attribute 0. All other values use the normal present shader. | `MetalVideoPresenter.cs` |
-| `SHARPEMU_METAL_FULL_DRAWABLE` | `1` | Cancels `SHARPEMU_METAL_CAP_DRAWABLE=1`, so the Metal drawable uses the full window pixel size. It has no effect when the cap is off. | `MetalVideoPresenter.cs` |
-| `SHARPEMU_NO_TEXTURE_SKIP` | `1` | Stops the reuse of cached texture snapshots in the Metal backend, so each texture is copied again. Use it to make sure that a snapshot is not stale. The default is off. | `MetalTextureSnapshots.cs` |
-| `SHARPEMU_REUSE_GUEST_TEXTURE_SNAPSHOTS` | `0` | The default is on. The Metal backend uses a guest texture snapshot again when the snapshot key is the same. Set to `0` to make a new snapshot each time. | `MetalTextureSnapshots.cs` |
-| `SHARPEMU_TEXTURE_DUMP_DIR` | path | Set a directory to make the Metal backend write raw texture source bytes to `.bin` files. The file name contains the address, size, pitch, format and tile mode. The limit is 200 files. | `MetalTextureSnapshots.cs` |
-| `SHARPEMU_TEXTURE_LINEAR_DUMP_DIR` | path | Set a directory to make the Metal backend write the linear texture bytes to `.linear.bin` files. The file name contains the address, size, pitch, format and tile mode. The limit is 200 files. | `MetalTextureSnapshots.cs` |
-| `SHARPEMU_TRACE_STORAGE_IMAGE_INIT_ADDRESS` | hex address | The Metal backend writes an `agc.storage_initial_data` trace line when it makes the texture at this guest address. The line shows the upload state and the read result of the initial data. | `MetalTextureSnapshots.cs` |
 
 ## Audio and video
 
@@ -362,7 +344,7 @@ Each variable records a detailed sequence of events. Traces can be large.
 | `SHARPEMU_TRACE_FRAME_PACKETS` | `1` | Writes a `[FRAMEPKT]` line at a flip with the draw count and the dispatch count of the frame. It shows the first 8 flips, each 60th flip, and each flip that has no draws. Default is off. | `AgcExports.CommandStream.cs` |
 | `SHARPEMU_TRACE_GPU_MEMORY_ADDRESS` | hex address or `auto` | Writes `[GPU][MEMORY_TRACE]` lines for GPU memory events that touch the page of the given address. The value `auto` selects the page of the first device-address fault. Default is off. | `GuestGpuMemoryHook.cs` |
 | `SHARPEMU_TRACE_GPU_READS` | `1` | Writes a `[GPU][SYNC_READ]` line with the shader hash, the stage and the address when a shader resource read must wait for GPU-written memory. It writes one line for each shader and page, and a maximum of 64 lines. | `GpuReadTrace.cs`, `VulkanVideoPresenter.Pipelines.cs` |
-| `SHARPEMU_TRACE_GUEST_IMAGES` | `1`, `present` or `every:N[@M]` | `1` and `present` write Vulkan present trace lines (`vk.present_taken`, `vk.present_dropped`, `vk.present_sample`) and up to 64 Metal `agc.texture_fallback` lines. The code reads the `every:N[@M]` form, but no code uses the result. Default is off. | `VulkanVideoPresenter.Draws.Recording.cs`, `VulkanVideoPresenter.Present.cs`, `MetalTextureSnapshots.cs` |
+| `SHARPEMU_TRACE_GUEST_IMAGES` | `1`, `present` or `every:N[@M]` | `1` and `present` write Vulkan present trace lines (`vk.present_taken`, `vk.present_dropped`, `vk.present_sample`). The code reads the `every:N[@M]` form, but no code uses the result. Default is off. | `VulkanVideoPresenter.Draws.Recording.cs`, `VulkanVideoPresenter.Present.cs` |
 | `SHARPEMU_TRACE_GUEST_IMAGE_ADDRS` | list of hex addresses or `*` | The guest image write tracker writes `[WT][LIFETIME]` lines for each tracked range that contains a listed address. `*` selects all ranges. The Vulkan presenter also reads the list, but no code uses that filter. | `GuestImageWriteTracker.cs`, `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_TRACE_GUEST_IMAGE_FORMAT` | text (Vulkan format name) | Effect not clear from the code. The Vulkan presenter keeps the name for an image filter that compares the image format, but no code calls the filter. | `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_TRACE_GUEST_IMAGE_HEIGHT` | number | Effect not clear from the code. The Vulkan presenter keeps the number for an image filter that compares the image height, but no code calls the filter. | `VulkanVideoPresenter.Draws.Recording.cs` |

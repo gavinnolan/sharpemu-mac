@@ -42,12 +42,6 @@ internal sealed class MetalCompiledGuestShader(Gen5MslShader shader, ShaderCompi
     /// <summary>The source text has been dropped; <see cref="AcquireShader"/> regenerates it.</summary>
     internal bool SourceReleased => _sourceReleased;
 
-    // Library creation may run on the command worker before render admission.
-    // The per-program gate serializes it with renderer cache lookup/creation.
-    internal readonly object LibraryGate = new();
-    internal nint CachedLibrary;
-    internal nint LibraryDevice;
-
     // Not cached: a diagnostics dump is the only reader, and a cached copy is a second
     // retained form of the source.
     public byte[] Payload => Encoding.UTF8.GetBytes(AcquireShader().Source);

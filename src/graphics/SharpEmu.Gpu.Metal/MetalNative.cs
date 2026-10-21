@@ -214,9 +214,6 @@ internal static partial class MetalNative
     public static partial void objc_autoreleasePoolPop(nint pool);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    internal static partial void SendVoidFloat(nint receiver, nint selector, float value);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector);
 
     /// <summary>objc_msgSend for -gpuResourceID. MTLResourceID is a one-field
@@ -259,14 +256,6 @@ internal static partial class MetalNative
     /// <summary>Two-object-argument void sends, e.g. setObject:forKey:.</summary>
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoid(nint receiver, nint selector, nint argument0, nint argument1);
-
-    /// <summary>setSwizzle: on MTLTextureDescriptor. Four one-byte
-    /// MTLTextureSwizzle values, passed packed like the framework expects.</summary>
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendVoidSwizzle(
-        nint receiver,
-        nint selector,
-        MtlTextureSwizzleChannels channels);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidBool(nint receiver, nint selector, [MarshalAs(UnmanagedType.I1)] bool argument);
@@ -326,9 +315,6 @@ internal static partial class MetalNative
     public static partial void SendSetAtIndex(nint receiver, nint selector, nint value, nuint index);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendVoidCopyTexture(nint receiver, nint selector, nint source, nint destination);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendCopyTextureSlice(nint receiver, nint selector, nint source,
         nuint sourceSlice, nuint sourceLevel, MtlOrigin sourceOrigin, MtlSize sourceSize,
         nint destination, nuint destinationSlice, nuint destinationLevel, MtlOrigin destinationOrigin);
@@ -352,20 +338,6 @@ internal static partial class MetalNative
         nuint destinationOffset,
         nuint destinationBytesPerRow,
         nuint destinationBytesPerImage);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendCopyBufferToTexture(
-        nint receiver,
-        nint selector,
-        nint sourceBuffer,
-        nuint sourceOffset,
-        nuint sourceBytesPerRow,
-        nuint sourceBytesPerImage,
-        MtlSize sourceSize,
-        nint destinationTexture,
-        nuint destinationSlice,
-        nuint destinationLevel,
-        MtlOrigin destinationOrigin);
 
     /// <summary>
     /// copyFromBuffer:...:toTexture:...:options: — the depth/stencil-aware upload. A
@@ -464,17 +436,6 @@ internal static partial class MetalNative
         nuint instanceCount);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendDrawIndexedPrimitives(
-        nint receiver,
-        nint selector,
-        nuint primitiveType,
-        nuint indexCount,
-        nuint indexType,
-        nint indexBuffer,
-        nuint indexBufferOffset,
-        nuint instanceCount);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendTextureDescriptor(
         nint receiver,
         nint selector,
@@ -491,22 +452,6 @@ internal static partial class MetalNative
         nuint mipmapLevel,
         nint bytes,
         nuint bytesPerRow);
-
-    /// <summary>
-    /// The slice- and volume-aware upload. One array layer takes a slice with
-    /// Depth 1 and no image stride; a volume takes slice 0, the region's full
-    /// Depth and the byte stride between depth slices.
-    /// </summary>
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendReplaceRegionSlice(
-        nint receiver,
-        nint selector,
-        MtlRegion region,
-        nuint mipmapLevel,
-        nuint slice,
-        nint bytes,
-        nuint bytesPerRow,
-        nuint bytesPerImage);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendDrawPrimitives(
