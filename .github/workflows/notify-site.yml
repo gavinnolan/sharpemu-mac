@@ -10,6 +10,9 @@ on:
     types: [published, released, edited, deleted]
   workflow_dispatch:
 
+# The job authenticates with its own secret and never touches this repository.
+permissions: {}
+
 jobs:
   dispatch:
     # Upstream only. sharpemu.app/downloads lists upstream releases, so a fork
@@ -18,6 +21,7 @@ jobs:
     # reads as "the dispatch broke" rather than "this is not our website".
     if: github.repository == 'sharpemu/sharpemu'
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
     steps:
       - name: Trigger sharpemu-site rebuild
         env:

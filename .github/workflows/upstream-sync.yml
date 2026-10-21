@@ -21,9 +21,8 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+# Nothing by default; the one job below elevates what it needs.
+permissions: {}
 
 concurrency:
   group: upstream-sync
@@ -36,6 +35,10 @@ jobs:
     # a third-party fork of this fork would be syncing from the wrong place.
     if: github.repository == 'sharpemu/sharpemu-mac'
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

@@ -1,0 +1,9 @@
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Read by actionlint (https://github.com/rhysd/actionlint) when run locally.
+# GitHub provides ubuntu-26.04 hosted runners, but actionlint releases lag
+# behind new runner labels and flag it as unknown.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

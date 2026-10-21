@@ -9,33 +9,28 @@ on:
       - "**"
     tags:
       - "v*"
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.png"
-      - "**/*.jpeg"
-      - "**/*.jpg"
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.png"
-      - "**/*.jpeg"
-      - "**/*.jpg"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer push to a PR or a feature branch supersedes the older run. Tag runs
+# publish releases and main runs are the per-commit record, so neither is ever
+# cancelled; manual runs are not either.
 concurrency:
   group: build-release-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch' && github.ref != 'refs/heads/main') }}
 
 jobs:
   init:
     name: Init
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
     outputs:
+      code-changed: ${{ steps.changes.outputs.code-changed }}
       release-name: ${{ steps.vars.outputs.release-name }}
       release-tag: ${{ steps.vars.outputs.release-tag }}
       safe-ref: ${{ steps.vars.outputs.safe-ref }}
@@ -44,6 +39,45 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          # Two commits are enough for the change filter below: on pull
+          # requests HEAD is the merge commit and HEAD^1 is the base.
+          fetch-depth: 2
+
+      # Replaces the old workflow-level paths-ignore. That filter skipped the
+      # whole workflow for docs-only changes, so REUSE lint never ran on them
+      # and required checks never reported. Now every run reports; only the
+      # macOS build is skipped when nothing but docs and images changed. Any
+      # doubt (tag, manual run, new branch, force push, git error) builds.
+      - name: Detect code changes
+        id: changes
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          code_changed=true
+          base=""
+
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            base="HEAD^1"
+          elif [ "${EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_TYPE}" = "branch" ] \
+              && [ -n "${BEFORE//0/}" ]; then
+            if git fetch --no-tags --depth=1 origin "${BEFORE}"; then
+              base="${BEFORE}"
+            fi
+          fi
+
+          if [ -n "${base}" ] && files="$(git diff --name-only "${base}" HEAD)" && [ -n "${files}" ]; then
+            echo "Changed files:"
+            echo "${files}"
+            if ! grep -qEv '\.(md|png|jpe?g)$' <<< "${files}"; then
+              code_changed=false
+            fi
+          fi
+
+          echo "code-changed=${code_changed}" >> "$GITHUB_OUTPUT"
+          echo "code-changed=${code_changed}"
 
       - name: Compute workflow variables
         id: vars
@@ -72,6 +106,7 @@ jobs:
     name: REUSE Compliance
     needs: init
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -81,11 +116,17 @@ jobs:
 
   # This fork ships macOS only; the win-x64 and linux-x64 jobs run upstream.
   build-posix:
-    name: Build ${{ matrix.rid }}
+    # Static on purpose: when the job is skipped for a docs-only change, GitHub
+    # reports a skipped matrix job under its unexpanded name, which would not
+    # satisfy a required check called "Build osx-x64". Keep this in step with
+    # the single matrix entry below.
+    name: Build osx-x64
     needs:
       - init
       - reuse
+    if: needs.init.outputs.code-changed == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +137,7 @@ jobs:
       DOTNET_NOLOGO: true
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
       PUBLISH_DIR: ${{ github.workspace }}/artifacts/publish/${{ matrix.rid }}
+      TEST_RESULTS_DIR: ${{ github.workspace }}/artifacts/test-results
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -115,13 +157,45 @@ jobs:
       - name: Test macOS build scripts and native guest mapping
         run: python3 -m unittest discover -s tests/scripts -v
 
+      # The hyphenated file names are not importable, so unittest discovery
+      # cannot find them; each file runs itself.
+      - name: Test macOS harness scripts
+        shell: bash
+        run: |
+          failed=0
+          for test_file in scripts/macos/test-*.py; do
+            echo "::group::${test_file}"
+            python3 "${test_file}" -v || failed=1
+            echo "::endgroup::"
+          done
+          exit "${failed}"
+
       - name: Build solution
         run: dotnet build SharpEmu.slnx -c Release --no-restore
 
       # The aerolib.bin MSBuild task does platform-sensitive path handling, so a
       # generation regression on macOS surfaces here.
       - name: Run tests
-        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+        timeout-minutes: 25
+        run: >
+          dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+          --logger "trx;LogFilePrefix=test-results"
+          --results-directory "$TEST_RESULTS_DIR"
+
+      # Both steps run after a failed test step too, so a red build says which
+      # tests failed without opening the raw log.
+      - name: Summarize test results
+        if: ${{ !cancelled() }}
+        run: python3 .github/scripts/trx-summary.py "$TEST_RESULTS_DIR" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}
+          path: ${{ env.TEST_RESULTS_DIR }}
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Publish ${{ matrix.rid }} CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r ${{ matrix.rid }} --self-contained true --no-restore -p:PublishDir="$PUBLISH_DIR"
@@ -165,6 +239,7 @@ jobs:
     # still produce Actions artifacts without modifying a published release.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -224,6 +299,7 @@ jobs:
           total="$(wc -l < commits.txt)"
 
           {
+            # shellcheck disable=SC2016 # literal Markdown backticks
             printf 'Automated SharpEmu v%s build for commit [`%s`](%s/commit/%s).\n\n' \
               "${VERSION}" "${SHORT_SHA}" "${REPO_URL}" "${GITHUB_SHA}"
 
@@ -237,6 +313,7 @@ jobs:
               printf '_No commits since %s._\n' "${previous_tag}"
             else
               head -n "${MAX_COMMITS}" commits.txt | while IFS=$'\x1f' read -r sha short subject; do
+                # shellcheck disable=SC2016 # literal Markdown backticks
                 printf -- '- %s ([`%s`](%s/commit/%s))\n' "${subject}" "${short}" "${REPO_URL}" "${sha}"
               done
 
