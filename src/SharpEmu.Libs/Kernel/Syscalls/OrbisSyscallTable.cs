@@ -3,7 +3,7 @@
 
 namespace SharpEmu.Libs.Kernel.Syscalls;
 
-/// <summary>What a Prospero syscall slot is (SPEC §5.6).</summary>
+/// <summary>What a Prospero syscall slot is.</summary>
 internal enum OrbisSyscallKind
 {
     /// <summary>Unimplemented slot (FreeBSD <c>nosys</c>): SIGSYS, then ENOSYS.</summary>

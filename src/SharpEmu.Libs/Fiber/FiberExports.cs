@@ -652,7 +652,7 @@ public static class FiberExports
         FiberThreadState? priorThreadState = null;
         var threadKey = GetThreadKey(ctx);
         ulong previousResumeArgument = 0;
-        // Monitor enter/exit spelled out so DSTRACE can time the gate wait (§4.3);
+        // Monitor enter/exit spelled out so DSTRACE can time the gate wait;
         // with DSTRACE off EnterGate is Monitor.Enter.
         DsFiber.EnterGate(_fiberGate);
         try

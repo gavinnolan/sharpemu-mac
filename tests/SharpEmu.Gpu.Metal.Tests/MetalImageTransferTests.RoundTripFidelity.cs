@@ -11,9 +11,8 @@ using Xunit;
 
 namespace SharpEmu.Gpu.Metal.Tests;
 
-// Round-trip fidelity for the single-copy texture plan (artifacts/memopt/single-copy-textures.md,
-// stage 1): a guest copy may only be dropped when detile -> texture -> retile gives the
-// guest bytes back. Every guest byte of the image is random here - padding inside blocks,
+// Round-trip fidelity for the single-copy texture plan (stage 1): a guest copy
+// may only be dropped when detile -> texture -> retile gives the guest bytes back. Every guest byte of the image is random here - padding inside blocks,
 // mip-tail slack and the gaps between layers included - so the comparison sees exactly
 // which bytes the texture holds. Each case is retiled twice: once into a zeroed buffer,
 // which is what a restore writes into, and once over a sentinel pattern, which must

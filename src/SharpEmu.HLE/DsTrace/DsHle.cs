@@ -4,7 +4,7 @@
 namespace SharpEmu.HLE.DsTrace;
 
 /// <summary>
-/// §4.2 HLE dispatch accounting: import names, the allow-list, per-thread HLEA
+/// HLE dispatch accounting: import names, the allow-list, per-thread HLEA
 /// aggregates and the HLE / CPUPT records. Core's gateway wrapper calls
 /// <see cref="Record"/> once per import while the hle group is armed.
 /// </summary>

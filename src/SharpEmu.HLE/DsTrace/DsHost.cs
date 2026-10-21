@@ -6,8 +6,8 @@ using System.Diagnostics;
 namespace SharpEmu.HLE.DsTrace;
 
 /// <summary>
-/// Host sampler thread <c>SharpEmu-DsHost</c> (§6). It arms the trace at ARM_S,
-/// drives the §7 A/B schedule, flushes the per-thread aggregates once a second and
+/// Host sampler thread <c>SharpEmu-DsHost</c>. It arms the trace at ARM_S,
+/// drives the A/B schedule, flushes the per-thread aggregates once a second and
 /// samples host state: CLK 4 Hz, PROC/GC 1 Hz, OTHER 0.2 Hz, TCPU 10 Hz, WCPU at
 /// SHARPEMU_DSTRACE_WCPU_HZ. Mach thread_info only: no register state, safe under Rosetta.
 /// </summary>
@@ -125,7 +125,7 @@ internal static unsafe class DsHost
         }
     }
 
-    // §7: from AB_START_S, flip every AB_RIPCACHE seconds: OFF, ON, OFF, ON …
+    // From AB_START_S, flip every AB_RIPCACHE seconds: OFF, ON, OFF, ON …
     private static void StepAb(long now, long start, long freq)
     {
         var abStart = start + freq * DsTrace.AbStartSeconds;

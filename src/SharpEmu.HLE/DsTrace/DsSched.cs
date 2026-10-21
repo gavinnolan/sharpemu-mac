@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 
 namespace SharpEmu.HLE.DsTrace;
 
-/// <summary>§4.1 scheduler events: GF, BRA, WAKE, PUMPA counters and USLA/USLP.</summary>
+/// <summary>Scheduler events: GF, BRA, WAKE, PUMPA counters and USLA/USLP.</summary>
 public static class DsSched
 {
     /// <summary>One GUEST_FLOW event mirrored as GF (same values as the existing TraceEvent).</summary>

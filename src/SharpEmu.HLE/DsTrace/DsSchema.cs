@@ -12,25 +12,25 @@ public enum DsEv : ushort
 {
     None = 0,
     STR,
-    // §4.1 scheduler
+    // scheduler
     GF, BRA, WAKE, PUMPA, USLA, USLP,
-    // §4.2 HLE
+    // HLE
     HLE, HLEA, CPUPT,
-    // §4.3 fiber
+    // fiber
     FSW, FSJ,
-    // §4.4 sync
+    // sync
     MXQ, MXH, MXR, EVF, EVS, APR,
-    // §4.5 memory locks
+    // memory locks
     MLW, MLA,
-    // §4.6 video out / AGC
+    // video out / AGC
     FLIP, SUBMIT, SUSP, FLIPDONE, PRESENT,
-    // §4.7 Metal pipeline
+    // Metal pipeline
     QENQ, SLICE, CPS, CPW, WIDLE, MCOMMIT, MGPU, LENC, LLAND, RRW,
-    // §5 guest-state sampler
+    // guest-state sampler
     ROOTS, SRT, SFC, SWK, SLK, CSAT, JD, SCNT, SGRP, SPOOL, SFM, SSTAT,
-    // §6 host sampler
+    // host sampler
     THR, TATTR, CLK, PROC, OTHER, TCPU, WCPU, GC, AB,
-    // §1.4 writer
+    // writer
     WSTAT,
     Count,
 }

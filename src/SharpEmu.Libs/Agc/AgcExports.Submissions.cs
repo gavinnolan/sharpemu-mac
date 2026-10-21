@@ -34,7 +34,7 @@ public static partial class AgcExports
         }
 
         var profileEnabled = DcbSubmissionProfile.Enabled;
-        // DSTRACE §4.6 SUBMIT reuses the profile's tick locals; timed equals profileEnabled
+        // DSTRACE SUBMIT reuses the profile's tick locals; timed equals profileEnabled
         // whenever SHARPEMU_DSTRACE is unset.
         var dsSubmit = DsTrace.Gpu && DsTrace.Armed;
         var timed = profileEnabled || dsSubmit;
@@ -131,7 +131,7 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // DSTRACE §4.6 SUBMIT: one record per accepted DCB submission, at its return.
+    // DSTRACE SUBMIT: one record per accepted DCB submission, at its return.
     private static void DsEmitSubmit(
         CpuContext ctx, ulong packetAddress, uint dwordCount, long gateWaitTicks, long callStartTicks, ulong submissionId)
     {

@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 namespace SharpEmu.HLE.DsTrace;
 
 /// <summary>
-/// Guest-memory reads for DSTRACE (§3.2). Guest virtual addresses are host addresses.
+/// Guest-memory reads for DSTRACE. Guest virtual addresses are host addresses.
 ///
 /// Default (safe) mode reads through <see cref="ICpuMemory.TryRead"/>: never a raw
 /// dereference, so a page whose protection changes at runtime (page watch for GPU
@@ -137,7 +137,7 @@ public static unsafe class DsGuestMem
     }
 
     /// <summary>
-    /// Frame-pointer return-address chain (§3.3). Fills <paramref name="returns"/> with
+    /// Frame-pointer return-address chain. Fills <paramref name="returns"/> with
     /// RA2, RA3, … from <paramref name="rbp"/>; missing values stay 0. Returns the count.
     /// </summary>
     public static int ReturnChain(ulong rbp, ulong rsp, Span<ulong> returns)

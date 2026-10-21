@@ -26,7 +26,7 @@ public sealed class DsThreadData
     internal readonly long[] Pump = new long[PumpFields];
     internal int CpuSampleCounter;
 
-    /// <summary>Scratch state of the fiber switch in flight on this thread (§4.3).</summary>
+    /// <summary>Scratch state of the fiber switch in flight on this thread.</summary>
     public readonly DsFiberScratch FiberScratch = new();
 
     // Host-sampler side: the values at the previous 1 Hz flush.
@@ -34,7 +34,7 @@ public sealed class DsThreadData
     internal long[]? PrevHle;
     internal long[]? PrevPump;
 
-    // sceKernelUsleep aggregates, owner-flushed (§4.1 USLA).
+    // sceKernelUsleep aggregates, owner-flushed (USLA).
     internal long UslaSecond;
     internal Dictionary<ulong, DsSched.UsleepAgg>? Usla;
 
@@ -72,7 +72,7 @@ public sealed class DsFiberScratch
     public ulong R14;
     public ulong R15;
 
-    // Filled by the §4.5 lock wrappers while DsTrace.InRipProbe is set.
+    // Filled by the lock wrappers while DsTrace.InRipProbe is set.
     public uint ProbePath = 0xff;
     public long ProbeWlockWaitTicks;
     public long ProbeMprotectTicks;

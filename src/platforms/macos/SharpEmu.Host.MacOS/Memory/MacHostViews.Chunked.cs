@@ -13,7 +13,7 @@ namespace SharpEmu.Host.MacOS;
 /// <para>
 /// Why: under Rosetta (a 4 KiB VM map) no madvise-style call frees a page of the shm object
 /// while the alias and the guest views map it, so memory the guest frees stays resident for
-/// the life of the process (artifacts/memopt/single-copy-textures.md §3). A purgeable object
+/// the life of the process. A purgeable object
 /// can be emptied in place: <c>mach_vm_purgable_control(EMPTY)</c> frees its pages at once,
 /// every mapping stays valid and reads zero, and NONVOLATILE makes it ordinary memory again.
 /// Chunks are 64 KiB because that is the granule titles allocate and BatchMap direct memory
@@ -27,7 +27,7 @@ namespace SharpEmu.Host.MacOS;
 /// object, and for a sub-page map each one re-simplifies every map entry left in the range).
 /// 64 KiB objects held windows to 32 MiB, and Demon's Souls copied its larger bindings through
 /// the ring every command buffer. At 2 MiB a 1 GiB window spans 512 objects and is made in
-/// ~2.4 ms (artifacts/memopt/exp-window). EMPTY is whole-object and leaves wired pages alone
+/// ~2.4 ms. EMPTY is whole-object and leaves wired pages alone
 /// (they keep their bytes), so a release of only some chunks of an object wires the rest of
 /// it first (<c>mlock</c>), empties it and unwires it. The released chunks' pages are freed
 /// through every mapping and the rest keep every byte. A writer racing the release cannot
@@ -45,8 +45,8 @@ namespace SharpEmu.Host.MacOS;
 /// alias and every other view exactly as an shm view does, for any page-aligned offset and
 /// size, then <c>mprotect</c> to the view's protection. Execute is dropped exactly as the shm
 /// view drops it: <c>mmap(MAP_SHARED, PROT_READ|PROT_WRITE|PROT_EXEC)</c> of the shm object
-/// succeeds but maps read-write with a read-write maximum, on arm64 and under Rosetta alike
-/// (artifacts/memopt/exp/chunked-rwx.c), so an executable guest view has never been executable
+/// succeeds but maps read-write with a read-write maximum, on arm64 and under Rosetta alike,
+/// so an executable guest view has never been executable
 /// and a later protection change that asks for execute fails the same way. Holes, protection changes and unmaps
 /// are the same calls as for shm. Every object mapping carries the <see cref="GuestChunkTag"/>
 /// VM tag and a view inherits it from the alias, so scripts/macos/memstat.c classifies the objects as
@@ -88,8 +88,8 @@ internal sealed unsafe partial class MacHostViews
     internal static bool? ChunkedBackingForTests;
 
     // On unless SHARPEMU_GUEST_BACKING=shm. It was opt-in while Metal windows over 64 KiB
-    // objects were capped at 32 MiB (DS in-world 0.15 FPS against 3.4 with shm, runs
-    // 20261018-225430 / -230850); 2 MiB objects let them grow to the 1 GiB shm windows reach.
+    // objects were capped at 32 MiB (Demon's Souls in-world ran at 0.15 FPS against 3.4 with
+    // shm); 2 MiB objects let them grow to the 1 GiB shm windows reach.
     private static bool UseChunkedBacking => ChunkedBackingForTests ?? !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_GUEST_BACKING"), "shm", StringComparison.OrdinalIgnoreCase);
 
@@ -351,7 +351,7 @@ internal sealed unsafe partial class MacHostViews
     // HostBackingObject.CreateGpuAlias: the alias remapped once more (copy=FALSE, so the same
     // objects) for the GPU's windows, and one non-purgeable 64 KiB dummy object whose port is
     // kept so it can be mapped over any number of punched chunks. Measured under Rosetta on an
-    // M4 (artifacts/memopt/single-copy-textures.md §4): remapping an 18 GiB alias of 64 KiB
+    // M4: remapping an 18 GiB alias of 64 KiB
     // objects took ~0.3 s, a punch or a fill ~20 µs, and the remap keeps one map entry per
     // object, so a window over it costs what one over the alias does, plus two objects' worth
     // for every hole inside it (the dummy splits the object around it).

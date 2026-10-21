@@ -7,7 +7,7 @@ using System.Runtime.CompilerServices;
 namespace SharpEmu.HLE.DsTrace;
 
 /// <summary>
-/// §4.3 fiber-switch internals. sceFiberSwitch fills the per-thread scratch, the
+/// fiber-switch internals. sceFiberSwitch fills the per-thread scratch, the
 /// fiber gate and the transfer request add their timings, and the import dispatcher
 /// emits FSW + FSJ once TryPrepareGuestContextTransfer has run.
 /// </summary>

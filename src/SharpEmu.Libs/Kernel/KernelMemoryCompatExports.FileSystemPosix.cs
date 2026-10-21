@@ -9,8 +9,8 @@ namespace SharpEmu.Libs.Kernel;
 
 /// <summary>
 /// The POSIX file-system calls libkernel exports beside the sceKernel*
-/// file API: access, lstat, getcwd, pipe, readv/writev and statfs/fstatfs
-/// (SPEC §5.6). Each POSIX entry returns -1 and sets errno; the sceKernel*
+/// file API: access, lstat, getcwd, pipe, readv/writev and statfs/fstatfs.
+/// Each POSIX entry returns -1 and sets errno; the sceKernel*
 /// forms return the SCE code of the same errno.
 /// </summary>
 public static partial class KernelMemoryCompatExports
