@@ -87,18 +87,6 @@ internal enum MtlPixelFormat : uint
     X32Stencil8 = 261,
 }
 
-/// <summary>A sampled-texture format: the Metal pixel format plus the byte
-/// layout the upload path needs. <see cref="BlockBytes"/> is nonzero for
-/// block-compressed formats (bytes per 4x4 block); otherwise
-/// <see cref="BytesPerPixel"/> applies.</summary>
-internal readonly record struct MetalTextureFormat(
-    MtlPixelFormat Format,
-    uint BytesPerPixel,
-    uint BlockBytes)
-{
-    public bool IsBlockCompressed => BlockBytes != 0;
-}
-
 internal readonly record struct MetalRenderTargetFormat(
     MtlPixelFormat Format,
     Gen5PixelOutputKind OutputKind,
@@ -110,18 +98,6 @@ internal readonly record struct MetalRenderTargetFormat(
         : this(format, outputKind, Gen5ColorComponentMapping.Identity)
     {
     }
-
-    public static uint GetBytesPerPixel(MtlPixelFormat format) =>
-        format switch
-        {
-            MtlPixelFormat.R8Unorm or MtlPixelFormat.R8Snorm or MtlPixelFormat.R8Uint => 1,
-            MtlPixelFormat.Rg8Unorm or MtlPixelFormat.Rg8Snorm => 2,
-            MtlPixelFormat.Rg32Float => 8,
-            MtlPixelFormat.Rgba16Unorm or MtlPixelFormat.Rgba16Snorm or MtlPixelFormat.Rgba16Uint or
-                MtlPixelFormat.Rgba16Sint or MtlPixelFormat.Rgba16Float => 8,
-            MtlPixelFormat.Rgba32Float => 16,
-            _ => 4,
-        };
 }
 
 /// <summary>
@@ -132,112 +108,6 @@ internal readonly record struct MetalRenderTargetFormat(
 /// </summary>
 internal static class MetalGuestFormats
 {
-    /// <summary>Guest sampled-texture format to Metal, mirroring the Vulkan
-    /// backend's implemented mappings. Unknown codes fail explicitly instead
-    /// of reinterpreting unrelated source bytes as RGBA8. BC formats upload
-    /// raw blocks — Mac-family GPUs decode them
-    /// natively.</summary>
-    public static MetalTextureFormat DecodeTextureFormat(uint dataFormat, uint numberType)
-    {
-        var format = (dataFormat, numberType) switch
-        {
-            (1, 0) => MtlPixelFormat.R8Unorm,
-            (1, 1) => MtlPixelFormat.R8Snorm,
-            (1, 4) => MtlPixelFormat.R8Uint,
-            (1, 5) => MtlPixelFormat.R8Sint,
-            (2, 0) => MtlPixelFormat.R16Unorm,
-            (2, 1) => MtlPixelFormat.R16Snorm,
-            (2, 4) => MtlPixelFormat.R16Uint,
-            (2, 5) => MtlPixelFormat.R16Sint,
-            (2, 7) => MtlPixelFormat.R16Float,
-            (3, 0) => MtlPixelFormat.Rg8Unorm,
-            (3, 1) => MtlPixelFormat.Rg8Snorm,
-            (3, 4) => MtlPixelFormat.Rg8Uint,
-            (3, 5) => MtlPixelFormat.Rg8Sint,
-            (4, 4) => MtlPixelFormat.R32Uint,
-            (4, 5) => MtlPixelFormat.R32Sint,
-            (4, 7) => MtlPixelFormat.R32Float,
-            (5, 0) => MtlPixelFormat.Rg16Unorm,
-            (5, 4) => MtlPixelFormat.Rg16Uint,
-            (5, 5) => MtlPixelFormat.Rg16Sint,
-            (5, 7) => MtlPixelFormat.Rg16Float,
-            (6, 7) or (7, 7) => MtlPixelFormat.Rg11B10Float,
-            (8, _) or (9, _) => MtlPixelFormat.Bgr10A2Unorm,
-            (10, 0) => MtlPixelFormat.Rgba8Unorm,
-            (10, 4) => MtlPixelFormat.Rgba8Uint,
-            (10, 5) => MtlPixelFormat.Rgba8Sint,
-            (10, 9) => MtlPixelFormat.Rgba8UnormSrgb,
-            (11, 4) => MtlPixelFormat.Rg32Uint,
-            (11, 5) => MtlPixelFormat.Rg32Sint,
-            (11, 7) => MtlPixelFormat.Rg32Float,
-            (12, 0) => MtlPixelFormat.Rgba16Unorm,
-            (12, 4) => MtlPixelFormat.Rgba16Uint,
-            (12, 5) => MtlPixelFormat.Rgba16Sint,
-            (12, 7) => MtlPixelFormat.Rgba16Float,
-            // Guest RGB32 is 12 bytes, not Metal RGBA32's 16. It requires
-            // an explicit repack before a native upload can preserve pixels.
-            (14, 4) => MtlPixelFormat.Rgba32Uint,
-            (14, 5) => MtlPixelFormat.Rgba32Sint,
-            (14, _) => MtlPixelFormat.Rgba32Float,
-            (16, 0) => MtlPixelFormat.B5G6R5Unorm,
-            (34, 7) => MtlPixelFormat.Rgb9E5Float,
-            (169, _) => MtlPixelFormat.Bc1Rgba,
-            (170, _) => MtlPixelFormat.Bc1RgbaSrgb,
-            (171, _) => MtlPixelFormat.Bc2Rgba,
-            (172, _) => MtlPixelFormat.Bc2RgbaSrgb,
-            (173, _) => MtlPixelFormat.Bc3Rgba,
-            (174, _) => MtlPixelFormat.Bc3RgbaSrgb,
-            (175, 1) or (176, _) => MtlPixelFormat.Bc4RSnorm,
-            (175, _) => MtlPixelFormat.Bc4RUnorm,
-            (177, 1) or (178, _) => MtlPixelFormat.Bc5RgSnorm,
-            (177, _) => MtlPixelFormat.Bc5RgUnorm,
-            (179, _) => MtlPixelFormat.Bc6HRgbUfloat,
-            (180, _) => MtlPixelFormat.Bc6HRgbFloat,
-            (181, _) => MtlPixelFormat.Bc7RgbaUnorm,
-            (182, _) => MtlPixelFormat.Bc7RgbaUnormSrgb,
-            _ => throw new NotSupportedException($"Metal guest texture format {dataFormat}/{numberType} is unsupported."),
-        };
-
-        var blockBytes = format switch
-        {
-            MtlPixelFormat.Bc1Rgba or MtlPixelFormat.Bc1RgbaSrgb or
-                MtlPixelFormat.Bc4RUnorm or MtlPixelFormat.Bc4RSnorm => 8u,
-            MtlPixelFormat.Bc2Rgba or MtlPixelFormat.Bc2RgbaSrgb or
-                MtlPixelFormat.Bc3Rgba or MtlPixelFormat.Bc3RgbaSrgb or
-                MtlPixelFormat.Bc5RgUnorm or MtlPixelFormat.Bc5RgSnorm or
-                MtlPixelFormat.Bc6HRgbFloat or MtlPixelFormat.Bc6HRgbUfloat or
-                MtlPixelFormat.Bc7RgbaUnorm or MtlPixelFormat.Bc7RgbaUnormSrgb => 16u,
-            _ => 0u,
-        };
-
-        var bytesPerPixel = format switch
-        {
-            MtlPixelFormat.R8Unorm or MtlPixelFormat.R8Snorm or
-                MtlPixelFormat.R8Uint or MtlPixelFormat.R8Sint => 1u,
-            MtlPixelFormat.R16Unorm or MtlPixelFormat.R16Snorm or
-                MtlPixelFormat.R16Uint or MtlPixelFormat.R16Sint or
-                MtlPixelFormat.R16Float or MtlPixelFormat.Rg8Unorm or
-                MtlPixelFormat.Rg8Snorm or MtlPixelFormat.Rg8Uint or
-                MtlPixelFormat.Rg8Sint or MtlPixelFormat.B5G6R5Unorm => 2u,
-            MtlPixelFormat.Rg32Uint or MtlPixelFormat.Rg32Sint or
-                MtlPixelFormat.Rg32Float or MtlPixelFormat.Rgba16Unorm or
-                MtlPixelFormat.Rgba16Uint or MtlPixelFormat.Rgba16Sint or
-                MtlPixelFormat.Rgba16Float => 8u,
-            MtlPixelFormat.Rgba32Uint or MtlPixelFormat.Rgba32Sint or
-                MtlPixelFormat.Rgba32Float => 16u,
-            _ => 4u,
-        };
-
-        return new MetalTextureFormat(format, bytesPerPixel, blockBytes);
-    }
-
-    /// <summary>Source byte footprint of a sampled texture, block-aware —
-    /// the same math the AGC layer uses to size the texel copy it ships.</summary>
-    public static ulong GetTextureByteCount(in MetalTextureFormat format, uint width, uint height) =>
-        format.IsBlockCompressed
-            ? checked(((ulong)width + 3) / 4 * (((ulong)height + 3) / 4) * format.BlockBytes)
-            : checked((ulong)width * height * format.BytesPerPixel);
-
     /// <summary>
     /// The neutral host format the shared image cache names, as a Metal pixel format.
     /// <see cref="GpuFormat"/> carries VkFormat's numeric values, so this is the Metal
