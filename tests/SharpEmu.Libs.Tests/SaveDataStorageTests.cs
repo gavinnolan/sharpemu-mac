@@ -5,6 +5,8 @@ using System.IO;
 using SharpEmu.Libs.SaveData;
 using Xunit;
 
+using SharpEmu.Logging;
+
 namespace SharpEmu.Libs.Tests;
 
 /// <summary>

@@ -1,0 +1,19 @@
+rev=40 config=0x244 swizzle=27 resource=1 bpp=32 block=128x128x1 pitch=1024 height=1024 slices=1 surf=4194304 slice=4194304 align=65536 mipoff=0 macoff=0 tail=0 equation=67
+equation bits=16 components=3 stacked=0
+bit0: x0
+bit1: x1
+bit2: x2
+bit3: x3
+bit4: y0
+bit5: y1
+bit6: x4
+bit7: y2
+bit8: y4 x8 y6
+bit9: x6 y4 z1
+bit10: y5 x7 z0
+bit11: x7 x9 y7
+bit12: x5
+bit13: y3
+bit14: x8 y7
+bit15: y6 x9
+unique=1048576 min=0 max=4194300 xorChanges=0
