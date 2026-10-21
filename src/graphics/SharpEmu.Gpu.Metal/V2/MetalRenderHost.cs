@@ -1967,14 +1967,24 @@ internal sealed partial class MetalRenderHost :
     // copies and detiles of this size take the GPU well under a millisecond, and the
     // pools then see their memory back. The budget is a handful of the largest
     // surfaces, because every commit costs the open pass a store and a reload of its
-    // attachments. SHARPEMU_METAL_V2_TRANSIENT_COMMIT_MB overrides it, for measuring.
-    private const ulong DefaultTransientCommitBytes = 256UL * 1024 * 1024;
+    // attachments. It scales with the machine's memory - 1/64 of it, between 256 MB and 1 GB,
+    // two budgets at most in flight - because a small one is a commit storm of its own: Black
+    // Myth: Wukong stages ~4.5 GB of scattered storage buffers per 2 s window, and at 256 MB
+    // it committed ~50 times a window, ending the open pass each time and waiting for the GPU
+    // on the throttle below for 13% of the worker's time. At 1 GB (64 GB of memory) it commits
+    // once in 80 s: in-game 5.9 -> 7.1 fps, the cinematic's army 4.3 -> 5.6, the ring pool's peak
+    // 1.15 -> 1.44 GB. SHARPEMU_METAL_V2_TRANSIENT_COMMIT_MB overrides it, for measuring.
+    private const ulong MinimumTransientCommitBytes = 256UL * 1024 * 1024;
+    private const ulong MaximumTransientCommitBytes = 1024UL * 1024 * 1024;
+
+    internal static ulong DefaultTransientCommitBytes(ulong physicalBytes) =>
+        Math.Clamp(physicalBytes / 64, MinimumTransientCommitBytes, MaximumTransientCommitBytes);
 
     internal ulong TransientCommitBytes { get; set; } =
         ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRANSIENT_COMMIT_MB"), out var megabytes) &&
         megabytes != 0
             ? megabytes * 1024 * 1024
-            : DefaultTransientCommitBytes;
+            : DefaultTransientCommitBytes(MetalHostMemory.Physical);
 
     /// <summary>The staging pool the transfers draw on; tests lend from it directly.</summary>
     internal MetalTiler? StagingTiler => (_transfer as MetalImageTransfer)?.Tiler;
