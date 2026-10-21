@@ -1558,7 +1558,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     internal static bool MayEncodeLabelOnGpu(bool ordered, long owedHostLabels) => !ordered || owedHostLabels == 0;
 
     // SHARPEMU_METAL_V2_GPU_LABELS=0 goes back to publishing every label from the
-    // completion that reports its work. That is correct and it is what V1 does, but a
+    // completion that reports its work. That is correct, but a
     // completion costs a command buffer flush and then waits to be told the submission
     // finished, so a title that writes a label per render pass pays both per pass:
     // measured at 9.5 fps against 24. The GPU writing the label where its packet sits

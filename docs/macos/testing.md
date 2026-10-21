@@ -69,8 +69,7 @@ python3 -I scripts/macos/test-memstat.py
 python3 -I scripts/macos/test-native-fault-trace.py
 ```
 
-`tools/profile/test_metal_drain_allocations.py` and `tools/SharpEmu.DebuggerFrontend/tests`
-test their own tools.
+`tools/SharpEmu.DebuggerFrontend/tests` tests the debugger frontend.
 
 ## CI
 
