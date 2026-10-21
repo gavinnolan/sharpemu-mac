@@ -31,8 +31,8 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2018 Alex Barney"
 SPDX-License-Identifier = "MIT"
 
-# macOS fork: documentation, validation evidence, localisation data and test
-# fixtures. Formats here either cannot carry a header (binary, CSV, JSON) or
+# macOS fork: documentation, localisation data, test fixtures and analysis
+# tooling. Formats here either cannot carry a header (binary, CSV, JSON) or
 # are generated/captured data, so they are annotated in one place.
 [[annotations]]
 path = [

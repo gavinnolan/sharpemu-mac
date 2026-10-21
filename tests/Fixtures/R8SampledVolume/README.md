@@ -2,11 +2,8 @@
 
 Primary AMD PAL AddrLib revision `c5e800072a32f68b6ccc4422936d96167c6e0728`,
 public32-bit API driver `oracle.cpp`, mode5 `ADDR_SW_4KB_S`, TEX3D8bpp,
-4x4x16, one mip/sample/slice range, sampled/noMetadata. The retained peer CPU
-evidence at `artifacts/validation/integrated-20261007/superliminal-r8-volume-cpu-oracle-20261008`
-records source/library/command/output hashes. Navi10 and five Navi21 modeled
-configurations produced identical256-voxel CSVs; `comparison.json` retains each
-case. This does not identify actual PS5 topology or prove backing ownership.
+4x4x16, one mip/sample/slice range, sampled/noMetadata. Navi10 and five Navi21 modeled
+configurations produced identical256-voxel CSVs. This does not identify actual PS5 topology or prove backing ownership.
 
 `offsets.csv` is the independently emitted Navi21/16pipe/4packer CSV, x/y/z/byte
 offset. The4KiB physical block has16x16x16 padded geometry; logical4x4x16 has256
