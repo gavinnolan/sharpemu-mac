@@ -4,7 +4,7 @@
 # Usage: tools/re/ds-setup.sh [--no-ghidra] [--no-analysis]
 #   --no-ghidra    only the ELF / imports / callsites / modules (seconds); skip the Ghidra project
 #   --no-analysis  import into Ghidra but skip auto-analysis (minutes instead of a long run)
-# Env:   DS_APP0   game dir with eboot.bin (default /Volumes/Untitled/games/Demon Souls/PPSA01342-app0)
+# Env:   DS_APP0   (required) game dir with eboot.bin, e.g. <games>/Demon Souls/PPSA01342-app0
 #        RE_OUT    output root (default <main checkout>/artifacts/re; artifacts/ is git-ignored)
 #
 # Outputs under $RE_OUT:
@@ -19,7 +19,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 MAIN=$(cd "$HERE/../.." && pwd)
 case $MAIN in */.claude/worktrees/*) MAIN=${MAIN%%/.claude/worktrees/*} ;; esac
-DS_APP0=${DS_APP0:-/Volumes/Untitled/games/Demon Souls/PPSA01342-app0}
+DS_APP0=${DS_APP0:?set DS_APP0 to the game directory that holds eboot.bin}
 RE_OUT=${RE_OUT:-$MAIN/artifacts/re}
 GHIDRA=1
 GHIDRA_ARGS=()
