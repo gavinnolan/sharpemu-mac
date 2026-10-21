@@ -1,0 +1,37 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- macOS x86-64 direct-execution integration (W10): Mach exception-port
+       routing, the Darwin signal fault bridge and its ucontext/mcontext
+       layouts, Darwin pthread TLS keys and the Win64-ABI helper stubs the
+       emitted guest code calls. Referenced only by osx-* builds; see the
+       conditional ProjectReference in SharpEmu.CLI.csproj. Contains no
+       Windows or Linux declaration, layout or OS check. -->
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_MACOS_X64</DefineConstants>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\SharpEmu.Core\SharpEmu.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shared by source, not by a POSIX execution assembly: only the parts
+         that carry no OS-specific declaration, constant or ABI detail. Every
+         Darwin/Linux difference lives in this package's own
+         Faults/PosixSignalLayout.cs, which this file compiles against. -->
+    <Compile Include="..\..\shared\PosixFaults\PosixFaultBridge.cs"
+             Link="Faults\Shared\PosixFaultBridge.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The signal fault bridge is driven with fabricated signal frames by
+         tests/SharpEmu.Libs.Tests/Cpu/Sse4aPosixSignalRecoveryTests.cs. -->
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+  </ItemGroup>
+</Project>
