@@ -203,6 +203,18 @@ public interface IRenderHost
     // of waiting for the compile (RenderExecutor.MayLeaveOutWhileCompiling decides which).
     bool LeavesOutDrawsWhileCompiling => false;
 
+    // True when such a draw may write depth or stencil too: the host's part below then answers
+    // for the depth target as for the colour targets.
+    bool LeavesOutDepthWritesWhileCompiling => false;
+
+    // True when such a draw may write mip statistics (texture-streaming feedback) too.
+    bool LeavesOutMipStatisticsWhileCompiling => false;
+
+    // Why the executor would not leave out the draw it asks about next (diagnostics; a literal).
+    void NoteLeaveOutRefused(string reason)
+    {
+    }
+
     // The host's part of that decision, for the attachments the draw has just acquired: true
     // only for targets it knows are rebuilt from nothing every frame, so that the frame being
     // recorded is the only one that misses the draw.

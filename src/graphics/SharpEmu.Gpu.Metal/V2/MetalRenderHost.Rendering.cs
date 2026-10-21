@@ -931,6 +931,8 @@ internal sealed partial class MetalRenderHost
                     NoteColorTargetRebuilt(index);
                 }
 
+                NoteColorTargetDrawn(index);
+
                 MetalV2Native.SendVoidValue(slot, SelSetStoreAction, PendingStoreAction);
                 if (clears)
                 {
@@ -947,6 +949,11 @@ internal sealed partial class MetalRenderHost
                 (!depthStencil.HasDepth || depthStencil.DepthClear) && (!depthStencil.HasStencil || depthStencil.StencilClear))
             {
                 NoteDepthTargetRebuilt();
+            }
+
+            if (depthStencil.View.Handle != 0 && depthStencil.HasDepth && depthStencil.DepthClear)
+            {
+                NoteDepthCleared();
             }
 
             if (depthStencil.HasDepth && depthStencil.View.Handle != 0)

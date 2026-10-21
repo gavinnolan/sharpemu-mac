@@ -222,14 +222,20 @@ public sealed partial class RenderExecutor
     /// <list type="bullet">
     /// <item>a program that writes memory (storage buffers or images, atomics, device-address
     /// stores), uses the GDS (ordered counts, append and consume), or writes mip statistics:
-    /// what it writes outlives the frame and later work reads it;</item>
+    /// what it writes outlives the frame and later work reads it. Mip statistics only when the
+    /// host leaves those out too (IRenderHost.LeavesOutMipStatisticsWhileCompiling): they are
+    /// the texture streamer's feedback, gathered over frames, and a draw missing from a few
+    /// frames only reports its object's mips that much later;</item>
     /// <item>a predicated draw, or one inside an occlusion query: the guest decides on the
     /// count it produces (the interpreter's DrawsMustExecute);</item>
     /// <item>an indirect mesh draw, whose launch was prepared before the pipeline;</item>
     /// <item>a draw whose attachments carry a clear (a fast clear consumed at their
     /// acquire, a load clear): leaving it out would lose the clear;</item>
-    /// <item>a draw that writes depth or stencil: the depth target is what the rest of the
-    /// frame tests and samples, and a missing occluder there shows in every later pass;</item>
+    /// <item>a draw that writes depth or stencil, unless the host leaves those out too
+    /// (IRenderHost.LeavesOutDepthWritesWhileCompiling): the depth target is what the rest of
+    /// the frame tests and samples, and a missing occluder there shows in every later pass of
+    /// the frame - but of that frame alone when the host's check below finds the depth target
+    /// rebuilt every frame as well;</item>
     /// <item>and the host's own say on the targets (IRenderHost.MayLeaveOutWhileCompiling),
     /// which leaves out only draws into targets it saw cleared or overwritten whole in this
     /// frame and in the frames before it, so a look-up table, a shadow or virtual-texture
@@ -250,6 +256,7 @@ public sealed partial class RenderExecutor
         {
             if (rendering.ColorAttachments[index].IsClear)
             {
+                _host.NoteLeaveOutRefused("color-clear");
                 return false;
             }
         }
@@ -257,6 +264,7 @@ public sealed partial class RenderExecutor
         if (state.Depth.HasTarget &&
             (rendering.DepthStencilAttachment.DepthClear || rendering.DepthStencilAttachment.StencilClear))
         {
+            _host.NoteLeaveOutRefused("depth-clear");
             return false;
         }
 
@@ -269,22 +277,43 @@ public sealed partial class RenderExecutor
     private bool MayLeaveOutBeforeAcquiring(
         ref DrawState state, ShaderStageResources vertexStage, ShaderStageResources? pixelStage, bool indirectMesh)
     {
-        if (_drawMustExecute || indirectMesh || !_host.LeavesOutDrawsWhileCompiling)
+        if (!_host.LeavesOutDrawsWhileCompiling)
         {
             return false;
         }
 
-        if (WritesOutsideTargets(vertexStage) || (pixelStage is { } pixel && WritesOutsideTargets(pixel)))
+        if (_drawMustExecute || indirectMesh)
         {
+            _host.NoteLeaveOutRefused("must-execute");
+            return false;
+        }
+
+        var mipStatistics = _host.LeavesOutMipStatisticsWhileCompiling;
+        if (WriteOutsideTargets(vertexStage, mipStatistics) is { } vertexWrite)
+        {
+            _host.NoteLeaveOutRefused(vertexWrite);
+            return false;
+        }
+
+        if (pixelStage is { } pixel && WriteOutsideTargets(pixel, mipStatistics) is { } pixelWrite)
+        {
+            _host.NoteLeaveOutRefused(pixelWrite);
             return false;
         }
 
         if (state.Depth.HasTarget)
         {
             var depth = state.Depth.Target;
-            if (state.Depth.LoadClear || depth.State.StencilClearEnabled ||
-                !state.Depth.LoadState.IsReadOnly(depth.Target.Format) || depth.State.DepthWriteEnabled)
+            if (state.Depth.LoadClear || depth.State.StencilClearEnabled)
             {
+                _host.NoteLeaveOutRefused("depth-clear");
+                return false;
+            }
+
+            if ((!state.Depth.LoadState.IsReadOnly(depth.Target.Format) || depth.State.DepthWriteEnabled) &&
+                !_host.LeavesOutDepthWritesWhileCompiling)
+            {
+                _host.NoteLeaveOutRefused("depth-write");
                 return false;
             }
         }
@@ -295,23 +324,37 @@ public sealed partial class RenderExecutor
     // Any write a draw makes other than through its attachments, as the conservative reading of
     // the program's resource use: a written or atomic buffer whatever its descriptor holds, any
     // storage image, the GDS, mip statistics and device-address stores.
-    internal static bool WritesOutsideTargets(ShaderStageResources stage)
+    internal static bool WritesOutsideTargets(ShaderStageResources stage) => WriteOutsideTargets(stage) is not null;
+
+    // What WritesOutsideTargets found, as a literal for the leave-out diagnostics; null for nothing.
+    // Mip statistics are left out of the count when the host says so (IRenderHost.LeavesOutMipStatisticsWhileCompiling).
+    internal static string? WriteOutsideTargets(ShaderStageResources stage, bool mipStatisticsAllowed = false)
     {
         if (stage.Program is not { } program)
         {
-            return false;
+            return null;
         }
 
-        if (program.WritesDeviceAddresses || (program.Bindings?.MipStatisticsCount ?? 0) != 0)
+        if (program.WritesDeviceAddresses)
         {
-            return true;
+            return "device-address-store";
+        }
+
+        if (!mipStatisticsAllowed && (program.Bindings?.MipStatisticsCount ?? 0) != 0)
+        {
+            return "mip-statistics";
         }
 
         foreach (var buffer in program.Buffers)
         {
-            if (buffer.Written || buffer.Atomic)
+            if (buffer.Atomic)
             {
-                return true;
+                return "atomic-buffer";
+            }
+
+            if (buffer.Written)
+            {
+                return "written-buffer";
             }
         }
 
@@ -319,7 +362,7 @@ public sealed partial class RenderExecutor
         {
             if (image.Written || image.Class == ImageResourceClass.Storage)
             {
-                return true;
+                return "storage-image";
             }
         }
 
@@ -329,12 +372,12 @@ public sealed partial class RenderExecutor
             {
                 if (descriptor.Kind == SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare)
                 {
-                    return true;
+                    return "gds";
                 }
             }
         }
 
-        return false;
+        return null;
     }
 
     private void SetDrawDebugPhase(ulong submitId, in DrawCall draw, uint phase) =>

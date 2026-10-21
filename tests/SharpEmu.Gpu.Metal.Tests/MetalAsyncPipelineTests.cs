@@ -16,8 +16,8 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// out builds a queued compile itself, an untaken result is dropped, teardown does not wait
 /// for queued compiles, and a compile in flight keeps its modules through the shader cache
 /// bound. Which targets count as rebuilt every frame, and that a draw into any other target
-/// waits for its pipeline, serving the guest stores that wait for a writeback meanwhile.
-/// Scenes are behind the exclusive device gate.
+/// waits for its pipeline - unless, in wide mode, passes drew into it every frame - serving the
+/// guest stores that wait for a writeback meanwhile. Scenes are behind the exclusive device gate.
 /// </summary>
 public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTestBase(output)
 {
@@ -315,6 +315,105 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
         // And the draw that waited was drawn.
         Assert.Equal(0xFF00FF00u, SceneDraws.Pixel(rig.ReadImage(other, size, size), size, size / 2, size / 2));
         Assert.Empty(rig.Fatals);
+    }
+
+    // Wide mode (SHARPEMU_METAL_V2_ASYNC_GRAPHICS=wide): a target passes drew into in each of the last
+    // frames, never cleared, takes a draw left out while its pipeline compiles; a later frame draws it.
+    [Fact]
+    public void InWideModeADrawIntoATargetDrawnEveryFrameIsLeftOutWhileItsPipelineCompiles()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const uint size = 16;
+        const uint red = 0xFF0000FFu, yellow = 0xFF00FFFFu;
+        rig.Host.AsynchronousGraphics = true;
+        rig.Host.AsynchronousWide = true;
+        var target = rig.ColorTarget(size, size);
+        SceneState Target() => new SceneState(size, size).ColorTarget(0, target, size, size);
+        var additive = Target();
+        additive.Context[Cx.CbBlend0Control] = 1u | (1u << 8) | (1u << 16) | (1u << 30);
+        uint Frame(bool green)
+        {
+            rig.Host.NoteFlipForCompilingDraws();
+            var pm4 = rig.DrawMesh(new ScenePm4(), Target(), SceneDraws.Quad(0.5f, 1, 0, 0));
+            rig.Submit(green ? rig.DrawMesh(pm4, additive, SceneDraws.Quad(0.5f, 0, 1, 0)) : pm4);
+            return SceneDraws.Pixel(rig.ReadImage(target, size, size), size, size / 2, size / 2);
+        }
+
+        // Red alone, one pipeline, in as many frames as the rule looks back.
+        for (var frame = 0; frame < MetalRenderHost.RebuiltFrames; frame++)
+        {
+            Assert.Equal(red, Frame(green: false));
+        }
+
+        using var gate = new ManualResetEventSlim(false);
+        rig.Host.PipelineCompiler.Gate = gate;
+        Assert.Equal(red, Frame(green: true));
+        Assert.Equal(1, rig.Host.CompilingDrawCounters.Skipped);
+
+        gate.Set();
+        Assert.True(SpinWait.SpinUntil(() => Frame(green: true) == yellow, Patience));
+        Assert.Empty(rig.Fatals);
+    }
+
+    // Wide mode counts a depth target whose depth every frame clears, its stencil loaded (Grand Theft Auto V's);
+    // outside wide mode nothing is noted.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void InWideModeADepthTargetIsCountedWhenEachFrameClearsItsDepth(bool wide)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var host = rig.Host;
+        host.AsynchronousGraphics = true;
+        host.AsynchronousWide = wide;
+        var depth = new MetalRenderHost.TargetSubresource(0x2000, 0, 0);
+        var missedOne = new MetalRenderHost.TargetSubresource(0x2000, 0, 1);
+        for (var frame = 0; frame < MetalRenderHost.RebuiltFrames; frame++)
+        {
+            host.NoteFlipForCompilingDraws();
+            host.NoteDepthCleared(depth);
+            if (frame != 1)
+            {
+                host.NoteDepthCleared(missedOne);
+            }
+        }
+
+        Assert.Equal(wide, host.DepthClearedEveryFrame(depth));
+        Assert.False(host.DepthClearedEveryFrame(missedOne));
+        Assert.False(host.RebuiltEveryFrame(depth));
+    }
+
+    // Without wide mode the same target, never cleared, waits for the pipeline.
+    [Fact]
+    public void WithoutWideModeATargetOnlyDrawnEveryFrameWaitsForThePipeline()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const uint size = 16;
+        rig.Host.AsynchronousGraphics = true;
+        rig.Host.AsynchronousWide = false;
+        var target = rig.ColorTarget(size, size);
+        SceneState Target() => new SceneState(size, size).ColorTarget(0, target, size, size);
+        for (var frame = 0; frame < MetalRenderHost.RebuiltFrames; frame++)
+        {
+            rig.Host.NoteFlipForCompilingDraws();
+            rig.Submit(rig.DrawMesh(new ScenePm4(), Target(), SceneDraws.Quad(0.5f, 1, 0, 0)));
+        }
+
+        using var gate = new ManualResetEventSlim(false);
+        rig.Host.PipelineCompiler.Gate = gate;
+        var additive = Target();
+        additive.Context[Cx.CbBlend0Control] = 1u | (1u << 8) | (1u << 16) | (1u << 30);
+        rig.Host.NoteFlipForCompilingDraws();
+        var pm4 = rig.DrawMesh(new ScenePm4(), Target(), SceneDraws.Quad(0.5f, 1, 0, 0));
+        rig.Submit(rig.DrawMesh(pm4, additive, SceneDraws.Quad(0.5f, 0, 1, 0)));
+
+        Assert.Equal(0xFF00FFFFu, SceneDraws.Pixel(rig.ReadImage(target, size, size), size, size / 2, size / 2));
+        Assert.Equal(0, rig.Host.CompilingDrawCounters.Skipped);
+        Assert.Empty(rig.Fatals);
+        gate.Set();
     }
 
     [Fact]

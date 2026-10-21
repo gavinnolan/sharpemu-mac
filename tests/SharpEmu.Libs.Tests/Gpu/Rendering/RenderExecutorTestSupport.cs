@@ -230,6 +230,10 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool LeavesOutDrawsWhileCompiling { get; set; }
 
+    public bool LeavesOutDepthWritesWhileCompiling { get; set; }
+
+    public bool LeavesOutMipStatisticsWhileCompiling { get; set; }
+
     // The host's say on the targets: true stands in for targets rebuilt every frame.
     public bool TargetsRebuiltEveryFrame { get; set; } = true;
 

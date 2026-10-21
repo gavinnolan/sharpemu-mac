@@ -700,6 +700,7 @@ internal sealed partial class MetalRenderHost
     public PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description)
     {
         Interlocked.Increment(ref _pipelineWaitsBlocking);
+        NoteBlockingBuild();
         RequireDrawableDescription(description);
         // A draw that could be left out may have started this compile; it is waited for
         // rather than built a second time.

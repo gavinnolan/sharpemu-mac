@@ -2275,6 +2275,7 @@ internal sealed partial class MetalRenderHost :
             // (a miss it compiled itself, or a draw that could not be left out), and compiles
             // queued or running on the compiler threads now.
             $"draws_skipped_compiling={Interlocked.Exchange(ref _drawsSkippedCompiling, 0)} " +
+            $"leave_out=[{FormatLeaveOutCounters()}] " +
             $"pipeline_waits_blocking={Interlocked.Exchange(ref _pipelineWaitsBlocking, 0)} " +
             $"async_compiles_inflight={PipelinesCompiling} " +
             // Modules and pipeline states resident against made, and what the bound released.
