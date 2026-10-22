@@ -61,6 +61,14 @@ internal sealed partial class MetalImageCache
     /// <summary>Writebacks whose range is still watched for their submission.</summary>
     internal int FencedWritebackCount => Volatile.Read(ref _fencedWritebackCount);
 
+    /// <summary>
+    /// Writeback runs staged because no window held them whole, writebacks that left some
+    /// bytes behind, and writebacks that recorded nothing.
+    /// </summary>
+    internal (long StagedRuns, long Partial, long Unrecorded) WritebackCarryCounts =>
+        (Interlocked.Read(ref _stagedWritebackRuns), Interlocked.Read(ref _shortWritebacks),
+            Interlocked.Read(ref _unrecordedWritebacks));
+
     /// <summary>Guest stores that waited for a writeback, and the waits that gave up.</summary>
     internal (long Waits, long Timeouts) FenceWaitCounts =>
         (Interlocked.Read(ref _fenceWaits), Interlocked.Read(ref _fenceTimeouts));
@@ -75,13 +83,17 @@ internal sealed partial class MetalImageCache
     /// <summary>The CHURN line's fence counters since the last call.</summary>
     public string TakeWritebackFenceCounters()
     {
+        FlushUnwrittenWritebackReports();
         var added = Interlocked.Exchange(ref _fencedWritebacksAdded, 0);
         var waits = Interlocked.Exchange(ref _fenceWaits, 0);
         var ticks = Interlocked.Exchange(ref _fenceWaitTicks, 0);
         var timeouts = Interlocked.Exchange(ref _fenceTimeouts, 0);
         var waitMs = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         return $" wb_fenced={added} wb_fence_live={FencedWritebackCount} wb_fence_waits={waits} " +
-            $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts}";
+            $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts} " +
+            $"wb_staged_runs_total={Interlocked.Read(ref _stagedWritebackRuns)} " +
+            $"wb_partial_total={Interlocked.Read(ref _shortWritebacks)} " +
+            $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)}" + StorePublishCounterText();
     }
 
     // The writeback of these bytes was just recorded into the submission with this serial.

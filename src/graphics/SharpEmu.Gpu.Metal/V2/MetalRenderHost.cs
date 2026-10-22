@@ -1265,6 +1265,18 @@ internal sealed partial class MetalRenderHost :
         return _completions.WaitForSignalled(serial, timeoutMilliseconds);
     }
 
+    bool IMetalImageCacheOwner.TryRunOnWorker(Action work) => !_relay.IsGpuQueueThread && _relay.TryPost(work);
+
+    bool IMetalImageCacheOwner.IsWorkerThread => _relay.IsGpuQueueThread;
+
+    void IMetalImageCacheOwner.CommitRecorded()
+    {
+        if (_commandBuffer != 0)
+        {
+            FlushCommandBuffer(MetalFlushCause.WaitUncommitted);
+        }
+    }
+
     private ulong _commitRequestedSerial;
 
     // One relay command per serial however many stores wait for it.
