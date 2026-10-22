@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 
@@ -56,7 +57,7 @@ public sealed record ShaderCorpusRecord
         }, Hash, UserData, UserDataBase, Stage) { ExcludedUserDataRegisters = ExcludedUserDataRegisters };
 }
 
-// SHARPEMU_SHADER_CORPUS_DIR: every distinct program is written before its translation is
+// SHARPEMU_SHADER_CORPUS_DIR (a path, or 1 for shader-corpus under the logs folder): every distinct program is written before its translation is
 // attempted, so a run that dies on the first shader the translator rejects still leaves the
 // whole set that was submitted up to that point. File = header, the prewarm list's code record
 // (the guest bytes), then the rest of the translation inputs as JSON.
@@ -68,9 +69,7 @@ public static class ShaderCorpus
     private const uint Magic = 0x50434553;
     private const uint FormatVersion = 1;
 
-    private static string? CorpusDirectory = Environment.GetEnvironmentVariable(DirectoryVariable) is { Length: > 0 } directory
-        ? directory
-        : null;
+    private static string? CorpusDirectory = SharpEmuPaths.ResolveDumpPath(DirectoryVariable, "shader-corpus");
 
     private static readonly object Gate = new();
     private static readonly HashSet<string> Written = [];

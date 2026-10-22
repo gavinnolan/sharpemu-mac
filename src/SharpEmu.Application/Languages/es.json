@@ -81,6 +81,9 @@
   "Options.LogToFile.Label": "Registrar log en archivo",
   "Options.LogToFile.Desc": "Duplicar la salida del emulador en un archivo de logs.",
 
+  "Options.LogsFolder.Label": "Carpeta de registros",
+  "Options.LogsFolder.Desc": "Todos los registros, trazas y volcados: {0} ({1})",
+  "Options.LogsFolder.Open": "Abrir",
   "Options.LogFilePath.Label": "Ruta del archivo de Log",
   "Options.LogFilePath.Default": "Sin ruta personalizada — los logs van a user/logs al lado del emulador.",
   "Options.LogFilePath.Select": "Seleccionar…",

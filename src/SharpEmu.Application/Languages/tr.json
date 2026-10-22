@@ -106,6 +106,9 @@
   "Options.LogToFile.Label": "Dosyaya günlükle",
   "Options.LogToFile.Desc": "Emülatör çıktısını bir günlük dosyasına yansıt.",
 
+  "Options.LogsFolder.Label": "Günlük klasörü",
+  "Options.LogsFolder.Desc": "Tüm günlükler, izlemeler ve dökümler: {0} ({1})",
+  "Options.LogsFolder.Open": "Aç",
   "Options.LogFilePath.Label": "Günlük dosyası yolu",
   "Options.LogFilePath.Default": "Özel yol yok — günlükler emülatörün yanındaki user/logs klasörüne yazılır.",
   "Options.LogFilePath.Select": "Seç…",

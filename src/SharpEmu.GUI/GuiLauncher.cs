@@ -44,8 +44,10 @@ public static class GuiLauncher
     {
         try
         {
+            var crashLogPath = SharpEmuPaths.LogsPath("gui-crash.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(crashLogPath)!);
             File.AppendAllText(
-                SharpEmuPaths.DataPath("gui-crash.log"),
+                crashLogPath,
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}{Environment.NewLine}{Environment.NewLine}");
         }
         catch (Exception)

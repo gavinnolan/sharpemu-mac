@@ -35,7 +35,7 @@ shutdown is not available when the process stops through `FailFast`.
 Set `SHARPEMU_SNAPSHOT_PIXEL_HASH` to a hexadecimal pixel shader hash before launch.
 The Vulkan renderer saves inputs before, and color outputs after, the first two
 matching draws. The default is off. RenderDoc and image-clear tracing are not required.
-Files are under `user/logs/image-snapshots/<session>` beside the executable.
+Files are under `image-snapshots/<session>` in the logs folder (`user/logs` in the data root, or `SHARPEMU_LOG_DIR`).
 Each tightly packed `.bin` file has a `.json` manifest with format, extent,
 guest address, byte size, and scheduler tick. Input numbers are shader image indices.
 
@@ -284,7 +284,7 @@ use `SHARPEMU_WATCH_WRITE` from [guest write watch](guest-write-watch.md) on one
 
 Set `SHARPEMU_DUMP_VOLUME_UPLOADS=1` to save paired GPU upload snapshots.
 The default is off. Each pair contains the tiled source, the linear result, and a JSON
-layout record. Files are under `user/logs/volume-uploads`, in a unique session directory.
+layout record. Files are under `volume-uploads` in the logs folder, in a unique session directory.
 The `.backing.bin` file records guest backing bytes before buffer acquisition, when readable.
 The manifest identifies the selected GPU buffer usage. Backing bytes can differ from newer
 GPU-owned data. The image-clear trace also records raw 3D descriptors in little-endian byte order.

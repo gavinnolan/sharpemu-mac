@@ -106,6 +106,15 @@ Details are in [Performance display](../performance-overlay.md).
 
 - With `--log-file` the CLI also mirrors the console to a file. Without a path
   it uses `user/logs/<title ID>-<yyyyMMdd-HHmmss>.log` under the data root.
+- Everything diagnostic goes under `user/logs/` in the data root
+  (`~/Library/Application Support/SharpEmu/user/logs` for the app bundle):
+  run logs, `gui-crash.log`, and the subfolders `videoout`, `shader-dumps`,
+  `msl-dumps`, `metal-targets`, `metal-bc-uploads`, `guest-images`,
+  `shader-corpus`, `dstrace`, `game_logs/<title ID>` (the guest's `/devlog/app`
+  and `/hostapp`), `capture_logs`, `image-snapshots` and `volume-uploads`.
+  `SHARPEMU_LOG_DIR` moves the whole folder. The dump variables that take a
+  path (for example `SHARPEMU_METAL_V2_DUMP_TARGETS`) also accept `1`, which
+  writes to the default subfolder; an explicit path still goes where you name it.
 - `--log-level` takes a level name such as `trace`, `debug`, `info`, `warn`,
   `error`.
 - Log lines are tagged by subsystem. The Metal backend writes `[METAL-V2]`
@@ -130,7 +139,7 @@ SharpEmu writes everything under one data root:
 | `gui-settings.json` | GUI settings |
 | `user/custom_configs/<title ID>.json` | Per-game settings |
 | `user/custom_envs.json` | Global custom environment variables |
-| `user/logs/` | Log files |
+| `user/logs/` | Logs, traces, crash dumps and shader and frame dumps (`SHARPEMU_LOG_DIR` moves it) |
 | `user/savedata/<title ID>/` | Save data (`SHARPEMU_SAVEDATA_DIR` moves it) |
 | `user/patches/` | Game patches |
 | `user/zar-cache/` | Unpacked parts of `.zar` archives |

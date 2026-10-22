@@ -94,6 +94,9 @@
   "Options.LogToFile.Label": "Registar para ficheiro",
   "Options.LogToFile.Desc": "Duplicar a saída do emulador para um ficheiro de registo.",
 
+  "Options.LogsFolder.Label": "Pasta de registos",
+  "Options.LogsFolder.Desc": "Todos os registos, rastreios e dumps: {0} ({1})",
+  "Options.LogsFolder.Open": "Abrir",
   "Options.LogFilePath.Label": "Caminho do ficheiro de registo",
   "Options.LogFilePath.Default": "Sem caminho personalizado — os registos vão para user/logs junto ao emulador.",
   "Options.LogFilePath.Select": "Selecionar…",

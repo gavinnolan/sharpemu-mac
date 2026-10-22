@@ -504,7 +504,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var dumpPath = _pendingShaderModuleDumpPath;
                 var dumpHint = dumpPath is null
-                    ? "Set SHARPEMU_SHADER_SPIRV_DUMP_DIR to a directory to "
+                    ? "Set SHARPEMU_SHADER_SPIRV_DUMP_DIR to 1 (or a directory) to "
                         + "capture every module's .spv bytes for offline "
                         + "spirv-dis/spirv-val analysis."
                     : $"Dumped module for this failure: {dumpPath}";

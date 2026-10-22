@@ -8,6 +8,7 @@ namespace SharpEmu.Gpu.Vulkan.Presentation;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Gpu.Images;
 using Silk.NET.Vulkan;
+using SharpEmu.Logging;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
 internal static unsafe partial class VulkanVideoPresenter
@@ -740,8 +741,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"nonblack_pixels={nonblackPixels}/{(ulong)_extent.Width * _extent.Height} " +
                     $"hash=0x{hash:X16}");
 
-                var dumpDir = Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_DUMP_DIR");
-                if (!string.IsNullOrWhiteSpace(dumpDir))
+                var dumpDir = SharpEmuPaths.ResolveDumpPath("SHARPEMU_GUEST_IMAGE_DUMP_DIR", "guest-images");
+                if (dumpDir is not null)
                 {
                     Directory.CreateDirectory(dumpDir);
                     var seq = Interlocked.Increment(ref _guestImageDumpSequence);

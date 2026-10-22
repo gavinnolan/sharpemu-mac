@@ -81,6 +81,9 @@
   "Options.LogToFile.Label": "In Datei protokollieren",
   "Options.LogToFile.Desc": "Emulator-Ausgabe zusätzlich in eine Log-Datei schreiben.",
 
+  "Options.LogsFolder.Label": "Log-Ordner",
+  "Options.LogsFolder.Desc": "Alle Logs, Traces und Dumps: {0} ({1})",
+  "Options.LogsFolder.Open": "Öffnen",
   "Options.LogFilePath.Label": "Protokolldatei-Pfad",
   "Options.LogFilePath.Default": "Kein benutzerdefinierter Pfad – Logs werden im Ordner user/logs neben dem Emulator gespeichert.",
   "Options.LogFilePath.Select": "Auswählen…",

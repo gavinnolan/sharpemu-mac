@@ -241,7 +241,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
         };
     }
 
-    private static string FormatSize(long bytes)
+    internal static string FormatSize(long bytes)
     {
         return bytes switch
         {

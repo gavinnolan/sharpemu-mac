@@ -193,6 +193,55 @@ public static class SharpEmuPaths
     public static string UserPath(params string[] parts) =>
         Path.Combine([DataRoot, "user", .. parts]);
 
+    /// <summary>Environment variable that moves <see cref="LogsRoot"/> elsewhere.</summary>
+    public const string LogDirectoryVariable = "SHARPEMU_LOG_DIR";
+
+    /// <summary>
+    /// Resolves the directory every log, trace, capture and dump goes under
+    /// for a process whose data root is <paramref name="dataRoot"/>:
+    /// <c>SHARPEMU_LOG_DIR</c> when set, otherwise <c>&lt;data root&gt;/user/logs</c>.
+    /// </summary>
+    public static string ResolveLogsRoot(string dataRoot)
+    {
+        var configured = Environment.GetEnvironmentVariable(LogDirectoryVariable);
+        return string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(dataRoot, "user", "logs")
+            : Path.GetFullPath(configured);
+    }
+
+    /// <summary>
+    /// The one directory that holds everything diagnostic this process
+    /// writes: run logs, traces, crash dumps, shader and frame dumps,
+    /// captures. Keeping them together means a user who wonders where disk
+    /// space went has exactly one folder to look in.
+    /// </summary>
+    public static string LogsRoot { get; } = ResolveLogsRoot(DataRoot);
+
+    /// <summary>Combines <paramref name="parts"/> onto <see cref="LogsRoot"/>.</summary>
+    public static string LogsPath(params string[] parts) =>
+        parts.Length == 0 ? LogsRoot : Path.Combine([LogsRoot, .. parts]);
+
+    /// <summary>
+    /// Resolves a dump file or directory from an environment variable that
+    /// both enables the dump and may name where it goes. Unset, empty,
+    /// <c>0</c>, <c>false</c> or <c>off</c> returns null (dump off). <c>1</c>,
+    /// <c>true</c> or <c>on</c> returns <see cref="LogsPath"/> of
+    /// <paramref name="defaultParts"/>. Anything else is an explicit path and
+    /// is honoured as given.
+    /// </summary>
+    public static string? ResolveDumpPath(string variable, params string[] defaultParts)
+    {
+        var value = Environment.GetEnvironmentVariable(variable)?.Trim();
+        if (string.IsNullOrEmpty(value) || value == "0" ||
+            value.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("off", StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("on", StringComparison.OrdinalIgnoreCase))
+            return LogsPath(defaultParts);
+        return Path.GetFullPath(value);
+    }
+
     /// <summary>
     /// Finds the <c>*.app</c> directory enclosing <paramref name="baseDirectory"/>.
     /// </summary>

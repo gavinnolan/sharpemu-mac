@@ -81,6 +81,9 @@
   "Options.LogToFile.Label": "التسجيل في ملف",
   "Options.LogToFile.Desc": "نسخ مخرجات المحاكي إلى ملف سجل.",
 
+  "Options.LogsFolder.Label": "مجلد السجلات",
+  "Options.LogsFolder.Desc": "كل السجلات والتتبعات والتفريغات: {0} ({1})",
+  "Options.LogsFolder.Open": "فتح",
   "Options.LogFilePath.Label": "مسار ملف السجل",
   "Options.LogFilePath.Default": "لا يوجد مسار مخصص — تُحفظ السجلات في user/logs بجوار المحاكي.",
   "Options.LogFilePath.Select": "تحديد...",

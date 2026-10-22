@@ -81,6 +81,9 @@
   "Options.LogToFile.Label": "Log til fil",
   "Options.LogToFile.Desc": "Spejl emulatorens output til en logfil.",
 
+  "Options.LogsFolder.Label": "Logmappe",
+  "Options.LogsFolder.Desc": "Alle logfiler, sporinger og dumps: {0} ({1})",
+  "Options.LogsFolder.Open": "Åbn",
   "Options.LogFilePath.Label": "Sti til logfil",
   "Options.LogFilePath.Default": "Ingen brugerdefineret sti — logs gemmes i user/logs ved siden af emulatoren.",
   "Options.LogFilePath.Select": "Vælg…",

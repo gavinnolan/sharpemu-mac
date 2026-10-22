@@ -81,6 +81,9 @@
   "Options.LogToFile.Label": "ファイルに保存",
   "Options.LogToFile.Desc": "エミュレータの出力をログファイルにコピーします。",
 
+  "Options.LogsFolder.Label": "ログフォルダー",
+  "Options.LogsFolder.Desc": "すべてのログ、トレース、ダンプ: {0} ({1})",
+  "Options.LogsFolder.Open": "開く",
   "Options.LogFilePath.Label": "ログファイルのパス",
   "Options.LogFilePath.Default": "カスタムパスなし — ログはエミュレータと同じ場所の user/logs フォルダーに保存されます。",
   "Options.LogFilePath.Select": "選択…",

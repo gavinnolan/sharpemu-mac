@@ -127,8 +127,10 @@ SharpEmu.app/Contents/MacOS/SharpEmu "/path/to/game/eboot.bin" --log-file
 - A `.zar` archive of a whole game folder, with `eboot.bin` at its root. The GUI
   can pack a game folder into a `.zar`.
 
-Settings, logs, save data and shader caches live under one data root. Inside
-`SharpEmu.app` that is `~/Library/Application Support/SharpEmu`; see
+Settings, save data and shader caches live under one data root. Inside
+`SharpEmu.app` that is `~/Library/Application Support/SharpEmu`. Every log,
+trace, crash dump and shader or frame dump goes under `user/logs/` in that data
+root; `SHARPEMU_LOG_DIR` moves it. See
 [Running games on macOS](docs/macos/running-games.md) for the full usage line,
 the data folder, controls, and the performance display. Game patches are described in
 [Game patches](docs/patches.md), and environment variables in

@@ -131,6 +131,9 @@
   "Options.LogToFile.Label": "Jurnalı fayla yaz",
   "Options.LogToFile.Desc": "Emulyatorun çıxışını jurnal faylına da yazın.",
 
+  "Options.LogsFolder.Label": "Jurnallar qovluğu",
+  "Options.LogsFolder.Desc": "Bütün jurnallar, izləmələr və dampalar: {0} ({1})",
+  "Options.LogsFolder.Open": "Aç",
   "Options.LogFilePath.Label": "Jurnal faylının yolu",
   "Options.LogFilePath.Default": "Fərdi yol yoxdur. Jurnallar emulyatorun yanındakı user/logs qovluğuna yazılır.",
   "Options.LogFilePath.Select": "Seç…",

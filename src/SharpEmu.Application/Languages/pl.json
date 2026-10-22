@@ -144,6 +144,9 @@
   "Options.LogToFile.Label": "Loguj do pliku",
   "Options.LogToFile.Desc": "Kopiuj wyjście emulatora do pliku logu.",
 
+  "Options.LogsFolder.Label": "Folder logów",
+  "Options.LogsFolder.Desc": "Wszystkie logi, ślady i zrzuty: {0} ({1})",
+  "Options.LogsFolder.Open": "Otwórz",
   "Options.LogFilePath.Label": "Ścieżka pliku logu",
   "Options.LogFilePath.Default": "Brak niestandardowej ścieżki — logi trafiają do user/logs obok emulatora.",
   "Options.LogFilePath.Select": "Wybierz…",

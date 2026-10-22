@@ -96,6 +96,9 @@
   "Options.LogToFile.Label": "Enregistrer dans un fichier",
   "Options.LogToFile.Desc": "Copier la sortie de l’émulateur dans un fichier journal.",
 
+  "Options.LogsFolder.Label": "Dossier des journaux",
+  "Options.LogsFolder.Desc": "Tous les journaux, traces et dumps : {0} ({1})",
+  "Options.LogsFolder.Open": "Ouvrir",
   "Options.LogFilePath.Label": "Chemin du fichier journal",
   "Options.LogFilePath.Default": "Aucun chemin personnalisé — les journaux sont enregistrés dans user/logs à côté de l’émulateur.",
   "Options.LogFilePath.Select": "Sélectionner…",

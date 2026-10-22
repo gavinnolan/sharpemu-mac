@@ -140,6 +140,9 @@
   "Options.LogToFile.Label": "Запись лога в файл",
   "Options.LogToFile.Desc": "Дублировать вывод эмулятора в файл лога.",
 
+  "Options.LogsFolder.Label": "Папка логов",
+  "Options.LogsFolder.Desc": "Все логи, трассировки и дампы: {0} ({1})",
+  "Options.LogsFolder.Open": "Открыть",
   "Options.LogFilePath.Label": "Путь к файлу лога",
   "Options.LogFilePath.Default": "Пользовательский путь не задан: логи сохраняются в user/logs рядом с эмулятором.",
   "Options.LogFilePath.Select": "Выбрать…",

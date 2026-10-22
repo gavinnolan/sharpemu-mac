@@ -30,8 +30,7 @@ internal sealed partial class ShaderPipelineCache
         try
         {
             if (Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SKIPPED_GRAPHICS") != "1") return;
-            var directory = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_SPIRV_DUMP_DIR");
-            if (string.IsNullOrWhiteSpace(directory)) return;
+            var directory = CompiledShaderDump.GetDirectory();
             captureDirectory = directory;
             lock (_gate)
             {

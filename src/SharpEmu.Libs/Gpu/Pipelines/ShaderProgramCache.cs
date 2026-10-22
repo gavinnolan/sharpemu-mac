@@ -1524,14 +1524,17 @@ internal static class CompiledShaderDump
         return true;
     }
 
+    /// <summary>
+    /// The shader dump folder: <c>SHARPEMU_SHADER_SPIRV_DUMP_DIR</c> when it
+    /// names a path, otherwise <c>shader-dumps</c> under the logs root.
+    /// </summary>
+    internal static string GetDirectory() =>
+        SharpEmuPaths.ResolveDumpPath("SHARPEMU_SHADER_SPIRV_DUMP_DIR", "shader-dumps")
+        ?? SharpEmuPaths.LogsPath("shader-dumps");
+
     internal static string GetBasePath(string stage, ulong shaderAddress, ulong hash)
     {
-        var directory = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_SPIRV_DUMP_DIR");
-        if (string.IsNullOrWhiteSpace(directory))
-        {
-            directory = SharpEmuPaths.DataPath("shader-dumps");
-        }
-
+        var directory = GetDirectory();
         Directory.CreateDirectory(directory);
         return Path.Combine(directory, $"{shaderAddress:X16}-{hash:X16}.{stage}");
     }
