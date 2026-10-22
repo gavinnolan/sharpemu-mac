@@ -69,6 +69,9 @@ internal sealed partial class MetalImageCache
     /// Writeback runs staged because no window held them whole, writebacks that left some
     /// bytes behind, and writebacks that recorded nothing.
     /// </summary>
+    /// <summary>Upload pieces the transfer refused, which reached nothing.</summary>
+    internal long RefusedUploads => Interlocked.Read(ref _refusedUploads);
+
     internal (long StagedRuns, long Partial, long Unrecorded) WritebackCarryCounts =>
         (Interlocked.Read(ref _stagedWritebackRuns), Interlocked.Read(ref _shortWritebacks),
             Interlocked.Read(ref _unrecordedWritebacks));
@@ -97,7 +100,8 @@ internal sealed partial class MetalImageCache
             $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts} " +
             $"wb_staged_runs_total={Interlocked.Read(ref _stagedWritebackRuns)} " +
             $"wb_partial_total={Interlocked.Read(ref _shortWritebacks)} " +
-            $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)}" + StorePublishCounterText();
+            $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)} " +
+            $"upload_refused_total={Interlocked.Read(ref _refusedUploads)}" + StorePublishCounterText();
     }
 
     // The writeback of these bytes was just recorded into the submission with this serial.

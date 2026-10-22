@@ -655,19 +655,21 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return usage;
     }
 
-    public void EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
+    public bool EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
         ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0)
     {
-        EncodeGuestToTextureCore(
+        var encoded = EncodeGuestToTextureCore(
             context, description, range, source, stencilSource, texture, guestBase, pieceSize, textureFirstLevel);
-        if (textureFirstLevel == 0)
+        if (encoded && textureFirstLevel == 0)
         {
             MetalBlockCubeDump.Capture(context, _tiler, description, source, texture, guestBase, pieceSize);
         }
+
+        return encoded;
     }
 
-    private void EncodeGuestToTextureCore(IMetalSubmissionContext context, in ImageDescription description,
+    private bool EncodeGuestToTextureCore(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
         ulong guestBase, ulong pieceSize, uint textureFirstLevel)
     {
@@ -675,7 +677,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         // leaves a multisampled image untouched too.
         if (!Ready(context, description, source, texture, guestBase, pieceSize))
         {
-            return;
+            return false;
         }
 
         var plan = PlanFor(description);
@@ -689,19 +691,19 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
 
             EncodeDepthUpload(context, description, plan, range, source, stencilSource, texture, guestBase, pieceSize);
-            return;
+            return true;
         }
 
         Select(plan, description, range, guestBase, pieceSize, textureFirstLevel);
         if (_copies.Count == 0)
         {
-            return;
+            return true;
         }
 
         if (TryEncodeTextureTiles(context, plan, texture, description.Data.Address + guestBase,
                 new MetalBufferSpan(source.Buffer, source.Offset, TiledCapacity(source)), MetalTileDirection.Detile))
         {
-            return;
+            return true;
         }
 
         var linear = StageUpload(context, plan, source, out var tight);
@@ -718,6 +720,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         MetalTiler.EndEncoding(encoder);
+
+        return true;
     }
 
     // Where one subresource's rows sit in the buffer a blit reads or writes. A tight

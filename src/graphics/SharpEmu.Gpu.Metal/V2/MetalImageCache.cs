@@ -2071,16 +2071,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var whole = residentSize <= TransferPieceBytes
             ? _guestMemory.Resolve(description.Data.Address + residentStart, residentSize)
             : default;
+        bool moved;
         if (whole.IsValid && whole.Size >= residentSize)
         {
             var stencil = description.HasStencil
                 ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
                 : default;
-            _transfer.EncodeGuestToTexture(
+            moved = EncodeUpload(
                 context, in description, ResidentRange(image), whole, stencil, image.Texture,
                 residentStart, residentSize, image.FirstLevel);
         }
-        else if (!UploadInPieces(context, image))
+        else
+        {
+            moved = UploadInPieces(context, image);
+        }
+
+        if (!moved)
         {
             // Nothing reached the texture, so it still disagrees with guest memory: the
             // image stays CPU-dirty and the next use tries again, rather than sampling
@@ -2137,9 +2143,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         PrepareSparseUpload(image, start, end);
         _owner.LandHeldCopies(description.Data.Address + start, end - start);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-        _transfer.EncodeGuestToTexture(
-            context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
-            image.FirstLevel);
+        if (!EncodeUpload(
+                context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
+                image.FirstLevel))
+        {
+            // Nothing reached the texture; the whole refresh decides what becomes of the image.
+            return false;
+        }
+
         _uploadCauses[(int)image.DirtyCause]++;
         _partialUploads++;
         _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
@@ -2246,10 +2257,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var stencil = description.HasStencil
                 ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
                 : default;
-            _transfer.EncodeGuestToTexture(
+            return EncodeUpload(
                 context, in description, ResidentRange(image), source, stencil, image.Texture,
                 residentStart, residentSize, image.FirstLevel);
-            return true;
         }
 
         var batch = (uint)Math.Clamp(TransferPieceBytes / layerBytes, 1, layers);
@@ -2283,12 +2293,34 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     description.Stencil.Address + (stencilLayerBytes * first), stencilLayerBytes * count)
                 : default;
             var range = new SubresourceRange(0, description.Resources.Levels, first, count);
-            _transfer.EncodeGuestToTexture(
+            moved |= EncodeUpload(
                 context, in description, range, piece, stencilPiece, image.Texture, pieceBase, pieceSize);
-            moved = true;
         }
 
         return moved;
+    }
+
+    // One upload piece. One the transfer refused (a multisampled image, a source shorter than
+    // the piece) reached nothing, so it is counted and named, and the caller treats those
+    // bytes as not uploaded.
+    private bool EncodeUpload(
+        IMetalSubmissionContext context, in ImageDescription description, SubresourceRange range,
+        MetalGuestRange source, MetalGuestRange stencil, nint texture, ulong guestBase, ulong pieceSize,
+        uint textureFirstLevel = 0)
+    {
+        if (_transfer.EncodeGuestToTexture(
+                context, in description, range, source, stencil, texture, guestBase, pieceSize, textureFirstLevel))
+        {
+            return true;
+        }
+
+        Interlocked.Increment(ref _refusedUploads);
+        MetalV2Diagnostics.WarnOnce(
+            $"upload-refused:{description.PixelFormat}:{description.Samples}:{description.TileMode}",
+            "An image upload encoded nothing, so the texture does not hold the guest's bytes there and the " +
+            $"image stays stale over them: address=0x{description.Data.Address:X16} piece=0x{guestBase:X}+0x{pieceSize:X} " +
+            $"{ProfileLabel("upload", in description)}.");
+        return false;
     }
 
     // A GPU-written image stale over a run an alias took from it holds old bytes there,
@@ -2649,9 +2681,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     description.Stencil.Address + (stencilLayerBytes * (run.Offset / layerBytes)),
                     stencilLayerBytes * Math.Max(1UL, run.Size / layerBytes))
                 : default;
-            _transfer.EncodeGuestToTexture(
-                context, in description, range, source with { Size = run.Size }, stencil, image.Texture,
-                run.Offset, run.Size, image.FirstLevel);
+            if (!EncodeUpload(
+                    context, in description, range, source with { Size = run.Size }, stencil, image.Texture,
+                    run.Offset, run.Size, image.FirstLevel))
+            {
+                uncovered += run.Size;
+                continue;
+            }
+
             moved += run.Size;
             staged += run.Staged ? run.Size : 0;
         }
@@ -2849,6 +2886,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private long _stagedWritebackRuns;
     private long _shortWritebacks;
     private long _unrecordedWritebacks;
+    private long _refusedUploads;
     private readonly long[] _releaseCauses = new long[11];
 
     private static readonly string[] _releaseCauseNames =

@@ -477,8 +477,39 @@ public sealed partial class MetalImageBudgetTests
         Assert.Equal((0L, 0L, 1L), rig.Cache.WritebackCarryCounts);
     }
 
-    // A 64² RGBA8 colour target with two samples a texel.
-    private static ResourceSlotIdentifier AcquireMultisampledTarget(Rig rig, ulong address)
+    // The transfer refuses to upload a multisampled image too. It used to be marked current
+    // all the same, sampled as though the texture held the guest's bytes; it stays stale
+    // now, each use tries again, and every refused piece is counted.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUploadTheTransferRefusesLeavesTheImageStale(bool scattered)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, layout: backing =>
+        {
+            if (scattered)
+            {
+                backing.ScatterStart = GuestBase;
+                backing.ScatterBytes = ImageSize * 2;
+                backing.ScatterChunk = 0x1000;
+            }
+        });
+        rig.WriteGuest(GuestBase, MetalTileOracle.Pattern((int)ImageSize * 2, 0x5A));
+
+        var identifier = AcquireMultisampledTarget(rig, GuestBase, ImageRole.Texture);
+        Assert.True(rig.Cache.GetImage(identifier).IsCpuDirty);
+        var refused = rig.Cache.RefusedUploads;
+        Assert.True(refused > 0);
+
+        Assert.Equal(identifier, AcquireMultisampledTarget(rig, GuestBase, ImageRole.Texture));
+        Assert.True(rig.Cache.GetImage(identifier).IsCpuDirty);
+        Assert.True(rig.Cache.RefusedUploads > refused);
+    }
+
+    // A 64² RGBA8 colour target (or texture) with two samples a texel.
+    private static ResourceSlotIdentifier AcquireMultisampledTarget(
+        Rig rig, ulong address, ImageRole role = ImageRole.ColorTarget)
     {
         const ulong size = ImageSize * 2;
         var description = ImageDescription.Create();
@@ -499,11 +530,19 @@ public sealed partial class MetalImageBudgetTests
             Type = GpuImageViewType.Type2D,
             Aspect = GpuImageAspect.ColorBit,
             LayerCount = 1,
-            Usage = GpuImageUsage.ColorAttachmentBit,
+            Usage = role == ImageRole.ColorTarget ? GpuImageUsage.ColorAttachmentBit : GpuImageUsage.SampledBit,
         };
-        var request = new ImageRequest(description, view, ImageRole.ColorTarget);
+        var request = new ImageRequest(description, view, role);
         var identifier = rig.Cache.FindImage(ref request);
-        rig.Cache.AcquireColorTargetView(identifier, request);
+        if (role == ImageRole.ColorTarget)
+        {
+            rig.Cache.AcquireColorTargetView(identifier, request);
+        }
+        else
+        {
+            rig.Cache.AcquireTextureView(identifier, request);
+        }
+
         return identifier;
     }
 

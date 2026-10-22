@@ -108,8 +108,10 @@ internal interface IMetalImageTransfer
     //
     // textureFirstLevel is the guest level the texture's level 0 holds (see ShapeFor):
     // range still names guest levels, which must all be at or past it, and each lands
-    // in texture level (guest level - textureFirstLevel).
-    void EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
+    // in texture level (guest level - textureFirstLevel). False when the transfer refused
+    // the piece and encoded nothing (a multisampled image, a source shorter than the piece):
+    // the texture still holds whatever it held, not the guest's bytes.
+    bool EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
         ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0);
 
