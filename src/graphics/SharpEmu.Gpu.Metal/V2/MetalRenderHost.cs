@@ -2292,6 +2292,9 @@ internal sealed partial class MetalRenderHost :
             $"leave_out=[{FormatLeaveOutCounters()}] " +
             $"pipeline_waits_blocking={Interlocked.Exchange(ref _pipelineWaitsBlocking, 0)} " +
             $"async_compiles_inflight={PipelinesCompiling} " +
+            // Read-aheads of the dispatches after one waiting on its pipeline, the dispatches
+            // whose pipelines they asked for, and their time on the worker.
+            $"lookahead=[{FormatLookaheadCounters()}] " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +

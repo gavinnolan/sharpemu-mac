@@ -178,6 +178,16 @@ public interface IShaderPipelineProvider
         Pipelines.ComputeProgramRetry retry) =>
         GetComputeProgram(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
 
+    // The program of a dispatch the stream has not reached, prepared as that dispatch will
+    // prepare it but consuming nothing (no adaptation kernel is submitted), so its pipeline can
+    // be asked for early. A provider that cannot prepare ahead says it is not available.
+    ComputeProgram PrepareComputeProgramAhead(
+        ComputeStageRegisters compute,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ) => new() { Available = false };
+
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;

@@ -598,6 +598,10 @@ public static partial class AgcExports
             throw _host.Fatal("The command stream has no render executor.");
         }
 
+        // A dispatch after one suspended on its pipeline, read ahead (ICommandStreamHost.PrefetchDispatchPipeline).
+        public void PrefetchDispatchPipeline(RegisterBanks banks, uint endX, uint endY, uint endZ, uint dispatchInitiator) =>
+            _executor?.PrefetchDispatchPipeline(banks, endX, endY, endZ, dispatchInitiator);
+
         private static void ExecuteDispatch(RenderExecutor executor, ulong submitId, RegisterBanks banks, uint endX, uint endY, uint endZ,
             uint dispatchInitiator, ulong indirectArgumentsAddress)
         {

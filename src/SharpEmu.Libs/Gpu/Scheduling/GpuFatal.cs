@@ -25,6 +25,25 @@ public static class GpuFatal
     public sealed class AbandonedWorkException(string message) : Exception(message);
 
     /// <summary>
+    /// Runs work done ahead of need on any thread with <see cref="ThrowOnFatal"/> set: a fatal
+    /// condition inside it abandons the work instead of ending the process, and whoever needs the
+    /// result does the work itself and fails on it if it is real.
+    /// </summary>
+    public static T Speculatively<T>(Func<T> work)
+    {
+        var previous = ThrowOnFatal;
+        ThrowOnFatal = true;
+        try
+        {
+            return work();
+        }
+        finally
+        {
+            ThrowOnFatal = previous;
+        }
+    }
+
+    /// <summary>
     /// Run once on this thread before a fatal ends the process. <see cref="OnFatal"/> fails
     /// fast, so neither an exception filter nor a catch above the throw ever sees the fatal;
     /// the command stream worker registers what it has to print while it runs a slice.

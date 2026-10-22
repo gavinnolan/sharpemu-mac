@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
@@ -1404,22 +1405,41 @@ internal sealed partial class MetalRenderHost
         var program = description.Program;
         var hash = description.Stage.Hash;
         // The library compile is waited for on the compiler thread too, not on the worker.
-        if (!Compiler.TryTake(
-                program.Id,
-                () =>
-                {
-                    var module = RequireModule(program, onWorker: false);
-                    return new MetalPipelineCompiler.Result(BuildComputePipelineState(module.Function, hash, module.ArchiveKey));
-                },
-                out var compiled,
-                $"cs=0x{hash:X16}"))
+        Func<MetalPipelineCompiler.Result> build = () =>
         {
+            var module = RequireModule(program, onWorker: false);
+            return new MetalPipelineCompiler.Result(BuildComputePipelineState(module.Function, hash, module.ArchiveKey));
+        };
+        if (_prefetchingPipeline)
+        {
+            // Asked for ahead of its dispatch, from registers that may yet change: a failure only
+            // abandons this compile, and the dispatch, if it asks, compiles it again itself.
+            var speculative = build;
+            build = () => GpuFatal.Speculatively(speculative);
+        }
+
+        MetalPipelineCompiler.Result? compiled;
+        try
+        {
+            if (!Compiler.TryTake(program.Id, build, out compiled, $"cs=0x{hash:X16}"))
+            {
+                return false;
+            }
+        }
+        catch (GpuFatal.AbandonedWorkException) when (!_prefetchingPipeline)
+        {
+            // A compile asked for ahead failed; this dispatch's own compile reports why.
+            _ = Compiler.TryTake(program.Id, build, out _, $"cs=0x{hash:X16}");
             return false;
         }
 
         handle = RegisterComputePipeline(description, LookupModule(program), compiled!.State);
         return true;
     }
+
+    // Set on the worker while it asks for the pipeline of a dispatch it has read ahead to.
+    [ThreadStatic]
+    private static bool _prefetchingPipeline;
 
     // Runs on the compile pool: MTLDevice is thread safe, and nothing here touches
     // the host's own state.

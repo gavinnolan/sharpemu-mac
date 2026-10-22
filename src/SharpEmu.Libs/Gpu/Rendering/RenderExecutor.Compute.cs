@@ -26,6 +26,29 @@ public sealed partial class RenderExecutor
     private const uint ImageClearStride = 16;
     private const uint ImageClearUserDataCount = 8;
 
+    // The pipeline of a dispatch the stream has not reached, asked for while an earlier dispatch
+    // waits on its own compile (GpuCommandInterpreter.PrefetchPipelinesAhead): the program is
+    // prepared as the dispatch will prepare it, and a pipeline the cache does not hold starts
+    // compiling beside the one waited for. Nothing is recorded. Pipelines take from the counted
+    // ones the dispatch's own request would.
+    public void PrefetchDispatchPipeline(RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    {
+        var compute = banks.Shader.Compute;
+        if (!_host.SupportsPipelineSuspend || compute.Address == 0 || groupsX == 0 || groupsY == 0 || groupsZ == 0)
+        {
+            return;
+        }
+
+        var computeProgram = _pipelines.PrepareComputeProgramAhead(compute, dispatchInitiator, groupsX, groupsY, groupsZ);
+        if (!computeProgram.Available || computeProgram.Consumed || !computeProgram.Program.IsValid ||
+            computeProgram.Input.Stage.Program is null)
+        {
+            return;
+        }
+
+        _ = _pipelines.TryCreateComputePipeline(computeProgram.Input, computeProgram.Program, out _);
+    }
+
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
         if (!_host.IsRecording)

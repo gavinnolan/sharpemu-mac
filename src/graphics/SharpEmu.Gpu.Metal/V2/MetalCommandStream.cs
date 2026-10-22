@@ -2079,6 +2079,27 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         ulong indirectArgumentsAddress = 0) =>
         _translation!.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
 
+    // The dispatches after one that waits on its pipeline compile beside it (GpuCommandInterpreter.PrefetchPipelinesAhead).
+    public bool PrefetchesPipelines => SupportsPipelineSuspend;
+
+    public void PrefetchDispatchPipeline(
+        SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks,
+        uint groupsX,
+        uint groupsY,
+        uint groupsZ,
+        uint dispatchInitiator)
+    {
+        _prefetchingPipeline = true;
+        try
+        {
+            _translation?.PrefetchDispatchPipeline(banks, groupsX, groupsY, groupsZ, dispatchInitiator);
+        }
+        finally
+        {
+            _prefetchingPipeline = false;
+        }
+    }
+
     public bool ResolvesIndirectDispatchOnGpu => true;
 
     public bool ResolvesIndirectDrawOnGpu => true;

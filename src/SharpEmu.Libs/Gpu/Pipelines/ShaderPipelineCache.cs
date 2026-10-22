@@ -889,7 +889,24 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null);
+            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null);
+        }
+    }
+
+    // The program of a dispatch the stream has not reached (IShaderPipelineProvider), for a
+    // pipeline asked for ahead of it: the same preparation, which the dispatch then finds cached.
+    public ComputeProgram PrepareComputeProgramAhead(
+        ComputeStageRegisters compute,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ)
+    {
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
+        lock (_resolveGate)
+        {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null, ahead: true);
         }
     }
 
@@ -909,18 +926,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
+            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
         }
     }
 
     private ComputeProgram GetComputeProgramCore(
         ComputeStageRegisters compute,
-        ShaderInterfaceRegisters shaderInterface,
         uint dispatchInitiator,
         uint dimensionX,
         uint dimensionY,
         uint dimensionZ,
-        ComputeProgramRetry? retry)
+        ComputeProgramRetry? retry,
+        bool ahead = false)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0, ref _computeUserData);
@@ -959,6 +976,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var systemRegisters = DecodeComputeSystemRegisters(compute);
+        if (ahead && IsMaskedDwordCopyKernel(program))
+        {
+            // Submitting it is running it; the dispatch does that itself when the stream gets there.
+            return new ComputeProgram { Available = false };
+        }
+
         if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, out var description))
         {
             if (RenderTrace.Enabled)

@@ -103,6 +103,12 @@ internal sealed partial class MetalRenderHost
         return $"allowed={allowed} color={color} depth={depth} clears={clears} blocking_builds_by=({TakeBlockingBuildReasons()})";
     }
 
+    private static string FormatLookaheadCounters()
+    {
+        var (scans, dispatches, milliseconds) = SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.TakeLookaheadCounters();
+        return $"scans={scans} dispatches={dispatches} ms={milliseconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}";
+    }
+
     /// <summary>The compiler threads; tests hold their gate.</summary>
     internal MetalPipelineCompiler PipelineCompiler => Compiler;
 

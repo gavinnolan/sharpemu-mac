@@ -333,10 +333,34 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         Calls.Add($"draw_auto {submitId} {arguments.VertexCount}");
     }
 
-    public void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0) =>
+    public void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
+    {
         Calls.Add(indirectArgumentsAddress == 0
             ? $"dispatch {submitId} {groupsX} {groupsY} {groupsZ} {dispatchInitiator:X}"
             : $"dispatch {submitId} {groupsX} {groupsY} {groupsZ} {dispatchInitiator:X} @{indirectArgumentsAddress:X}");
+        _pipelineNotReady = PipelineNotReady.TryDequeue(out var notReady) && notReady;
+    }
+
+    // One answer per dispatch, in order: true has it wait on a pipeline still compiling.
+    public Queue<bool> PipelineNotReady { get; } = new();
+
+    private bool _pipelineNotReady;
+
+    public bool ConsumePipelineNotReady()
+    {
+        var notReady = _pipelineNotReady;
+        _pipelineNotReady = false;
+        return notReady;
+    }
+
+    public bool PrefetchesPipelines { get; set; }
+
+    // The compute program and group count of each dispatch the look-ahead handed over.
+    public List<(ulong Program, uint GroupsX)> PrefetchedDispatches { get; } = new();
+
+    public void PrefetchDispatchPipeline(SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks, uint groupsX, uint groupsY,
+        uint groupsZ, uint dispatchInitiator) =>
+        PrefetchedDispatches.Add((banks.Shader.Compute.Address, groupsX));
 
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
 
