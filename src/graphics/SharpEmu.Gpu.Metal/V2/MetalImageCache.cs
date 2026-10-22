@@ -2327,14 +2327,25 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 ? _guestMemory.ResolveWritable(description.Stencil.Address, description.Stencil.Size)
                 : default;
             var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-            _transfer.EncodeTextureToGuest(
-                context, in description, range, image.Texture, destination, stencil, 0, description.Data.Size);
-            written = description.Data.Size;
+            written = _transfer.EncodeTextureToGuest(
+                context, in description, range, image.Texture, destination, stencil, 0, description.Data.Size)
+                ? description.Data.Size
+                : 0;
         }
-        else if ((written = WriteBackInPieces(context, image)) == 0)
+        else
+        {
+            written = WriteBackInPieces(context, image);
+        }
+
+        if (written == 0)
         {
             // Nothing recorded: the texture alone still holds the image.
             Interlocked.Increment(ref _unrecordedWritebacks);
+            MetalV2Diagnostics.WarnOnce(
+                $"writeback-unrecorded:{description.PixelFormat}:{description.Samples}:{description.TileMode}",
+                "A GPU-written image's writeback recorded nothing, so it stays GPU-written and only its texture " +
+                $"holds it: address=0x{description.Data.Address:X16} {ProfileLabel("writeback", in description)} " +
+                $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
             return MetalWritebackOutcome.Failed;
         }
 
@@ -2402,9 +2413,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     description.Stencil.Address + (stencilLayerBytes * first), stencilLayerBytes * count)
                 : default;
             var range = new SubresourceRange(0, description.Resources.Levels, first, count);
-            _transfer.EncodeTextureToGuest(
-                context, in description, range, image.Texture, piece, stencilPiece, pieceBase, pieceSize);
-            written += pieceSize;
+            written += _transfer.EncodeTextureToGuest(
+                context, in description, range, image.Texture, piece, stencilPiece, pieceBase, pieceSize)
+                ? pieceSize
+                : 0;
         }
 
         return written;
@@ -2446,11 +2458,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             if (!run.Staged)
             {
                 var destination = _guestMemory.ResolveWritable(address + run.Offset, run.Size);
-                if (destination.IsValid && destination.Size >= run.Size)
-                {
+                if (destination.IsValid && destination.Size >= run.Size &&
                     _transfer.EncodeTextureToGuest(
                         context, in description, range, image.Texture,
-                        destination with { Size = run.Size }, stencil, run.Offset, run.Size);
+                        destination with { Size = run.Size }, stencil, run.Offset, run.Size))
+                {
                     carried = run.Size;
                 }
             }
@@ -2569,7 +2581,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _transfer.EncodeBufferCopies(context, copies);
-        _transfer.EncodeTextureToGuest(context, in description, range, image.Texture, scratch, stencil, offset, size);
+        if (!_transfer.EncodeTextureToGuest(context, in description, range, image.Texture, scratch, stencil, offset, size))
+        {
+            // The retile encoded nothing: copying the scratch back would only rewrite the
+            // guest's own bytes, and the run is not carried.
+            return 0;
+        }
+
         for (var index = 0; index < copies.Length; index++)
         {
             copies[index] = (copies[index].To, copies[index].From);

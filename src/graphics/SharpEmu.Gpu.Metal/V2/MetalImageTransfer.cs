@@ -765,13 +765,13 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
     }
 
-    public void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
+    public bool EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
         ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0)
     {
         if (!Ready(context, description, destination, texture, guestBase, pieceSize))
         {
-            return;
+            return false;
         }
 
         var plan = PlanFor(description);
@@ -785,19 +785,19 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
 
             EncodeDepthDownload(context, description, plan, range, texture, destination, stencilDestination, guestBase, pieceSize);
-            return;
+            return true;
         }
 
         Select(plan, description, range, guestBase, pieceSize, textureFirstLevel);
         if (_copies.Count == 0)
         {
-            return;
+            return true;
         }
 
         if (TryEncodeTextureTiles(context, plan, texture, description.Data.Address + guestBase,
                 new MetalBufferSpan(destination.Buffer, destination.Offset, pieceSize), MetalTileDirection.Tile))
         {
-            return;
+            return true;
         }
 
         // A readback lands in staging first whenever the retile reads it, the channels
@@ -825,7 +825,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         MetalTiler.EndEncoding(blit);
         if (direct)
         {
-            return;
+            return true;
         }
 
         var compute = _tiler.BeginCompute(context);
@@ -848,6 +848,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         MetalTiler.EndEncoding(compute);
+
+        return true;
     }
 
     // SHARPEMU_METAL_V2_TEXTURE_TILER=0 stages every tiled colour transfer through a

@@ -116,8 +116,10 @@ internal interface IMetalImageTransfer
     // Retiles/copies every subresource in range from the texture back into guest memory,
     // with the same piece contract as the upload, textureFirstLevel included: a texture
     // held from a later level writes only the guest levels it holds, at their full-chain
-    // offsets, and leaves every other byte of the destination as it was.
-    void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
+    // offsets, and leaves every other byte of the destination as it was. False when the
+    // transfer refused the piece and encoded nothing (a multisampled image, a destination
+    // shorter than the piece): the texture alone still holds those bytes.
+    bool EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
         ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0);
 
