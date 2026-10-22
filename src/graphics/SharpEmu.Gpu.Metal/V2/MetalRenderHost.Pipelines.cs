@@ -143,6 +143,9 @@ internal sealed partial class MetalRenderHost
     private readonly Dictionary<ulong, nint> _depthStencilStates = new();
     private ulong _nextPipelineId;
 
+    /// <summary>Runs where a module's library compile starts, on whichever thread runs it; tests hold it.</summary>
+    internal Action? BeforeLibraryCompile { get; set; }
+
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
         _ = programId;
@@ -173,6 +176,7 @@ internal sealed partial class MetalRenderHost
         {
             try
             {
+                BeforeLibraryCompile?.Invoke();
                 _ = MetalCompileScheduler.TakeThreadPrewarmWait();
                 if (stage == ShaderStage.Compute)
                 {
@@ -564,15 +568,7 @@ internal sealed partial class MetalRenderHost
                     ((IAsyncResult)compiling).AsyncWaitHandle.WaitOne();
                 }
 
-                var waited = System.Diagnostics.Stopwatch.GetTimestamp() - started;
-                Interlocked.Add(ref _libraryWaitTicks, waited);
-                Interlocked.Increment(ref _libraryWaits);
-                var onPrewarm = Math.Min(waited, Volatile.Read(ref module.PrewarmWaitTicks));
-                Interlocked.Add(ref _libraryWaitPrewarmTicks, onPrewarm);
-                if (module.Contended)
-                {
-                    Interlocked.Add(ref _libraryWaitContendedTicks, waited - onPrewarm);
-                }
+                NoteLibraryWait(module, System.Diagnostics.Stopwatch.GetTimestamp() - started);
             }
 
             // A failed compile is fatal where the module is first needed, as it was where
@@ -587,6 +583,105 @@ internal sealed partial class MetalRenderHost
         }
 
         return module;
+    }
+
+    private void NoteLibraryWait(MetalShaderModule module, long waited)
+    {
+        Interlocked.Add(ref _libraryWaitTicks, waited);
+        Interlocked.Increment(ref _libraryWaits);
+        var onPrewarm = Math.Min(waited, Volatile.Read(ref module.PrewarmWaitTicks));
+        Interlocked.Add(ref _libraryWaitPrewarmTicks, onPrewarm);
+        if (module.Contended)
+        {
+            Interlocked.Add(ref _libraryWaitContendedTicks, waited - onPrewarm);
+        }
+    }
+
+    // How long a library wait before a preparation sleeps between looks at the store requests.
+    private const int LibraryWaitServiceMilliseconds = 1;
+
+    /// <summary>
+    /// The library compiles of a draw or dispatch that will wait for its pipeline, waited for
+    /// before its preparation opens, serving guest stores that wait for a writeback meanwhile.
+    /// A store's request is otherwise taken only between packets: inside the preparation the
+    /// images the draw acquired are stamped with the open submission, which serving it would
+    /// commit, so a request posted while the worker waited there for a cold compile waited for
+    /// the whole compile, a second and more. Here nothing of the draw is recorded yet, as at the
+    /// draw's entry where the relay runs anyway. Only the store requests are served, not the
+    /// whole relay. A compile no pool thread has taken yet starts at once on a thread of its
+    /// own, as RequireModule would run it on the worker, and the worker goes on serving.
+    /// RequireModule then finds the modules built.
+    /// </summary>
+    public void AwaitProgramsBeforePreparation(ShaderProgram first, ShaderProgram second)
+    {
+        var firstCompiling = CompilingModule(first);
+        var secondCompiling = CompilingModule(second);
+        if (firstCompiling is null && secondCompiling is null)
+        {
+            return;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        StartQueuedCompile(firstCompiling);
+        StartQueuedCompile(secondCompiling);
+        AwaitServingStores(firstCompiling);
+        AwaitServingStores(secondCompiling);
+        var waited = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+        if (firstCompiling is not null)
+        {
+            NoteLibraryWait(firstCompiling, waited);
+        }
+
+        if (secondCompiling is not null)
+        {
+            NoteLibraryWait(secondCompiling, firstCompiling is null ? waited : 0);
+        }
+    }
+
+    private MetalShaderModule? CompilingModule(ShaderProgram program)
+    {
+        if (!program.IsValid)
+        {
+            return null;
+        }
+
+        var module = LookupModule(program);
+        return module.Compiling is { IsCompleted: false } ? module : null;
+    }
+
+    private void StartQueuedCompile(MetalShaderModule? module)
+    {
+        if (module?.Job is not { IsQueued: true } job)
+        {
+            return;
+        }
+
+        new Thread(() =>
+        {
+            if (MetalLibraryCompilePool.Shared.TryRunHere(job))
+            {
+                Interlocked.Increment(ref _libraryInlineCompiles);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "SharpEmu Metal v2 library compile (needed now)",
+        }.Start();
+    }
+
+    private void AwaitServingStores(MetalShaderModule? module)
+    {
+        if (module?.Compiling is not { } compiling)
+        {
+            return;
+        }
+
+        var done = ((IAsyncResult)compiling).AsyncWaitHandle;
+        do
+        {
+            _imageCache.ServiceStoreRequests();
+        }
+        while (!done.WaitOne(LibraryWaitServiceMilliseconds));
     }
 
     /// <summary>A rectangle list draws one patch per rectangle, so its count is needed up

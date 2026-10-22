@@ -240,12 +240,7 @@ public sealed partial class RenderExecutor
     private bool MayLeaveOutWhileCompiling(
         ref DrawState state, ShaderStageResources vertexStage, ShaderStageResources? pixelStage, bool indirectMesh)
     {
-        if (_drawMustExecute || indirectMesh || !_host.LeavesOutDrawsWhileCompiling)
-        {
-            return false;
-        }
-
-        if (WritesOutsideTargets(vertexStage) || (pixelStage is { } pixel && WritesOutsideTargets(pixel)))
+        if (!MayLeaveOutBeforeAcquiring(ref state, vertexStage, pixelStage, indirectMesh))
         {
             return false;
         }
@@ -259,18 +254,42 @@ public sealed partial class RenderExecutor
             }
         }
 
+        if (state.Depth.HasTarget &&
+            (rendering.DepthStencilAttachment.DepthClear || rendering.DepthStencilAttachment.StencilClear))
+        {
+            return false;
+        }
+
+        return _host.MayLeaveOutWhileCompiling(in rendering);
+    }
+
+    // The part of MayLeaveOutWhileCompiling the draw knows before it acquires anything. False
+    // here is false there: acquiring only adds reasons to keep the draw (a clear it consumes, a
+    // metadata clear that makes the depth load a write, the host's say on the targets).
+    private bool MayLeaveOutBeforeAcquiring(
+        ref DrawState state, ShaderStageResources vertexStage, ShaderStageResources? pixelStage, bool indirectMesh)
+    {
+        if (_drawMustExecute || indirectMesh || !_host.LeavesOutDrawsWhileCompiling)
+        {
+            return false;
+        }
+
+        if (WritesOutsideTargets(vertexStage) || (pixelStage is { } pixel && WritesOutsideTargets(pixel)))
+        {
+            return false;
+        }
+
         if (state.Depth.HasTarget)
         {
             var depth = state.Depth.Target;
-            if (state.Depth.LoadClear || depth.State.StencilClearEnabled || rendering.DepthStencilAttachment.DepthClear ||
-                rendering.DepthStencilAttachment.StencilClear || !state.Depth.LoadState.IsReadOnly(depth.Target.Format) ||
-                depth.State.DepthWriteEnabled)
+            if (state.Depth.LoadClear || depth.State.StencilClearEnabled ||
+                !state.Depth.LoadState.IsReadOnly(depth.Target.Format) || depth.State.DepthWriteEnabled)
             {
                 return false;
             }
         }
 
-        return _host.MayLeaveOutWhileCompiling(in rendering);
+        return true;
     }
 
     // Any write a draw makes other than through its attachments, as the conservative reading of
@@ -377,6 +396,15 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
+        if (!MayLeaveOutBeforeAcquiring(ref state, vertexInput.Stage, state.PixelActive ? pixelInput.Stage : null,
+                meshInput is not null && emission.IndirectArgumentsAddress != 0))
+        {
+            // The draw will wait for its pipeline: its programs' compiles are waited for here,
+            // before anything of it is prepared, where the host may still serve what waits for
+            // a packet boundary.
+            _host.AwaitProgramsBeforePreparation(state.Programs.Vertex, state.PixelActive ? state.Programs.Pixel : default);
+        }
+
         if (state.PixelActive && (pixelInput.Stage.Program?.UsesDeviceAddresses ?? false))
         {
             _host.BeforeDeviceAddressPreparation([vertexInput.Stage, pixelInput.Stage]);

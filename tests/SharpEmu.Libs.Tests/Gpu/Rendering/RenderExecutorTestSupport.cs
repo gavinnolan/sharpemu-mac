@@ -239,6 +239,8 @@ internal sealed class RecordingRenderHost : IRenderHost
         return TargetsRebuiltEveryFrame;
     }
 
+    public void AwaitProgramsBeforePreparation(ShaderProgram first, ShaderProgram second) => Calls.Add("await_programs");
+
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
     {
         var address = target.Resolution.BaseAddress;
