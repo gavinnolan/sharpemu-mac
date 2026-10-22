@@ -542,7 +542,10 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public bool HasPendingGpuWrite(ulong address, ulong size) => false;
         public void FillGuestRange(ulong address, ulong size, uint value) { }
         public void NoteGuestWrite(ulong address, ulong size) { }
-        public void WaitForGpu() { }
+        // What the GPU worker's commit-and-wait does; a test supplies it.
+        public Action? OnWaitForGpu { get; set; }
+
+        public void WaitForGpu() => OnWaitForGpu?.Invoke();
         public void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color) { }
 
         public void ClearTextureDepthStencil(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height,
@@ -561,7 +564,10 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public bool TryRunOnWorker(Action work) => RunOnWorker?.Invoke(work) ?? false;
 
-        public bool IsWorkerThread => false;
+        // Whether the cache's caller is the GPU worker; a test sets it.
+        public bool OnWorker { get; set; }
+
+        public bool IsWorkerThread => OnWorker;
 
         public void CommitRecorded()
         {

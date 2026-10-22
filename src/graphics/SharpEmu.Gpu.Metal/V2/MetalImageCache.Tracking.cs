@@ -366,6 +366,13 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        // A writeback still in flight over these bytes lands first, as it does under a
+        // faulting store; this write lands as soon as it returns, not on a retry.
+        if (Volatile.Read(ref _fencedWritebackCount) != 0)
+        {
+            WaitForFencedWritebacksUnder(address, size);
+        }
+
         var stagedHit = false;
         if (StagedRanges is { } staged && staged.MayCover(address, size))
         {
