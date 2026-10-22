@@ -2578,7 +2578,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 		// read to the global address-space write lock plus two mprotect calls on EVERY fiber
 		// switch, which also stalls every other thread's guest-memory access (DS: ~2x frame
 		// time). SHARPEMU_TRANSFER_RIP_PROBE_LOCKFREE=0 restores the old probe; the DSTRACE
-		// §7 in-run A/B (SHARPEMU_DSTRACE_AB_RIPCACHE) alternates it when enabled.
+		// in-run A/B (SHARPEMU_DSTRACE_AB_RIPCACHE) alternates it when enabled.
 		var lockFreeProbe = DsTraceAb.Enabled ? DsTraceAb.RipCacheActive : _lockFreeTransferRipProbe;
 		if (lockFreeProbe && IsExecutableAddress(target.Rip))
 		{

@@ -11,7 +11,7 @@ using System.Text;
 namespace SharpEmu.Libs.Kernel;
 
 /// <summary>
-/// Process identity, system information and the sysctl tree (SPEC §5.1).
+/// Process identity, system information and the sysctl tree.
 /// </summary>
 public static class KernelSystemInfoExports
 {
@@ -46,10 +46,10 @@ public static class KernelSystemInfoExports
     // stable number in that range is faithful.
     private const int OidAutoBase = 0x100;
 
-    /// <summary>App-visible CPUs (SPEC §0.2, CPUMASK_13CPU).</summary>
+    /// <summary>App-visible CPUs (CPUMASK_13CPU).</summary>
     internal const int AppVisibleCpuCount = 13;
 
-    /// <summary>Page size (SPEC §0.2, SCE_KERNEL_PAGE_SIZE).</summary>
+    /// <summary>Page size (SCE_KERNEL_PAGE_SIZE).</summary>
     internal const int GuestPageSize = 16384;
 
     /// <summary>PS5 physical memory: 16 GiB of GDDR6.</summary>
@@ -485,7 +485,7 @@ public static class KernelSystemInfoExports
         return 0;
     }
 
-    // SPEC §5.1: a retail console is never in development mode.
+    // A retail console is never in development mode.
     [SysAbiExport(
         Nid = "UtO0OHMCgmI",
         ExportName = "sceKernelIsDevelopmentMode",
@@ -508,7 +508,7 @@ public static class KernelSystemInfoExports
 
     /// <summary>
     /// A guest CPU index 0..12, stable for the calling host thread. Host
-    /// threads are spread round-robin as they first ask (SPEC §5.2).
+    /// threads are spread round-robin as they first ask.
     /// </summary>
     internal static int GetCurrentCpu()
     {

@@ -145,7 +145,7 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
-    // DSTRACE §4.6 FLIP: the frame boundary, at the entry of sceAgcDcbSetFlip.
+    // DSTRACE FLIP: the frame boundary, at the entry of sceAgcDcbSetFlip.
     private static long _dsFlipSequence;
 
     private static void DsEmitFlip(CpuContext ctx)

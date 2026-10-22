@@ -7,7 +7,7 @@ using System.Runtime.CompilerServices;
 namespace SharpEmu.HLE.DsTrace;
 
 /// <summary>
-/// Timed lock wrappers for the §4.5 memory-system sites. With the mem group off or
+/// Timed lock wrappers for the memory-system sites. With the mem group off or
 /// not yet armed each wrapper is exactly the original lock call. The armed fast path
 /// adds one TryEnter(0) attempt and one timestamp.
 ///

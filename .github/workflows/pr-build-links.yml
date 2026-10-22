@@ -27,6 +27,7 @@ jobs:
   comment:
     name: Post artifact links
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     # Only for successful PR builds — artifacts exist only when the build passed.
     if: >-
       github.event.workflow_run.event == 'pull_request' &&

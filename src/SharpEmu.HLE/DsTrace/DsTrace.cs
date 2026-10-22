@@ -29,7 +29,7 @@ internal struct DsSlot
 /// </summary>
 public static unsafe class DsTrace
 {
-    // ---- switches (§1.6, §2) ----
+    // ---- switches ----
 
     public static readonly bool On = Env("SHARPEMU_DSTRACE") == "1";
     private static readonly string Groups = Env("SHARPEMU_DSTRACE_GROUPS") ?? "all";
@@ -73,7 +73,7 @@ public static unsafe class DsTrace
 
     internal static void Arm() => Volatile.Write(ref _armed, 1);
 
-    // ---- thread-local state (§1.6) ----
+    // ---- thread-local state ----
 
     [ThreadStatic] private static int _currentImportPlusOne;
 
@@ -163,7 +163,7 @@ public static unsafe class DsTrace
         }
     }
 
-    // ---- ring (§1.3) ----
+    // ---- ring ----
 
     private static DsSlot[]? _ring;
     private static long _mask;
@@ -240,7 +240,7 @@ public static unsafe class DsTrace
         EmitAt(Stopwatch.GetTimestamp(), type, p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12);
     }
 
-    // ---- string interning (§1.5) ----
+    // ---- string interning ----
 
     private const int MaxStrings = 1 << 20;
     private static readonly ConcurrentDictionary<string, uint>? _strings = On ? new(StringComparer.Ordinal) : null;
@@ -278,7 +278,7 @@ public static unsafe class DsTrace
         return map.TryAdd(text, next) ? next : map.TryGetValue(text, out id) ? id : 0;
     }
 
-    // ---- thread registration (§3.1) ----
+    // ---- thread registration ----
 
     /// <summary>
     /// Registers the calling thread: sets <see cref="ThreadClass"/>, records its Mach
@@ -367,7 +367,7 @@ public static unsafe class DsTrace
         return end > 0 && int.TryParse(digits[..end], out var n) && n >= 0 && n < 0xffff ? n : 0xffff;
     }
 
-    // ---- start / writer / shutdown (§1.4) ----
+    // ---- start / writer / shutdown ----
 
     private static FileStream? _file;
     private static string? _path;
@@ -768,7 +768,7 @@ public static unsafe class DsTrace
     }
 }
 
-/// <summary>§7 in-run A/B switch. Only the host sampler flips it, and only when SHARPEMU_DSTRACE_AB_RIPCACHE &gt; 0.</summary>
+/// <summary>In-run A/B switch. Only the host sampler flips it, and only when SHARPEMU_DSTRACE_AB_RIPCACHE &gt; 0.</summary>
 public static class DsTraceAb
 {
     /// <summary>JIT-foldable: false unless the A/B is configured, so the hook costs nothing otherwise.</summary>

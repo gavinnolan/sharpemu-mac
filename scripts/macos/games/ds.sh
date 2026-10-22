@@ -96,7 +96,7 @@ case "$MODE" in
     # comments; "pending" ones have inputs derived from research but could not be timed because
     # in-world gameplay still runs at ~0-2 fps.
     #
-    # Boot, calibrated on 20261018-082109-ds-cal1-full: Bink IO #1 is the PlayStation Studios
+    # Boot: Bink IO #1 is the PlayStation Studios
     # movie, #2 the ~107 s intro movie ("upon Earth was planted an irrevocable poison", not
     # skippable by Cross in the first minutes), #3 the Bluepoint logo (~10 s), after which the
     # title menu is drawn. The movies play in real time, so these anchors hold at any speed.
@@ -107,9 +107,9 @@ case "$MODE" in
     # Title menu: CONTINUE, LOAD GAME, NEW GAME, (gap) SETTINGS; the cursor starts on CONTINUE.
     # Cross dismisses "PRESS ANY BUTTON"; then Up three times (no wrap, so any number of extra Ups
     # stays on CONTINUE, and a press dropped during the menu's fade-in changes nothing), then CONTINUE.
-    # The earlier down,down,up,up probe landed on NEW GAME in p0-baseline (20261018-093723): the
+    # A down,down,up,up sequence landed on NEW GAME: the
     # first D-pad press only dismissed the prompt and a later one was dropped.
-    # Calibrated on cal4-full: the in-game Settings screen has the tabs GAME, CONTROLLER, DISPLAY,
+    # The in-game Settings screen has the tabs GAME, CONTROLLER, DISPLAY,
     # AUDIO, CAMERA, LANGUAGE, NETWORK, and DISPLAY > Visual Mode already reads "Performance" (the 60
     # FPS mode) with the golden save, so a run needs no change to be in Performance mode.
     # SHARPEMU_DS_SETTINGS_TOUR=1 adds a walk through the Settings screen (a screenshot per tab and
@@ -132,7 +132,7 @@ case "$MODE" in
     fi
     # CONTINUE, then Continue Offline once the dialog is up (a second or so), then once more.
     PLAN+="$(printf ',%d:mark:continue,%d:enter,%d:enter,%d:enter' "$CONT" "$CONT" $((CONT + 12)) $((CONT + 18)))"
-    # Calibrated on cal3-ingame: with Cross held from the first movie the stage entry shows clouds
+    # With Cross held from the first movie the stage entry shows clouds
     # and then the HUD at the Outpost Passage spawn, no cinematic. Here Cross is only tapped (0.3 s
     # every 25 s) so any in-engine cinematic plays unskipped.   [pending: whether taps suffice]
     PLAN+=";@after=20|0:mark:load.stage,0:rep:enter:25:0.3"

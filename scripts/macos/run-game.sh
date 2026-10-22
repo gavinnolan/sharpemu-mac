@@ -6,8 +6,8 @@
 #
 #   scripts/macos/run-game.sh <game|path/to/eboot.bin> <tag> <seconds> [keyplan] [ENV=VALUE ...]
 #
-#   game     ds | sarah | octo | poppy | quake | sh | superl | oregon | void (under $SHARPEMU_GAMES_DIR),
-#            or a path to an eboot.bin
+#   game     ds | sarah | gta | poppy | quake | sh | superl | oregon | void (looked up under
+#            $SHARPEMU_GAMES_DIR, which the shortcuts require), or a path to an eboot.bin or .zar
 #   seconds  run length, capped at 150 (600 with SHARPEMU_GAME_ENTRY_RUN=1, 2400 with
 #            SHARPEMU_GAME_SESSION_RUN=1 for 30-minute play sessions)
 #   keyplan  comma list "t:key[:hold]" pressed through SHARPEMU_INPUT_FILE, e.g. "20:enter,30:down:1",
@@ -44,28 +44,35 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-GAMES_DIR="${SHARPEMU_GAMES_DIR:-/Volumes/Untitled/games}"
+GAMES_DIR="${SHARPEMU_GAMES_DIR:-}"
 APP_DIR="${SHARPEMU_APP_DIR:-$REPO_ROOT/artifacts/macos/SharpEmu.app/Contents/MacOS}"
-COMPAT_DIR="${SHARPEMU_COMPAT_DIR:-$HOME/Projects/xnetcat/sharpemu-compat}"
+# Optional directory of a shared harness checkout: when set and present it holds the machine-wide
+# game lock. SHARPEMU_WINID names a helper that prints the window id of a process; without it no
+# screenshots are taken.
+COMPAT_DIR="${SHARPEMU_COMPAT_DIR:-}"
 if [[ -z "${SHARPEMU_GAME_LOCK:-}" ]]; then
-  if [[ -d "$COMPAT_DIR" ]]; then SHARPEMU_GAME_LOCK="$COMPAT_DIR/.gamelock"; else SHARPEMU_GAME_LOCK="$HOME/.sharpemu/gamelock"; fi
+  if [[ -n "$COMPAT_DIR" && -d "$COMPAT_DIR" ]]; then SHARPEMU_GAME_LOCK="$COMPAT_DIR/.gamelock"; else SHARPEMU_GAME_LOCK="$HOME/.sharpemu/gamelock"; fi
 fi
-WINID="${SHARPEMU_WINID:-$COMPAT_DIR/scripts/winid}"
+WINID="${SHARPEMU_WINID:-}"
 MEM_LIMIT_MB="${SHARPEMU_MEM_LIMIT_MB:-12288}"
 
-usage() { sed -n '5,14p' "$0" >&2; exit 2; }
+usage() { sed -n '5,15p' "$0" >&2; exit 2; }
 [[ $# -ge 3 ]] || usage
 
 case "$1" in
-  ds) EBOOT="$GAMES_DIR/Demon Souls/PPSA01342-app0/eboot.bin" ;;
+  ds|sarah|gta|poppy|quake|sh|superl|oregon|void)
+    [[ -n "$GAMES_DIR" ]] || { echo "set SHARPEMU_GAMES_DIR to the directory holding the games, or pass a path to an eboot.bin" >&2; exit 2; } ;;
+esac
+case "$1" in
+  ds) EBOOT="$GAMES_DIR/demon souls.zar" ;;
   sarah) EBOOT="$GAMES_DIR/Dreaming Sarah/PPSA02929-app0/eboot.bin" ;;
-  octo) EBOOT="$GAMES_DIR/OCTOPATH TRAVELER II/eboot.bin" ;;
-  poppy) EBOOT="$GAMES_DIR/Poppy Playtime Chapter 1/eboot.bin" ;;
-  quake) EBOOT="$GAMES_DIR/Quake/eboot.bin" ;;
-  sh) EBOOT="$GAMES_DIR/SILENT HILL The Short Message/PPSA10112-app/eboot.bin" ;;
-  superl) EBOOT="$GAMES_DIR/Superliminal/PPSA06084-app0/eboot.bin" ;;
-  oregon) EBOOT="$GAMES_DIR/The Oregon Trail/PPSA19244-app0/eboot.bin" ;;
-  void) EBOOT="$GAMES_DIR/void tRrLM Void Terrarium/eboot.bin" ;;
+  gta) EBOOT="$GAMES_DIR/GTA V/eboot.bin" ;;
+  poppy) EBOOT="$GAMES_DIR/Poppy Playtime Chapter 1.zar" ;;
+  quake) EBOOT="$GAMES_DIR/quake.zar" ;;
+  sh) EBOOT="$GAMES_DIR/silent hill short message.zar" ;;
+  superl) EBOOT="$GAMES_DIR/Superliminal.zar" ;;
+  oregon) EBOOT="$GAMES_DIR/the oregon trail.zar" ;;
+  void) EBOOT="$GAMES_DIR/void terrarium.zar" ;;
   *) EBOOT="$1" ;;
 esac
 GAME="$(basename "$1" .bin)"
@@ -200,7 +207,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Idle .NET build servers (MSBuild node-reuse processes, VBCSCompiler) from earlier builds pile up and
-# hold gigabytes of swapped/compressed memory: 161 MSBuild nodes held ~8 GB on 2026-10-18 and skewed
+# hold gigabytes of swapped/compressed memory (161 idle MSBuild nodes once held ~8 GB) and skew
 # every memory reading. They restart on demand, so a measurement run stops them first
 # (SHARPEMU_KEEP_BUILD_SERVERS=1 skips this) and records the machine's memory state at launch.
 if [[ "${SHARPEMU_KEEP_BUILD_SERVERS:-0}" != 1 ]]; then

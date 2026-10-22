@@ -132,7 +132,7 @@ git switch --create "${sync_branch}" "refs/heads/${INTEGRATION_BASE}"
 
 # A merge, deliberately, and never a rebase: main is published, so its history
 # is not ours to rewrite, and a merge keeps each upstream commit identifiable
-# for the local-vs-upstream patch tracking the plan asks for.
+# for tracking which patches are local and which came from upstream.
 merge_status=0
 git merge --no-ff --no-edit \
     -m "Merge upstream ${fetched_short} into ${INTEGRATION_BASE}" \

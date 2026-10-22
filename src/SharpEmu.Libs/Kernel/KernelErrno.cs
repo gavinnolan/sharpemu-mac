@@ -25,7 +25,7 @@ public enum KernelAbiFlavor
 /// <summary>
 /// The one adapter from an errno to an export's return value. Handlers decide
 /// the errno; this decides how the flavour presents it, so the sceKernel* and
-/// POSIX forms of one function cannot drift apart (SPEC §5.1).
+/// POSIX forms of one function cannot drift apart.
 /// </summary>
 public static class KernelErrno
 {

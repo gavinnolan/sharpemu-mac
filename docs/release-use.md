@@ -65,6 +65,13 @@ This command will:
 
 Pushing the tag automatically triggers the GitHub Release workflow.
 
+### macOS Release Assets
+
+This fork builds for `osx-x64` only. The release workflow requires exactly two
+assets and publishes them with the tag: `sharpemu-<version>-osx-x64.tar.gz` (the
+CLI publish output) and `sharpemu-<version>-osx-x64-app.zip` (the `SharpEmu.app`
+bundle). See [Building on macOS](macos/building.md) for how they are produced.
+
 ### Version Format
 
 Specify the version **without** the `v` prefix.

@@ -34,7 +34,7 @@ public sealed class GuestTimer
 }
 
 /// <summary>
-/// The emulator's deadline service (SPEC §6 "timer"): one binary min-heap of absolute
+/// The emulator's deadline service: one binary min-heap of absolute
 /// deadlines served by one thread that sleeps precisely until the earliest of them
 /// (<see cref="HostPreciseClock"/>: kqueue + <c>mach_wait_until</c> on macOS). It replaces
 /// per-wait <see cref="System.Threading.Timer"/>s and fixed-interval polling: a wait with a

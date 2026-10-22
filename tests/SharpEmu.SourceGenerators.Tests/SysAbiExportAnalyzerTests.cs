@@ -150,7 +150,7 @@ public sealed class SysAbiExportAnalyzerTests
                 [SysAbiExport(Nid = "12wOHk8ywb0", ExportName = "sceKernelPollSema")]
                 public static int TooMany(CpuContext ctx, uint a, int b, ulong c, long d, uint e, int f, int g) => 0;
 
-                // string is not register-representable (that is phase 3's marshalling).
+                // string is not register-representable (that needs custom marshalling).
                 [SysAbiExport(Nid = "4czppHBiriw", ExportName = "sceKernelSignalSema")]
                 public static int WrongKind(CpuContext ctx, string name) => 0;
             }

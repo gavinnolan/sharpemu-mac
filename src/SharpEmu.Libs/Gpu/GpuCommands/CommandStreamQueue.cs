@@ -105,10 +105,10 @@ public sealed class CommandStreamQueue
     private CommandSubmission? _fatalSubmission;
     private GpuCommandInterpreter? _fatalProcessor;
 
-    // DSTRACE §4.7: the submission whose slice the calling (worker) thread runs, for MCOMMIT.
+    // DSTRACE: the submission whose slice the calling (worker) thread runs, for MCOMMIT.
     [ThreadStatic] public static ulong DsCurrentSubmissionId;
 
-    // DSTRACE §4.7 WIDLE: what made the worker wait, captured by WaitForWork under the gate
+    // DSTRACE WIDLE: what made the worker wait, captured by WaitForWork under the gate
     // it already holds. Written and read only by the thread that calls WaitForWork.
     public bool DsIdleHadPending { get; private set; }
 
@@ -495,7 +495,7 @@ public sealed class CommandStreamQueue
 
             if (dsSuspend)
             {
-                // DSTRACE §4.6 SUSP: how long the guest's frame boundary blocked on the
+                // DSTRACE SUSP: how long the guest's frame boundary blocked on the
                 // in-flight boundaries, and how many were pending (this one included).
                 DsTrace.Emit(DsEv.SUSP,
                     (ulong)DsTrace.TicksToNs(System.Diagnostics.Stopwatch.GetTimestamp() - dsStarted),
@@ -1030,7 +1030,7 @@ public sealed class CommandStreamQueue
     /// <summary>Heads kept runnable because their wake arrived while they still ran.</summary>
     public ulong WakesRacedWithSlice { get; private set; }
 
-    // DSTRACE §4.7 CPW sources: which wake reached the blocked heads.
+    // DSTRACE CPW sources: which wake reached the blocked heads.
     private enum DsWakeSource : ulong
     {
         GpuTick = 1,
@@ -1155,7 +1155,7 @@ public sealed class CommandStreamQueue
         CommandSubmission? submission = null;
         ControlBarrier? control = null;
         var sliceWakeGeneration = 0UL;
-        // DSTRACE §4.7 SLICE: entry and exit of a slice that ran a submission.
+        // DSTRACE SLICE: entry and exit of a slice that ran a submission.
         var dsSlice = DsTrace.Gpu && DsTrace.Armed;
         var dsStarted = dsSlice ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
         var dsCpuStarted = dsSlice ? DsTrace.SelfCpuNs() : 0UL;

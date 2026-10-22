@@ -18,7 +18,7 @@ tools/re/ds-setup.sh --no-ghidra     # the Python outputs only (seconds)
 
 Outputs in `artifacts/re/`: `ds/eboot.elf`, `ds/imports.tsv`, `ds/callsites.tsv`, `ds/functions.txt`,
 `ds/modules/` (bundled `sce_module/*.prx` flattened + their import/export maps), `ghidra/DS.gpr`.
-Overrides: `DS_APP0` (game dir), `RE_OUT` (output root).
+Environment: `DS_APP0` (required: game dir holding `eboot.bin`), `RE_OUT` (optional output root).
 
 ## Tools
 

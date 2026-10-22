@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Globalization;
 using System.Text;
 
 namespace SharpEmu.ShaderCompiler.Metal;
@@ -60,38 +59,10 @@ public static class MslFixedShaders
     /// </summary>
     public static string CreatePresentHdrFragment() => MslTemplates.Render("present_hdr_fragment");
 
-    public static string CreateSolidFragment(float red, float green, float blue, float alpha) =>
-        MslTemplates.Render(
-            "solid_fragment",
-            ("red", Format(red)),
-            ("green", Format(green)),
-            ("blue", Format(blue)),
-            ("alpha", Format(alpha)));
-
-    /// <summary>
-    /// Diagnostic fragment stage exposing one interpolated vertex output
-    /// directly as color, isolating fragment translation from interface data.
-    /// </summary>
-    public static string CreateAttributeFragment(uint location) =>
-        MslTemplates.Render(
-            "attribute_fragment",
-            ("location", location.ToString(CultureInfo.InvariantCulture)));
-
     /// <summary>
     /// Output-free fragment stage for fixed-function depth-only passes: the
     /// guest has no pixel shader, so no color may be written while depth
     /// testing still runs for the translated vertex shader.
     /// </summary>
     public static string CreateDepthOnlyFragment() => MslTemplates.Render("depth_only_fragment");
-
-    /// <summary>
-    /// Compute kernel that deswizzles one RDNA2 exact-XOR tiled surface (swizzle
-    /// modes 5/9/24/27) at 4 bytes/element into a linear output buffer — the MSL
-    /// twin of <c>SpirvFixedShaders.CreateDetileCompute</c>. Entry point
-    /// "detile_cs"; buffers 0=tiled, 1=xTerm, 2=yTerm, 3=out, 4=DetileParams.
-    /// </summary>
-    public static string CreateDetileCompute() => MslTemplates.Render("detile_compute");
-
-    private static string Format(float value) =>
-        value.ToString("0.0######", CultureInfo.InvariantCulture) + "f";
 }

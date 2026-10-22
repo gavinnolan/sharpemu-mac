@@ -93,8 +93,8 @@ public sealed record HostVideoOptions
     public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.TitleBar;
 
     // Whether HdrMode.Auto may turn HDR on: a presenter capability, not an OS property. The
-    // legacy Metal presenter registers false because it has no HDR (EDR) output path, so
-    // reporting HDR would move titles onto render paths it cannot present.
+    // Metal presenter registers false: Auto stays on SDR there, and only an explicit
+    // --hdr=on presents HDR.
     internal static bool AutoHdrAllowed => HostVideoHost.AutoHdrAllowed;
 
     /// <summary>The display size every guest query reports, from

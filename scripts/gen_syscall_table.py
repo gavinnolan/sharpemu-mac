@@ -3,7 +3,7 @@
 # Copyright (C) 2026 SharpEmu Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-"""Generates the Prospero syscall table (SPEC 5.6) from psdevwiki's Syscalls page.
+"""Generates the Prospero syscall table from psdevwiki's Syscalls page.
 
 Input: the captured psdevwiki "PS5 Syscalls" markdown table (ID | PS4 | PS5).
 Output: src/SharpEmu.Libs/Kernel/Syscalls/OrbisSyscallTable.g.cs, one entry per

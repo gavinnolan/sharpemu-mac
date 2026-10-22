@@ -72,8 +72,8 @@ public interface IGuestSingleCopyHandler
 
 /// <summary>
 /// Which 64 KiB chunks of a chunked guest backing are released: their guest copy may have
-/// been emptied because a texture holds the same bytes (single-copy textures,
-/// artifacts/memopt/single-copy-textures.md). Host code reaches guest memory through the
+/// been emptied because a texture holds the same bytes (single-copy textures).
+/// Host code reaches guest memory through the
 /// canonical alias, which a page watch cannot guard, so every alias access of
 /// <see cref="SharedBackingViews"/> asks here first and hands a released chunk to the
 /// <see cref="Handler"/> before the bytes are used. With nothing released the check is one

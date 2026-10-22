@@ -8,7 +8,7 @@ using System.IO;
 namespace SharpEmu.Core.Runtime;
 
 /// <summary>
-/// The order preloaded modules start in (SPEC §5.1): every module after the
+/// The order preloaded modules start in: every module after the
 /// modules it names in DT_SCE_NEEDED_MODULE, as rtld initializes a DAG from
 /// the leaves up. Independent modules, and modules on a dependency cycle,
 /// keep their discovery order, so the result is deterministic.
