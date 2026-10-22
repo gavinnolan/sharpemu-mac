@@ -1733,6 +1733,11 @@ internal sealed partial class MetalRenderHost
 
     public bool TryReadGuestWord(ulong address, out uint word)
     {
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            return TryReadGuestWordConcurrent(address, out word, assumptions);
+        }
+
         _wordReads++;
         if (_labelOverlay.Count != 0 && TryReadPendingLabelWord(address, out word))
         {
@@ -1759,6 +1764,18 @@ internal sealed partial class MetalRenderHost
     public bool TryReadCleanGuestWord(ulong address, out uint word)
     {
         word = 0;
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            Span<byte> concurrent = stackalloc byte[sizeof(uint)];
+            if (!TryReadResidentGuestBytesConcurrent(address, concurrent, ConcurrentQuery.CleanWord, assumptions))
+            {
+                return false;
+            }
+
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(concurrent);
+            return true;
+        }
+
         if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
         {
             return false;
@@ -1781,6 +1798,11 @@ internal sealed partial class MetalRenderHost
         if (destination.IsEmpty)
         {
             return true;
+        }
+
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            return TryReadResidentGuestBytesConcurrent(address, destination, ConcurrentQuery.Resident, assumptions);
         }
 
         if (_imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length))
@@ -1815,6 +1837,12 @@ internal sealed partial class MetalRenderHost
         if (count == 0)
         {
             return true;
+        }
+
+        // Off the worker the caller reads each range itself, so every answer is recorded.
+        if (_concurrentAssumptions is not null)
+        {
+            return false;
         }
 
         if (lengths.Length != count || offsets.Length != count || _labelOverlay.Count != 0 ||
