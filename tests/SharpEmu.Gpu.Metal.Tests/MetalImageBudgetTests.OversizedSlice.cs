@@ -51,14 +51,34 @@ public sealed partial class MetalImageBudgetTests
         Assert.Equal((1L, 0L, 0L), carry);
     }
 
+    // A ring cap below the slice as well: the slice is staged whole past it, where a ring
+    // copy of its prefix would be refused as shorter than the run.
+    [Fact]
+    public void ADepthSliceLargerThanTheRingCapIsStagedWholeOnUpload()
+    {
+        if (!RequireDevice()) return;
+        var size = D16TargetRequest().Description.Data.Size;
+        var written = OversizedSliceRoundTrip(
+            backing =>
+            {
+                backing.ScatterStart = ShadowMap;
+                backing.ScatterBytes = size;
+            },
+            out var carry, out var counts, ringCapBytes: size / 2);
+
+        Assert.Equal(written.Expected, written.Actual);
+        Assert.Equal((1L, 0L), (counts.Writebacks, counts.Fallbacks));
+        Assert.Equal((1L, 0L, 0L), carry);
+    }
+
     // Guest bytes uploaded into a 1024² D16 target with the piece below its slice, rendered
     // into (GPU-written), scribbled over in guest memory, then published by a store: what
     // guest memory holds afterwards is what was uploaded.
     private (byte[] Expected, byte[] Actual) OversizedSliceRoundTrip(
         Action<Backing>? layout, out (long StagedRuns, long Partial, long Unrecorded) carry,
-        out MetalImageCache.StorePublishCounters counts)
+        out MetalImageCache.StorePublishCounters counts, ulong? ringCapBytes = null)
     {
-        using var rig = new Rig(Device.Value, layout: layout);
+        using var rig = new Rig(Device.Value, layout: layout, ringCapBytes: ringCapBytes);
         rig.Cache.TransferPieceBytes = SmallTransferPieceBytes;
         var request = D16TargetRequest();
         var size = request.Description.Data.Size;

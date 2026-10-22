@@ -2643,10 +2643,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // are not one window-resident span - most often a large image that crosses the edge
     // between two windows. Each run is the longest prefix one window covers, pulled back
     // to a boundary no subresource straddles, and the transfer is restricted to it. A run
-    // is at most TransferPieceBytes; asking for it moves the window edge inside it out of
-    // the way when the command buffer has not used the windows beside that edge yet, so a
-    // backed byte reaches the texture through a window, and the ring stages only what no
-    // window holds now.
+    // is at most TransferPieceBytes, except a subresource the transfer moves only whole that
+    // is larger - a depth slice past the piece - which is one run of its own size
+    // (PlanUploadRuns). Asking for a run moves the window edge inside it out of the way when
+    // the command buffer has not used the windows beside that edge yet, so a backed byte
+    // reaches the texture through a window, and the ring stages only what no window holds
+    // now: whole, even a run past the ring's cap.
     private bool UploadInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
     {
         ref readonly var description = ref image.Description;
