@@ -1205,6 +1205,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        EncodeEventBarrier(commandBuffer);
+        Interlocked.Increment(ref _labelBarriers);
+    }
+
+    // Work encoded after this point starts only when everything encoded before it in the
+    // command buffer has finished and its stores are visible.
+    private void EncodeEventBarrier(nint commandBuffer)
+    {
         // One event per command buffer. Command buffers overlap on the GPU, and with one event
         // across all of them a later buffer's signal of a lower value could land between an
         // earlier one's signal and its wait, which then waited for a value no one signals
@@ -1221,7 +1229,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _labelBarrierEvent = MetalNative.Send(_device, LabelBarrierShared ? SelNewSharedEvent : SelNewEvent);
             if (_labelBarrierEvent == 0)
             {
-                throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order label copies after their work.");
+                throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order work after the work before it.");
             }
 
             _labelBarrierCommandBuffer = commandBuffer;
@@ -1232,7 +1240,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var value = ++_labelBarrierValue;
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeSignalEvent, _labelBarrierEvent, value);
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeWaitForEvent, _labelBarrierEvent, value);
-        Interlocked.Increment(ref _labelBarriers);
     }
 
     private void ReleaseCompletedLabelBarrierEvents()

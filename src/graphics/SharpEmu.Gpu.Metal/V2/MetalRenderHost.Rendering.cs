@@ -112,10 +112,31 @@ internal sealed partial class MetalRenderHost
     }
 
     /// <summary>Closes an encoder opened through <see cref="RetainEncoder"/> and gives its reference back.</summary>
-    private static void EndAndReleaseEncoder(nint encoder)
+    // Two encoders of one command buffer can run at the same time on the GPU. The guest windows
+    // are untracked (MetalGuestMemory), so Metal orders nothing between them, and an encoder can
+    // read what the one before it is still writing. Black Myth: Wukong's Nanite passes did once a
+    // larger transient budget let more of them share a command buffer: black blocks over the army,
+    // black specks around Wukong and a black box over his eye in two of three cinematic runs. With
+    // an event barrier after each render and compute encoder there were none in three; a commit
+    // was the only thing that had ordered them. SHARPEMU_METAL_V2_ENCODER_BARRIER=0 leaves the
+    // encoders unordered again.
+    internal bool EncoderBarriers { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ENCODER_BARRIER") != "0";
+
+    private long _encoderBarriers;
+
+    /// <summary>Barriers encoded after render and compute encoders since the last call.</summary>
+    internal long TakeEncoderBarriers() => Interlocked.Exchange(ref _encoderBarriers, 0);
+
+    private void EndAndReleaseEncoder(nint encoder)
     {
         MetalNative.SendVoid(encoder, SelEndEncoding);
         MetalNative.SendVoid(encoder, SelRelease);
+        if (EncoderBarriers && _commandBuffer != 0)
+        {
+            EncodeEventBarrier(_commandBuffer);
+            Interlocked.Increment(ref _encoderBarriers);
+        }
     }
     private long _renderPasses;
     private long _passEndClear;

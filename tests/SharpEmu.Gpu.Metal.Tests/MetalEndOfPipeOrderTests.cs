@@ -217,6 +217,38 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0x77u, rig.Backing.Read32(filled));
     }
 
+    // The guest windows are untracked, so nothing but a barrier keeps the next encoder of the
+    // command buffer from starting while this one still writes: a compute encoder that ends
+    // leaves one behind it, and the opt-out leaves none.
+    [Fact]
+    public void AnEndingComputeEncoderLeavesABarrierBeforeTheNextEncoder()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        const ulong filled = GuestBase + 0x10000;
+        host.EncoderBarriers = true;
+        _ = host.TakeEncoderBarriers();
+
+        _ = host.EnsureComputeEncoder();
+        host.FillBufferInOrder(filled, 0x1000, 0x11);
+        host.FlushCommandBuffer();
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(1L, host.TakeEncoderBarriers());
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x11u, rig.Backing.Read32(filled));
+
+        host.EncoderBarriers = false;
+        _ = host.EnsureComputeEncoder();
+        host.FillBufferInOrder(filled, 0x1000, 0x22);
+        host.FlushCommandBuffer();
+        Assert.Equal(0L, host.TakeEncoderBarriers());
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x22u, rig.Backing.Read32(filled));
+    }
+
     // A copy waiting for the open compute encoder to end lands after every dispatch recorded
     // into it. A dispatch binding its bytes - GTA V's bounds pass over the table its
     // WRITE_DATA has just initialised - ends the encoder first so the copy lands before it;
