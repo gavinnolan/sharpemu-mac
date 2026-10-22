@@ -54,7 +54,7 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
             high = bucket.y;
         }
     }
-    for (uint step = 0u; step < 15u && low < high; step++)
+    for (uint step = 0u; step < 17u && low < high; step++)
     {
         uint middle = low + ((high - low) >> 1u);
         bool move_up = ranges[middle].first_page <= page;

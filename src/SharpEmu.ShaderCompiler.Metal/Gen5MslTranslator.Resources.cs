@@ -12,12 +12,14 @@ namespace SharpEmu.ShaderCompiler.Metal;
 // argument buffer, every descriptor index from the memory table, user data from push data.
 public static partial class Gen5MslTranslator
 {
-    // The range table holds at most 16384 entries; the resolver's binary search needs
-    // 2^AddressRangeSearchSteps > MaxAddressRangeCount, so 15 steps cover 16384. Raise both together.
+    // The range table holds at most 65536 entries; the resolver's binary search needs
+    // 2^AddressRangeSearchSteps > MaxAddressRangeCount, so 17 steps cover 65536. Raise both together.
     // Demon's Souls maps 1834 spans in play and splits them into more than 4096 runs over
     // 1 GiB guest windows; the table is sorted, so two more steps buy four times the room.
-    public const uint AddressRangeSearchSteps = 15;
-    public const uint MaxAddressRangeCount = 16384;
+    // Black Myth: Wukong's 1469 spans, mapped a page at a time from scattered backing, passed
+    // 16384 runs two minutes into its first fight and ended the run.
+    public const uint AddressRangeSearchSteps = 17;
+    public const uint MaxAddressRangeCount = 65536;
 
     /// <summary>The device-address helpers every program with a page table carries, for device tests.</summary>
     internal static string DeviceAddressPrelude()
