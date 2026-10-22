@@ -132,7 +132,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // Hazard tracking on a window makes Metal order and fence every command buffer that
     // touches it, which measured at tens of milliseconds per submission because every
     // submission touches a window. Untracked is the design's choice: the guest's own
-    // barriers end the encoder, and encoders on one queue run in order.
+    // barriers end the encoder, and the host orders each encoder after the one before it
+    // (MetalRenderHost.EncoderOrdering) - Metal does not, for untracked resources.
     // SHARPEMU_METAL_V2_TRACKED=1 restores automatic tracking for comparison.
     // An MTLResidencySet would keep the windows mapped for the queue without any
     // per-encoder call — but a set holding the whole 16 GiB backing measured about seventy

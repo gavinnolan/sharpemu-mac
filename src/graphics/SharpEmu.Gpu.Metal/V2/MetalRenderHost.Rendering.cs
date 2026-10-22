@@ -116,23 +116,105 @@ internal sealed partial class MetalRenderHost
     // are untracked (MetalGuestMemory), so Metal orders nothing between them, and an encoder can
     // read what the one before it is still writing. Black Myth: Wukong's Nanite passes did once a
     // larger transient budget let more of them share a command buffer: black blocks over the army,
-    // black specks around Wukong and a black box over his eye in two of three cinematic runs. With
-    // an event barrier after each render and compute encoder there were none in three; a commit
-    // was the only thing that had ordered them. SHARPEMU_METAL_V2_ENCODER_BARRIER=0 leaves the
-    // encoders unordered again.
-    internal bool EncoderBarriers { get; set; } =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ENCODER_BARRIER") != "0";
+    // black specks around Wukong and a black box over his eye in three of four cinematic runs; a
+    // commit was the only thing that had ordered them.
+    internal enum EncoderOrderingMode
+    {
+        None,
+        // Each render and compute encoder waits on one fence before its first stage and updates
+        // it after its last, so each starts only once the one before it has finished.
+        Fence,
+        // An event signal and wait after each: the same order, but every barrier splits the
+        // command buffer, and in Wukong's gameplay the GPU sat idle ~46 ms of every frame on them.
+        Event,
+    }
 
+    // SHARPEMU_METAL_V2_ENCODER_BARRIER=0 leaves the encoders unordered, =event orders them with events.
+    internal EncoderOrderingMode EncoderOrdering { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ENCODER_BARRIER") switch
+        {
+            "0" => EncoderOrderingMode.None,
+            "event" => EncoderOrderingMode.Event,
+            _ => EncoderOrderingMode.Fence,
+        };
+
+    private static readonly nint SelComputeWaitForFence = MetalNative.Selector("waitForFence:");
+    private static readonly nint SelComputeUpdateFence = MetalNative.Selector("updateFence:");
+    private static readonly nint SelRenderWaitForFence = MetalNative.Selector("waitForFence:beforeStages:");
+    private static readonly nint SelRenderUpdateFence = MetalNative.Selector("updateFence:afterStages:");
+    private static readonly nint SelNewEncoderFence = MetalNative.Selector("newFence");
+
+    private nint _encoderFence;
     private long _encoderBarriers;
 
-    /// <summary>Barriers encoded after render and compute encoders since the last call.</summary>
+    /// <summary>Orderings encoded after render and compute encoders since the last call.</summary>
     internal long TakeEncoderBarriers() => Interlocked.Exchange(ref _encoderBarriers, 0);
 
-    private void EndAndReleaseEncoder(nint encoder)
+    private nint EncoderFence()
     {
+        if (_encoderFence == 0)
+        {
+            _encoderFence = MetalNative.Send(_device, SelNewEncoderFence);
+            if (_encoderFence == 0)
+            {
+                throw Fatal("A Metal fence could not be created to order encoders.");
+            }
+        }
+
+        return _encoderFence;
+    }
+
+    // Right after a render or compute encoder is created, before anything is encoded into it.
+    private void WaitForPreviousEncoder(nint encoder, bool render)
+    {
+        if (EncoderOrdering != EncoderOrderingMode.Fence || encoder == 0)
+        {
+            return;
+        }
+
+        if (render)
+        {
+            MetalV2Native.SendWaitForFence(encoder, SelRenderWaitForFence, EncoderFence(),
+                Mtl.RenderStageVertex | Mtl.RenderStageObject | Mtl.RenderStageMesh);
+        }
+        else
+        {
+            MetalNative.SendVoid(encoder, SelComputeWaitForFence, EncoderFence());
+        }
+    }
+
+    // Right before a render, compute or blit encoder ends.
+    private void UpdateEncoderFence(nint encoder, bool render)
+    {
+        if (EncoderOrdering != EncoderOrderingMode.Fence || encoder == 0)
+        {
+            return;
+        }
+
+        if (render)
+        {
+            // Same shape as waitForFence:beforeStages: (encoder, selector, fence, stages).
+            MetalV2Native.SendWaitForFence(encoder, SelRenderUpdateFence, EncoderFence(), Mtl.RenderStageFragment);
+        }
+        else
+        {
+            // Blit and compute encoders take the same updateFence: and waitForFence:.
+            MetalNative.SendVoid(encoder, SelComputeUpdateFence, EncoderFence());
+        }
+
+        Interlocked.Increment(ref _encoderBarriers);
+    }
+
+    void IMetalSubmissionContext.EncoderStarted(nint encoder, bool render) => WaitForPreviousEncoder(encoder, render);
+
+    void IMetalSubmissionContext.EncoderEnding(nint encoder, bool render) => UpdateEncoderFence(encoder, render);
+
+    private void EndAndReleaseEncoder(nint encoder, bool render)
+    {
+        UpdateEncoderFence(encoder, render);
         MetalNative.SendVoid(encoder, SelEndEncoding);
         MetalNative.SendVoid(encoder, SelRelease);
-        if (EncoderBarriers && _commandBuffer != 0)
+        if (EncoderOrdering == EncoderOrderingMode.Event && _commandBuffer != 0)
         {
             EncodeEventBarrier(_commandBuffer);
             Interlocked.Increment(ref _encoderBarriers);
@@ -1054,6 +1136,8 @@ internal sealed partial class MetalRenderHost
                     $"A Metal render command encoder could not be created: colors={state.ColorAttachmentCount} " +
                     $"depth={depthStencil.HasDepth} stencil={depthStencil.HasStencil} area={state.Width}x{state.Height}.");
             }
+
+            WaitForPreviousEncoder(_renderEncoder, render: true);
         }
         finally
         {
@@ -1176,7 +1260,7 @@ internal sealed partial class MetalRenderHost
                 ResolveStoreActions(in next, hasNext);
             }
 
-            EndAndReleaseEncoder(_renderEncoder);
+            EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
             PassProfileClose();
         }
@@ -1234,7 +1318,7 @@ internal sealed partial class MetalRenderHost
         }
 
         _transferSharesCompute = false;
-        EndAndReleaseEncoder(_computeEncoder);
+        EndAndReleaseEncoder(_computeEncoder, render: false);
         _computeEncoder = 0;
         _boundComputePipeline = 0;
         PassProfileClose();
@@ -1280,6 +1364,8 @@ internal sealed partial class MetalRenderHost
         {
             throw Fatal("A Metal compute command encoder could not be created.");
         }
+
+        WaitForPreviousEncoder(_computeEncoder, render: false);
 
         // A new encoder has none of the residency the last one was given.
         ForgetResidentResources();
@@ -2420,6 +2506,8 @@ internal sealed partial class MetalRenderHost
             MetalMemoryTelemetry.RenderEncoders.Add();
             if (encoder != 0)
             {
+                WaitForPreviousEncoder(encoder, render: true);
+                UpdateEncoderFence(encoder, render: true);
                 MetalNative.SendVoid(encoder, SelEndEncoding);
             }
         }
@@ -2823,6 +2911,8 @@ internal sealed partial class MetalRenderHost
                 return;
             }
 
+            WaitForPreviousEncoder(encoder, render: true);
+            UpdateEncoderFence(encoder, render: true);
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
         finally

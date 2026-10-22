@@ -73,7 +73,7 @@ internal sealed partial class MetalRenderHost
             pristine = _guestMemory.Allocate(staging.Size, 256, out _);
             OrderAfterDeferredCopies(address, staging.Size);
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
-            staged.EncodeGather(context.CommandBuffer, address, staging, pristine);
+            staged.EncodeGather(context.CommandBuffer, address, staging, pristine, context);
             if (context.WantsEncodedLabels)
             {
                 context.ProfileEncoded($"stage storage bytes=0x{staging.Size:X}");
@@ -183,7 +183,7 @@ internal sealed partial class MetalRenderHost
             OrderAfterDeferredCopies(entry.Address, size);
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
             _stagedRanges!.Touch(entry, context.SubmissionSerial);
-            staged.EncodeGather(context.CommandBuffer, entry.Address, entry.Staging, entry.Pristine);
+            staged.EncodeGather(context.CommandBuffer, entry.Address, entry.Staging, entry.Pristine, context);
             if (context.WantsEncodedLabels)
             {
                 context.ProfileEncoded($"stage storage bytes=0x{size:X}");
@@ -247,7 +247,7 @@ internal sealed partial class MetalRenderHost
         _encodingStagedStores = true;
         try
         {
-            var written = staged.EncodeWritebacks(EnsureCommandBuffer(), _submissionSerial);
+            var written = staged.EncodeWritebacks(EnsureCommandBuffer(), _submissionSerial, this);
             NoteRecordedWork();
             foreach (var (address, size) in written)
             {

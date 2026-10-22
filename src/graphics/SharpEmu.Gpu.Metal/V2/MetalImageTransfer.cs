@@ -177,7 +177,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         var blit = _tiler.BeginBlit(context);
         MetalNative.SendVoid(blit, SelCopyWholeTexture, sourceTexture, targetTexture);
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
     }
 
     public bool TryEncodeTextureToTexture(
@@ -272,7 +272,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 size, targetTexture, layer, 0, default, (nuint)writeOption);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         return true;
     }
 
@@ -356,7 +356,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             staging.Buffer, (nuint)staging.Offset, (nuint)rowBytes, (nuint)sliceBytes,
             new MtlSize { Width = width, Height = height, Depth = 1 },
             depthTexture, 0, 0, default, (nuint)MtlBlitOption.StencilFromDepthStencil);
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         return true;
     }
 
@@ -500,7 +500,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 targetSize, targetTexture, layer, 0, default, (nuint)MtlBlitOption.None);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         return true;
     }
 
@@ -719,7 +719,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 new MtlOrigin { X = 0, Y = copy.OriginY, Z = copy.OriginZ }, (nuint)MtlBlitOption.None);
         }
 
-        MetalTiler.EndEncoding(encoder);
+        MetalTiler.EndEncoding(context, encoder);
 
         return true;
     }
@@ -765,7 +765,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
         finally
         {
-            MetalTiler.EndEncoding(blit);
+            // The copies' blit takes its place in the encoder order like every other encoder.
+            MetalTiler.EndEncoding(context, blit);
         }
     }
 
@@ -826,7 +827,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 (nuint)MtlBlitOption.None);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         if (direct)
         {
             return true;
@@ -851,7 +852,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             RepackSubresources(compute, plan, guest, source, toGuest: true);
         }
 
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
 
         return true;
     }
@@ -970,7 +971,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
             else
             {
-                MetalTiler.EndEncoding(compute);
+                MetalTiler.EndEncoding(context, compute);
             }
         }
         finally
@@ -1055,7 +1056,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             linear = swapped;
         }
 
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
         return linear;
     }
 
@@ -1936,7 +1937,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         if (compute != 0)
         {
-            MetalTiler.EndEncoding(compute);
+            MetalTiler.EndEncoding(context, compute);
         }
 
         var blit = _tiler.BeginBlit(context);
@@ -1964,7 +1965,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
     }
 
     // The way out of a tiled depth surface: one compute pass reads the depth texture and
@@ -2004,7 +2005,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                     plan.StencilPitch, (nuint)plan.StencilSliceSize, (nuint)MtlBlitOption.StencilFromDepthStencil);
             }
 
-            MetalTiler.EndEncoding(blit);
+            MetalTiler.EndEncoding(context, blit);
         }
 
         if (plan.BlockKind != TileBlockKind.Depth64KB)
@@ -2024,7 +2025,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 SelectStencilTiles(plan, firstLayer, layerCount));
         }
 
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
     }
 
     // The fused writeback only has Depth64KB offset functions, so any other tile mode
@@ -2051,7 +2052,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 (nuint)depthRowBytes, (nuint)depthSliceBytes, (nuint)depthOption);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         var compute = _tiler.BeginCompute(context);
         if (widening)
         {
@@ -2072,7 +2073,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         _tiler.EncodeTile(compute, staging,
             new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece), _tiles);
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
     }
 
     private void EncodeDepthDownload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
@@ -2131,7 +2132,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         if (direct)
         {
             return;
@@ -2161,6 +2162,6 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             (ulong)description.Pitch * description.BytesPerBlock,
             (ulong)description.Pitch * description.BytesPerBlock,
             plan.SliceSize, plan.SliceSize);
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
     }
 }

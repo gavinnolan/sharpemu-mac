@@ -299,6 +299,8 @@ internal sealed partial class MetalRenderHost
                 throw Fatal($"A Metal multisample resolve pass could not be encoded: {width}x{height} samples={source.Shape.SampleCount}.");
             }
 
+            WaitForPreviousEncoder(encoder, render: true);
+            UpdateEncoderFence(encoder, render: true);
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
         finally
@@ -357,6 +359,7 @@ internal sealed partial class MetalRenderHost
             throw Fatal("A Metal blit encoder could not be created for an image copy.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
         try
         {
             var layers = Math.Min(sourceRange.LayerCount, destinationRange.LayerCount);
@@ -383,6 +386,7 @@ internal sealed partial class MetalRenderHost
         }
         finally
         {
+            UpdateEncoderFence(encoder, render: false);
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 

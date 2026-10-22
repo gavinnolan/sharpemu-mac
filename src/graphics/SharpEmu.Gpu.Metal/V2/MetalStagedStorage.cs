@@ -284,7 +284,8 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
     /// with a compute encoder opened on the command buffer after the work that stored.
     /// </summary>
     /// <returns>The ranges written back, which the caller records as GPU writes.</returns>
-    public List<(ulong Address, ulong Size)> EncodeWritebacks(nint commandBuffer, ulong submissionSerial = 0)
+    public List<(ulong Address, ulong Size)> EncodeWritebacks(nint commandBuffer, ulong submissionSerial = 0,
+        IMetalSubmissionContext? ordering = null)
     {
         var written = new List<(ulong, ulong)>();
         nint encoder = 0;
@@ -313,6 +314,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
                         throw GpuFatal.Fatal("A Metal compute encoder could not be created for staged storage stores.");
                     }
 
+                    ordering?.EncoderStarted(encoder, render: false);
                     MetalNative.SendVoid(encoder, SelSetPipeline, WritebackPipeline());
                 }
 
@@ -333,6 +335,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
         {
             if (encoder != 0)
             {
+                ordering?.EncoderEnding(encoder, render: false);
                 MetalNative.SendVoid(encoder, SelEndEncoding);
             }
         }
@@ -362,12 +365,13 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
     /// <summary>
     /// Fills a staged copy from the windows on the GPU, after whatever the GPU still has to
     /// write there, then its pristine copy from it, when it has one. Bytes no window covers keep what the
-    /// CPU staged. Each step is an encoder of its own, which is what orders them.
+    /// CPU staged. Each step is an encoder of its own, which <paramref name="ordering"/> runs in order.
     /// </summary>
-    public void EncodeGather(nint commandBuffer, ulong address, in MetalGuestRange staging, in MetalGuestRange pristine)
+    public void EncodeGather(nint commandBuffer, ulong address, in MetalGuestRange staging, in MetalGuestRange pristine,
+        IMetalSubmissionContext? ordering = null)
     {
         var size = staging.Size;
-        var gather = BlitEncoder(commandBuffer);
+        var gather = BlitEncoder(commandBuffer, ordering);
         try
         {
             for (var offset = 0UL; offset < size;)
@@ -388,6 +392,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
         }
         finally
         {
+            ordering?.EncoderEnding(gather, render: false);
             MetalNative.SendVoid(gather, SelEndEncoding);
         }
 
@@ -396,7 +401,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             return;
         }
 
-        var snapshot = BlitEncoder(commandBuffer);
+        var snapshot = BlitEncoder(commandBuffer, ordering);
         try
         {
             MetalNative.SendCopyBuffer(
@@ -406,11 +411,12 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
         }
         finally
         {
+            ordering?.EncoderEnding(snapshot, render: false);
             MetalNative.SendVoid(snapshot, SelEndEncoding);
         }
     }
 
-    private static nint BlitEncoder(nint commandBuffer)
+    private static nint BlitEncoder(nint commandBuffer, IMetalSubmissionContext? ordering)
     {
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -418,6 +424,8 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
         {
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for a staged storage buffer.");
         }
+
+        ordering?.EncoderStarted(encoder, render: false);
 
         return encoder;
     }

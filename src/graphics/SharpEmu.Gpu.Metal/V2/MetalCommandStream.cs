@@ -1274,6 +1274,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for an end-of-pipe label.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
         try
         {
             foreach (ref readonly var copy in copies)
@@ -1290,6 +1291,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
         finally
         {
+            UpdateEncoderFence(encoder, render: false);
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
     }

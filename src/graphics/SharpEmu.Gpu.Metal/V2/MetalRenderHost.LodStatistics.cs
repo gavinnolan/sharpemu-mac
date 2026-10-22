@@ -307,6 +307,7 @@ internal sealed partial class MetalRenderHost
             throw Fatal("A Metal compute encoder could not be created for a GET_LOD_STATS report.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
         try
         {
             var arguments = new LodStatsArguments { Reset = reset ? 1u : 0u };
@@ -320,6 +321,7 @@ internal sealed partial class MetalRenderHost
         }
         finally
         {
+            UpdateEncoderFence(encoder, render: false);
             MetalNative.SendVoid(encoder, SelLodStatsEndEncoding);
         }
     }

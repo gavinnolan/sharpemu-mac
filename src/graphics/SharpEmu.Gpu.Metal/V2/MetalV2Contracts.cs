@@ -65,6 +65,21 @@ internal interface IMetalSubmissionContext
     void ReleaseSharedEncoder()
     {
     }
+
+    // An encoder of this command buffer starts only once the one before it has finished:
+    // called right after the encoder is created, before anything is encoded into it, and
+    // EncoderEnding right before it ends (MetalRenderHost.EncoderOrdering).
+    void EncoderStarted(nint encoder, bool render)
+    {
+        _ = encoder;
+        _ = render;
+    }
+
+    void EncoderEnding(nint encoder, bool render)
+    {
+        _ = encoder;
+        _ = render;
+    }
 }
 
 // Moves image contents between guest memory and Metal textures entirely on the GPU.

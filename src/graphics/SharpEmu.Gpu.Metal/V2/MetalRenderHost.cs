@@ -523,7 +523,7 @@ internal sealed partial class MetalRenderHost :
         {
             _encodersInBuffer++;
             PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
-            EndAndReleaseEncoder(_computeEncoder);
+            EndAndReleaseEncoder(_computeEncoder, render: false);
             _computeEncoder = 0;
             _boundComputePipeline = 0;
             PassProfileClose();
@@ -1408,6 +1408,7 @@ internal sealed partial class MetalRenderHost :
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for a guest fill.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
         try
         {
             var bytes = (byte)value;
@@ -1444,6 +1445,7 @@ internal sealed partial class MetalRenderHost :
         }
         finally
         {
+            UpdateEncoderFence(encoder, render: false);
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 
@@ -1547,6 +1549,7 @@ internal sealed partial class MetalRenderHost :
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for a guest copy.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
         try
         {
             MetalNative.SendCopyBuffer(
@@ -1560,6 +1563,7 @@ internal sealed partial class MetalRenderHost :
         }
         finally
         {
+            UpdateEncoderFence(encoder, render: false);
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 

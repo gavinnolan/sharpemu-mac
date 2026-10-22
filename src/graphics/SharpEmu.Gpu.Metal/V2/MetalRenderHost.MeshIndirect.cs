@@ -332,6 +332,8 @@ internal sealed partial class MetalRenderHost
             throw Fatal("A Metal compute encoder could not be created for an indirect launch.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
+
         MetalNative.SendVoid(encoder, SelSetComputePipelineState, IndirectLaunchPipeline());
         // Every record of the batch is in this buffer (CanWriteLaunchAhead), at its own offset.
         MetalNative.SendSetBuffer(encoder, SelSetComputeBuffer, (nint)key.Buffer, 0, 0);
@@ -343,6 +345,7 @@ internal sealed partial class MetalRenderHost
             new MtlSize { Width = (nuint)batch.Count, Height = 1, Depth = 1 });
         // The slots live in an untracked ring: the pass that draws from them waits on this.
         MetalNative.SendVoid(encoder, SelUpdateFence, IndirectLaunchFence());
+        UpdateEncoderFence(encoder, render: false);
         MetalNative.SendVoid(encoder, SelEndEncoding);
         NoteRecordedWork();
         if (PassProfileEnabled)

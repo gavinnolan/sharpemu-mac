@@ -217,33 +217,36 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0x77u, rig.Backing.Read32(filled));
     }
 
-    // The guest windows are untracked, so nothing but a barrier keeps the next encoder of the
+    // The guest windows are untracked, so nothing but an ordering keeps the next encoder of the
     // command buffer from starting while this one still writes: a compute encoder that ends
-    // leaves one behind it, and the opt-out leaves none.
-    [Fact]
-    public void AnEndingComputeEncoderLeavesABarrierBeforeTheNextEncoder()
+    // leaves one behind it, as a fence update (the default, which also chains the fill's own
+    // encoder) or an event barrier, and the opt-out leaves none. The fill lands either way.
+    [Theory]
+    [InlineData("Fence", 1L)]
+    [InlineData("Event", 1L)]
+    [InlineData("None", 0L)]
+    public void AnEndingComputeEncoderIsOrderedBeforeTheNextEncoder(string mode, long expected)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
         const ulong filled = GuestBase + 0x10000;
-        host.EncoderBarriers = true;
+        host.EncoderOrdering = Enum.Parse<MetalRenderHost.EncoderOrderingMode>(mode);
         _ = host.TakeEncoderBarriers();
 
         _ = host.EnsureComputeEncoder();
         host.FillBufferInOrder(filled, 0x1000, 0x11);
         host.FlushCommandBuffer();
         Assert.False(host.ComputeEncoderOpen);
-        Assert.Equal(1L, host.TakeEncoderBarriers());
-        WaitForGpu(host, host.LastWorkSerial);
-        WaitForCompletions(host);
-        Assert.Equal(0x11u, rig.Backing.Read32(filled));
+        var ordered = host.TakeEncoderBarriers();
+        if (expected == 0)
+            Assert.Equal(0L, ordered);
+        else
+            Assert.True(ordered >= expected);
 
-        host.EncoderBarriers = false;
         _ = host.EnsureComputeEncoder();
         host.FillBufferInOrder(filled, 0x1000, 0x22);
         host.FlushCommandBuffer();
-        Assert.Equal(0L, host.TakeEncoderBarriers());
         WaitForGpu(host, host.LastWorkSerial);
         WaitForCompletions(host);
         Assert.Equal(0x22u, rig.Backing.Read32(filled));

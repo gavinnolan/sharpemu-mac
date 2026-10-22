@@ -412,6 +412,8 @@ internal sealed unsafe partial class MetalImageCache
                 throw GpuFatal.Fatal("A Metal blit encoder could not be created for a sparse texture.");
             }
 
+            context.EncoderStarted(blit, render: false);
+
             var size = new MtlSize { Width = image.Shape.Width, Height = image.Shape.Height, Depth = 1 };
             foreach (var layer in _sparseMaps)
             {
@@ -420,6 +422,7 @@ internal sealed unsafe partial class MetalImageCache
                     sparse.Texture, layer, 0, default);
             }
 
+            context.EncoderEnding(blit, render: false);
             MetalNative.SendVoid(blit, SelEndEncoding);
         }
 
@@ -498,6 +501,8 @@ internal sealed unsafe partial class MetalImageCache
                 throw GpuFatal.Fatal("A Metal blit encoder could not be created for a sparse texture.");
             }
 
+            context.EncoderStarted(blit, render: false);
+
             // Every layer with tiles on the new heap: what the old texture held there, or the
             // zeros an unmapped layer of it reads.
             var size = new MtlSize { Width = shape.Width, Height = shape.Height, Depth = 1 };
@@ -510,6 +515,7 @@ internal sealed unsafe partial class MetalImageCache
                 }
             }
 
+            context.EncoderEnding(blit, render: false);
             MetalNative.SendVoid(blit, SelEndEncoding);
         }
 

@@ -208,6 +208,7 @@ internal sealed unsafe class MetalTiler : IDisposable
             throw GpuFatal.Fatal("The tiler could not open a compute encoder.");
         }
 
+        context.EncoderStarted(encoder, render: false);
         return encoder;
     }
 
@@ -221,10 +222,19 @@ internal sealed unsafe class MetalTiler : IDisposable
             throw GpuFatal.Fatal("The tiler could not open a blit encoder.");
         }
 
+        context.EncoderStarted(encoder, render: false);
         return encoder;
     }
 
+    // Ends an encoder outside any ordering (tests that drive the tiler on their own).
     public static void EndEncoding(nint encoder) => MetalNative.SendVoid(encoder, SelEndEncoding);
+
+    // Ends an encoder BeginCompute or BeginBlit opened.
+    public static void EndEncoding(IMetalSubmissionContext context, nint encoder)
+    {
+        context.EncoderEnding(encoder, render: false);
+        MetalNative.SendVoid(encoder, SelEndEncoding);
+    }
 
     private nint Library(TileBlockKind kind, MetalTileDirection direction)
     {

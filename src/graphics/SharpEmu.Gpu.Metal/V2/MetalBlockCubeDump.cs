@@ -124,7 +124,7 @@ internal static class MetalBlockCubeDump
             }
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         var serial = context.SubmissionSerial;
         var directory = Directory;
         _ = Task.Run(() =>
