@@ -1996,6 +1996,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // asking the ring for hundreds of megabytes in one submission.
     private const ulong MaxTransferPieceBytes = 32UL * 1024 * 1024;
 
+    /// <summary>The piece size transfers are cut to; a test lowers it to reach the cap with a small image.</summary>
+    internal ulong TransferPieceBytes { get; set; } = MaxTransferPieceBytes;
+
     // The pieces an image is transferred in: one piece for anything that maps whole, and
     // otherwise runs of whole layers, which is the only split whose guest bytes are
     // contiguous and whose subresources are expressible as a SubresourceRange. An image
@@ -2059,7 +2062,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var residentSize = residentEnd - residentStart;
-        var whole = residentSize <= MaxTransferPieceBytes
+        var whole = residentSize <= TransferPieceBytes
             ? _guestMemory.Resolve(description.Data.Address + residentStart, residentSize)
             : default;
         if (whole.IsValid && whole.Size >= residentSize)
@@ -2243,7 +2246,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return true;
         }
 
-        var batch = (uint)Math.Clamp(MaxTransferPieceBytes / layerBytes, 1, layers);
+        var batch = (uint)Math.Clamp(TransferPieceBytes / layerBytes, 1, layers);
         var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
         MetalV2Diagnostics.InfoOnce(
             "image-pieces",
@@ -2258,7 +2261,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var pieceSize = layerBytes * count;
             // A piece past the run size - a single layer that large - is past what the
             // ring stages whole, so only a window may carry it in one transfer.
-            var piece = pieceSize <= MaxTransferPieceBytes
+            var piece = pieceSize <= TransferPieceBytes
                 ? _guestMemory.Resolve(description.Data.Address + pieceBase, pieceSize)
                 : _guestMemory.ResolveWritable(description.Data.Address + pieceBase, pieceSize);
             if (!piece.IsValid || piece.Size < pieceSize)
@@ -2313,7 +2316,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
         _owner.LandHeldCopies(description.Data.Address, description.Data.Size);
-        var destination = description.Data.Size <= MaxTransferPieceBytes
+        var destination = description.Data.Size <= TransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
@@ -2377,7 +2380,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return WriteBackInRuns(context, image, 0, description.Data.Size);
         }
 
-        var batch = (uint)Math.Clamp(MaxTransferPieceBytes / layerBytes, 1, layers);
+        var batch = (uint)Math.Clamp(TransferPieceBytes / layerBytes, 1, layers);
         var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
         var written = 0UL;
         for (uint first = 0; first < layers; first += batch)
@@ -2420,8 +2423,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var runs = new List<UploadRun>();
         // What no run is planned for shows as written falling short of the range below.
         _ = PlanUploadRuns(
-            _transfer, in description, from, to, MaxTransferPieceBytes,
-            (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs);
+            _transfer, in description, from, to, TransferPieceBytes,
+            (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs,
+            _guestMemory.MaxWindowBytes);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         // The stencil plane is named by layers, not by the depth plane's bytes: one
         // layer of stencil is a byte per texel where one layer of depth is four, so a
@@ -2583,7 +2587,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // are not one window-resident span - most often a large image that crosses the edge
     // between two windows. Each run is the longest prefix one window covers, pulled back
     // to a boundary no subresource straddles, and the transfer is restricted to it. A run
-    // is at most MaxTransferPieceBytes; asking for it moves the window edge inside it out of
+    // is at most TransferPieceBytes; asking for it moves the window edge inside it out of
     // the way when the command buffer has not used the windows beside that edge yet, so a
     // backed byte reaches the texture through a window, and the ring stages only what no
     // window holds now.
@@ -2593,8 +2597,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var address = description.Data.Address;
         var runs = new List<UploadRun>();
         var uncovered = PlanUploadRuns(
-            _transfer, in description, from, to, MaxTransferPieceBytes,
-            (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs);
+            _transfer, in description, from, to, TransferPieceBytes,
+            (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs,
+            _guestMemory.MaxWindowBytes);
         var range = ResidentRange(image);
         // The stencil plane is named by layers, as in WriteBackInRuns.
         var layers = description.TransferLayers;
@@ -2604,8 +2609,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var staged = 0UL;
         foreach (var run in runs)
         {
+            // Staged whole: a run past the ring's cap is one subresource the transfer cannot
+            // cut (PlanUploadRuns), and a prefix of it would be refused as too short.
             var source = run.Staged
-                ? _guestMemory.Resolve(address + run.Offset, run.Size)
+                ? _guestMemory.Resolve(address + run.Offset, run.Size, whole: true)
                 : _guestMemory.ResolveWritable(address + run.Offset, run.Size);
             if (!source.IsValid || source.Size < run.Size)
             {
@@ -2650,10 +2657,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // maxRunBytes, pull its end back to a cut no subresource straddles. Where that leaves
     // nothing - no window holds a whole block row from here - the bytes up to the first
     // cut past what the window holds are staged instead, never more than maxRunBytes, so
-    // the ring stays inside its cap. Returns the bytes no run carries.
+    // the ring stays inside its cap. The one exception is a subresource the transfer moves
+    // only whole and that is larger than maxRunBytes - a depth slice, which the depth
+    // kernels walk a layer at a time: it is one run, in place or staged, up to
+    // maxUnitBytes (the largest window, which bounds what a window or the ring holds
+    // whole), since a cap below it would leave it in neither direction. Returns the bytes
+    // no run carries.
     internal static ulong PlanUploadRuns(
         IMetalImageTransfer transfer, in ImageDescription description, ulong from, ulong to, ulong maxRunBytes,
-        Func<ulong, ulong, ulong> windowPrefix, List<UploadRun> runs)
+        Func<ulong, ulong, ulong> windowPrefix, List<UploadRun> runs, ulong maxUnitBytes = 0)
     {
         var size = Math.Min(to, description.Data.Size);
         var uncovered = 0UL;
@@ -2669,6 +2681,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             var remaining = Math.Min(size - offset, maxRunBytes);
+            if (remaining < size - offset && transfer.AlignRunEnd(in description, offset, offset + remaining) <= offset)
+            {
+                // No cut within a run's worth: the subresource here is larger than a run.
+                var unitEnd = Math.Min(transfer.AlignRunStart(in description, offset + remaining), size);
+                if (unitEnd - offset <= maxUnitBytes && transfer.AlignRunEnd(in description, offset, unitEnd) == unitEnd)
+                {
+                    remaining = unitEnd - offset;
+                }
+            }
+
             var resident = Math.Min(windowPrefix(offset, remaining), remaining);
             var end = resident != 0
                 ? transfer.AlignRunEnd(in description, offset, offset + resident)
