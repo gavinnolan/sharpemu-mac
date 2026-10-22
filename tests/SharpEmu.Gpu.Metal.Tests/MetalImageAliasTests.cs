@@ -558,6 +558,36 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.Equal(0, rig.Cache.AliasCounters.Narrow);
     }
 
+    // A run the transfer refuses to retile (a multisampled image) put nothing in guest
+    // memory, so it is not handed over as published: the decline is counted, and the image
+    // takes the whole-image path instead.
+    [Fact]
+    public void AnAliasRunTheTransferRefusesIsNotPublished()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var request = Rig.Request(ImageAddress, LargeSide, ImageRole.ColorTarget);
+        var description = request.Description;
+        description.Samples = 2;
+        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0x5A));
+        var image = rig.Cache.GetImage(rig.Acquire(new ImageRequest(description, request.View, request.Role)));
+        Assert.True(image.IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        _ = rig.Cache.AliasCounters;
+        _ = rig.Cache.TakeAliasFallbacks();
+
+        rig.Acquire(Rig.Request(ImageAddress + 0x2000, LargeSide, AliasRows, ImageRole.ColorTarget));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.False(image.IsPublished(0x2000, 0x2000 + SmallSize));
+        Assert.Equal(0, rig.Cache.AliasCounters.Narrow);
+        var fallbacks = rig.Cache.TakeAliasFallbacks();
+        output.WriteLine(fallbacks);
+        Assert.Contains("write:RetileRefused=1", fallbacks);
+    }
+
     // The large image as a target over known bytes, with guest memory then rewritten so a
     // writeback of the texture is told apart from bytes that were never published.
     private static (MetalCachedImage Image, byte[] Written, byte[] Stale) GpuWrittenLarge(Rig rig)

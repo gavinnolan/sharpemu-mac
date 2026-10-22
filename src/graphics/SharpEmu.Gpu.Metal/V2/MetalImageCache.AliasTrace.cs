@@ -21,11 +21,13 @@ internal enum MetalAliasFallbackReason : byte
     NoTexture,
     CoveringRunRefused,
     RunUnmapped,
+    // The transfer refused the run and retiled nothing.
+    RetileRefused,
 }
 
 internal sealed partial class MetalImageCache
 {
-    private const int AliasFallbackReasons = (int)MetalAliasFallbackReason.RunUnmapped + 1;
+    private const int AliasFallbackReasons = (int)MetalAliasFallbackReason.RetileRefused + 1;
     private const int AliasTraceLinesPerWindow = 40;
 
     // SHARPEMU_METAL_V2_ALIAS_TRACE=1 logs the first alias declines and publications of

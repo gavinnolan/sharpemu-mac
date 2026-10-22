@@ -1519,8 +1519,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         _owner.LandHeldCopies(description.Data.Address + aligned, alignedEnd - aligned);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-        _transfer.EncodeTextureToGuest(
-            context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned);
+        if (!_transfer.EncodeTextureToGuest(
+                context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned))
+        {
+            // Nothing was retiled, so the run is not published; the caller writes the image back whole.
+            failure = MetalAliasFallbackReason.RetileRefused;
+            return false;
+        }
+
         if (context.WantsEncodedLabels)
         {
             context.ProfileEncoded(ProfileLabel("writeback-run", in description));
