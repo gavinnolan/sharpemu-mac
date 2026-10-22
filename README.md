@@ -139,40 +139,27 @@ reuse the caches.
 
 ## Games
 
-Captured on an Apple M4 (24 GB) from the release build. Status and frame
-rates for each title are in [Performance](#performance).
+Captured on SharpEmu-mac with the Metal backend.
 
-| Dreaming Sarah | void tRrLM(); //Void Terrarium++ | Quake |
-| :---: | :---: | :---: |
-| ![Dreaming Sarah](./.github/images/macos/dreaming-sarah.jpg) | ![Void Terrarium](./.github/images/macos/void-terrarium.jpg) | ![Quake](./.github/images/macos/quake.jpg) |
+| Black Myth: Wukong | Grand Theft Auto V |
+| :---: | :---: |
+| ![Black Myth: Wukong](./.github/images/macos/black-myth-wukong.jpg) | ![Grand Theft Auto V](./.github/images/macos/gta-v.jpg) |
 
-| The Oregon Trail | Superliminal | Poppy Playtime Chapter 1 |
-| :---: | :---: | :---: |
-| ![The Oregon Trail](./.github/images/macos/oregon-trail.jpg) | ![Superliminal](./.github/images/macos/superliminal.jpg) | ![Poppy Playtime](./.github/images/macos/poppy-playtime.jpg) |
+| Demon's Souls | SILENT HILL: The Short Message |
+| :---: | :---: |
+| ![Demon's Souls](./.github/images/macos/demons-souls.jpg) | ![SILENT HILL: The Short Message](./.github/images/macos/silent-hill-short-message.jpg) |
 
-| Grand Theft Auto V | SILENT HILL: The Short Message | Demon's Souls |
-| :---: | :---: | :---: |
-| ![GTA V](./.github/images/macos/gta-v.jpg) | ![Silent Hill: The Short Message](./.github/images/macos/silent-hill-short-message.jpg) | ![Demon's Souls](./.github/images/macos/demons-souls.jpg) |
+| Superliminal | Poppy Playtime Chapter 1 |
+| :---: | :---: |
+| ![Superliminal](./.github/images/macos/superliminal.jpg) | ![Poppy Playtime Chapter 1](./.github/images/macos/poppy-playtime.jpg) |
 
-## Performance
+| Quake | The Oregon Trail |
+| :---: | :---: |
+| ![Quake](./.github/images/macos/quake.jpg) | ![The Oregon Trail](./.github/images/macos/oregon-trail.jpg) |
 
-| Game | Furthest scene reached | Status | Avg fps | 1% low | First frame | Peak memory |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| Dreaming Sarah | Gameplay | Playable | 58.2 | 35.4 | 7.2 s | 1.0 GB |
-| void tRrLM(); //Void Terrarium++ | Gameplay | Playable | 58.1 | 26.5 | 5.4 s | 2.6 GB |
-| Quake | Level start | In-game, with issues | 20.8 | 1.6 | 9.9 s | 3.5 GB |
-| The Oregon Trail | Town and map screens | Menus | 11.5 (town), 58.1 (map) | 0.9 | 18.5 s | 3.5 GB |
-| Superliminal | Gameplay | In-game, slow | 16.4 | 13.1 | 14.5 s | 3.6 GB |
-| Poppy Playtime Chapter 1 | Gameplay | In-game, slow | 18.1 | 10.2 | 19.6 s | 4.2 GB |
-| Grand Theft Auto V | Story menu, prologue load | Crashes after the menu | 60.0 (menu) | 57.4 | 14.8 s | 13.3 GB |
-| SILENT HILL: The Short Message | Opening cutscene | Cutscenes, about 1 fps | 0.9 | 0.2 | 37.0 s | 13.3 GB |
-| Demon's Souls | In-world | Loads, unplayable speed | < 0.1 | < 0.1 | 55.7 s | 12.3 GB |
-
-Apple M4 with 24 GB, macOS 27.2, `osx-x64` build under Rosetta 2, 1920x1080
-guest output. Average fps and 1% lows are over the steady part of the scene
-shown in the gallery. "First frame" is measured with warm shader caches. See
-[macOS benchmarks](docs/macos/benchmarks.md) for the method, the measurement
-windows and known issues per game.
+| void tRrLM(); //Void Terrarium++ | Dreaming Sarah |
+| :---: | :---: |
+| ![void tRrLM(); //Void Terrarium++](./.github/images/macos/void-terrarium.jpg) | ![Dreaming Sarah](./.github/images/macos/dreaming-sarah.jpg) |
 
 ## Building from source
 
@@ -201,7 +188,6 @@ signing and entitlements.
   [Configuration](docs/macos/configuration.md),
   [Metal backend](docs/macos/metal-backend.md),
   [Testing](docs/macos/testing.md),
-  [Benchmarks](docs/macos/benchmarks.md),
   [Troubleshooting](docs/macos/troubleshooting.md)
 
 ## Contributing

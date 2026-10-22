@@ -14,7 +14,6 @@ This fork targets macOS with the Metal backend. Start here.
 - [macOS configuration](macos/configuration.md): environment variables for the host, memory, shader translation and diagnostics.
 - [Metal backend](macos/metal-backend.md): how the Metal renderer is structured, with pointers into the source.
 - [Testing on macOS](macos/testing.md): the .NET and Python tests, CI, and the game harness scripts.
-- [macOS benchmarks](macos/benchmarks.md): frame rates, memory and known issues per tested game on the first release.
 - [macOS troubleshooting](macos/troubleshooting.md): startup, performance and rendering problems and what to check.
 
 ## General

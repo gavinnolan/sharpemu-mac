@@ -64,14 +64,14 @@ case "$1" in
     [[ -n "$GAMES_DIR" ]] || { echo "set SHARPEMU_GAMES_DIR to the directory holding the games, or pass a path to an eboot.bin" >&2; exit 2; } ;;
 esac
 case "$1" in
-  ds) EBOOT="$GAMES_DIR/Demon Souls/PPSA01342-app0/eboot.bin" ;;
+  ds) EBOOT="$GAMES_DIR/demon souls.zar" ;;
   sarah) EBOOT="$GAMES_DIR/Dreaming Sarah/PPSA02929-app0/eboot.bin" ;;
   gta) EBOOT="$GAMES_DIR/GTA V/eboot.bin" ;;
   poppy) EBOOT="$GAMES_DIR/Poppy Playtime Chapter 1.zar" ;;
   quake) EBOOT="$GAMES_DIR/quake.zar" ;;
   sh) EBOOT="$GAMES_DIR/silent hill short message.zar" ;;
   superl) EBOOT="$GAMES_DIR/Superliminal.zar" ;;
-  oregon) EBOOT="$GAMES_DIR/The Oregon Trail/PPSA19244-2.000.001.zar" ;;
+  oregon) EBOOT="$GAMES_DIR/the oregon trail.zar" ;;
   void) EBOOT="$GAMES_DIR/void terrarium.zar" ;;
   *) EBOOT="$1" ;;
 esac
