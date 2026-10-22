@@ -32,9 +32,31 @@ public static class MetalGpuBackend
     internal static void ConfigureSharedGpuCode()
     {
         SharpEmu.Libs.Gpu.Images.ImageRequestBuilders.NativeColorClearMetadata = false;
-        SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.CompiledTransactions = false;
+        SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.CompiledTransactions = CompiledTransactionsDefault();
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.SpecializationGuards = false;
         SharpEmu.ShaderCompiler.Resources.ResourceTracker.UnvalidatedAddressWordsAreMemory = false;
+    }
+
+    // Compiled resource transactions are back on for the titles below. Grand Theft Auto V's draws
+    // write new pointers into their user data every frame, so a materialization misses its cache
+    // tens of thousands of times a second: in Los Santos gameplay ~55K misses per 5 s took 1.24 s of
+    // the command stream through the evaluator and 0.75-0.88 s compiled, 9.46 -> 9.99 median fps
+    // with the same pictures. Elsewhere they stay off until the Demon's Souls areas they were
+    // turned off for are checked again. SHARPEMU_METAL_COMPILED_TRANSACTIONS=1 or =0 decides for
+    // any title.
+    private static readonly HashSet<string> CompiledTransactionTitles = new(StringComparer.Ordinal) { "PPSA04264", "PPSA03420" };
+
+    private static bool CompiledTransactionsDefault()
+    {
+        var titleId = VideoOutBackendServices.GetApplicationTitleId();
+        var enabled = Environment.GetEnvironmentVariable("SHARPEMU_METAL_COMPILED_TRANSACTIONS") switch
+        {
+            "1" => true,
+            "0" => false,
+            _ => CompiledTransactionTitles.Contains(titleId),
+        };
+        Console.Error.WriteLine($"[LOADER][INFO] Compiled resource transactions: {(enabled ? "on" : "off")} (title {titleId}).");
+        return enabled;
     }
 
     public static void Register()
