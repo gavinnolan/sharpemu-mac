@@ -1650,6 +1650,15 @@ internal sealed partial class MetalRenderHost :
             return true;
         }
 
+        // A read of bytes an image the GPU drew into owns comes after the draws deferred before it.
+        // Command memory is read packet by packet, so the rest is not drained for: a deferred draw
+        // records no write anywhere else that the read would wait for (an operand read drains).
+        if (_translation is { HasPendingDraws: true } && _imageCache.MayOwn(address, (ulong)destination.Length) &&
+            _imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length))
+        {
+            DrainDraws();
+        }
+
         if (_cpOverlay.Count != 0)
         {
             // Bytes a command-processor write still owes are read as written, the way the
@@ -1722,6 +1731,12 @@ internal sealed partial class MetalRenderHost :
 
     public void SynchronizeShaderCode(ulong address, ulong size)
     {
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            SynchronizeShaderCodeConcurrent(address, size, assumptions);
+            return;
+        }
+
         if (size != 0 && (_gpuWrites.MayCover(address, size) || _imageCache.MayOwn(address, size)))
         {
             WaitForGuestBytes(address, size);
@@ -1833,6 +1848,8 @@ internal sealed partial class MetalRenderHost :
             return true;
         }
 
+        DrainDraws();
+
         if (!PollWithoutWaiting)
         {
             return TryReadGuest(address, destination);
@@ -1901,6 +1918,7 @@ internal sealed partial class MetalRenderHost :
     /// </remarks>
     public bool CommitPendingOperandWrite(ulong address, ulong size)
     {
+        DrainDraws();
         if (size == 0 || !PollWithoutWaiting)
         {
             return false;
@@ -2295,6 +2313,9 @@ internal sealed partial class MetalRenderHost :
             // Read-aheads of the dispatches after one waiting on its pipeline, the dispatches
             // whose pipelines they asked for, and their time on the worker.
             $"lookahead=[{FormatLookaheadCounters()}] " +
+            // Programs resolved ahead of their draws (ParallelResolve): resolved, abandoned, taken,
+            // refused when taken, and how long the worker waited for them.
+            $"prefetch=[{FormatPrefetchCounters()}] " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +

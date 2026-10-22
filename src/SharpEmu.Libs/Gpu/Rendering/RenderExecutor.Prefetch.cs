@@ -67,6 +67,10 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 // when it takes the result, that the assumptions still hold.
 public interface IConcurrentResolveHost
 {
+    // False keeps a host that can answer reads from another thread resolving on its own thread,
+    // so it can be turned on and off at run time.
+    bool ResolvesConcurrently => true;
+
     // On the resolving thread, around one resolution.
     void BeginConcurrentResolve();
 

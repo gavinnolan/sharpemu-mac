@@ -244,6 +244,8 @@ internal sealed partial class MetalRenderHost
 
     bool ICommandStreamHost.TryRecordLodStatistics(ulong destination, uint size, bool resetCounters)
     {
+        // The report counts the draws before it.
+        DrainDraws();
         // A buffer too small for the slots gets the fallback's "no counters" header, and a
         // host that publishes labels as it parses them would publish the guest's fence
         // before the GPU wrote the report.

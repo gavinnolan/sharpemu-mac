@@ -1767,7 +1767,7 @@ internal sealed partial class MetalRenderHost
         if (_concurrentAssumptions is { } assumptions)
         {
             Span<byte> concurrent = stackalloc byte[sizeof(uint)];
-            if (!TryReadResidentGuestBytesConcurrent(address, concurrent, ConcurrentQuery.CleanWord, assumptions))
+            if (!TryReadResidentGuestBytesConcurrent(address, concurrent, assumptions))
             {
                 return false;
             }
@@ -1802,7 +1802,7 @@ internal sealed partial class MetalRenderHost
 
         if (_concurrentAssumptions is { } assumptions)
         {
-            return TryReadResidentGuestBytesConcurrent(address, destination, ConcurrentQuery.Resident, assumptions);
+            return TryReadResidentGuestBytesConcurrent(address, destination, assumptions);
         }
 
         if (_imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length))
@@ -1839,10 +1839,9 @@ internal sealed partial class MetalRenderHost
             return true;
         }
 
-        // Off the worker the caller reads each range itself, so every answer is recorded.
-        if (_concurrentAssumptions is not null)
+        if (_concurrentAssumptions is { } assumptions)
         {
-            return false;
+            return TryCompareResidentGuestBytesConcurrent(addresses, lengths, offsets, recorded, assumptions);
         }
 
         if (lengths.Length != count || offsets.Length != count || _labelOverlay.Count != 0 ||

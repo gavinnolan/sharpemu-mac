@@ -182,7 +182,7 @@ public static partial class AgcExports
             {
                 _pipelines = new ShaderPipelineCache(_context, pipelineHost, GuestGpu.Current, CreateShaderHeaderRegistry(_context));
                 _executor = new RenderExecutor(renderHost, _pipelines);
-                if (host is IConcurrentResolveHost concurrentHost)
+                if (host is IConcurrentResolveHost { ResolvesConcurrently: true } concurrentHost)
                 {
                     _parallel = new ParallelProgramPrefetch(_executor, renderHost, concurrentHost);
                     _executor.Prefetch = _parallel;
@@ -317,6 +317,8 @@ public static partial class AgcExports
         private readonly Queue<PendingDraw> _pendingDraws = new();
 
         public bool HasPendingDraws => _pendingDraws.Count != 0;
+
+        public int PendingDrawCount => _pendingDraws.Count;
 
         private bool _draining;
 

@@ -1224,8 +1224,19 @@ public sealed partial class RenderExecutor
         }
 
         using var resolveScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSynchronousResolution);
+        var resolveStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         state.Programs = ResolveGraphicsPrograms(banks, in inputs);
+        Interlocked.Add(ref _synchronousResolveTicks, System.Diagnostics.Stopwatch.GetTimestamp() - resolveStarted);
+        Interlocked.Increment(ref _synchronousResolves);
     }
+
+    private static long _synchronousResolveTicks;
+    private static long _synchronousResolves;
+
+    /// <summary>Graphics program resolutions the drawing thread made itself, and their time, since the last call.</summary>
+    public static (long Count, double Milliseconds) TakeSynchronousResolveCounters() =>
+        (Interlocked.Exchange(ref _synchronousResolves, 0),
+            Interlocked.Exchange(ref _synchronousResolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
     private static void TraceDrawState(ulong submitId, RegisterBanks banks, in DrawCall draw, in DrawState state)
     {

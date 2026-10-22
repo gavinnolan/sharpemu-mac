@@ -57,6 +57,22 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     public long Submitted { get; private set; }
 
+    // What became of the jobs since the last TakeCounters: resolved, abandoned (the resolution threw),
+    // taken by their draw, refused when taken (inputs or ownership changed), and the worker's wait.
+    private long _resolvedCount;
+    private long _abandonedCount;
+    private long _takenCount;
+    private long _refusedCount;
+    private long _waitTicks;
+    private static int _abandonReports;
+    private static readonly int MaxAbandonReports =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_ABANDON_REPORTS"), out var reports) ? reports : 0;
+
+    public (long Resolved, long Abandoned, long Taken, long Refused, double WaitMilliseconds) TakeCounters() =>
+        (Interlocked.Exchange(ref _resolvedCount, 0), Interlocked.Exchange(ref _abandonedCount, 0),
+            Interlocked.Exchange(ref _takenCount, 0), Interlocked.Exchange(ref _refusedCount, 0),
+            Interlocked.Exchange(ref _waitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+
     // A gate above zero holds the job until AdvanceGate reaches it: with the command stream on its own
     // thread, draws are submitted ahead of the work before them, which may change what they read.
     public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false)
@@ -164,13 +180,22 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         Current = null;
+        var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         WaitFor(job);
+        Interlocked.Add(ref _waitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
-        if (job.State != 1 || !job.Inputs.Equals(inputs) || !_concurrent.IsStillCurrent(job.Assumptions!))
+        if (job.State != 1)
         {
             return false;
         }
 
+        if (!job.Inputs.Equals(inputs) || !_concurrent.IsStillCurrent(job.Assumptions!))
+        {
+            Interlocked.Increment(ref _refusedCount);
+            return false;
+        }
+
+        Interlocked.Increment(ref _takenCount);
         programs = job.Programs!;
         return true;
     }
@@ -274,7 +299,26 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
     }
 
+    private long _resolveTicks;
+
+    // The resolving thread's busy time since the last call.
+    public double TakeResolveMilliseconds() =>
+        Interlocked.Exchange(ref _resolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
     private void Resolve(Job job)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            ResolveCore(job);
+        }
+        finally
+        {
+            Interlocked.Add(ref _resolveTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        }
+    }
+
+    private void ResolveCore(Job job)
     {
         _concurrent.BeginConcurrentResolve();
         try
@@ -282,12 +326,19 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, _host.Fatal, job.Indexed);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
             job.Assumptions = _concurrent.EndConcurrentResolve();
+            Interlocked.Increment(ref _resolvedCount);
             job.State = 1;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             // The render thread resolves the draw itself, and fails there if the error is real.
             job.Assumptions = _concurrent.EndConcurrentResolve();
+            Interlocked.Increment(ref _abandonedCount);
+            if (MaxAbandonReports > 0 && Interlocked.Increment(ref _abandonReports) <= MaxAbandonReports)
+            {
+                Console.Error.WriteLine($"[GPU][PREFETCH] abandoned: {exception.GetType().Name}: {exception.Message}");
+            }
+
             job.State = 2;
         }
     }

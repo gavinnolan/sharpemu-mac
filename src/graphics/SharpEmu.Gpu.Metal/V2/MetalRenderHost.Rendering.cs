@@ -2375,6 +2375,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public void EmitGlobalBarrier()
     {
+        DrainDraws();
         if (_renderEncoder != 0 || _computeEncoder != 0)
         {
             RecordMemoryBarrier();

@@ -139,62 +139,70 @@ internal sealed class MetalGpuWriteRanges
         ulong serial,
         MetalGpuWriteOrigin origin = MetalGpuWriteOrigin.StorageBuffer)
     {
-        if (size == 0 || serial == 0 || serial <= _retiredSerial || address > ulong.MaxValue - size)
+        BeginMutation();
+        try
         {
-            return 0;
-        }
+            if (size == 0 || serial == 0 || serial <= _retiredSerial || address > ulong.MaxValue - size)
+            {
+                return 0;
+            }
 
-        _recorded++;
-        Version++;
-        var sequence = ++_sequence;
-        var end = address + size;
-        if (origin == MetalGpuWriteOrigin.EndOfPipeLabel)
-        {
-            NoteLabel(address, end, serial, sequence);
+            _recorded++;
+            Version++;
+            var sequence = ++_sequence;
+            var end = address + size;
+            if (origin == MetalGpuWriteOrigin.EndOfPipeLabel)
+            {
+                NoteLabel(address, end, serial, sequence);
+                return sequence;
+            }
+
+            // Draws and dispatches bind the same storage range over and over inside one
+            // submission, so the newest record almost always absorbs the next one.
+            for (var index = _count - 1; index >= 0 && index >= _count - 8; index--)
+            {
+                ref var candidate = ref _records[index];
+                if (candidate.Serial != serial || candidate.End < address || candidate.Start > end)
+                {
+                    continue;
+                }
+
+                candidate.Start = Math.Min(candidate.Start, address);
+                candidate.End = Math.Max(candidate.End, end);
+                candidate.Sequence = sequence;
+                return sequence;
+            }
+
+            if (_count == _records.Length)
+            {
+                if (_records.Length < MaxRecords)
+                {
+                    Array.Resize(ref _records, _records.Length * 2);
+                }
+                else
+                {
+                    FoldOldest();
+                }
+            }
+
+            _records[_count++] = new Record { Start = address, End = end, Serial = serial, Sequence = sequence, Origin = origin };
+            _recordsByOrigin[(int)origin]++;
+            if (address < _boundsStart)
+            {
+                _boundsStart = address;
+            }
+
+            if (end > _boundsEnd)
+            {
+                _boundsEnd = end;
+            }
+
             return sequence;
         }
-
-        // Draws and dispatches bind the same storage range over and over inside one
-        // submission, so the newest record almost always absorbs the next one.
-        for (var index = _count - 1; index >= 0 && index >= _count - 8; index--)
+        finally
         {
-            ref var candidate = ref _records[index];
-            if (candidate.Serial != serial || candidate.End < address || candidate.Start > end)
-            {
-                continue;
-            }
-
-            candidate.Start = Math.Min(candidate.Start, address);
-            candidate.End = Math.Max(candidate.End, end);
-            candidate.Sequence = sequence;
-            return sequence;
+            EndMutation();
         }
-
-        if (_count == _records.Length)
-        {
-            if (_records.Length < MaxRecords)
-            {
-                Array.Resize(ref _records, _records.Length * 2);
-            }
-            else
-            {
-                FoldOldest();
-            }
-        }
-
-        _records[_count++] = new Record { Start = address, End = end, Serial = serial, Sequence = sequence, Origin = origin };
-        _recordsByOrigin[(int)origin]++;
-        if (address < _boundsStart)
-        {
-            _boundsStart = address;
-        }
-
-        if (end > _boundsEnd)
-        {
-            _boundsEnd = end;
-        }
-
-        return sequence;
     }
 
     private void NoteLabel(ulong address, ulong end, ulong serial, ulong sequence)
@@ -253,16 +261,24 @@ internal sealed class MetalGpuWriteRanges
     /// </summary>
     public void NoteUnbounded(ulong serial)
     {
-        Version++;
-        if (serial != 0 && serial > _retiredSerial && serial >= _unboundedSerial)
+        BeginMutation();
+        try
         {
-            _unboundedSequence = ++_sequence;
-        }
+            Version++;
+            if (serial != 0 && serial > _retiredSerial && serial >= _unboundedSerial)
+            {
+                _unboundedSequence = ++_sequence;
+            }
 
-        if (serial > _unboundedSerial)
+            if (serial > _unboundedSerial)
+            {
+                _unboundedSerial = serial;
+                _recordsByOrigin[(int)MetalGpuWriteOrigin.Unbounded]++;
+            }
+        }
+        finally
         {
-            _unboundedSerial = serial;
-            _recordsByOrigin[(int)MetalGpuWriteOrigin.Unbounded]++;
+            EndMutation();
         }
     }
 
@@ -282,6 +298,64 @@ internal sealed class MetalGpuWriteRanges
     /// False when no recorded write can possibly cover these bytes. Cheap enough to
     /// call for every packet the command stream reads, and it touches nothing.
     /// </summary>
+    // Odd while the worker changes the records: a reader on another thread (a resolution ahead of the
+    // worker) scans them only between two equal even values, so it never trusts a torn view.
+    private int _mutation;
+
+    private void BeginMutation() => Volatile.Write(ref _mutation, _mutation + 1);
+
+    private void EndMutation() => Volatile.Write(ref _mutation, _mutation + 1);
+
+    /// <summary>
+    /// <see cref="PendingSerial"/> for a thread other than the worker: nothing is retired, and false
+    /// when the worker changed the records meanwhile, so the caller treats the bytes as pending.
+    /// </summary>
+    public bool TryPendingSerialSnapshot(ulong address, ulong size, ulong completed, out ulong pending)
+    {
+        pending = 0;
+        var before = Volatile.Read(ref _mutation);
+        if ((before & 1) != 0 || size == 0 || address > ulong.MaxValue - size)
+        {
+            return size == 0 && (before & 1) == 0;
+        }
+
+        try
+        {
+            var end = address + size;
+            var found = _unboundedSerial > completed ? _unboundedSerial : 0;
+            var records = _records;
+            var count = Math.Min(_count, records.Length);
+            for (var index = 0; index < count; index++)
+            {
+                var record = records[index];
+                if (record.Serial > completed && record.Serial > found && record.End > address && record.Start < end)
+                {
+                    found = record.Serial;
+                }
+            }
+
+            var labels = _labels;
+            var labelCount = Math.Min(_labelCount, labels.Length);
+            for (var index = 0; index < labelCount; index++)
+            {
+                var label = labels[index];
+                if (label.Serial > completed && label.Serial > found && label.End > address && label.Start < end)
+                {
+                    found = label.Serial;
+                }
+            }
+
+            pending = found;
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return false;
+        }
+
+        Interlocked.MemoryBarrier();
+        return Volatile.Read(ref _mutation) == before;
+    }
+
     public bool MayCover(ulong address, ulong size) =>
         _unboundedSerial != 0 ||
         ((_count != 0 || _labelCount != 0) && size != 0 && address < _boundsEnd && _boundsStart < address + size);
@@ -409,75 +483,92 @@ internal sealed class MetalGpuWriteRanges
     /// <summary>Drops every record the GPU has finished.</summary>
     public void Retire(ulong completed)
     {
+        // Most calls find nothing new to retire, and change nothing a reader on another thread sees.
         if (completed <= _retiredSerial)
         {
             return;
         }
 
-        _retiredSerial = completed;
-        if (_unboundedSerial <= completed)
+        BeginMutation();
+        try
         {
-            _unboundedSerial = 0;
-        }
+            _retiredSerial = completed;
+            if (_unboundedSerial <= completed)
+            {
+                _unboundedSerial = 0;
+            }
 
-        var kept = 0;
-        var start = ulong.MaxValue;
-        var end = 0UL;
-        for (var index = 0; index < _count; index++)
+            var kept = 0;
+            var start = ulong.MaxValue;
+            var end = 0UL;
+            for (var index = 0; index < _count; index++)
+            {
+                if (_records[index].Serial <= completed)
+                {
+                    continue;
+                }
+
+                ref var record = ref _records[index];
+                if (record.Start < start)
+                {
+                    start = record.Start;
+                }
+
+                if (record.End > end)
+                {
+                    end = record.End;
+                }
+
+                _records[kept++] = record;
+            }
+
+            _count = kept;
+            kept = 0;
+            for (var index = 0; index < _labelCount; index++)
+            {
+                ref var label = ref _labels[index];
+                if (label.Serial <= completed)
+                {
+                    CountLabelPages(label.Start, label.End, -1);
+                    continue;
+                }
+
+                start = Math.Min(start, label.Start);
+                end = Math.Max(end, label.End);
+                _labels[kept++] = label;
+            }
+
+            _labelCount = kept;
+            _boundsStart = start;
+            _boundsEnd = end;
+        }
+        finally
         {
-            if (_records[index].Serial <= completed)
-            {
-                continue;
-            }
-
-            ref var record = ref _records[index];
-            if (record.Start < start)
-            {
-                start = record.Start;
-            }
-
-            if (record.End > end)
-            {
-                end = record.End;
-            }
-
-            _records[kept++] = record;
+            EndMutation();
         }
-
-        _count = kept;
-        kept = 0;
-        for (var index = 0; index < _labelCount; index++)
-        {
-            ref var label = ref _labels[index];
-            if (label.Serial <= completed)
-            {
-                CountLabelPages(label.Start, label.End, -1);
-                continue;
-            }
-
-            start = Math.Min(start, label.Start);
-            end = Math.Max(end, label.End);
-            _labels[kept++] = label;
-        }
-
-        _labelCount = kept;
-        _boundsStart = start;
-        _boundsEnd = end;
     }
 
     /// <summary>Everything recorded has completed.</summary>
     public void Clear(ulong completed)
     {
-        Version++;
-        _count = 0;
-        _labelCount = 0;
-        _labelPages.Clear();
-        _unboundedSerial = 0;
-        _boundsStart = ulong.MaxValue;
-        _boundsEnd = 0;
-        if (completed > _retiredSerial)
+        BeginMutation();
+        try
         {
-            _retiredSerial = completed;
+            Version++;
+            _count = 0;
+            _labelCount = 0;
+            _labelPages.Clear();
+            _unboundedSerial = 0;
+            _boundsStart = ulong.MaxValue;
+            _boundsEnd = 0;
+            if (completed > _retiredSerial)
+            {
+                _retiredSerial = completed;
+            }
+        }
+        finally
+        {
+            EndMutation();
         }
     }
 
