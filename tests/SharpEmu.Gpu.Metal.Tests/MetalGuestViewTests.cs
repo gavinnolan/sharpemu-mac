@@ -131,6 +131,62 @@ public sealed unsafe class MetalGuestViewTests(ITestOutputHelper output)
         AssertEqualBytes(stores, bytes);
     }
 
+    // A large written range is staged by the GPU alone: the copy and its pristine twin are both
+    // filled from the windows over the range's scattered runs, the CPU copies none of it, and
+    // what the shader stores into the copy still reaches every scattered page. A range with a
+    // page no window covers is left to the CPU.
+    [Fact]
+    public void AWrittenScatteredRangeIsStagedOnTheGpuAndItsStoresReachGuestMemory()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var backing = new ShmScatteredBacking(BackingBytes, ViewBytes);
+        backing.FillAliasPattern(0x2468ACE1u);
+        using var harness = new MetalTransferHarness(Device.Value);
+        using var memory = Memory(backing);
+        var staged = new MetalStagedStorage(memory);
+
+        harness.Begin();
+        memory.BeginSubmission(1, 0);
+        var copy = memory.ReserveWholeStaging(backing.Base, ViewBytes);
+        var pristine = memory.Allocate(ViewBytes, 256, out _);
+        Assert.True(copy.IsValid);
+        Assert.Equal(ViewBytes, copy.Size);
+        Assert.Equal(1UL, memory.OversizedStaged);
+        Assert.True(staged.TryEncodeWholeGather(harness.CommandBuffer, backing.Base, copy, pristine));
+        var tail = memory.Allocate(2 * ShmScatteredBacking.Piece, 256, out _);
+        Assert.False(staged.TryEncodeWholeGather(
+            harness.CommandBuffer, backing.Base + ViewBytes - ShmScatteredBacking.Piece, tail, tail));
+        harness.Submit();
+        AssertGuestBytes(backing, backing.Base, harness.Read(copy.Buffer, copy.Offset, ViewBytes));
+        AssertGuestBytes(backing, backing.Base, harness.Read(pristine.Buffer, pristine.Offset, ViewBytes));
+
+        harness.Begin();
+        staged.Add(backing.Base, ViewBytes, copy, pristine, written: true);
+        var stores = MetalTileOracle.Pattern((int)ViewBytes, 0xBEEF);
+        var source = harness.Buffer(stores);
+        var fence = MetalNative.Send(Device.Value, SelNewFence);
+        var store = MetalNative.Send(harness.CommandBuffer, SelBlit);
+        MetalNative.SendCopyBuffer(store, SelCopy, source, 0, copy.Buffer, (nuint)copy.Offset, (nuint)ViewBytes);
+        MetalNative.SendVoid(store, SelUpdateFence, fence);
+        MetalNative.SendVoid(store, SelEnd);
+        staged.Arm();
+        var wait = MetalNative.Send(harness.CommandBuffer, SelBlit);
+        MetalNative.SendVoid(wait, SelWaitForFence, fence);
+        MetalNative.SendVoid(wait, SelEnd);
+        Assert.Equal([(backing.Base, ViewBytes)], staged.EncodeWritebacks(harness.CommandBuffer));
+        staged.MarkWrittenBack();
+        harness.Submit();
+        MetalNative.SendVoid(fence, SelRelease);
+
+        var bytes = new byte[ViewBytes];
+        Assert.True(backing.TryRead(backing.Base, bytes));
+        AssertEqualBytes(stores, bytes);
+    }
+
     // Inside one command buffer a guest view would not see a write made through a window,
     // so a read of bytes this command buffer already wrote is staged with the write gathered
     // in, and sees it. The next command buffer reads the same bytes through a view.

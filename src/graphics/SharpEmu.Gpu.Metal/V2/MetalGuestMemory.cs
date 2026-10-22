@@ -1122,6 +1122,45 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         return true;
     }
 
+    /// <summary>
+    /// Ring bytes for the whole of a range no window covers, left unfilled for the GPU to fill
+    /// (MetalStagedStorage.TryEncodeWholeGather); invalid when <see cref="Stage"/> would not
+    /// stage the range whole.
+    /// </summary>
+    public MetalGuestRange ReserveWholeStaging(ulong gpuVa, ulong size)
+    {
+        if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa || size > Math.Min(_maxWindowBytes, MaxWholeStageBytes))
+        {
+            return default;
+        }
+
+        if (size > _maxUploadBytes)
+        {
+            Interlocked.Increment(ref _oversizedStaged);
+        }
+
+        var range = Allocate(size, RingAlignment, out _);
+        MetalGpuReferenceCensus.Mark(gpuVa, size, MetalRefKind.Staged);
+        Interlocked.Add(ref _ringFallbackBytes, (long)size);
+        Interlocked.Increment(ref _ringFallbacks);
+        return range;
+    }
+
+    /// <summary>Fills ring bytes <see cref="ReserveWholeStaging"/> reserved with what the CPU sees now, as <see cref="Stage"/> does.</summary>
+    public unsafe void FillStaging(ulong gpuVa, in MetalGuestRange staging)
+    {
+        foreach (var ring in _rings)
+        {
+            if (ring.Buffer == staging.Buffer && staging.Offset + staging.Size <= ring.Size)
+            {
+                ReadForStaging(gpuVa, new Span<byte>((void*)(ring.Contents + (nint)staging.Offset), checked((int)staging.Size)));
+                return;
+            }
+        }
+
+        throw GpuFatal.Fatal($"A staging range is not in any ring: address=0x{gpuVa:X16} size=0x{staging.Size:X}.");
+    }
+
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
     private MetalGuestRange Upload(ulong gpuVa, ulong size, bool whole)
     {

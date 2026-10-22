@@ -50,6 +50,14 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        // The GPU copy is a transfer, which ends an open render pass; the CPU staging only ever
+        // did when the GPU still had to write the bytes, so with a pass open it still does.
+        if (written && size >= WholeGatherMinBytes && (_renderEncoder == 0 || PendingSerialHinted(address, size) != 0) &&
+            StageWrittenOnGpu(address, size) is { IsValid: true } gpuStaged)
+        {
+            return gpuStaged;
+        }
+
         var staging = _guestMemory.Stage(address, size);
         if (!staging.IsValid || _guestMemory.IsInPlace(staging))
         {
@@ -94,6 +102,53 @@ internal sealed partial class MetalRenderHost
         return staging;
     }
 
+    // A written range at least this large is staged by the GPU alone (StageWrittenOnGpu).
+    internal const ulong WholeGatherMinBytes = 4UL * 1024 * 1024;
+
+    private long _wholeGathers;
+    private long _wholeGatherBytes;
+
+    /// <summary>
+    /// A written range no window covers, staged by the GPU alone: the copy and its pristine
+    /// twin are both filled from the windows over the range's runs, behind the work that
+    /// writes there. The CPU stages nothing. Before, it copied the whole range into the ring
+    /// first, and then either copied it again for the pristine twin or had the GPU gather
+    /// over every byte of it: Black Myth: Wukong binds a 128 MiB written range two runs of
+    /// the backing make about sixteen times a second, a 2 GB/s memcpy on the worker. Invalid
+    /// when the range is too large to stage whole; a range with a run no window covers is
+    /// staged by the CPU and gathered as before.
+    /// </summary>
+    private MetalGuestRange StageWrittenOnGpu(ulong address, ulong size)
+    {
+        var staging = _guestMemory.ReserveWholeStaging(address, size);
+        if (!staging.IsValid)
+        {
+            return default;
+        }
+
+        var pristine = _guestMemory.Allocate(staging.Size, 256, out _);
+        OrderAfterDeferredCopies(address, staging.Size);
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
+        if (StagedStorage.TryEncodeWholeGather(context.CommandBuffer, address, staging, pristine, context))
+        {
+            Interlocked.Increment(ref _wholeGathers);
+            Interlocked.Add(ref _wholeGatherBytes, (long)staging.Size);
+        }
+        else
+        {
+            _guestMemory.FillStaging(address, staging);
+            StagedStorage.EncodeGather(context.CommandBuffer, address, staging, pristine, context);
+        }
+
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded($"stage storage on the gpu bytes=0x{staging.Size:X}");
+        }
+
+        StagedStorage.Add(address, size, staging, pristine, written: true);
+        return staging;
+    }
+
     private long _guestViewRefusedWrites;
 
     /// <summary>
@@ -127,7 +182,8 @@ internal sealed partial class MetalRenderHost
             $"guest_views_released={v.Released} guest_view_binds={v.Binds} guest_view_bind_mb={v.BindBytes / (1024 * 1024)} " +
             $"guest_view_unmapped={v.Invalidated} guest_view_refused={v.CreateFailures} guest_view_unbacked={v.Unbacked} " +
             $"guest_view_refused_writes={Interlocked.Read(ref _guestViewRefusedWrites)} " +
-            $"oversized_staged={_guestMemory.OversizedStaged} oversized_prefix={_guestMemory.OversizedInPlace}";
+            $"oversized_staged={_guestMemory.OversizedStaged} oversized_prefix={_guestMemory.OversizedInPlace} " +
+            $"gpu_staged={Interlocked.Read(ref _wholeGathers)} gpu_staged_mb={Interlocked.Read(ref _wholeGatherBytes) / (1024 * 1024)}";
     }
 
     /// <summary>

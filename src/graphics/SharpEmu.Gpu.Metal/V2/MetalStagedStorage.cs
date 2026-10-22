@@ -416,6 +416,55 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
         }
     }
 
+    private readonly List<(ulong Offset, MetalGuestRange Run)> _wholeRuns = new();
+
+    /// <summary>
+    /// Fills a staged copy and its pristine copy straight from the windows on the GPU, one
+    /// encoder copying each run of the range into both, after whatever the GPU still has to
+    /// write there. False, encoding nothing, when a run of the range has no window, for the
+    /// caller to stage on the CPU instead.
+    /// </summary>
+    public bool TryEncodeWholeGather(nint commandBuffer, ulong address, in MetalGuestRange staging,
+        in MetalGuestRange pristine, IMetalSubmissionContext? ordering = null)
+    {
+        var size = staging.Size;
+        _wholeRuns.Clear();
+        for (var offset = 0UL; offset < size;)
+        {
+            var run = memory.ResolveWritablePrefix(address + offset, size - offset);
+            if (!run.IsValid)
+            {
+                return false;
+            }
+
+            _wholeRuns.Add((offset, run));
+            offset += run.Size;
+        }
+
+        var gather = BlitEncoder(commandBuffer, ordering);
+        try
+        {
+            foreach (var (offset, run) in _wholeRuns)
+            {
+                MetalNative.SendCopyBuffer(
+                    gather, SelCopyBuffer,
+                    run.Buffer, (nuint)run.Offset,
+                    staging.Buffer, (nuint)(staging.Offset + offset), (nuint)run.Size);
+                MetalNative.SendCopyBuffer(
+                    gather, SelCopyBuffer,
+                    run.Buffer, (nuint)run.Offset,
+                    pristine.Buffer, (nuint)(pristine.Offset + offset), (nuint)run.Size);
+            }
+        }
+        finally
+        {
+            ordering?.EncoderEnding(gather, render: false);
+            MetalNative.SendVoid(gather, SelEndEncoding);
+        }
+
+        return true;
+    }
+
     private static nint BlitEncoder(nint commandBuffer, IMetalSubmissionContext? ordering)
     {
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
