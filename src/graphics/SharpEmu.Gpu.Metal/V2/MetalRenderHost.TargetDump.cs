@@ -5,10 +5,11 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.IO.Compression;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
-// SHARPEMU_METAL_V2_DUMP_TARGETS=<dir>: writes the colour target of every render pass,
+// SHARPEMU_METAL_V2_DUMP_TARGETS=<dir>|1 (1 = metal-targets under the logs folder): writes the colour target of every render pass,
 // and the texture every flip presents, as a PNG. A title that presents black frames has
 // either drawn nothing, drawn somewhere else, or drawn something the flip never reaches,
 // and those look identical from outside: the only way to tell is to look at the pixels
@@ -19,9 +20,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal sealed partial class MetalRenderHost
 {
     private static readonly string? _dumpTargetsDirectory =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_TARGETS") is { Length: > 0 } value
-            ? value
-            : null;
+        SharpEmuPaths.ResolveDumpPath("SHARPEMU_METAL_V2_DUMP_TARGETS", "metal-targets");
 
     // Enough to see a title screen appear and settle without filling a disk.
     // SHARPEMU_METAL_V2_DUMP_MAX raises it for a title whose interesting frames

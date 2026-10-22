@@ -94,6 +94,9 @@
   "Options.LogToFile.Label": "Salvar log em arquivo",
   "Options.LogToFile.Desc": "Copia a saída do emulador para um arquivo de log.",
 
+  "Options.LogsFolder.Label": "Pasta de logs",
+  "Options.LogsFolder.Desc": "Todos os logs, rastreamentos e dumps: {0} ({1})",
+  "Options.LogsFolder.Open": "Abrir",
   "Options.LogFilePath.Label": "Caminho do arquivo de log",
   "Options.LogFilePath.Default": "Nenhum caminho definido — logs vão para user/logs na pasta do emulador.",
   "Options.LogFilePath.Select": "Selecionar…",

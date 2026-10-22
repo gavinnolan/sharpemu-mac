@@ -130,8 +130,7 @@ public static unsafe class RenderDocCapture
 
         try
         {
-            var directory = SharpEmuPaths.UserPath(
-                "logs",
+            var directory = SharpEmuPaths.LogsPath(
                 "capture_logs",
                 safeTitleId);
             Directory.CreateDirectory(directory);

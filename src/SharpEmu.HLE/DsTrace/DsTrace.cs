@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using SharpEmu.Logging;
 
 namespace SharpEmu.HLE.DsTrace;
 
@@ -466,7 +467,9 @@ public static unsafe class DsTrace
             return Path.GetFullPath(Path.Combine(runOut, "dstrace.log"));
         }
 
-        return Path.GetFullPath($"dstrace-{Environment.ProcessId}.log");
+        var path = SharpEmuPaths.LogsPath("dstrace", $"dstrace-{Environment.ProcessId}.log");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        return path;
     }
 
     private static void WriteHeader()

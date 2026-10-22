@@ -81,6 +81,9 @@
   "Options.LogToFile.Label": "Loggen naar bestand",
   "Options.LogToFile.Desc": "Stuur de uitvoer van de emulator ook naar een logbestand.",
 
+  "Options.LogsFolder.Label": "Logmap",
+  "Options.LogsFolder.Desc": "Alle logs, traces en dumps: {0} ({1})",
+  "Options.LogsFolder.Open": "Openen",
   "Options.LogFilePath.Label": "Pad naar logbestand",
   "Options.LogFilePath.Default": "Geen aangepast pad — logs komen terecht in user/logs naast de emulator.",
   "Options.LogFilePath.Select": "Selecteren…",

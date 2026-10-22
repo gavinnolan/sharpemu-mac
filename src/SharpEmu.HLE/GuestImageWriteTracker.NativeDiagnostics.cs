@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Host;
+using SharpEmu.Logging;
 
 namespace SharpEmu.HLE;
 
@@ -26,10 +27,12 @@ public static unsafe partial class GuestImageWriteTracker
         {
             if (_nativeDiagnosticsInitialized) return;
             _nativeDiagnosticsInitialized = true;
-            var path = Environment.GetEnvironmentVariable("SHARPEMU_NATIVE_FAULT_TRACE_PATH");
-            if (string.IsNullOrWhiteSpace(path)) return;
+            var path = SharpEmuPaths.ResolveDumpPath(
+                "SHARPEMU_NATIVE_FAULT_TRACE_PATH", $"native-fault-{Environment.ProcessId}.bin");
+            if (path is null) return;
             try
             {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 var buffer = new NativeFaultTraceBuffer(path);
                 try
                 {

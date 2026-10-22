@@ -6058,7 +6058,7 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static string ResolveGameLogRoot() =>
-        Path.GetFullPath(SharpEmuPaths.UserPath(
+        Path.GetFullPath(SharpEmuPaths.LogsPath(
             "game_logs",
             Volatile.Read(ref _applicationTitleId)));
 

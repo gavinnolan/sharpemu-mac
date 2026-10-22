@@ -4,10 +4,11 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
-// SHARPEMU_METAL_V2_DUMP_BC_UPLOAD=<dir>: after every whole-image upload of a BC6H array or
+// SHARPEMU_METAL_V2_DUMP_BC_UPLOAD=<dir>|1 (1 = metal-bc-uploads under the logs folder): after every whole-image upload of a BC6H array or
 // cube image, logs the content hash of the guest bytes the upload read and, for the first
 // few distinct contents of an address, writes those bytes and (once the GPU has finished)
 // the compressed blocks of every (level, layer) of the Metal texture. A watcher then
@@ -19,7 +20,7 @@ internal static class MetalBlockCubeDump
     private const int MaxDistinctPerAddress = 6;
     private const int MaxDriftPerAddress = 4;
 
-    private static readonly string? Directory = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BC_UPLOAD") is { Length: > 0 } value ? value : null;
+    private static readonly string? Directory = SharpEmuPaths.ResolveDumpPath("SHARPEMU_METAL_V2_DUMP_BC_UPLOAD", "metal-bc-uploads");
     private static readonly nint SelContents = MetalNative.Selector("contents");
     private static readonly nint SelCopy = MetalNative.Selector(
         "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:" +

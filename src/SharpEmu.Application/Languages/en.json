@@ -158,7 +158,10 @@
   "Options.LogToFile.Desc": "Mirror emulator output to a log file.",
 
   "Options.LogFilePath.Label": "Log file path",
-  "Options.LogFilePath.Default": "No custom path — logs go to user/logs next to the emulator.",
+  "Options.LogsFolder.Label": "Logs folder",
+  "Options.LogsFolder.Desc": "Every log, trace and dump: {0} ({1})",
+  "Options.LogsFolder.Open": "Open",
+  "Options.LogFilePath.Default": "No custom path — logs go to the logs folder.",
   "Options.LogFilePath.Select": "Select…",
 
   "Options.OverrideLogFile.Label": "Override log file",

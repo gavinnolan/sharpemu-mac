@@ -21,6 +21,7 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
+using SharpEmu.Logging;
 
 // This partial creates the graphics and compute pipelines of the shader cache and the presentation pipeline.
 internal static unsafe partial class VulkanVideoPresenter
@@ -527,8 +528,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             string? dumpPath = null;
-            var dumpDirectory = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_SPIRV_DUMP_DIR");
-            if (!string.IsNullOrWhiteSpace(dumpDirectory))
+            var dumpDirectory = SharpEmuPaths.ResolveDumpPath(
+                "SHARPEMU_SHADER_SPIRV_DUMP_DIR", "shader-dumps", "vulkan-spv");
+            if (dumpDirectory is not null)
             {
                 Directory.CreateDirectory(dumpDirectory);
 

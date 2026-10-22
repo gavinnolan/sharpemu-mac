@@ -3,12 +3,13 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.VideoOut;
 
 /// <summary>
 /// Opt-in per-flip timestamps for frame-pacing measurements: SHARPEMU_FRAME_TIMES=&lt;path&gt;
-/// writes one line per guest flip request, "&lt;sequence&gt; &lt;microseconds on the monotonic clock
+/// (or 1 for frame-times-&lt;timestamp&gt;.txt under the logs folder) writes one line per guest flip request, "&lt;sequence&gt; &lt;microseconds on the monotonic clock
 /// since the log opened&gt;", after a header line that carries the wall-clock time of that origin
 /// ("# t0_unix_us=..."), so a script can place every flip on the same timeline as its own
 /// markers. Lines are buffered and flushed once a second; when the variable is unset no
@@ -49,14 +50,16 @@ internal sealed class FrameTimeLog : IDisposable
     /// <summary>The log named by <see cref="EnvironmentVariable"/>, or null when it is unset or cannot be opened.</summary>
     public static FrameTimeLog? FromEnvironment()
     {
-        var path = Environment.GetEnvironmentVariable(EnvironmentVariable);
-        if (string.IsNullOrWhiteSpace(path))
+        var path = SharpEmuPaths.ResolveDumpPath(
+            EnvironmentVariable, $"frame-times-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+        if (path is null)
         {
             return null;
         }
 
         try
         {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
             var log = new FrameTimeLog(
                 new StreamWriter(stream),

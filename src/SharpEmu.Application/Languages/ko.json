@@ -81,6 +81,9 @@
   "Options.LogToFile.Label": "파일로 저장",
   "Options.LogToFile.Desc": "에뮬레이터 출력을 로그 파일에 복사합니다.",
 
+  "Options.LogsFolder.Label": "로그 폴더",
+  "Options.LogsFolder.Desc": "모든 로그, 추적 및 덤프: {0} ({1})",
+  "Options.LogsFolder.Open": "열기",
   "Options.LogFilePath.Label": "로그 파일 경로",
   "Options.LogFilePath.Default": "사용자 지정 경로 없음 — 로그는 에뮬레이터 옆의 user/logs 폴더에 저장됩니다.",
   "Options.LogFilePath.Select": "선택…",

@@ -21,7 +21,7 @@ hidden helper before runtime initialization. No SDK or debugger install is
 required. Look for `[CRASH][INFO] Crash capture ready` in the game log.
 
 The helper writes a full dump beside the run log. Without a log path, it uses
-`user/logs` beside the executable. Names include the game process ID:
+the logs folder (`user/logs` in the data root, or `SHARPEMU_LOG_DIR`). Names include the game process ID:
 
 - `<run>.crash-<pid>.dmp`: the memory dump.
 - `<run>.crash-<pid>.dmp.capture.log`: capture status and errors.

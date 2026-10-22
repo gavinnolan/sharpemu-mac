@@ -35,7 +35,8 @@ The CLI exits with code 2 when the `eboot.bin` path does not exist.
 
 ## Settings, saves and logs are not where I expect
 
-The data root depends on how SharpEmu was started; see
+Every log, trace and dump is under `user/logs/` in the data root, or under
+`SHARPEMU_LOG_DIR` if you set it. The data root depends on how SharpEmu was started; see
 [Running games](running-games.md#caches-and-data). From inside `SharpEmu.app` it is
 `~/Library/Application Support/SharpEmu`. A copy of the app on an external drive
 uses that folder too, unless a `portable.txt` file sits next to the bundle. The
@@ -81,12 +82,12 @@ image cache or a missing feature. To narrow it down:
    a command buffer; the periodic `[METAL-V2][PERF]` line counts these as
    `failed=`.
 2. `SHARPEMU_METAL_V2_TRACE=1` adds detail to the log.
-3. `SHARPEMU_METAL_V2_DUMP_TARGETS=<dir>` writes every render pass's color target
+3. `SHARPEMU_METAL_V2_DUMP_TARGETS=<dir>` (or `=1`) writes every render pass's color target
    and every presented frame as PNG, which shows where the picture is lost. It
    slows the game down.
 4. `SHARPEMU_METAL_V2_IGNORE_TESTS=1` drops culling, depth and stencil tests, to
    tell a pass that drew nothing from one that was rejected.
-5. `SHARPEMU_SHADER_MSL_DUMP_DIR=<dir>` dumps translated shaders, with the guest
+5. `SHARPEMU_SHADER_MSL_DUMP_DIR=<dir>` (or `=1`) dumps translated shaders, with the guest
    instruction listing, for the hashes you name in `SHARPEMU_SHADER_MSL_DUMP_HASH`.
 6. The code generation switches in [Configuration](configuration.md#shader-translation-and-caches)
    (for example `SHARPEMU_MSL_STRUCTURED=0`) undo one optimization each. If one

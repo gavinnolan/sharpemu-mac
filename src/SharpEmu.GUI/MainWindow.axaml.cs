@@ -401,6 +401,7 @@ public partial class MainWindow : Window
         OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
+        OpenLogsFolderButton.Click += (_, _) => OpenLogsFolder();
         PerformanceProfileToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE", PerformanceProfileToggle.IsChecked == true);
         PerformanceFrameTraceToggle.IsCheckedChanged += (_, _) =>
@@ -721,6 +722,10 @@ public partial class MainWindow : Window
         if (panels[section] == OptionsEnvironmentPanel)
         {
             RefreshTrophyTestGames();
+        }
+        else if (panels[section] == OptionsLoggingPanel)
+        {
+            RefreshLogsFolderText();
         }
     }
 
@@ -1785,6 +1790,78 @@ public partial class MainWindow : Window
         LogFilePathRow.Description = string.IsNullOrWhiteSpace(_settings.LogFilePath)
             ? Localization.Instance.Get("Options.LogFilePath.Default")
             : _settings.LogFilePath;
+    }
+
+    /// <summary>
+    /// The folder the emulator writes its logs, traces and dumps to, resolved
+    /// the way the emulator child process resolves it.
+    /// </summary>
+    private string EmulatorLogsRoot()
+    {
+        var exeDirectory = Path.GetDirectoryName(_emulatorExePath);
+        if (string.IsNullOrEmpty(exeDirectory))
+        {
+            exeDirectory = AppContext.BaseDirectory;
+        }
+
+        return SharpEmuPaths.ResolveLogsRoot(SharpEmuPaths.ResolveDataRoot(exeDirectory));
+    }
+
+    /// <summary>
+    /// Shows the logs folder and how much it holds. Dumps can grow to many
+    /// gigabytes, so the size is measured off the UI thread.
+    /// </summary>
+    private void RefreshLogsFolderText()
+    {
+        var root = EmulatorLogsRoot();
+        LogsFolderRow.Description = root;
+        _ = Task.Run(() =>
+        {
+            long bytes = 0;
+            try
+            {
+                if (Directory.Exists(root))
+                {
+                    foreach (var file in new DirectoryInfo(root).EnumerateFiles("*", new EnumerationOptions
+                             {
+                                 RecurseSubdirectories = true,
+                                 IgnoreInaccessible = true,
+                                 AttributesToSkip = FileAttributes.ReparsePoint,
+                             }))
+                    {
+                        bytes += file.Length;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                return;
+            }
+
+            Dispatcher.UIThread.Post(() => LogsFolderRow.Description =
+                Localization.Instance.Format("Options.LogsFolder.Desc", root, GameEntry.FormatSize(bytes)));
+        });
+    }
+
+    private void OpenLogsFolder()
+    {
+        try
+        {
+            var root = EmulatorLogsRoot();
+            Directory.CreateDirectory(root);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = OperatingSystem.IsWindows() ? "explorer.exe" : OperatingSystem.IsMacOS() ? "open" : "xdg-open",
+                Arguments = $"\"{root}\"",
+                UseShellExecute = false,
+            });
+        }
+        catch (Exception ex)
+        {
+            AppendConsoleLine(
+                Localization.Instance.Format("Status.CouldNotOpenFolder", ex.Message),
+                WarningLineBrush);
+        }
     }
 
     private async Task SelectLogFilePathAsync()
@@ -3086,16 +3163,9 @@ public partial class MainWindow : Window
     {
         try
         {
-            var exeDirectory = Path.GetDirectoryName(_emulatorExePath) ?? AppContext.BaseDirectory;
-            if (string.IsNullOrEmpty(exeDirectory))
-            {
-                return null;
-            }
-
             // The child process resolves its own data root the same way, so
             // both agree even when the bundle redirects writes out of itself.
-            var logsDirectory = Path.Combine(
-                SharpEmuPaths.ResolveDataRoot(exeDirectory), "user", "logs");
+            var logsDirectory = EmulatorLogsRoot();
             Directory.CreateDirectory(logsDirectory);
 
             var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;

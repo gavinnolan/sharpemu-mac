@@ -29,9 +29,7 @@ public sealed class KernelGameLogPathTests : IDisposable
         Environment.SetEnvironmentVariable("SHARPEMU_DEVLOG_APP_DIR", _previousDevlogRoot);
         KernelMemoryCompatExports.ConfigureApplicationInfo(null);
 
-        var testRoot = Path.Combine(
-            SharpEmuPaths.DataRoot,
-            "user",
+        var testRoot = SharpEmuPaths.LogsPath(
             "game_logs",
             "PPSA_01_342");
         if (Directory.Exists(testRoot))
@@ -46,9 +44,7 @@ public sealed class KernelGameLogPathTests : IDisposable
         var path = KernelMemoryCompatExports.ResolveGuestPath("/hostapp/logs/game.log");
 
         Assert.Equal(
-            Path.GetFullPath(Path.Combine(
-                SharpEmuPaths.DataRoot,
-                "user",
+            Path.GetFullPath(SharpEmuPaths.LogsPath(
                 "game_logs",
                 "PPSA_01_342",
                 "hostapp",
@@ -63,9 +59,7 @@ public sealed class KernelGameLogPathTests : IDisposable
         var path = KernelMemoryCompatExports.ResolveGuestPath("/devlog/app/debug.log");
 
         Assert.Equal(
-            Path.GetFullPath(Path.Combine(
-                SharpEmuPaths.DataRoot,
-                "user",
+            Path.GetFullPath(SharpEmuPaths.LogsPath(
                 "game_logs",
                 "PPSA_01_342",
                 "devlog",

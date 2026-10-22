@@ -83,6 +83,9 @@
   "Options.LogToFile.Desc": "Duplica l'output dell'emulatore in un file di log.",
 
 
+  "Options.LogsFolder.Label": "Cartella dei log",
+  "Options.LogsFolder.Desc": "Tutti i log, le tracce e i dump: {0} ({1})",
+  "Options.LogsFolder.Open": "Apri",
   "Options.LogFilePath.Label": "Percorso file di log",
   "Options.LogFilePath.Default": "Nessun percorso personalizzato — i log vengono salvati in user/logs accanto all'emulatore.",
   "Options.LogFilePath.Select": "Seleziona…",

@@ -2451,18 +2451,7 @@ public static partial class VideoOutExports
 
     private static string GetLogsDirectory()
     {
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            if (File.Exists(Path.Combine(current.FullName, "SharpEmu.slnx")))
-            {
-                return Path.Combine(current.FullName, "logs");
-            }
-
-            current = current.Parent;
-        }
-
-        return SharpEmuPaths.DataPath("logs");
+        return SharpEmuPaths.LogsPath("videoout");
     }
 
     private static void WriteBmp(string path, uint width, uint height, byte[] rgb)

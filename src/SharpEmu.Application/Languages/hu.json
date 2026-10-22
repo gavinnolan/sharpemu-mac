@@ -94,6 +94,9 @@
   "Options.LogToFile.Label": "Naplozás fájlba",
   "Options.LogToFile.Desc": "Az emulátor kimenetének tükrözése egy log fájlba.",
 
+  "Options.LogsFolder.Label": "Naplómappa",
+  "Options.LogsFolder.Desc": "Minden napló, nyomkövetés és dump: {0} ({1})",
+  "Options.LogsFolder.Open": "Megnyitás",
   "Options.LogFilePath.Label": "Naplófájl elérési útja",
   "Options.LogFilePath.Default": "Nincs egyéni út — a logok az emulátor melletti user/logs mappába kerülnek.",
   "Options.LogFilePath.Select": "Kiválasztás…",

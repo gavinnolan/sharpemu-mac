@@ -3,13 +3,14 @@
 
 using System.Globalization;
 using System.Text;
+using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.ShaderCompiler.Metal;
 
 /// <summary>
 /// Writes a translated program to disk so a profiler's shader hash can be read back as
-/// source. <c>SHARPEMU_SHADER_MSL_DUMP_DIR</c> names the directory; every compiled
+/// source. <c>SHARPEMU_SHADER_MSL_DUMP_DIR</c> names the directory (<c>1</c> means <c>msl-dumps</c> under the logs folder); every compiled
 /// permutation lands there as <c>&lt;stage&gt;-&lt;hash&gt;.metal</c> beside a
 /// <c>&lt;stage&gt;-&lt;hash&gt;.gen5</c> listing of the guest instructions it came from,
 /// which is what identifies a mistranslated loop. <c>SHARPEMU_SHADER_MSL_DUMP_HASH</c>
@@ -18,7 +19,7 @@ namespace SharpEmu.ShaderCompiler.Metal;
 public static class Gen5MslDump
 {
     private static readonly string? _directory =
-        Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MSL_DUMP_DIR") is { Length: > 0 } value ? value : null;
+        SharpEmuPaths.ResolveDumpPath("SHARPEMU_SHADER_MSL_DUMP_DIR", "msl-dumps");
 
     private static readonly HashSet<ulong> _hashes = ParseHashes(
         Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MSL_DUMP_HASH"));
