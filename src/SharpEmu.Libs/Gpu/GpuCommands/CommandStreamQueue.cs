@@ -205,6 +205,7 @@ public sealed class CommandStreamQueue
                 PendingLabelRecorded = NotePendingLabel,
                 PendingQwordsRecorded = NotePendingQwords,
                 PendingLabelLookup = TryGetPendingLabel,
+                QueuedSubmissionsLookup = CollectQueuedSubmissions,
                 SyntheticOcclusionCounterBank = _syntheticOcclusionCounters,
             };
             _interpreters[queueId] = created;
@@ -868,6 +869,30 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // The command submissions queued behind the one running on a queue, oldest first, for the
+    // pipeline look-ahead (GpuCommandInterpreter.PrefetchPipelinesAhead).
+    private int CollectQueuedSubmissions(int queueId, Span<GpuCommandInterpreter.QueuedSubmission> destination)
+    {
+        var count = 0;
+        lock (_gate)
+        {
+            for (var node = _queues[queueId].First; node is not null && count < destination.Length; node = node.Next)
+            {
+                var submission = node.Value;
+                if (submission.Started || submission.DwordCount == 0 ||
+                    submission.Kind is not (CommandSubmissionKind.Graphics or CommandSubmissionKind.Compute))
+                {
+                    continue;
+                }
+
+                destination[count++] = new GpuCommandInterpreter.QueuedSubmission(
+                    submission.Address, submission.DwordCount, submission.ResetInterpreter, submission.AdmissionOrdinal);
+            }
+        }
+
+        return count;
+    }
+
     private bool TryGetPendingLabel(ulong address, bool is64Bit, out ulong value)
     {
         lock (_labelGate)
@@ -1412,6 +1437,7 @@ public sealed class CommandStreamQueue
         if (firstSlice)
         {
             submission.Started = true;
+            processor.AdmissionOrdinal = submission.AdmissionOrdinal;
             processor.SubmitId = ++_submitId;
             processor.ResetCounters();
             processor.SetFlip(default);

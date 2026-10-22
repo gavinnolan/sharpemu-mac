@@ -67,6 +67,37 @@ public sealed class PipelineLookaheadTests
     }
 
     [Fact]
+    public void TheLookAheadReadsOnIntoTheSubmissionsQueuedBehindAndOneItCoveredDoesNotReadAgain()
+    {
+        var host = new RecordingCommandStreamHost { PrefetchesPipelines = true };
+        var queue = new CommandStreamQueue(host);
+        var first = StreamRunner.Concat(SetProgram(0x1_0000_0100), Dispatch(1));
+        var second = StreamRunner.Concat(SetProgram(0x1_0000_0200), Dispatch(2), SetProgram(0x1_0000_0300), Dispatch(3));
+        host.WriteWords(StreamRunner.CommandAddress, first);
+        host.WriteWords(CalledBuffer, second);
+        queue.EnqueueGraphics(StreamRunner.CommandAddress, (uint)first.Length, 1, null);
+        queue.EnqueueGraphics(CalledBuffer, (uint)second.Length, 2, null);
+        host.PipelineNotReady.Enqueue(true);
+
+        _ = queue.ProcessOne();
+
+        Assert.Equal([(0x1_0000_0200UL, 2u), (0x1_0000_0300UL, 3u)], host.PrefetchedDispatches);
+
+        // The first dispatch goes through, and the second submission's first dispatch waits: the
+        // look-ahead already read that submission to its end.
+        host.PipelineNotReady.Enqueue(false);
+        host.PipelineNotReady.Enqueue(true);
+        queue.NotifyPipelineReady();
+        for (var slice = 0; slice < 4 && host.PipelineNotReady.Count != 0; slice++)
+        {
+            _ = queue.ProcessOne();
+        }
+
+        Assert.Empty(host.PipelineNotReady);
+        Assert.Equal(2, host.PrefetchedDispatches.Count);
+    }
+
+    [Fact]
     public void AHostThatDoesNotAskIsHandedNothing()
     {
         var runner = new StreamRunner();

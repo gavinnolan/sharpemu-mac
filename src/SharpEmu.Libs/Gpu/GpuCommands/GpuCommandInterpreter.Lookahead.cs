@@ -13,7 +13,8 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 // dispatch can find the next one missing: a scene that brings in a few dozen new compute programs
 // (Black Myth: Wukong's fight effects) compiled them one after another, a second or more each, with
 // the frame stopped at 0 fps for half a minute and most compiler threads idle. While the dispatch
-// waits, the packets after it are read for their shader registers alone, on a copy of the banks,
+// waits, the packets after it - to the end of its submission and on into the submissions queued
+// behind it - are read for their shader registers alone, on a copy of the banks,
 // and each dispatch there has its pipeline asked for (ICommandStreamHost.PrefetchDispatchPipeline),
 // so the compiles run side by side. Nothing is executed or written: the stream still runs every
 // packet when it gets there, and a dispatch whose registers or data turn out different from what
@@ -26,9 +27,9 @@ public sealed partial class GpuCommandInterpreter
     // A look-ahead stops at whichever comes first; the next dispatch that suspends past where it
     // stopped reads on from there.
     private const uint LookaheadMaxDwords = 1u << 20;
-    private const int LookaheadMaxDispatches = 512;
+    private const int LookaheadMaxDispatches = 2048;
     private const int LookaheadMaxDepth = 4;
-    private static readonly long LookaheadMaxTicks = Stopwatch.Frequency / 40;
+    private static readonly long LookaheadMaxTicks = Stopwatch.Frequency / 20;
     private const int LookaheadBlockDwords = 2048;
 
     private static long _lookaheadScans;
@@ -40,6 +41,24 @@ public sealed partial class GpuCommandInterpreter
     private ulong _lookaheadSubmitId;
     private ulong _lookaheadBuffer;
     private uint _lookaheadEnd;
+
+    // The submissions queued behind the running one on this queue; the look-ahead reads on into
+    // them once it reaches the end of the running one. The queue sets it.
+    internal QueuedSubmissionReader? QueuedSubmissionsLookup { get; init; }
+
+    internal delegate int QueuedSubmissionReader(int queueId, Span<QueuedSubmission> destination);
+
+    internal readonly record struct QueuedSubmission(ulong Address, uint DwordCount, bool ResetInterpreter, ulong AdmissionOrdinal);
+
+    // The queue's order of the submission running now (CommandSubmission.AdmissionOrdinal).
+    internal ulong AdmissionOrdinal { get; set; }
+
+    // Queued submissions a look-ahead read to their end: one of them that suspends once it runs
+    // does not read its packets again. Command buffers are reused frame after frame, so they are
+    // told apart by their place in the queue's order rather than by address.
+    private readonly HashSet<ulong> _lookaheadCovered = new();
+
+    private const int LookaheadMaxQueuedSubmissions = 64;
 
     private uint[]? _lookaheadBlock;
     private ulong _lookaheadBlockAddress;
@@ -70,9 +89,15 @@ public sealed partial class GpuCommandInterpreter
 
         var topIndex = execution.Depth - 1;
         ref var top = ref execution.At(topIndex);
-        if (top.Address == _lookaheadBuffer && SubmitId == _lookaheadSubmitId && top.Offset < _lookaheadEnd)
+        if ((top.Address == _lookaheadBuffer && SubmitId == _lookaheadSubmitId && top.Offset < _lookaheadEnd) ||
+            (topIndex == 0 && _lookaheadCovered.Contains(AdmissionOrdinal)))
         {
             return;
+        }
+
+        if (_lookaheadCovered.Count > 1024)
+        {
+            _lookaheadCovered.RemoveWhere(ordinal => ordinal < AdmissionOrdinal);
         }
 
         var started = Stopwatch.GetTimestamp();
@@ -102,6 +127,27 @@ public sealed partial class GpuCommandInterpreter
                     }
 
                     _ = ScanAhead(ref state, caller.Address, caller.DwordCount, caller.Offset + advance, depth: 0);
+                }
+
+                // A frame is dozens of submissions: the ones queued behind this one run with the
+                // registers it leaves, unless they start from a reset interpreter.
+                if (!state.Stopped && QueuedSubmissionsLookup is { } lookup)
+                {
+                    Span<QueuedSubmission> queued = stackalloc QueuedSubmission[LookaheadMaxQueuedSubmissions];
+                    var count = lookup(QueueId, queued);
+                    for (var index = 0; index < count && !state.Stopped; index++)
+                    {
+                        if (queued[index].ResetInterpreter)
+                        {
+                            state.Banks.Reset();
+                        }
+
+                        _ = ScanAhead(ref state, queued[index].Address, queued[index].DwordCount, 0, depth: 0);
+                        if (!state.Stopped)
+                        {
+                            _lookaheadCovered.Add(queued[index].AdmissionOrdinal);
+                        }
+                    }
                 }
             }
         }
