@@ -177,6 +177,34 @@ public readonly record struct Gen5PixelOutputBinding(
     }
 }
 
+public enum Gen5TessellationRole : byte
+{
+    // The merged local/hull program: one guest wave64 per threadgroup of PatchesPerGroup patches.
+    Hull,
+    // The domain (export) program: three vertices per patch, at its corners.
+    Domain,
+}
+
+// A tessellated draw run without a fixed-function tessellator. The hull program runs as a compute
+// kernel whose threadgroup is one guest wave of PatchesPerGroup patches (ControlPoints lanes each,
+// one per input and output control point): its local half reads the control points' vertices by the
+// ids the host computed from the index buffer, and its hull half hands each patch to the domain stage
+// through the guest's off-chip buffer, OffchipBlockBytes per threadgroup, and writes its tessellation
+// factors, FactorBytesPerPatch per patch, to the guest's factor ring. The domain program then runs
+// per vertex at the three corners of each patch, so every patch is drawn as one triangle: the
+// result of tessellation factor 1, which keeps the corners of every patch where they are.
+public sealed record Gen5TessellationLaunch(
+    Gen5TessellationRole Role,
+    uint PatchesPerGroup,
+    uint ControlPoints,
+    uint OffchipBlockBytes,
+    uint FactorBytesPerPatch)
+{
+    // The hull kernel's launch dwords (patch count, first instance) and the control points' vertex ids.
+    public const int HullLaunchBufferIndex = 2;
+    public const int HullVertexBufferIndex = 3;
+}
+
 public readonly record struct Gen5ComputeSystemRegisters(
     uint? WorkGroupXRegister,
     uint? WorkGroupYRegister,

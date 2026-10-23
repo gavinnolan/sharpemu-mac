@@ -145,6 +145,16 @@ public interface IRenderHost
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
 
+    // The host runs a tessellated draw as a hull kernel and a draw of every patch's corners
+    // (RenderExecutor.Tessellation.cs): it binds the kernel's launch with BindHullLaunch.
+    bool SupportsTessellationEmulation => false;
+
+    // Binds the hull kernel's launch to the dispatch recorded next: the patch count and first
+    // instance (Gen5TessellationLaunch.HullLaunchBufferIndex) and each control point's vertex
+    // index in patch order (HullVertexBufferIndex).
+    void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance) =>
+        throw new NotSupportedException("The renderer does not run tessellated draws.");
+
     ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices) =>
         throw new NotSupportedException("The renderer does not support indexed mesh inputs.");
 

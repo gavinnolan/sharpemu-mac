@@ -70,6 +70,10 @@ public sealed class StageCompileOptions
     public ComputeInputInfo? ComputeInfo { get; set; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; set; }
 
+    // The stage of a tessellated draw this program runs as (ShaderCompileRequest.Tessellation):
+    // the hull kernel for a compute lookup, the domain program for a vertex one.
+    public Gen5TessellationLaunch? Tessellation { get; set; }
+
     // A resolver refills one reusable instance for every lookup of a stage instead of
     // allocating one per draw; whatever keeps options past the lookup (a new entry, a
     // compile, the corpus) takes Detached(), which copies a reusable instance.
@@ -616,6 +620,8 @@ internal sealed class ShaderProgramCache
                 {
                     _staticState.Add(options.VertexInterpolants[index]);
                 }
+
+                AddTessellationState(options.Tessellation);
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
@@ -641,8 +647,24 @@ internal sealed class ShaderProgramCache
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
+                AddTessellationState(options.Tessellation);
                 break;
         }
+    }
+
+    private void AddTessellationState(Gen5TessellationLaunch? tessellation)
+    {
+        if (tessellation is null)
+        {
+            _staticState.Add(0);
+            return;
+        }
+
+        _staticState.Add(1u + (uint)tessellation.Role);
+        _staticState.Add(tessellation.PatchesPerGroup);
+        _staticState.Add(tessellation.ControlPoints);
+        _staticState.Add(tessellation.OffchipBlockBytes);
+        _staticState.Add(tessellation.FactorBytesPerPatch);
     }
 
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
@@ -1035,6 +1057,7 @@ internal sealed class ShaderProgramCache
                     ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     PrimitiveShader = options.PrimitiveShader,
+                    Tessellation = options.Tessellation,
                     MeshPerVertexParameterMask = options.MeshPerVertexParameterMask,
                     VertexInterpolants = options.VertexInterpolants,
                     VertexInputs = entry.VertexInputs,
@@ -1105,7 +1128,7 @@ internal sealed class ShaderProgramCache
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
                     sharedInt64Atomics, _host.ExecGuardElisionEnabled, signedZeroInfNanPreserve, _host.ComputeWave64SubgroupNative,
-                    _host.ComputeRunsOn32LaneSubgroups(options.ComputeInfo!), imageInt64Atomics);
+                    _host.ComputeRunsOn32LaneSubgroups(options.ComputeInfo!), imageInt64Atomics, options.Tessellation);
         }
     }
 
@@ -1149,9 +1172,10 @@ internal sealed class ShaderProgramCache
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
         bool signedZeroInfNanPreserve, bool hostWave64Supported = false, bool hostComputeSubgroup32 = false,
-        bool imageInt64Atomics = false) =>
+        bool imageInt64Atomics = false, Gen5TessellationLaunch? tessellation = null) =>
         new(plan, resources, layout)
         {
+            Tessellation = tessellation,
             WaveSize = info.WaveSize,
             HostWave64Supported = info.WaveSize == 64 && hostWave64Supported,
             HostComputeSubgroup32 = info.WaveSize == 64 && !hostWave64Supported && hostComputeSubgroup32,

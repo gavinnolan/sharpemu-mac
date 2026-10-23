@@ -804,6 +804,20 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (emission.PlainList)
+        {
+            if (emission.Indexed)
+            {
+                _host.DrawIndexed(draw.Count, draw.InstanceCount, 0, emission.VertexOffset, emission.FirstInstance);
+            }
+            else
+            {
+                _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
+            }
+
+            return;
+        }
+
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
         {
             case GuestPrimitiveType.PointList:

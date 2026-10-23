@@ -1980,6 +1980,7 @@ internal sealed partial class MetalRenderHost
 
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
+        ApplyHullLaunch(encoder);
         MetalNative.SendDispatch(
             encoder,
             SelDispatchThreadgroups,

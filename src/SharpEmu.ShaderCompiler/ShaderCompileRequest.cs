@@ -335,6 +335,11 @@ public sealed class ShaderCompileRequest
     // NGG programs.
     public Gen5NggStageInfo? PrimitiveShader { get; init; }
 
+    // Set for a stage of a tessellated draw the backend runs without a tessellator: the merged
+    // local/hull program as a compute kernel, or the domain program per vertex at the corners
+    // of each patch (Gen5TessellationLaunch).
+    public Gen5TessellationLaunch? Tessellation { get; init; }
+
     // The parameter exports the paired pixel program reads per vertex
     // (Gen5PixelInputMapping.PerVertexParameterMask) on a host without per-vertex pixel
     // inputs. A primitive shader with any is emitted as a mesh function whose primitives
