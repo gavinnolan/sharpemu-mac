@@ -37,6 +37,7 @@ internal sealed partial class MetalImageCache
         if (image.Description.HasStencil)
         {
             _stencilOwners.Add(imageIdentifier);
+            _stencilOwnersVersion++;
         }
 
         image.Registered = true;
@@ -70,7 +71,10 @@ internal sealed partial class MetalImageCache
         // The watch goes first and the count last, once no lookup can find the image.
         UnwatchImage(imageIdentifier);
         _pageOwners.Remove(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
-        _stencilOwners.Remove(imageIdentifier);
+        if (_stencilOwners.Remove(imageIdentifier))
+        {
+            _stencilOwnersVersion++;
+        }
 
         _totalUsedMemory -= Math.Min(image.CountedBytes, _totalUsedMemory);
         image.CountedBytes = 0;
@@ -989,6 +993,28 @@ internal sealed partial class MetalImageCache
     internal bool MetadataWatchOverlaps(ulong address, ulong size) =>
         AnySpanOverlaps(Volatile.Read(ref _metadataWatchSnapshot), address, size);
 
+    /// <summary>Whether one of <paramref name="spans"/>, sorted by Begin and disjoint, holds <c>[begin, end)</c> whole.</summary>
+    internal static bool SpanCovers(ReadOnlySpan<MetadataWatchSpan> spans, ulong begin, ulong end)
+    {
+        // The last span that begins at or before the range.
+        int low = 0, high = spans.Length - 1, found = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (spans[middle].Begin <= begin)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return found >= 0 && spans[found].End >= end;
+    }
+
     /// <summary>Whether a range meets any of <paramref name="spans"/>, sorted by Begin and disjoint.</summary>
     internal static bool AnySpanOverlaps(ReadOnlySpan<MetadataWatchSpan> spans, ulong address, ulong size)
     {
@@ -1298,6 +1324,14 @@ internal sealed partial class MetalImageCache
 
         var begin = address & ~(Page - 1);
         var end = (address + size + Page - 1) & ~(Page - 1);
+        // Pages the watches already cover, as one watch or several side by side, are watched: a
+        // claim taken again over a slice whose watch stands no longer scans every watch for one
+        // that holds it whole.
+        if (SpanCovers(_metadataWatchSnapshot, begin, end))
+        {
+            return;
+        }
+
         // The snapshot is the union of the watches, republished under the lock at every change:
         // a range it misses meets no watch, and the dictionary is scanned only when it does.
         // The scans collect into a reused list instead of copying the dictionary: a copy per
@@ -1647,6 +1681,7 @@ internal sealed partial class MetalImageCache
         if (!MetalImageEpochs.SameMetadata(in found.Description.Metadata, in description.Metadata))
         {
             found.Description.Metadata = description.Metadata;
+            found.BindingVersion++;
             Epochs.NoteShapeChanged();
         }
         if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
@@ -1727,6 +1762,11 @@ internal sealed partial class MetalImageCache
             }
         }
 
+        // One query over every slice first: with nothing pending over the run - the usual case -
+        // no slice needs its own (Black Myth: Wukong scans thousands of slices a second, and each
+        // query walks the pending writes).
+        var anyPending = _owner.HasPendingGpuWrite(range.Address + sliceSize * first, sliceSize * count);
+
         // Rented on the first slice that is scanned whole.
         byte[]? buffer = null;
         // Adjacent slices that take the same clear are cleared together, as one pass over
@@ -1750,7 +1790,7 @@ internal sealed partial class MetalImageCache
                 // now reads half-written data, and claiming it would hide the real clear.
                 // The deferral is remembered, so a draw that lands before it settles is not
                 // wiped by applying it later.
-                var pending = _owner.HasPendingGpuWrite(address, sliceSize);
+                var pending = anyPending && _owner.HasPendingGpuWrite(address, sliceSize);
                 // Settled metadata says what it holds through its guest bytes; the first one
                 // is read before the lock, which the backing does not need.
                 var readable = !pending && _backing.TryReadBacking(address, firstByte);
@@ -1837,6 +1877,7 @@ internal sealed partial class MetalImageCache
 
                         continue;
                     }
+
                 }
 
                 if (claimStands)

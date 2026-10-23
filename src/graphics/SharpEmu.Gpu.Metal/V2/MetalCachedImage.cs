@@ -109,6 +109,18 @@ internal sealed class MetalCachedImage : IDisposable
     /// </summary>
     public MetalImageEpochs? Epochs { get; set; }
 
+    /// <summary>
+    /// Moves wherever this image bumps a count of <see cref="Epochs"/> (and where the cache changes
+    /// its metadata): a memo of a binding of this image alone is stale once it moved.
+    /// </summary>
+    public long BindingVersion;
+
+    /// <summary>
+    /// The owner-list counts over this image's bytes when an alias sync last found no other image
+    /// there, or -1 (MetalImageCache.SynchronizeAliases).
+    /// </summary>
+    public long AlonePageVersions = -1;
+
     public MetalCachedImage(in ImageDescription description, in MetalTextureShape shape, nint texture)
     {
         Description = description;
@@ -383,6 +395,7 @@ internal sealed class MetalCachedImage : IDisposable
         _windowLinearView = false;
         MarkCpuDirty(MetalImageDirtyCause.Invalidated);
         NoteContentChanged();
+        BindingVersion++;
         Epochs?.NoteShapeChanged();
         return retired;
     }
@@ -417,6 +430,7 @@ internal sealed class MetalCachedImage : IDisposable
         SetResidentLevels(firstLevel, start, end);
         MarkCpuDirty(MetalImageDirtyCause.Invalidated);
         NoteContentChanged();
+        BindingVersion++;
         Epochs?.NoteShapeChanged();
         return retired;
     }
@@ -444,6 +458,7 @@ internal sealed class MetalCachedImage : IDisposable
         Shape = shape;
         Sparse = null;
         NoteContentChanged();
+        BindingVersion++;
         Epochs?.NoteShapeChanged();
         return retired;
     }
@@ -541,6 +556,7 @@ internal sealed class MetalCachedImage : IDisposable
             DirtyStart = start;
             DirtyEnd = end;
             _cpuDirty = true;
+            BindingVersion++;
             Epochs?.NoteBindingChanged();
             return;
         }
@@ -549,6 +565,7 @@ internal sealed class MetalCachedImage : IDisposable
         {
             DirtyStart = Math.Min(DirtyStart, start);
             DirtyEnd = Math.Max(DirtyEnd, end);
+            BindingVersion++;
             Epochs?.NoteBindingChanged();
         }
     }
@@ -563,6 +580,7 @@ internal sealed class MetalCachedImage : IDisposable
         DirtyEnd = 0;
         if (wasDirty)
         {
+            BindingVersion++;
             Epochs?.NoteBindingChanged();
         }
     }
@@ -603,6 +621,7 @@ internal sealed class MetalCachedImage : IDisposable
             return;
         }
 
+        BindingVersion++;
         Epochs?.NoteBindingChanged();
     }
 
@@ -642,10 +661,12 @@ internal sealed class MetalCachedImage : IDisposable
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
         if (!wasModified)
         {
+            BindingVersion++;
             Epochs?.NoteGpuModified();
         }
         else if (wasDirty || wasPublished)
         {
+            BindingVersion++;
             Epochs?.NoteBindingChanged();
         }
     }
@@ -684,6 +705,7 @@ internal sealed class MetalCachedImage : IDisposable
 
         if (PublishedStart != wasStart || PublishedEnd != wasEnd)
         {
+            BindingVersion++;
             Epochs?.NoteBindingChanged();
         }
     }
@@ -700,6 +722,7 @@ internal sealed class MetalCachedImage : IDisposable
         PublishedEnd = 0;
         if (wasModified)
         {
+            BindingVersion++;
             Epochs?.NoteBindingChanged();
         }
     }
@@ -996,6 +1019,7 @@ internal sealed class MetalCachedImage : IDisposable
         Shape = shape;
         Sparse = null;
         NoteContentChanged();
+        BindingVersion++;
         Epochs?.NoteShapeChanged();
     }
 

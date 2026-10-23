@@ -411,6 +411,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        // An image found alone over its bytes stays alone until an image comes or goes over them,
+        // which moves the owner-list counts there: a target bound draw after draw is no longer
+        // looked up against every image on its pages each time.
+        var pageVersions = _pageOwners.VersionSum(address, size);
+        if (image.AlonePageVersions == pageVersions)
+        {
+            return;
+        }
+
+        var alone = true;
         foreach (var otherIdentifier in FindImagesInRange(address, size, pageOverlap: false))
         {
             if (otherIdentifier == imageIdentifier ||
@@ -418,6 +428,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             {
                 continue;
             }
+
+            alone = false;
 
             if (takesGpuOwnership && other.IsWindowLinearView)
             {
@@ -578,6 +590,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 }
             }
         }
+
+        image.AlonePageVersions = alone ? pageVersions : -1;
     }
 
     // Depth images with a stencil plane. The page owner index holds an image's depth
@@ -585,6 +599,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // over those bytes - the R8 view a deferred lighting pass samples the stencil through
     // - would never find the depth image that wrote them.
     private readonly HashSet<ResourceSlotIdentifier> _stencilOwners = new();
+
+    // Moves when an image joins or leaves _stencilOwners (texture memo stamps).
+    private long _stencilOwnersVersion;
 
     /// <summary>
     /// The stencil plane counterpart of the alias rules: the stencil a depth target writes
@@ -828,6 +845,90 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public nint AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
     {
         using var held = _lock.Hold();
+        return AcquireTextureViewLocked(imageIdentifier, in request, out resourceId);
+    }
+
+    /// <summary>
+    /// <see cref="AcquireTextureView(ResourceSlotIdentifier, in ImageRequest, out ulong)"/> for a sampled
+    /// binding the caller memoises: in the same hold, the stamp that says when the view it returns is
+    /// still what an acquire of the same binding would return (<see cref="TryReacquireTextureView"/>).
+    /// <paramref name="requestPagesBefore"/> is <see cref="RequestPageVersions"/> read before the lookup
+    /// that found the image; no stamp when an image came or went over the request since.
+    /// </summary>
+    public nint AcquireTextureViewForMemo(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, long requestPagesBefore,
+        out ulong resourceId, out TextureMemoStamp? stamp)
+    {
+        using var held = _lock.Hold();
+        var view = AcquireTextureViewLocked(imageIdentifier, in request, out resourceId);
+        stamp = TryStampTextureLocked(imageIdentifier, in request, requestPagesBefore);
+        return view;
+    }
+
+    /// <summary>When a memoised sampled binding still holds; see <see cref="TryStampTextureLocked"/>.</summary>
+    internal readonly record struct TextureMemoStamp(
+        MetalCachedImage Image, long ImageVersion, ulong RangeStart, ulong RangeSize, long PageVersions, long StencilOwners);
+
+    /// <summary>The owner-list change counts over a request's bytes, read before its lookup.</summary>
+    public long RequestPageVersions(in ImageRequest request) =>
+        _pageOwners.VersionSum(request.Description.Data.Address, request.Description.Data.Size);
+
+    /// <summary>
+    /// The stamp of a sampled binding just acquired, or null when it may not be memoised. Only an
+    /// image alone over its bytes and the request's qualifies: no alias whose writes the acquire
+    /// would publish, no other image a lookup could pick, no depth image whose stencil plane lies
+    /// there. Nor does one whose acquire reads guest DCC metadata (a DCC request or image), which
+    /// changes without the cache counting it. The stamp then holds while the image's own
+    /// <see cref="MetalCachedImage.BindingVersion"/>, the owner lists over those bytes and the stencil
+    /// owners stay as they are and no deferred refresh waits. Caller holds the lock.
+    /// </summary>
+    private TextureMemoStamp? TryStampTextureLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, long requestPagesBefore)
+    {
+        ref readonly var data = ref request.Description.Data;
+        if (_deferredRefreshes.Count != 0 || ImageDescription.IsEmptyRange(data) ||
+            request.Description.Metadata.Kind == MetadataKind.Dcc ||
+            _slots.TryGet(imageIdentifier) is not { } image || image.Texture == 0 ||
+            image.Description.Metadata.Kind == MetadataKind.Dcc ||
+            ImageDescription.IsEmptyRange(image.Description.Data) ||
+            _pageOwners.VersionSum(data.Address, data.Size) != requestPagesBefore)
+        {
+            return null;
+        }
+
+        var start = Math.Min(data.Address, image.Description.Data.Address);
+        var end = Math.Max(data.Address + data.Size, image.Description.Data.Address + image.Description.Data.Size);
+        foreach (var other in FindImagesInRange(start, end - start, pageOverlap: false))
+        {
+            if (other != imageIdentifier)
+            {
+                return null;
+            }
+        }
+
+        foreach (var ownerIdentifier in _stencilOwners)
+        {
+            if (_slots.TryGet(ownerIdentifier) is { } depth && depth.Description.HasStencil &&
+                GuestRangeOverlap.Bytes(depth.Description.Stencil.Address, depth.Description.Stencil.Size, start, end - start))
+            {
+                return null;
+            }
+        }
+
+        return new TextureMemoStamp(image, image.BindingVersion, start, end - start,
+            _pageOwners.VersionSum(start, end - start), _stencilOwnersVersion);
+    }
+
+    /// <summary>
+    /// Whether a stamp still holds, read without the lock: a hint for skipping the lookup, which
+    /// <see cref="TryReacquireTextureView"/> confirms under the lock.
+    /// </summary>
+    public bool TextureStampMayHold(in TextureMemoStamp stamp) =>
+        !HasDeferredRefreshes &&
+        Volatile.Read(ref stamp.Image.BindingVersion) == stamp.ImageVersion &&
+        _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) == stamp.PageVersions;
+
+    private nint AcquireTextureViewLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
+    {
         // An attachment waiting for its pass is not marked written yet; anything bound
         // now must see it the way the acquire left it before the wait existed.
         DrainDeferredRefreshesLocked();
@@ -886,6 +987,36 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureViewUsageLocked(image, in request.View);
         return image.GetOrCreateView(request.View, out resourceId);
+    }
+
+    /// <summary>
+    /// The per-use part of <see cref="AcquireTextureView(ResourceSlotIdentifier, in ImageRequest, out ulong)"/>
+    /// for a sampled binding memoised with <paramref name="stamp"/>: while the stamp holds nothing can
+    /// have changed which view the binding resolves to or what acquiring it does first, so the view it
+    /// got then still holds. The image still notes the use and fits its resident levels to the
+    /// binding (a reshape moves its version and answers false). False sends the caller to the full
+    /// acquire.
+    /// </summary>
+    public bool TryReacquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, in TextureMemoStamp stamp)
+    {
+        using var held = _lock.Hold();
+        var image = stamp.Image;
+        if (_deferredRefreshes.Count != 0 || !ReferenceEquals(_slots.TryGet(imageIdentifier), image) ||
+            image.BindingVersion != stamp.ImageVersion || _stencilOwnersVersion != stamp.StencilOwners ||
+            _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) != stamp.PageVersions)
+        {
+            return false;
+        }
+
+        image.LastAccessTick = _collectionTick;
+        FitResidentLevelsLocked(image, in request.View);
+        if (image.BindingVersion != stamp.ImageVersion)
+        {
+            return false;
+        }
+
+        image.NoteUse(_owner.CurrentSerial);
+        return true;
     }
 
     /// <summary>
@@ -1034,6 +1165,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RegisterDccMetadata(request.Description);
             if (changed)
             {
+                image.BindingVersion++;
                 Epochs.NoteShapeChanged();
             }
         }
@@ -1115,6 +1247,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RegisterHtileMetadata(request.Description);
             if (!MetalImageEpochs.SameMetadata(in before, in image.Description.Metadata))
             {
+                image.BindingVersion++;
                 Epochs.NoteShapeChanged();
             }
         }

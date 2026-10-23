@@ -2335,6 +2335,9 @@ internal sealed partial class MetalRenderHost :
             $"prefetch=[{FormatPrefetchCounters()}] " +
             // The command thread's synchronous calls and their wait, its wait for room in the queue, and its items.
             $"cthread=[{FormatCommandThreadCounters()}] " +
+            // Sampled bindings the texture memo answered, those whose stamp failed between the preparation
+            // and the bind, lookups made in full, results memoised, and entries held.
+            $"texture_memo=({TakeTextureMemoCounters()}) " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
