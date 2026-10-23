@@ -826,10 +826,16 @@ public static class PlayGoExports
         var chunkIds = LoadChunkIds(chunkDefsXml);
         if (chunkIds.Length == 0)
         {
-            TracePlayGo("metadata_has_no_chunk_definitions; installed chunk ids unknown");
+            // Metadata that defines no chunks (a playgo-scenario.json alone, an unreadable
+            // playgo-chunk.dat) still belongs to a package with chunks: report the installed ones
+            // (at least the base chunk 0) and keep other ids unknown rather than absent. Reporting
+            // none sent Ghost of Tsushima (PPSA02225, scenario file only) into scePlayGoGetLocus
+            // and the to-do list calls with zero entries and on to a null dereference at boot.
+            var installedChunkIds = DiscoverInstalledChunkIds(app0Root);
+            TracePlayGo($"metadata_has_no_chunk_definitions; installed chunks=[{string.Join(',', installedChunkIds)}], other ids unknown");
             return new PlayGoMetadata(
                 true,
-                Array.Empty<ushort>(),
+                installedChunkIds,
                 PlayGoChunkIdKnowledge.Unknown);
         }
 

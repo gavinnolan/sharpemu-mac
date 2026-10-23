@@ -143,6 +143,26 @@ public sealed class PlayGoExportsTests : IDisposable
     }
 
     [Fact]
+    public void GetChunkId_ScenarioOnlyMetadata_ReportsTheBaseChunk()
+    {
+        var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+        File.WriteAllText(Path.Combine(sceSys.FullName, "playgo-scenario.json"), "{ \"scenarioCount\": 1 }");
+        var handle = InitializeAndOpen();
+
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = LociAddress;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetChunkId(_ctx));
+        Span<byte> count = stackalloc byte[sizeof(uint)];
+        Assert.True(_memory.TryRead(LociAddress, count));
+        Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(count));
+
+        // Ids past the installed set stay unknown, not absent.
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 5]));
+    }
+
+    [Fact]
     public void GetLocus_FaultingChunkAndOutputPointers_ReturnMemoryFault()
     {
         var handle = InitializeAndOpen();
