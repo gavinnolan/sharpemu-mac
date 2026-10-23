@@ -368,9 +368,11 @@ public sealed partial class RenderExecutor
 
         if (program.Bindings is { } bindings)
         {
-            foreach (var descriptor in bindings.Descriptors)
+            // By index: a foreach over the interface boxes its enumerator, once per draw.
+            var descriptors = bindings.Descriptors;
+            for (var index = 0; index < descriptors.Count; index++)
             {
-                if (descriptor.Kind == SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare)
+                if (descriptors[index].Kind == SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare)
                 {
                     return "gds";
                 }

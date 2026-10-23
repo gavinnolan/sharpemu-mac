@@ -4,7 +4,8 @@
 namespace SharpEmu.Libs.Gpu.GpuCommands.Registers;
 
 // The marker a preceding packet attaches to the next user scalar write.
-public enum UserScalarKind : uint
+// A byte: each stage keeps one per user data register, and the registers are copied on most draws.
+public enum UserScalarKind : byte
 {
     Unknown = 0,
     BufferResource = 1,

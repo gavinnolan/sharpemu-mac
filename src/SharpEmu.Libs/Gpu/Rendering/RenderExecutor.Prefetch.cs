@@ -78,6 +78,12 @@ public interface IConcurrentResolveHost
 
     // On the render thread.
     bool IsStillCurrent(object assumptions);
+
+    // On the render thread, once a taken resolution's assumptions were checked: the host may reuse
+    // them for a later resolution.
+    void ReleaseAssumptions(object assumptions)
+    {
+    }
 }
 
 // Program resolutions computed ahead of their draws. A draw takes one only when it was resolved

@@ -37,6 +37,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     bool IConcurrentResolveHost.IsStillCurrent(object assumptions) => IsConcurrentResolveStillCurrent(assumptions);
 
+    void IConcurrentResolveHost.ReleaseAssumptions(object assumptions) => ReleaseConcurrentAssumptions(assumptions);
+
     // Draws the translation deferred while their programs resolved run before any other host call of
     // the stream: everything but a draw may record into the same command buffer (a label, a
     // command-processor write, a transfer, a dispatch) or read what they use. Only the worker drains;
@@ -102,12 +104,21 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         public readonly List<(ConcurrentQuery Query, ulong Address, ulong Size, bool Owned)> Answers = new();
 
         // What the ownership answers came from: while none of it changed, they stand.
-        public readonly (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) Versions = versions;
+        public (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) Versions = versions;
 
         // The last pages found unowned, for each kind of read.
         private readonly ulong[] _cleanPages = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
             ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
         private int _nextCleanPage;
+
+        // Taken again from the pool for a new resolution.
+        public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
+        {
+            Answers.Clear();
+            Versions = versions;
+            Array.Fill(_cleanPages, ulong.MaxValue);
+            _nextCleanPage = 0;
+        }
 
         public bool IsCleanPage(ConcurrentQuery query, ulong page)
         {
@@ -149,7 +160,45 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     [ThreadStatic]
     private static ConcurrentAssumptions? _concurrentAssumptions;
 
-    internal void BeginConcurrentResolve() => _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions());
+    internal void BeginConcurrentResolve()
+    {
+        ConcurrentAssumptions? pooled = null;
+        lock (_assumptionPool)
+        {
+            _assumptionPool.TryPop(out pooled);
+        }
+
+        if (pooled is null)
+        {
+            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions());
+            return;
+        }
+
+        pooled.Reset(OwnershipVersions());
+        _concurrentAssumptions = pooled;
+    }
+
+    // Assumptions the worker has checked, for the resolving thread to fill again: one per draw
+    // otherwise, each with its answer list grown from nothing (Grand Theft Auto V, ~10 MB/s).
+    private readonly Stack<ConcurrentAssumptions> _assumptionPool = new();
+    private const int MaxPooledAssumptions = 32;
+    private const int MaxPooledAnswers = 4096;
+
+    internal void ReleaseConcurrentAssumptions(object assumptionsObject)
+    {
+        if (assumptionsObject is not ConcurrentAssumptions assumptions || assumptions.Answers.Capacity > MaxPooledAnswers)
+        {
+            return;
+        }
+
+        lock (_assumptionPool)
+        {
+            if (_assumptionPool.Count < MaxPooledAssumptions)
+            {
+                _assumptionPool.Push(assumptions);
+            }
+        }
+    }
 
     private (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) OwnershipVersions() =>
         (_cpOverlay.Version, _labelOverlay.Version, _gpuWrites.Version, _imageCache.ImageSetVersion, _imageCache.Epochs.GpuModified);

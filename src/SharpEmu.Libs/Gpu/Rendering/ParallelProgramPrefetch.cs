@@ -28,6 +28,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private readonly RenderExecutor _executor;
     private readonly IRenderHost _host;
+    // host.Fatal as one delegate: a method group over an interface makes a new one per use, per draw.
+    private readonly Func<string, Exception> _fatal;
     private readonly IConcurrentResolveHost _concurrent;
     private readonly object _lock = new();
     private readonly Queue<Job> _queue = new();
@@ -47,6 +49,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     {
         _executor = executor;
         _host = host;
+        _fatal = host.Fatal;
         _concurrent = concurrent;
         _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu program resolve" };
         _thread.Start();
@@ -186,10 +189,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
         if (job.State != 1)
         {
+            ReleaseAssumptions(job);
             return false;
         }
 
-        if (!job.Inputs.Equals(inputs) || !_concurrent.IsStillCurrent(job.Assumptions!))
+        var current = job.Inputs.Equals(inputs) && _concurrent.IsStillCurrent(job.Assumptions!);
+        ReleaseAssumptions(job);
+        if (!current)
         {
             Interlocked.Increment(ref _refusedCount);
             return false;
@@ -198,6 +204,16 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Interlocked.Increment(ref _takenCount);
         programs = job.Programs!;
         return true;
+    }
+
+    // The job is finished with: nothing reads its assumptions again.
+    private void ReleaseAssumptions(Job job)
+    {
+        if (job.Assumptions is { } assumptions)
+        {
+            job.Assumptions = null;
+            _concurrent.ReleaseAssumptions(assumptions);
+        }
     }
 
     private void WaitFor(Job job)
@@ -323,7 +339,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         _concurrent.BeginConcurrentResolve();
         try
         {
-            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, _host.Fatal, job.Indexed);
+            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, _fatal, job.Indexed);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
             job.Assumptions = _concurrent.EndConcurrentResolve();
             Interlocked.Increment(ref _resolvedCount);

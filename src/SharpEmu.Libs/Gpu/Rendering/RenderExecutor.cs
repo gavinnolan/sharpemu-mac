@@ -46,6 +46,8 @@ public sealed partial class RenderExecutor
     private static int _geometryWarningShown;
 
     private readonly IRenderHost _host;
+    // host.Fatal as one delegate: a method group over an interface makes a new one per use, per draw.
+    private readonly Func<string, Exception> _fatal;
     private readonly IShaderPipelineProvider _pipelines;
     private readonly bool _strictDrawResources;
     private readonly bool _dumpSkippedGraphics = Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SKIPPED_GRAPHICS") == "1";
@@ -59,6 +61,7 @@ public sealed partial class RenderExecutor
     internal RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines, bool strictDrawResources)
     {
         _host = host;
+        _fatal = host.Fatal;
         _pipelines = pipelines;
         _strictDrawResources = strictDrawResources;
     }
