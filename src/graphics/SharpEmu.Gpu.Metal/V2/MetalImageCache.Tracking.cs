@@ -131,6 +131,7 @@ internal sealed partial class MetalImageCache
     private void ForgetImageBookkeepingLocked(ResourceSlotIdentifier imageIdentifier, MetalCachedImage image)
     {
         _unpublishedLinearWrites.Remove(image);
+        ForgetDccRunMarkersLocked(imageIdentifier, 0, ulong.MaxValue);
         if (_materializedDccSlices.Count != 0)
         {
             var removed = _materializedDccSlices.RemoveWhere(entry =>
@@ -1120,6 +1121,7 @@ internal sealed partial class MetalImageCache
             });
             if (removed != 0)
             {
+                ForgetDccRunMarkersLocked(null, address, size);
                 Epochs.NoteDccChanged();
             }
 
@@ -1154,6 +1156,81 @@ internal sealed partial class MetalImageCache
     // an array does not cost the next layer its clear.
     private readonly Dictionary<(ResourceSlotIdentifier Image, ulong Address), long> _deferredDccSlices = new();
     private long _dccClearsDropped;
+
+    // Runs of slices a settled scan found claimed whole, by image and first slice address, with
+    // each slice's code. A later scan of the run with nothing pending over it whose first bytes
+    // still read those codes would meet the same claimed repeats slice by slice (or a code its
+    // view does not decode as a clear, which does nothing either): one hold and one lookup settle
+    // it instead. Black Myth: Wukong scans its 64-plane volumes some 95,000 slices a second
+    // between clears. A marker goes wherever a claim over it goes (a re-arm of its range, the
+    // image's release) and where a deferral or a recorded fill lands on it, so the full path is
+    // what meets those; each of them also moves _dccRunMarkerGeneration, so a scan that saw one
+    // happen while it ran takes no marker. SHARPEMU_METAL_V2_DCC_RUN_MARKERS=0 turns them off.
+    private readonly Dictionary<(ResourceSlotIdentifier Image, ulong Address), DccRunMarker> _dccRunMarkers = new();
+    private const int MaxDccRunMarkers = 4096;
+    private int _dccRunMarkerCount;
+    private long _dccRunMarkerGeneration;
+    private long _dccRunMarkerHits;
+    internal bool DccRunMarkers { get; set; } = MetalV2Diagnostics.DccRunMarkers;
+
+    /// <summary>DCC scans a run marker settled; reported and reset.</summary>
+    public long TakeDccRunMarkerHits() => Interlocked.Exchange(ref _dccRunMarkerHits, 0);
+
+    private sealed class DccRunMarker(ulong sliceSize, byte[] codes)
+    {
+        public readonly ulong SliceSize = sliceSize;
+        public readonly byte[] Codes = codes;
+    }
+
+    // The markers of this image (or of any, for null) over the range go. Caller holds the lock.
+    private void ForgetDccRunMarkersLocked(ResourceSlotIdentifier? image, ulong address, ulong size)
+    {
+        _dccRunMarkerGeneration++;
+        if (_dccRunMarkers.Count == 0)
+        {
+            return;
+        }
+
+        // In place, not over a copy: removing the current entry leaves the enumeration valid.
+        foreach (var (key, marker) in _dccRunMarkers)
+        {
+            if ((image is null || key.Image == image.Value) &&
+                key.Address < address + size && address < key.Address + marker.SliceSize * (ulong)marker.Codes.Length)
+            {
+                _dccRunMarkers.Remove(key);
+            }
+        }
+
+        Volatile.Write(ref _dccRunMarkerCount, _dccRunMarkers.Count);
+    }
+
+    // Whether the run's marker stands with these codes.
+    private bool DccRunMarkerHolds(ResourceSlotIdentifier image, ulong address, ulong sliceSize, ReadOnlySpan<byte> codes)
+    {
+        using var held = _lock.Hold();
+        return _dccRunMarkers.TryGetValue((image, address), out var marker) &&
+            marker.SliceSize == sliceSize && codes.SequenceEqual(marker.Codes);
+    }
+
+    // A scan found every slice of the run a settled claimed repeat with these codes. Taken only
+    // when nothing that would forget the marker happened since the scan began.
+    private void TakeDccRunMarker(
+        ResourceSlotIdentifier image, ulong address, ulong sliceSize, ReadOnlySpan<byte> codes, long generation)
+    {
+        using var held = _lock.Hold();
+        if (_dccRunMarkerGeneration != generation || _slots.TryGet(image) is null)
+        {
+            return;
+        }
+
+        if (_dccRunMarkers.Count >= MaxDccRunMarkers)
+        {
+            _dccRunMarkers.Clear();
+        }
+
+        _dccRunMarkers[(image, address)] = new DccRunMarker(sliceSize, codes.ToArray());
+        Volatile.Write(ref _dccRunMarkerCount, _dccRunMarkers.Count);
+    }
 
     /// <summary>Deferred DCC clears dropped because the image was drawn to since.</summary>
     public long TakeDccClearsDropped() => Interlocked.Exchange(ref _dccClearsDropped, 0);
@@ -1203,6 +1280,7 @@ internal sealed partial class MetalImageCache
         ForgetRecordedDccFillsLocked(address, size);
         if (record)
         {
+            ForgetDccRunMarkersLocked(null, address, size);
             _recordedDccFills[address] = new RecordedDccFill { Size = size, Code = code, AwaitingOwnWrite = true };
             Epochs.NoteDccChanged();
         }
@@ -1762,10 +1840,32 @@ internal sealed partial class MetalImageCache
             }
         }
 
-        // One query over every slice first: with nothing pending over the run - the usual case -
-        // no slice needs its own (Black Myth: Wukong scans thousands of slices a second, and each
-        // query walks the pending writes).
-        var anyPending = _owner.HasPendingGpuWrite(range.Address + sliceSize * first, sliceSize * count);
+        // Which slices recorded work may still be writing, in one walk of the pending writes: Black
+        // Myth: Wukong scans thousands of slices a second, and a query per slice walked them all.
+        var runStart = range.Address + sliceSize * first;
+        Span<bool> pendingSlices = count <= StackSlices ? stackalloc bool[StackSlices] : new bool[count];
+        pendingSlices = pendingSlices[..(int)count];
+        var anyPending = _owner.MarkPendingGpuWrites(runStart, sliceSize, pendingSlices);
+
+        // A run a settled scan found claimed whole is settled by its marker while its first bytes
+        // read the same codes (see _dccRunMarkers). The codes read for it serve the scan otherwise.
+        Span<byte> codes = count <= StackSlices ? stackalloc byte[StackSlices] : new byte[count];
+        codes = codes[..(int)count];
+        var markable = DccRunMarkers && !anyPending && !DccClaimFirst && !DccTraceActive;
+        var markerGeneration = markable ? Interlocked.Read(ref _dccRunMarkerGeneration) : 0;
+        var codesRead = false;
+        if (markable && Volatile.Read(ref _dccRunMarkerCount) != 0)
+        {
+            codesRead = ReadDccCodes(runStart, sliceSize, codes);
+            if (codesRead && DccRunMarkerHolds(imageIdentifier, runStart, sliceSize, codes))
+            {
+                Interlocked.Add(ref _dccRepeatsSkipped, count);
+                Interlocked.Increment(ref _dccRunMarkerHits);
+                return;
+            }
+        }
+
+        var claimedSettled = 0u;
 
         // Rented on the first slice that is scanned whole.
         byte[]? buffer = null;
@@ -1790,10 +1890,10 @@ internal sealed partial class MetalImageCache
                 // now reads half-written data, and claiming it would hide the real clear.
                 // The deferral is remembered, so a draw that lands before it settles is not
                 // wiped by applying it later.
-                var pending = anyPending && _owner.HasPendingGpuWrite(address, sliceSize);
+                var pending = pendingSlices[(int)slice];
                 // Settled metadata says what it holds through its guest bytes; the first one
                 // is read before the lock, which the backing does not need.
-                var readable = !pending && _backing.TryReadBacking(address, firstByte);
+                var readable = !pending && (codesRead || _backing.TryReadBacking(address, firstByte));
                 byte code;
                 var recorded = false;
                 GpuClearColor clear;
@@ -1810,7 +1910,8 @@ internal sealed partial class MetalImageCache
                             continue;
                         }
 
-                        code = firstByte[0];
+                        code = codesRead ? codes[(int)slice] : firstByte[0];
+                        codes[(int)slice] = code;
                     }
                     else if (TryFindRecordedDccFillLocked(address, sliceSize, out code))
                     {
@@ -1820,6 +1921,7 @@ internal sealed partial class MetalImageCache
                     {
                         if (_deferredDccSlices.TryAdd((imageIdentifier, address), imageWriteSequence))
                         {
+                            ForgetDccRunMarkersLocked(imageIdentifier, address, sliceSize);
                             Epochs.NoteDccChanged();
                         }
 
@@ -1868,6 +1970,7 @@ internal sealed partial class MetalImageCache
                             // Read settled and found claimed: from here the claim settles
                             // the slice alone again.
                             StandDccClaimLocked(imageIdentifier, address, code);
+                            claimedSettled++;
                         }
 
                         if (DccTraceActive)
@@ -1941,6 +2044,11 @@ internal sealed partial class MetalImageCache
             {
                 ClearDccRun(imageIdentifier, in view, in run);
             }
+
+            if (markable && claimedSettled == count)
+            {
+                TakeDccRunMarker(imageIdentifier, runStart, sliceSize, codes, markerGeneration);
+            }
         }
         finally
         {
@@ -1949,6 +2057,20 @@ internal sealed partial class MetalImageCache
                 System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
             }
         }
+    }
+
+    // The first byte of each slice: what a settled scan reads to know the slice's code.
+    private bool ReadDccCodes(ulong address, ulong sliceSize, Span<byte> codes)
+    {
+        for (var slice = 0; slice < codes.Length; slice++)
+        {
+            if (!_backing.TryReadBacking(address + sliceSize * (ulong)slice, codes.Slice(slice, 1)))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // Consecutive slices of one image that a DCC scan decided to clear to one colour.

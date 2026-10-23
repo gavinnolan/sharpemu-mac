@@ -161,6 +161,13 @@ internal static class MetalV2Diagnostics
 
     public static readonly bool DccClaimFirstVerify = PerfSwitches.Verify("SHARPEMU_METAL_V2_DCC_CLAIM_FIRST_VERIFY");
 
+    // SHARPEMU_METAL_V2_DCC_RUN_MARKERS=0 scans every slice of a DCC run whose slices a settled
+    // scan found claimed whole, instead of settling it from the marker (MetalImageCache.Tracking.cs).
+    // Unlike the claim-first path above it still queries pending writes and reads each slice's
+    // first byte, which is all the full path reads before a claimed repeat.
+    public static readonly bool DccRunMarkers =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_RUN_MARKERS"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_LOSSY_TEXTURES=1 creates sampled-only textures with Apple GPU lossy
     // compression (about half the memory) where the device and the format allow it
     // (MetalImageCache.Lossy.cs). Off by default: with it on, SH rendered dark scenes as

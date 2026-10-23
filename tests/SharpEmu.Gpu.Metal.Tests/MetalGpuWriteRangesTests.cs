@@ -304,4 +304,49 @@ public sealed class MetalGpuWriteRangesTests
         Assert.True(ranges.TryPendingSerialSnapshot(0x3_0000, 0x10, completed: 5, out var later));
         Assert.Equal(9UL, later);
     }
+
+    // Marking the slices of a run in one pass answers what a PendingSerial per slice does: storage
+    // records, labels (looked up by page or scanned), retired records and an unbounded write.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void MarkingSlicesAgreesWithAQueryPerSlice(int seed)
+    {
+        var random = new Random(seed);
+        const ulong Base = 0x100_0000;
+        for (var round = 0; round < 200; round++)
+        {
+            var ranges = new MetalGpuWriteRanges();
+            for (var record = random.Next(0, 24); record > 0; record--)
+            {
+                var origin = random.Next(3) == 0 ? MetalGpuWriteOrigin.EndOfPipeLabel : MetalGpuWriteOrigin.StorageBuffer;
+                var size = origin == MetalGpuWriteOrigin.EndOfPipeLabel ? 4UL * (ulong)random.Next(1, 3) : (ulong)random.Next(1, 0x6000);
+                ranges.Note(Base + (ulong)random.Next(0, 0x50000), size, serial: (ulong)random.Next(1, 10), origin);
+            }
+
+            if (random.Next(8) == 0)
+            {
+                ranges.NoteUnbounded((ulong)random.Next(1, 10));
+            }
+
+            var completed = (ulong)random.Next(0, 10);
+            var sliceSize = 0x1000UL * (ulong)random.Next(1, 3);
+            var count = random.Next(1, 70);
+            var address = Base + 0x1000UL * (ulong)random.Next(0, 0x40);
+            var pending = new bool[count];
+            var any = ranges.MarkPending(address, sliceSize, completed, pending);
+
+            var expectedAny = false;
+            for (var slice = 0; slice < count; slice++)
+            {
+                var expected = ranges.PendingSerial(address + sliceSize * (ulong)slice, sliceSize, completed) != 0;
+                Assert.Equal(expected, pending[slice]);
+                expectedAny |= expected;
+            }
+
+            Assert.Equal(expectedAny, any);
+        }
+    }
 }

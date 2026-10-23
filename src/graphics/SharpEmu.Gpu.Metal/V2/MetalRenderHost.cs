@@ -1241,6 +1241,41 @@ internal sealed partial class MetalRenderHost :
     bool IMetalImageCacheOwner.HasPendingGpuWrite(ulong address, ulong size) =>
         _gpuWrites.MayCover(address, size) && PendingSerialHinted(address, size) != 0;
 
+    // The same for every slice of a DCC scan in one walk of the records: Black Myth: Wukong's
+    // 64-plane volumes asked once per plane, each asking walking every record twice (hint, then
+    // send), 5% of its GPU worker. A slice the hint finds settled is settled, so the exact serial
+    // is read only when the hint leaves something pending over the whole range.
+    bool IMetalImageCacheOwner.MarkPendingGpuWrites(ulong address, ulong sliceSize, Span<bool> pending)
+    {
+        pending.Clear();
+        var count = (ulong)pending.Length;
+        if (sliceSize == 0 || count == 0)
+        {
+            return false;
+        }
+
+        if (sliceSize > (ulong.MaxValue - address) / count)
+        {
+            var wraps = false;
+            for (var slice = 0; slice < pending.Length; slice++)
+            {
+                pending[slice] = ((IMetalImageCacheOwner)this).HasPendingGpuWrite(address + sliceSize * (ulong)slice, sliceSize);
+                wraps |= pending[slice];
+            }
+
+            return wraps;
+        }
+
+        var size = sliceSize * count;
+        if (!_gpuWrites.MayCover(address, size) ||
+            (SerialHintEnabled && _gpuWrites.PendingSerial(address, size, CompletedSerialHint) == 0))
+        {
+            return false;
+        }
+
+        return _gpuWrites.MarkPending(address, sliceSize, CompletedSerial, pending);
+    }
+
     // A guest thread waiting for a recorded writeback (MetalImageCache.WritebackFence.cs). The
     // GPU finishes a committed submission without the guest's help, so the one thing the wait
     // needs from the worker is the commit, asked for through the relay; it holds no lock the
@@ -2344,7 +2379,7 @@ internal sealed partial class MetalRenderHost :
             // Shared (CPU-visible) memory the transfer staging and the upload rings hold.
             $"{DescribeStagingWindow()} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
-            $"dcc_repeats_skipped={_imageCache.TakeDccRepeatsSkipped()} " +
+            $"dcc_repeats_skipped={_imageCache.TakeDccRepeatsSkipped()} dcc_run_marker_hits={_imageCache.TakeDccRunMarkerHits()} " +
             $"dcc_slices_coalesced={_imageCache.TakeDccSlicesCoalesced()} " +
             $"dcc_clears_dropped={_imageCache.TakeDccClearsDropped()} " +
             // Shaders whose control flow the structured emitter could express, against

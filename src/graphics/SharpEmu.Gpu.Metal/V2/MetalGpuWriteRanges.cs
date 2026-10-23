@@ -400,6 +400,62 @@ internal sealed class MetalGpuWriteRanges
     }
 
     /// <summary>
+    /// <see cref="PendingSerial"/> for each of <c>pending.Length</c> adjacent slices of
+    /// <paramref name="sliceSize"/> bytes from <paramref name="address"/>, as whether it is
+    /// non-zero, in one pass over the records: a slice is marked when it would wait. True
+    /// when any is. Slices already marked stay marked.
+    /// </summary>
+    public bool MarkPending(ulong address, ulong sliceSize, ulong completed, Span<bool> pending)
+    {
+        Retire(completed);
+        var count = (ulong)pending.Length;
+        if (sliceSize == 0 || count == 0 || sliceSize > (ulong.MaxValue - address) / count)
+        {
+            return false;
+        }
+
+        if (_unboundedSerial > completed)
+        {
+            pending.Fill(true);
+            return true;
+        }
+
+        // Every live record is past the retired serial, so any overlapping one makes a slice wait.
+        var end = address + sliceSize * count;
+        var any = false;
+        for (var index = 0; index < _count; index++)
+        {
+            ref var record = ref _records[index];
+            if (record.End > address && record.Start < end)
+            {
+                MarkSlices(pending, address, sliceSize, record.Start, record.End);
+                any = true;
+            }
+        }
+
+        var labels = LabelPagesMayCover(address, end) ? _labelCount : 0;
+        for (var index = 0; index < labels; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.End > address && label.Start < end)
+            {
+                MarkSlices(pending, address, sliceSize, label.Start, label.End);
+                any = true;
+            }
+        }
+
+        return any;
+    }
+
+    // Marks the slices [start, end) overlaps; it overlaps at least one.
+    private static void MarkSlices(Span<bool> pending, ulong address, ulong sliceSize, ulong start, ulong end)
+    {
+        var first = start <= address ? 0 : (start - address) / sliceSize;
+        var last = Math.Min((end - address - 1) / sliceSize, (ulong)pending.Length - 1);
+        pending[(int)first..((int)last + 1)].Fill(true);
+    }
+
+    /// <summary>
     /// The sequence of the newest recorded write overlapping this range, or zero when no
     /// live record does. Every write gets a larger sequence than the ones recorded before
     /// it, and a merged or folded record carries the largest of its parts, so a write is

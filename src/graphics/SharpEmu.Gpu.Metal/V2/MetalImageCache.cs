@@ -44,6 +44,20 @@ internal interface IMetalImageCacheOwner
     // are not settled yet.
     bool HasPendingGpuWrite(ulong address, ulong size);
 
+    // HasPendingGpuWrite for each of pending.Length adjacent slices of sliceSize bytes from
+    // address, marking the ones that are pending; true when any is.
+    bool MarkPendingGpuWrites(ulong address, ulong sliceSize, Span<bool> pending)
+    {
+        var any = false;
+        for (var slice = 0; slice < pending.Length; slice++)
+        {
+            pending[slice] = HasPendingGpuWrite(address + sliceSize * (ulong)slice, sliceSize);
+            any |= pending[slice];
+        }
+
+        return any;
+    }
+
     // Fills a guest byte range with a repeating dword on the GPU.
     void FillGuestRange(ulong address, ulong size, uint value);
 
