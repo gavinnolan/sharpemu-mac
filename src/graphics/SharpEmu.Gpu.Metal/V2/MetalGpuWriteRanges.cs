@@ -151,6 +151,7 @@ internal sealed class MetalGpuWriteRanges
             Version++;
             var sequence = ++_sequence;
             var end = address + size;
+            NoteNewest(address, end, serial);
             if (origin == MetalGpuWriteOrigin.EndOfPipeLabel)
             {
                 NoteLabel(address, end, serial, sequence);
@@ -167,8 +168,14 @@ internal sealed class MetalGpuWriteRanges
                     continue;
                 }
 
-                candidate.Start = Math.Min(candidate.Start, address);
-                candidate.End = Math.Max(candidate.End, end);
+                if (address < candidate.Start || end > candidate.End)
+                {
+                    CountRecordBuckets(candidate.Start, candidate.End, -1);
+                    candidate.Start = Math.Min(candidate.Start, address);
+                    candidate.End = Math.Max(candidate.End, end);
+                    CountRecordBuckets(candidate.Start, candidate.End, 1);
+                }
+
                 candidate.Sequence = sequence;
                 return sequence;
             }
@@ -186,6 +193,7 @@ internal sealed class MetalGpuWriteRanges
             }
 
             _records[_count++] = new Record { Start = address, End = end, Serial = serial, Sequence = sequence, Origin = origin };
+            CountRecordBuckets(address, end, 1);
             _recordsByOrigin[(int)origin]++;
             if (address < _boundsStart)
             {
@@ -203,6 +211,119 @@ internal sealed class MetalGpuWriteRanges
         {
             EndMutation();
         }
+    }
+
+    // The ranges written with the newest serial noted, exact: never folded and never widened
+    // past their union. A guest-view bind asks whether the command buffer being recorded wrote
+    // its bytes (WrittenSince), and walking every record for that cost Black Myth: Wukong's
+    // worker a scan of some 500 records per storage binding. Past MaxNewestRanges a query
+    // walks the records instead.
+    private (ulong Start, ulong End)[] _newest = new (ulong, ulong)[16];
+    private int _newestCount;
+    private ulong _newestSerial;
+    private bool _newestOverflow;
+    private const int MaxNewestRanges = 256;
+
+    private void NoteNewest(ulong start, ulong end, ulong serial)
+    {
+        if (serial < _newestSerial)
+        {
+            return;
+        }
+
+        if (serial > _newestSerial)
+        {
+            _newestSerial = serial;
+            _newestCount = 0;
+            _newestOverflow = false;
+        }
+
+        for (var index = _newestCount - 1; index >= 0 && index >= _newestCount - 8; index--)
+        {
+            ref var range = ref _newest[index];
+            if (range.End < start || range.Start > end)
+            {
+                continue;
+            }
+
+            range.Start = Math.Min(range.Start, start);
+            range.End = Math.Max(range.End, end);
+            return;
+        }
+
+        if (_newestCount == MaxNewestRanges)
+        {
+            _newestOverflow = true;
+            return;
+        }
+
+        if (_newestCount == _newest.Length)
+        {
+            Array.Resize(ref _newest, _newest.Length * 2);
+        }
+
+        _newest[_newestCount++] = (start, end);
+    }
+
+    /// <summary>
+    /// Whether work recorded with <paramref name="serial"/> or a later one stores into this range:
+    /// <c>PendingSerial(address, size, completed) &gt;= serial</c> for a serial that has not
+    /// completed, without walking every record when <paramref name="serial"/> is the newest
+    /// noted. Retires nothing.
+    /// </summary>
+    public bool WrittenSince(ulong address, ulong size, ulong serial)
+    {
+        if (size == 0 || serial == 0 || address > ulong.MaxValue - size)
+        {
+            return false;
+        }
+
+        if (_unboundedSerial >= serial)
+        {
+            return true;
+        }
+
+        if (serial > _newestSerial)
+        {
+            return false;
+        }
+
+        var end = address + size;
+        if (serial == _newestSerial && !_newestOverflow)
+        {
+            for (var index = 0; index < _newestCount; index++)
+            {
+                ref var range = ref _newest[index];
+                if (range.End > address && range.Start < end)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        var records = RecordsMayCover(address, end) ? _count : 0;
+        for (var index = 0; index < records; index++)
+        {
+            ref var record = ref _records[index];
+            if (record.Serial >= serial && record.End > address && record.Start < end)
+            {
+                return true;
+            }
+        }
+
+        var labels = LabelPagesMayCover(address, end) ? _labelCount : 0;
+        for (var index = 0; index < labels; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.Serial >= serial && label.End > address && label.Start < end)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void NoteLabel(ulong address, ulong end, ulong serial, ulong sequence)
@@ -375,7 +496,9 @@ internal sealed class MetalGpuWriteRanges
             LastMatch = (0, ulong.MaxValue, pending, MetalGpuWriteOrigin.Unbounded);
         }
 
-        for (var index = 0; index < _count; index++)
+        var records = RecordsMayCover(address, end) ? _count : 0;
+
+        for (var index = 0; index < records; index++)
         {
             ref var record = ref _records[index];
             if (record.Serial > pending && record.End > address && record.Start < end)
@@ -423,7 +546,8 @@ internal sealed class MetalGpuWriteRanges
         // Every live record is past the retired serial, so any overlapping one makes a slice wait.
         var end = address + sliceSize * count;
         var any = false;
-        for (var index = 0; index < _count; index++)
+        var records = RecordsMayCover(address, end) ? _count : 0;
+        for (var index = 0; index < records; index++)
         {
             ref var record = ref _records[index];
             if (record.End > address && record.Start < end)
@@ -471,7 +595,8 @@ internal sealed class MetalGpuWriteRanges
 
         var end = address + size;
         var latest = _unboundedSerial != 0 ? _unboundedSequence : 0;
-        for (var index = 0; index < _count; index++)
+        var records = RecordsMayCover(address, end) ? _count : 0;
+        for (var index = 0; index < records; index++)
         {
             ref var record = ref _records[index];
             if (record.Sequence > latest && record.End > address && record.Start < end)
@@ -491,6 +616,71 @@ internal sealed class MetalGpuWriteRanges
         }
 
         return latest;
+    }
+
+    // How many records reach into each 2 MiB bucket, for records spanning at most MaxRecordBuckets
+    // of them; the wider ones are only counted. A query whose buckets hold none, with no wide
+    // record live, skips the walk of every record: the command processor reads its register tables,
+    // labels and operands through here (Grand Theft Auto V: ~400,000 queries a second over some
+    // 200 records each, nearly all finding nothing). Kept by the worker alone, like the records.
+    private readonly Dictionary<ulong, int> _recordBuckets = [];
+    private int _wideRecords;
+    private const int RecordBucketShift = 21;
+    private const ulong MaxRecordBuckets = 32;
+
+    // A query reaching more buckets than this walks the records rather than looking each one up.
+    private const ulong MaxRecordBucketLookups = 16;
+
+    private void CountRecordBuckets(ulong start, ulong end, int delta)
+    {
+        var first = start >> RecordBucketShift;
+        var last = (end - 1) >> RecordBucketShift;
+        if (last - first >= MaxRecordBuckets)
+        {
+            _wideRecords += delta;
+            return;
+        }
+
+        for (var bucket = first; bucket <= last; bucket++)
+        {
+            ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_recordBuckets, bucket, out _);
+            count += delta;
+            if (count == 0)
+            {
+                _recordBuckets.Remove(bucket);
+            }
+        }
+    }
+
+    // Whether a live record may reach into [address, end): false only when none can.
+    private bool RecordsMayCover(ulong address, ulong end)
+    {
+        if (_count == 0)
+        {
+            return false;
+        }
+
+        if (_wideRecords != 0)
+        {
+            return true;
+        }
+
+        var first = address >> RecordBucketShift;
+        var last = (end - 1) >> RecordBucketShift;
+        if (last - first >= MaxRecordBucketLookups)
+        {
+            return true;
+        }
+
+        for (var bucket = first; bucket <= last; bucket++)
+        {
+            if (_recordBuckets.ContainsKey(bucket))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void CountLabelPages(ulong start, ulong end, int delta)
@@ -561,6 +751,7 @@ internal sealed class MetalGpuWriteRanges
             {
                 if (_records[index].Serial <= completed)
                 {
+                    CountRecordBuckets(_records[index].Start, _records[index].End, -1);
                     continue;
                 }
 
@@ -612,7 +803,11 @@ internal sealed class MetalGpuWriteRanges
         {
             Version++;
             _count = 0;
+            _recordBuckets.Clear();
+            _wideRecords = 0;
             _labelCount = 0;
+            _newestCount = 0;
+            _newestOverflow = false;
             _labelPages.Clear();
             _unboundedSerial = 0;
             _boundsStart = ulong.MaxValue;
@@ -687,5 +882,11 @@ internal sealed class MetalGpuWriteRanges
         }
 
         _count = kept + tail;
+        _recordBuckets.Clear();
+        _wideRecords = 0;
+        for (var index = 0; index < _count; index++)
+        {
+            CountRecordBuckets(_records[index].Start, _records[index].End, 1);
+        }
     }
 }

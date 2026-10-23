@@ -349,4 +349,106 @@ public sealed class MetalGpuWriteRangesTests
             Assert.Equal(expectedAny, any);
         }
     }
+
+    // Whether work of a serial not yet completed (or a later one) wrote a range answers what
+    // PendingSerial >= serial does, for the newest serial from its exact ranges and for an older
+    // one from the records, over labels and an unbounded write. Past 512 records a fold widens
+    // the records, so PendingSerial may answer yes where the exact ranges do not, never the
+    // other way round.
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(3, false)]
+    [InlineData(4, true)]
+    [InlineData(5, true)]
+    public void WrittenSinceAgreesWithThePendingSerial(int seed, bool folds)
+    {
+        var random = new Random(seed);
+        const ulong Base = 0x200_0000;
+        for (var round = 0; round < 60; round++)
+        {
+            var ranges = new MetalGpuWriteRanges();
+            var serial = 1UL;
+            for (var record = folds ? random.Next(600, 1200) : random.Next(0, 500); record > 0; record--)
+            {
+                serial += random.Next(6) == 0 ? 1UL : 0UL;
+                var origin = random.Next(4) == 0 ? MetalGpuWriteOrigin.EndOfPipeLabel : MetalGpuWriteOrigin.StorageBuffer;
+                var size = origin == MetalGpuWriteOrigin.EndOfPipeLabel ? 8UL : (ulong)random.Next(1, 0x3000);
+                ranges.Note(Base + (ulong)random.Next(0, 0x80000), size, serial, origin);
+            }
+
+            if (random.Next(10) == 0)
+            {
+                ranges.NoteUnbounded(serial - (ulong)random.Next(0, 2));
+            }
+
+            var completed = (ulong)random.Next(0, (int)serial);
+            for (var query = 0; query < 40; query++)
+            {
+                var since = completed + 1 + (ulong)random.Next(0, (int)(serial - completed) + 1);
+                var address = Base + (ulong)random.Next(0, 0x80000);
+                var size = (ulong)random.Next(1, 0x4000);
+                var written = ranges.WrittenSince(address, size, since);
+                var pending = ranges.PendingSerial(address, size, completed) >= since;
+                if (folds)
+                {
+                    Assert.True(pending || !written);
+                }
+                else
+                {
+                    Assert.Equal(pending, written);
+                }
+            }
+        }
+    }
+
+    // The bucket index over the records only lets a query skip records that cannot reach it: what
+    // PendingSerial answers is what the unindexed walk of every record (the snapshot another thread
+    // reads) answers, over narrow and wide writes, labels, retirement, folds and clears.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void IndexedQueriesAgreeWithTheUnindexedWalk(int seed)
+    {
+        var random = new Random(seed);
+        const ulong Base = 0x10_0000_0000;
+        var ranges = new MetalGpuWriteRanges();
+        var serial = 1UL;
+        var completed = 0UL;
+        for (var step = 0; step < 6000; step++)
+        {
+            switch (random.Next(20))
+            {
+                case 0:
+                    completed = Math.Min(serial - 1, completed + (ulong)random.Next(0, 3));
+                    ranges.Retire(completed);
+                    break;
+                case 1 when random.Next(40) == 0:
+                    completed = serial - 1;
+                    ranges.Clear(completed);
+                    break;
+                case 2:
+                    serial++;
+                    break;
+                default:
+                {
+                    var origin = random.Next(5) == 0 ? MetalGpuWriteOrigin.EndOfPipeLabel : MetalGpuWriteOrigin.StorageBuffer;
+                    var size = origin == MetalGpuWriteOrigin.EndOfPipeLabel ? 8UL
+                        : random.Next(30) == 0 ? (ulong)random.Next(64, 200) << 20
+                        : (ulong)random.Next(1, 0x40000);
+                    ranges.Note(Base + ((ulong)random.Next(0, 0x4000) << 16), size, serial, origin);
+                    break;
+                }
+            }
+
+            for (var query = 0; query < 4; query++)
+            {
+                var address = Base + ((ulong)random.Next(0, 0x4000) << 16) + (ulong)random.Next(0, 0x10000);
+                var size = random.Next(10) == 0 ? (ulong)random.Next(1, 64) << 20 : (ulong)random.Next(1, 0x2000);
+                Assert.True(ranges.TryPendingSerialSnapshot(address, size, completed, out var expected));
+                Assert.Equal(expected, ranges.PendingSerial(address, size, completed));
+            }
+        }
+    }
 }

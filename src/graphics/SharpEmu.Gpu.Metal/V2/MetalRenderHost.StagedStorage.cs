@@ -166,7 +166,7 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        if (PendingSerialHinted(address, size) >= SubmissionSerial)
+        if (_gpuWrites.WrittenSince(address, size, SubmissionSerial))
         {
             Interlocked.Increment(ref _guestViewRefusedWrites);
             return false;
