@@ -542,7 +542,10 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public bool HasPendingGpuWrite(ulong address, ulong size) => false;
         public void FillGuestRange(ulong address, ulong size, uint value) { }
         public void NoteGuestWrite(ulong address, ulong size) { }
-        public void WaitForGpu() { }
+        // What the GPU worker's commit-and-wait does; a test supplies it.
+        public Action? OnWaitForGpu { get; set; }
+
+        public void WaitForGpu() => OnWaitForGpu?.Invoke();
         public void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color) { }
 
         public void ClearTextureDepthStencil(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height,
@@ -561,7 +564,10 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public bool TryRunOnWorker(Action work) => RunOnWorker?.Invoke(work) ?? false;
 
-        public bool IsWorkerThread => false;
+        // Whether the cache's caller is the GPU worker; a test sets it.
+        public bool OnWorker { get; set; }
+
+        public bool IsWorkerThread => OnWorker;
 
         public void CommitRecorded()
         {
@@ -577,7 +583,9 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         private readonly bool _savedLinearViews = MetalLinearWindowView.Enabled;
         private long _now = 1000 * Stopwatch.Frequency;
 
-        public Rig(nint device, int writeWatchLimit = PageGuard.MaxWriteWatchesPerPage, Action<Backing>? layout = null)
+        public Rig(
+            nint device, int writeWatchLimit = PageGuard.MaxWriteWatchesPerPage, Action<Backing>? layout = null,
+            ulong? ringCapBytes = null)
         {
             MetalLinearWindowView.Enabled = false;
             Harness = new MetalTransferHarness(device);
@@ -585,7 +593,12 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
             _pages = NewPageGuard(_space, writeWatchLimit);
             // A laid-out backing is read by the CPU too: what a staged upload copies.
             layout?.Invoke(_backing);
-            _memory = new MetalGuestMemory(device, _backing, layout is null ? new NoMemory() : new BackingMemory(_backing));
+            ICpuMemory cpu = layout is null ? new NoMemory() : new BackingMemory(_backing);
+            // A lowered ring cap reaches the staging past it with a small image.
+            _memory = ringCapBytes is { } cap
+                ? new MetalGuestMemory(
+                    device, _backing, cpu, MetalGuestMemory.DefaultGranuleBytes, MetalGuestMemory.DefaultMaxWindowBytes, cap)
+                : new MetalGuestMemory(device, _backing, cpu);
             CacheOwner = new Owner(Harness);
             Cache = new MetalImageCache(CacheOwner, Harness.Transfer, _memory, _pages, _backing);
             // Exact textures: lossy compression is not this suite's subject.

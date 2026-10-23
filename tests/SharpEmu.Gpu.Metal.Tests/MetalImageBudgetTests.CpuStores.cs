@@ -443,6 +443,109 @@ public sealed partial class MetalImageBudgetTests
         Assert.True(rig.Cache.GetImage(second).IsGpuModified);
     }
 
+    // The transfer refuses a multisampled image (no per-sample layout is decoded), so its
+    // writeback encodes nothing. It used to count as carried all the same: Complete, and no
+    // longer GPU-written. It is Failed now, in place and staged alike.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AWritebackTheTransferRefusesIsNotCarried(bool scattered)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, layout: backing =>
+        {
+            if (scattered)
+            {
+                backing.ScatterStart = GuestBase;
+                backing.ScatterBytes = ImageSize * 2;
+                backing.ScatterChunk = 0x1000;
+            }
+        });
+        var identifier = AcquireMultisampledTarget(rig, GuestBase);
+        Assert.True(rig.Cache.GetImage(identifier).IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            work();
+            return true;
+        };
+        rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + StoreOffset, 8));
+        Assert.Equal((0L, 1L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Failed));
+        Assert.Equal((0L, 0L, 1L), rig.Cache.WritebackCarryCounts);
+    }
+
+    // The transfer refuses to upload a multisampled image too. It used to be marked current
+    // all the same, sampled as though the texture held the guest's bytes; it stays stale
+    // now, each use tries again, and every refused piece is counted.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUploadTheTransferRefusesLeavesTheImageStale(bool scattered)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, layout: backing =>
+        {
+            if (scattered)
+            {
+                backing.ScatterStart = GuestBase;
+                backing.ScatterBytes = ImageSize * 2;
+                backing.ScatterChunk = 0x1000;
+            }
+        });
+        rig.WriteGuest(GuestBase, MetalTileOracle.Pattern((int)ImageSize * 2, 0x5A));
+
+        var identifier = AcquireMultisampledTarget(rig, GuestBase, ImageRole.Texture);
+        Assert.True(rig.Cache.GetImage(identifier).IsCpuDirty);
+        var refused = rig.Cache.RefusedUploads;
+        Assert.True(refused > 0);
+
+        Assert.Equal(identifier, AcquireMultisampledTarget(rig, GuestBase, ImageRole.Texture));
+        Assert.True(rig.Cache.GetImage(identifier).IsCpuDirty);
+        Assert.True(rig.Cache.RefusedUploads > refused);
+    }
+
+    // A 64² RGBA8 colour target (or texture) with two samples a texel.
+    private static ResourceSlotIdentifier AcquireMultisampledTarget(
+        Rig rig, ulong address, ImageRole role = ImageRole.ColorTarget)
+    {
+        const ulong size = ImageSize * 2;
+        var description = ImageDescription.Create();
+        description.Data = new GuestSpan(address, size);
+        description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
+        description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
+        description.Type = GuestImageType.Color2D;
+        description.Extent = new GpuExtent3D(Side, Side, 1);
+        description.Resources = new SubresourceCount(1, 1);
+        description.Pitch = Side;
+        description.BytesPerBlock = 4;
+        description.Samples = 2;
+        description.TileMode = GuestTileMode.Linear;
+        description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = Side, Height = Side };
+        var view = ImageViewDescription.Default with
+        {
+            Format = GpuFormat.R8G8B8A8Unorm,
+            Type = GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.ColorBit,
+            LayerCount = 1,
+            Usage = role == ImageRole.ColorTarget ? GpuImageUsage.ColorAttachmentBit : GpuImageUsage.SampledBit,
+        };
+        var request = new ImageRequest(description, view, role);
+        var identifier = rig.Cache.FindImage(ref request);
+        if (role == ImageRole.ColorTarget)
+        {
+            rig.Cache.AcquireColorTargetView(identifier, request);
+        }
+        else
+        {
+            rig.Cache.AcquireTextureView(identifier, request);
+        }
+
+        return identifier;
+    }
+
     private const ulong MipChain = GuestBase + 0x100000;
 
     // The guest bytes under a GPU-written 256² RGBA8 nine-level chain in 64 KB tiles once a

@@ -28,6 +28,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 // asks the worker to commit a submission it is still recording, and gives up after
 // SHARPEMU_METAL_V2_WRITEBACK_FENCE_TIMEOUT_MS (250 ms) with a warning - a store that cannot
 // wait lands as it did before. SHARPEMU_METAL_V2_WRITEBACK_FENCE=0 keeps no watch at all.
+//
+// A managed (HLE) write never faults, so it asks before it lands instead: it waits for a
+// fenced writeback over its exact bytes (WaitForFencedWritebacksUnder). On the worker, which
+// may be such a writer, that wait is a commit and a wait for the GPU.
 internal sealed partial class MetalImageCache
 {
     private static readonly bool WritebackFenceDefault =
@@ -65,6 +69,9 @@ internal sealed partial class MetalImageCache
     /// Writeback runs staged because no window held them whole, writebacks that left some
     /// bytes behind, and writebacks that recorded nothing.
     /// </summary>
+    /// <summary>Upload pieces the transfer refused, which reached nothing.</summary>
+    internal long RefusedUploads => Interlocked.Read(ref _refusedUploads);
+
     internal (long StagedRuns, long Partial, long Unrecorded) WritebackCarryCounts =>
         (Interlocked.Read(ref _stagedWritebackRuns), Interlocked.Read(ref _shortWritebacks),
             Interlocked.Read(ref _unrecordedWritebacks));
@@ -93,7 +100,8 @@ internal sealed partial class MetalImageCache
             $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts} " +
             $"wb_staged_runs_total={Interlocked.Read(ref _stagedWritebackRuns)} " +
             $"wb_partial_total={Interlocked.Read(ref _shortWritebacks)} " +
-            $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)}" + StorePublishCounterText();
+            $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)} " +
+            $"upload_refused_total={Interlocked.Read(ref _refusedUploads)}" + StorePublishCounterText();
     }
 
     // The writeback of these bytes was just recorded into the submission with this serial.
@@ -249,6 +257,66 @@ internal sealed partial class MetalImageCache
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// A managed write of exactly these bytes, about to land: waits for the newest recorded
+    /// writeback still storing into them, which would otherwise complete after the write and
+    /// land over it. A managed write never faults, so nothing retries it and no watch is
+    /// dropped here; a fence ends when its submission completes. Off the worker the wait is
+    /// a faulting store's, bounded by the same timeout. The worker cannot wait for a
+    /// submission it may still be recording, so it commits and waits for the GPU, as it does
+    /// for the writeback it records before its own managed write (AwaitStoreRequest). Called
+    /// without the cache lock.
+    /// </summary>
+    private void WaitForFencedWritebacksUnder(ulong address, ulong size)
+    {
+        ulong pending = 0;
+        MetalWritebackCause cause = default;
+        lock (_fenceGate)
+        {
+            var completed = _owner.CompletedSerial;
+            foreach (var entry in _fencedWritebacks)
+            {
+                if (entry.Serial > completed && entry.Serial > pending &&
+                    GuestRangeOverlap.Bytes(entry.Address, entry.Size, address, size))
+                {
+                    pending = entry.Serial;
+                    cause = entry.Cause;
+                }
+            }
+        }
+
+        if (pending == 0)
+        {
+            return;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        bool landed;
+        if (_owner.IsWorkerThread)
+        {
+            _owner.WaitForGpu();
+            landed = true;
+        }
+        else
+        {
+            landed = _owner.WaitForSubmissionOffWorker(pending, WritebackFenceTimeoutMilliseconds);
+        }
+
+        Interlocked.Add(ref _fenceWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        Interlocked.Increment(ref _fenceWaits);
+        if (!landed)
+        {
+            Interlocked.Increment(ref _fenceTimeouts);
+            if (Interlocked.Increment(ref _fenceTimeoutReports) <= MaxFenceTimeoutReports)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][WARN] A managed write into a recorded writeback did not wait for it: " +
+                    $"address=0x{address:X16} serial={pending} completed={_owner.CompletedSerial} cause={cause} " +
+                    $"timeout_ms={WritebackFenceTimeoutMilliseconds}. The writeback may land over the write.");
+            }
+        }
     }
 
     // Shutdown: the page guard refuses to be freed with a watch outstanding.

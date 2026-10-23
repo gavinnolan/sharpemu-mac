@@ -99,6 +99,87 @@ public sealed partial class MetalImageBudgetTests
         Assert.Equal(reused, rig.ReadGuest(GuestBase, ImageSize));
     }
 
+    // A managed write never faults, so it waits before it lands: the writeback recorded
+    // before it completes first, and the write lands over the GPU's bytes and stays there.
+    [Fact]
+    public void AManagedWriteIntoARecordedWritebackWaitsForItsSubmission()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (_, written) = ReleaseAGpuWrittenImage(rig);
+        var writebackSerial = rig.Harness.SubmissionSerial;
+        ulong waitedFor = 0;
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            waitedFor = waitedFor == 0 ? serial : waitedFor;
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            return rig.Harness.CompletedSerial >= serial;
+        };
+
+        var expected = ManagedWriteOverAFencedWriteback(rig, written);
+        Assert.Equal(writebackSerial, waitedFor);
+        Assert.Equal((1L, 0L), rig.Cache.FenceWaitCounts);
+        Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
+    // The GPU worker making a managed write cannot wait for a submission it may still be
+    // recording: it commits and waits for the GPU instead, and never deadlocks on itself.
+    [Fact]
+    public void AManagedWriteOnTheWorkerCommitsAndWaitsForTheWriteback()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (_, written) = ReleaseAGpuWrittenImage(rig);
+        var offWorker = 0;
+        var gpuWaits = 0;
+        rig.CacheOwner.WaitOffWorker = (_, _) => { offWorker++; return false; };
+        rig.CacheOwner.OnWaitForGpu = () =>
+        {
+            gpuWaits++;
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+        };
+        rig.CacheOwner.OnWorker = true;
+
+        var expected = ManagedWriteOverAFencedWriteback(rig, written);
+        Assert.Equal((1, 0), (gpuWaits, offWorker));
+        Assert.Equal((1L, 0L), rig.Cache.FenceWaitCounts);
+        Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
+    // A managed write past the fenced bytes does not wait.
+    [Fact]
+    public void AManagedWritePastAFencedWritebacksBytesDoesNotWait()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        _ = ReleaseAGpuWrittenImage(rig);
+        var waits = 0;
+        rig.CacheOwner.WaitOffWorker = (_, _) => { waits++; return true; };
+
+        _ = ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase + ImageSize, 8);
+        Assert.Equal(0, waits);
+        Assert.Equal(1, rig.Cache.FencedWritebackCount);
+    }
+
+    // A managed write of eight bytes into the released image, made the way the HLE makes it:
+    // marked, written, marked landed. Returns what guest memory should hold once it has.
+    private static byte[] ManagedWriteOverAFencedWriteback(Rig rig, byte[] written)
+    {
+        Assert.Equal(1, rig.Cache.FencedWritebackCount);
+        IGuestImageStore store = rig.Cache;
+        var bytes = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        _ = store.MarkPreciseCpuWrite(GuestBase + 0x40, (ulong)bytes.Length);
+        rig.WriteGuest(GuestBase + 0x40, bytes);
+        _ = store.MarkCpuWriteLanded(GuestBase + 0x40, (ulong)bytes.Length);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var expected = (byte[])written.Clone();
+        bytes.CopyTo(expected, 0x40);
+        return expected;
+    }
+
     // A fault outside every fenced page is none of the fence's business and costs no wait.
     [Fact]
     public void AStoreBesideAFencedWritebackDoesNotWait()
