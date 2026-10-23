@@ -193,6 +193,9 @@ public sealed class VertexStageRegisters
     public ulong ExportAddress;
     public ulong LocalAddress;
     public ulong HullAddress;
+    // SPI_SHADER_USER_DATA_ADDR_*_HS: the table a merged local/hull program's hull half reloads
+    // its user data from (s[0:1] at entry), as the export stage's continuation does from the GS one.
+    public ulong HullUserDataAddress;
     public HullResource1 HullResource1;
     public HullResource2 HullResource2;
     public ulong GeometryAddress;

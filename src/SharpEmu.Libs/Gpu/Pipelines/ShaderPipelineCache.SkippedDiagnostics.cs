@@ -22,6 +22,19 @@ internal sealed partial class ShaderPipelineCache
         DrawIndexedArguments? originalIndirectIndexedDraw = null)
         => RecordUnsupportedGraphicsCore(vertex, context, userConfig, draw, originalIndirectIndexedDraw);
 
+    private uint[] ReadDwords(ulong address, int count)
+    {
+        var bytes = new byte[count * sizeof(uint)];
+        if (address == 0 || !_context.Memory.TryRead(address, bytes)) return [];
+        return System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes).ToArray();
+    }
+
+    private ulong ReadQword(ulong address)
+    {
+        var words = ReadDwords(address, 2);
+        return words.Length == 2 ? words[0] | ((ulong)words[1] << 32) : 0;
+    }
+
     private void RecordUnsupportedGraphicsCore(VertexStageRegisters vertex, ContextRegisters context,
         UserConfigRegisters? userConfig, TargetlessDrawArguments? draw,
         DrawIndexedArguments? originalIndirectIndexedDraw = null)
@@ -56,6 +69,18 @@ internal sealed partial class ShaderPipelineCache
                 Directory.CreateDirectory(directory);
                 var stem = Path.Combine(directory, $"skipped-export-{vertex.ExportAddress:X16}");
                 for (var i = 0; i < bytes.Count; i++) File.WriteAllBytes($"{stem}.range-{i}.bin", bytes[i]);
+                // A tessellated draw's merged local/hull program feeds the export stage its patches.
+                var localCaptures = new List<object>();
+                if (vertex.LocalAddress != 0 && _registry.TryGetDiagnosticCodeRanges(vertex.LocalAddress, out var localRanges))
+                {
+                    for (var i = 0; i < localRanges.Length; i++)
+                    {
+                        var data = new byte[checked((int)localRanges[i].SizeBytes)];
+                        if (!_context.Memory.TryRead(localRanges[i].Address, data)) break;
+                        File.WriteAllBytes($"{stem}.local-range-{i}.bin", data);
+                        localCaptures.Add(new { address = localRanges[i].Address, size = localRanges[i].SizeBytes });
+                    }
+                }
                 File.WriteAllText(stem + ".json", JsonSerializer.Serialize(new
                 {
                     stages = context.ShaderStages,
@@ -92,6 +117,23 @@ internal sealed partial class ShaderPipelineCache
                     geometryResource1 = vertex.GeometryResource1,
                     geometryResource2 = vertex.GeometryResource2,
                     userData = ((ReadOnlySpan<uint>)vertex.GeometryUserScalars.Values).ToArray(),
+                    tessellation = new
+                    {
+                        localAddress = vertex.LocalAddress,
+                        hullAddress = vertex.HullAddress,
+                        hullUserDataAddress = vertex.HullUserDataAddress,
+                        vertex.HullResource1,
+                        vertex.HullResource2,
+                        hullUserData = ((ReadOnlySpan<uint>)vertex.HullUserScalars.Values).ToArray(),
+                        localHullConfiguration = context.ShaderInterface.LocalHullConfiguration,
+                        tessellationFactorParameter = context.ShaderInterface.TessellationFactorParameter,
+                        context.ShaderInterface.MaxTessellationLevel,
+                        context.ShaderInterface.MinTessellationLevel,
+                        context.ShaderInterface.TessellationDistribution,
+                        localRanges = localCaptures,
+                        hullUserTable = ReadDwords(vertex.HullUserDataAddress, 16),
+                        ringTable = ReadDwords(ReadQword(vertex.HullUserDataAddress + 48), 16),
+                    },
                     ranges = captures,
                     rejectedDraw = true,
                 }, new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }));
