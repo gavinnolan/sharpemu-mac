@@ -1797,7 +1797,9 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        var pending = _gpuWrites.PendingSerial(address, size, CompletedSerial);
+        // The serial hint first: reading the completed serial is a message send, and almost every
+        // read here (register tables, operands) finds nothing pending at all.
+        var pending = PendingSerialHinted(address, size);
         if (pending != 0)
         {
             if (size <= SmallReadWaitBytes)

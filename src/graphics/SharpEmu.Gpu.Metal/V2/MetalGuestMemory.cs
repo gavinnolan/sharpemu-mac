@@ -401,6 +401,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     public void BeginSubmission(ulong submissionSerial, ulong completedSerial)
     {
         _submissionSerial = submissionSerial;
+        _submissionClock = RingClock();
         _completedSerial = Math.Max(_completedSerial, completedSerial);
         RecordingBytes = 0;
         TrimIdleRings();
@@ -576,6 +577,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
     /// <summary>Milliseconds, monotonic; tests replace it to age rings.</summary>
     internal Func<long> RingClock { get; set; } = static () => Environment.TickCount64;
+
+    // RingClock as the submission being recorded began: what a ring's last use is stamped with.
+    // The idle rule counts seconds, and reading the clock per allocation - several per draw, for
+    // argument buffers - cost the worker a clock read each.
+    private long _submissionClock;
 
     private void TrimIdleRings()
     {
@@ -1284,7 +1290,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         ring.LastUsedSerial = _submissionSerial;
-        ring.LastUsedAt = RingClock();
+        ring.LastUsedAt = _submissionClock != 0 ? _submissionClock : RingClock();
         unsafe
         {
             span = new Span<byte>((void*)(ring.Contents + (nint)offset), checked((int)size));

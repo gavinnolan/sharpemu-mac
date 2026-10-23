@@ -60,6 +60,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     public long Submitted { get; private set; }
 
+    // The worker waits on an empty queue (read and written under _lock).
+    private bool _idleForJobs;
+
     // What became of the jobs since the last TakeCounters: resolved, abandoned (the resolution threw),
     // taken by their draw, refused when taken (inputs or ownership changed), and the worker's wait.
     private long _resolvedCount;
@@ -86,7 +89,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             _queue.Enqueue(job);
             Submitted++;
             _outstanding++;
-            Monitor.PulseAll(_lock);
+            // Only the worker asleep on an empty queue waits for a job: the others on this lock wait
+            // for jobs to finish, which the worker signals. A pulse per draw was a wake for nothing
+            // while the worker was busy resolving the draws before.
+            if (_idleForJobs)
+            {
+                Monitor.PulseAll(_lock);
+            }
         }
 
         return job;
@@ -254,7 +263,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             {
                 while (_queue.Count == 0 && !_stopping)
                 {
+                    _idleForJobs = true;
                     Monitor.Wait(_lock);
+                    _idleForJobs = false;
                 }
 
                 if (_stopping)
