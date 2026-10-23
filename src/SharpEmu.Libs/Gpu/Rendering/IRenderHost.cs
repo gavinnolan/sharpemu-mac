@@ -172,6 +172,14 @@ public interface IRenderHost
     {
     }
 
+    // A draw or dispatch that waits for its pipeline rather than being left out or suspended is
+    // about to be prepared: called before BeginPreparation (and BeforeDeviceAddressPreparation),
+    // so a backend can wait for the compiles of its programs where it may still serve work that
+    // waits for a packet boundary; inside the preparation it may not. An invalid program is none.
+    void AwaitProgramsBeforePreparation(ShaderProgram first, ShaderProgram second)
+    {
+    }
+
     // Opens the preparation scope; a ring wrap inside it is refused, and disposal releases it on every path.
     IResourcePreparation BeginPreparation();
 

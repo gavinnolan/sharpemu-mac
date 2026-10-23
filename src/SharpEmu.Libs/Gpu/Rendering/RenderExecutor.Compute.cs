@@ -162,6 +162,13 @@ public sealed partial class RenderExecutor
             }
         }
 
+        if (!_host.SupportsPipelineSuspend)
+        {
+            // The dispatch will wait for its pipeline below; its program's compile is waited
+            // for here instead, before the preparation opens.
+            _host.AwaitProgramsBeforePreparation(computeProgram.Program, default);
+        }
+
         ReleaseFragmentWrites();
         _host.EndRendering("dispatch");
         if (program.UsesDeviceAddresses)

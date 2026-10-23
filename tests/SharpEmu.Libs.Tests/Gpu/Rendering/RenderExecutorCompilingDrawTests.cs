@@ -12,7 +12,8 @@ using static SharpEmu.Libs.Tests.Gpu.Rendering.RenderExecutorFixtures;
 namespace SharpEmu.Libs.Tests.Gpu.Rendering;
 
 // Which draws are left out while their pipeline compiles (RenderExecutor.MayLeaveOutWhileCompiling),
-// and the dispatch that suspends on its pipeline running again on the program it prepared.
+// which of those that wait the host is told of before their preparation opens, and the dispatch
+// that suspends on its pipeline running again on the program it prepared.
 [Collection(SchedulingStateCollection.Name)]
 public sealed class RenderExecutorCompilingDrawTests : IDisposable
 {
@@ -99,6 +100,34 @@ public sealed class RenderExecutorCompilingDrawTests : IDisposable
 
         Assert.Equal(!writes, AskedWithoutWaiting);
         Assert.Equal(writes, Drawn);
+    }
+
+    private int AwaitedPrograms => _host.Calls.IndexOf("await_programs");
+
+    [Fact]
+    public void ADrawKnownToWaitBeforeItAcquiresAnythingAwaitsItsProgramsBeforeItsPreparation()
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.DepthTarget = banks.Context.DepthTarget with { DepthControl = (1u << 1) | (1u << 2) | (1u << 4) };
+        _executor.DrawAuto(1, banks, Auto(3));
+
+        Assert.True(Drawn);
+        Assert.InRange(AwaitedPrograms, 0, _host.Calls.IndexOf("preparation_begin") - 1);
+    }
+
+    [Fact]
+    public void ADrawThatMayBeLeftOutAwaitsNoProgramsUpFront()
+    {
+        // Left out, and (the host's say, a clear it consumes) waiting only once it acquired its
+        // targets: neither is held up before its preparation, which would draw what is left out.
+        _executor.DrawAuto(1, Banks(), Auto(3));
+        _host.TargetsRebuiltEveryFrame = false;
+        _executor.DrawAuto(2, Banks(), Auto(3));
+        _host.TargetsRebuiltEveryFrame = true;
+        _host.ColorMetadataClears[ColorBase] = default;
+        _executor.DrawAuto(3, Banks(), Auto(3));
+
+        Assert.Equal(-1, AwaitedPrograms);
     }
 
     [Fact]

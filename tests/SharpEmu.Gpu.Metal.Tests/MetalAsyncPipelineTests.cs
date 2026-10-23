@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using SharpEmu.Gpu.Metal.Tests.Scenes;
 using SharpEmu.Gpu.Metal.V2;
+using SharpEmu.HLE.GpuMemory;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -15,7 +16,8 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// out builds a queued compile itself, an untaken result is dropped, teardown does not wait
 /// for queued compiles, and a compile in flight keeps its modules through the shader cache
 /// bound. Which targets count as rebuilt every frame, and that a draw into any other target
-/// waits for its pipeline. Scenes are behind the exclusive device gate.
+/// waits for its pipeline, serving the guest stores that wait for a writeback meanwhile.
+/// Scenes are behind the exclusive device gate.
 /// </summary>
 public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTestBase(output)
 {
@@ -206,6 +208,113 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
         Assert.True(waits >= 1, $"waits={waits}");
         Assert.Empty(rig.Fatals);
         gate.Set();
+    }
+
+    // InterpolatedColor behind an s_nop: a program of its own, whose library compiles anew.
+    private static readonly uint[] PaddedInterpolatedColor = [0xBF800000, .. ScenePrograms.InterpolatedColor];
+
+    // With the pool busy, the compile is still queued when the draw needs it, and runs off the worker.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AGuestStoreIsServedWhileADrawWaitsForItsLibraryCompile(bool poolBusy)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        using var poolFree = new ManualResetEventSlim(false);
+        try
+        {
+            StoreWhileADrawWaitsForItsLibraryCompile(rig, poolBusy, poolFree);
+        }
+        finally
+        {
+            poolFree.Set();
+        }
+    }
+
+    private static void StoreWhileADrawWaitsForItsLibraryCompile(SceneRig rig, bool poolBusy, ManualResetEventSlim poolFree)
+    {
+        const uint size = 16;
+        // Every draw waits for its pipeline.
+        rig.Host.AsynchronousGraphics = false;
+        rig.Host.ImageCache.StorePublishTakeTimeoutMilliseconds = 2000;
+        var written = rig.ColorTarget(size, size);
+        rig.Submit(rig.DrawMesh(new ScenePm4(), new SceneState(size, size).ColorTarget(0, written, size, size),
+            SceneDraws.Quad(0.5f, 1, 0, 0)));
+        // Only the texture holds the red the GPU drew.
+        Assert.Equal(0u, BitConverter.ToUInt32(rig.Memory.ReadRaw(written, 4)));
+
+        // The next draw's pixel program compiles while a guest thread stores into the first
+        // target; the compile is held until the store has returned.
+        using var gate = new ManualResetEventSlim(false);
+        using var held = new ManualResetEventSlim(false);
+        var stored = false;
+        var compileHeld = false;
+        byte[]? landedOver = null;
+        Exception? failure = null;
+        var store = new Thread(() =>
+        {
+            try
+            {
+                if (!held.Wait(Patience))
+                {
+                    return;
+                }
+
+                stored = ((IGuestImageStore)rig.Host.ImageCache).MarkCpuWrite(written, 8);
+                landedOver = rig.Memory.ReadRaw(written, 4);
+                compileHeld = !gate.IsSet;
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+            finally
+            {
+                gate.Set();
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        store.Start();
+        rig.Host.BeforeLibraryCompile = () =>
+        {
+            held.Set();
+            gate.Wait();
+        };
+        if (poolBusy)
+        {
+            using var busy = new CountdownEvent(MetalLibraryCompilePool.ThreadCount);
+            for (var index = 0; index < MetalLibraryCompilePool.ThreadCount; index++)
+            {
+                MetalLibraryCompilePool.Shared.Run(() =>
+                {
+                    busy.Signal();
+                    poolFree.Wait();
+                });
+            }
+
+            Assert.True(busy.Wait(Patience), "The pool's threads did not all take a job.");
+        }
+
+        var other = rig.ColorTarget(size, size);
+        rig.Submit(rig.DrawMesh(new ScenePm4(), new SceneState(size, size).ColorTarget(0, other, size, size),
+            SceneDraws.Quad(0.5f, 0, 1, 0), pixelProgram: PaddedInterpolatedColor));
+        store.Join();
+        rig.Host.BeforeLibraryCompile = null;
+
+        Assert.Null(failure);
+        Assert.True(held.IsSet, "The second draw compiled no library.");
+        Assert.True(stored);
+        Assert.True(compileHeld, "The store returned only once the compile was let go.");
+        // The writeback landed before the store returned, while the draw still waited.
+        Assert.Equal(0xFF0000FFu, BitConverter.ToUInt32(landedOver!));
+        var counts = rig.Host.ImageCache.StorePublishCounts;
+        Assert.Equal((1L, 0L), (counts.Writebacks, counts.Fallbacks));
+        // And the draw that waited was drawn.
+        Assert.Equal(0xFF00FF00u, SceneDraws.Pixel(rig.ReadImage(other, size, size), size, size / 2, size / 2));
+        Assert.Empty(rig.Fatals);
     }
 
     [Fact]

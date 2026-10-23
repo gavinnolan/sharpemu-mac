@@ -34,8 +34,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 //    and the store's own invalidation, happen under one hold of the lock, so another round
 //    publishes what was written meanwhile.
 //  - A request is the store's own. The worker takes requests between packets (the relay runs
-//    at every packet boundary), so it is late only by one packet's work, which while shaders
-//    compile cold is hundreds of milliseconds. A request still not taken after
+//    at every packet boundary) and while a draw known to wait for its pipeline waits for its
+//    shader compiles, before its preparation opens (MetalRenderHost.AwaitProgramsBeforePreparation).
+//    So it is late by one packet's other work, which is still a whole compile for a draw that
+//    finds it has to wait only once it acquired its targets. A request still not taken after
 //    StorePublishTakeTimeoutMilliseconds (as it was when the request was made) means a hung
 //    worker: it is withdrawn under the lock, so it cannot be written back after the store,
 //    and the store takes the old path.
@@ -431,8 +433,10 @@ internal sealed partial class MetalImageCache
         }
     }
 
-    // On the GPU worker, between packets: every pending request's images go back to guest memory.
-    private void ServiceStoreRequests()
+    // On the GPU worker, between packets or while it waits for a compile before a preparation
+    // (MetalRenderHost.AwaitProgramsBeforePreparation): every pending request's images go back
+    // to guest memory.
+    internal void ServiceStoreRequests()
     {
         if (Volatile.Read(ref _storeRequestsPending) == 0)
         {

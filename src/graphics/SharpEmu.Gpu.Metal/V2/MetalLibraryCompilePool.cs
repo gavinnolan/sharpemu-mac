@@ -37,6 +37,9 @@ internal sealed class MetalLibraryCompilePool
 
         public Task Task => _done.Task;
 
+        // Whether no thread has taken it yet; a thread may take it the moment after.
+        internal bool IsQueued => Volatile.Read(ref _state) == Queued;
+
         // True when this call ran the work; false when another thread has it (or had it).
         internal bool TryRun()
         {
