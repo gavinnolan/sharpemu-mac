@@ -20,13 +20,14 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 {
     /// <summary>
-    /// SHARPEMU_METAL_V2_PARALLEL_RESOLVE=1: the translation defers each draw while ParallelProgramPrefetch
-    /// resolves its programs (the resource materializations, the program and permutation lookups) on a
-    /// thread of its own, and the worker runs the deferred draws before anything else the stream asks of
-    /// it (DrainDraws). The worker still interprets and records; it no longer resolves.
+    /// The translation defers each draw while ParallelProgramPrefetch resolves its programs (the resource
+    /// materializations, the program and permutation lookups) on a thread of its own, and the worker runs
+    /// the deferred draws before anything else the stream asks of it (DrainDraws). The worker still
+    /// interprets and records; it no longer resolves. Grand Theft Auto V gameplay: median 8.96 -> 11.46
+    /// fps. SHARPEMU_METAL_V2_PARALLEL_RESOLVE=0 resolves on the worker again.
     /// </summary>
     internal static readonly bool ParallelResolve =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PARALLEL_RESOLVE") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PARALLEL_RESOLVE") != "0";
 
     bool IConcurrentResolveHost.ResolvesConcurrently => ParallelResolve;
 
