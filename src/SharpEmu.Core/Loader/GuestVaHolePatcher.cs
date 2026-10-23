@@ -13,19 +13,20 @@ namespace SharpEmu.Core.Loader;
 // guest addresses in that window can be translated, the hardcoded base is moved above the window
 // where the loader finds it stored as an arena base:
 //  - GTA V Enhanced (RAGE) stores its streaming arena base in a global;
-//  - Ghost of Tsushima maps its direct-memory arenas one batch entry at a time from a base it keeps
-//    in a global after the call.
-// Other loads of the constant (range checks such as "below the user area") stay as they are: an
-// arena moved higher is still above the user area's start.
+//  - Ghost of Tsushima maps its arenas one batch entry at a time (0x10_0000_0000 for libc and its
+//    direct-memory pools, 0x11_0000_0000 and 0x15_0000_0000 for two more) from a base it keeps in a
+//    global after the call.
+// Every such base moves by the same amount (0x10_0000_0000 -> 0x80_0000_0000), so arenas keep their
+// order and spacing. Other loads of these constants stay as they are: the user area base also feeds
+// range checks ("below the user area"), which an arena moved higher still passes, and the others are
+// packed 32-bit pairs in struct initialisers, which must not change.
 internal static class GuestVaHolePatcher
 {
     private const ulong HardcodedUserAreaBase = 0x10_0000_0000UL;
     private const ulong DefaultRelocatedBase = 0x80_0000_0000UL;
 
-    // Signature wildcards: any byte, REX.W or REX.WB, and the movabs opcode for any register.
+    // A signature byte that matches anything.
     private const short AnyByte = -1;
-    private const short RexW = -2;
-    private const short MovAbs = -3;
 
     // movabs rax, 0x1000000000
     // lea    rdi, [rip+disp32]
@@ -42,25 +43,21 @@ internal static class GuestVaHolePatcher
         0x48, 0x89, 0x05,
     ];
 
-    // movabs r64, 0x1000000000
-    // lea    rdi, [rbp+disp8]      one SceKernelBatchMapEntry on the stack
-    // mov    esi, 1                one entry
-    // xor    edx, edx              no count out
-    // Ghost of Tsushima maps each of its direct-memory arenas this way.
-    private static readonly short[] BatchMapArenaBaseSignature =
-    [
-        RexW, MovAbs, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
-        0x48, 0x8D, 0x7D, AnyByte,
-        0xBE, 0x01, 0x00, 0x00, 0x00,
-        0x31, 0xD2,
-    ];
+    // The window macOS 27 guards, of which the user area's arenas are 4 GiB-aligned bases.
+    private const ulong WindowStart = 0x10_0000_0000UL;
+    private const ulong WindowEnd = 0x70_0000_0000UL;
+    private const ulong ArenaAlignment = 0x1_0000_0000UL;
 
-    private static readonly short[][] ArenaBaseSignatures = [RageArenaBaseSignature, BatchMapArenaBaseSignature];
+    // An arena base loaded for a one-entry sceKernelBatchMap: a movabs of a 4 GiB-aligned base in the
+    // window, then the batch setup - at most one store of the base into the entry (mov [rbp+disp8], r64),
+    // lea rdi, [rbp+disp8]; mov esi, 1; xor edx, edx - or, for a base chosen on another path, a store of
+    // another register into the arena's record (mov [r+disp32], r64) and a jmp to such a setup.
+    internal readonly record struct ArenaBaseSite(int Offset, ulong Base);
 
-    // The offsets of every arena-base load in code, each a movabs whose immediate starts two bytes in.
-    internal static List<int> FindArenaBaseSites(ReadOnlySpan<byte> code)
+    // Every arena-base load in code, each a movabs whose immediate starts two bytes in.
+    internal static List<ArenaBaseSite> FindArenaBaseSites(ReadOnlySpan<byte> code)
     {
-        var sites = new List<int>();
+        var sites = new List<ArenaBaseSite>();
         for (var offset = 0; offset + 10 <= code.Length; offset++)
         {
             if ((code[offset] != 0x48 && code[offset] != 0x49) || code[offset + 1] < 0xB8 || code[offset + 1] > 0xBF)
@@ -68,17 +65,47 @@ internal static class GuestVaHolePatcher
                 continue;
             }
 
-            foreach (var signature in ArenaBaseSignatures)
+            var immediate = BitConverter.ToUInt64(code.Slice(offset + 2, 8));
+            if (Matches(code, offset, RageArenaBaseSignature) ||
+                (immediate is >= WindowStart and < WindowEnd && immediate % ArenaAlignment == 0 &&
+                 FeedsOneEntryBatchMap(code, offset + 10)))
             {
-                if (Matches(code, offset, signature))
-                {
-                    sites.Add(offset);
-                    break;
-                }
+                sites.Add(new ArenaBaseSite(offset, immediate));
             }
         }
 
         return sites;
+    }
+
+    private static bool FeedsOneEntryBatchMap(ReadOnlySpan<byte> code, int next)
+    {
+        if (IsOneEntryBatchSetup(code, next))
+        {
+            return true;
+        }
+
+        // mov [r64+disp32], r64 (REX.WB 89 /r, mod 10) and jmp rel32 to the shared setup.
+        if (next + 12 > code.Length || code[next] != 0x49 || code[next + 1] != 0x89 || (code[next + 2] & 0xC0) != 0x80 ||
+            code[next + 7] != 0xE9)
+        {
+            return false;
+        }
+
+        var target = next + 12 + BitConverter.ToInt32(code.Slice(next + 8, 4));
+        return target >= 0 && IsOneEntryBatchSetup(code, target);
+    }
+
+    private static bool IsOneEntryBatchSetup(ReadOnlySpan<byte> code, int at)
+    {
+        // An optional mov [rbp+disp8], r64 (REX.W or REX.WR 89, mod 01 rm 101).
+        if (at + 4 <= code.Length && (code[at] is 0x48 or 0x4C) && code[at + 1] == 0x89 && (code[at + 2] & 0xC7) == 0x45)
+        {
+            at += 4;
+        }
+
+        ReadOnlySpan<byte> setup = [0x48, 0x8D, 0x7D];
+        ReadOnlySpan<byte> oneEntry = [0xBE, 0x01, 0x00, 0x00, 0x00, 0x31, 0xD2];
+        return at + 11 <= code.Length && code.Slice(at, 3).SequenceEqual(setup) && code.Slice(at + 4, 7).SequenceEqual(oneEntry);
     }
 
     public static int Patch(IVirtualMemory memory, IReadOnlyList<ProgramHeader> programHeaders, ulong imageBase)
@@ -114,14 +141,15 @@ internal static class GuestVaHolePatcher
                 continue;
             }
 
-            foreach (var offset in FindArenaBaseSites(bytes))
+            Span<byte> immediate = stackalloc byte[8];
+            foreach (var found in FindArenaBaseSites(bytes))
             {
-                var site = segmentStart + (ulong)offset;
-                Span<byte> immediate = stackalloc byte[8];
-                BitConverter.TryWriteBytes(immediate, relocatedBase);
+                var site = segmentStart + (ulong)found.Offset;
+                var moved = found.Base - HardcodedUserAreaBase + relocatedBase;
+                BitConverter.TryWriteBytes(immediate, moved);
                 var ok = memory.TryWrite(site + 2, immediate);
                 Console.Error.WriteLine(
-                    $"[LOADER][INFO] VA hole patch: arena base 0x{HardcodedUserAreaBase:X} -> 0x{relocatedBase:X} at 0x{site:X16} ok={ok}");
+                    $"[LOADER][INFO] VA hole patch: arena base 0x{found.Base:X} -> 0x{moved:X} at 0x{site:X16} ok={ok}");
                 if (ok)
                 {
                     patched++;
@@ -143,14 +171,7 @@ internal static class GuestVaHolePatcher
         {
             var actual = code[offset + index];
             var expected = signature[index];
-            var matches = expected switch
-            {
-                AnyByte => true,
-                RexW => actual is 0x48 or 0x49,
-                MovAbs => actual is >= 0xB8 and <= 0xBF,
-                _ => actual == expected,
-            };
-            if (!matches)
+            if (expected != AnyByte && actual != expected)
             {
                 return false;
             }

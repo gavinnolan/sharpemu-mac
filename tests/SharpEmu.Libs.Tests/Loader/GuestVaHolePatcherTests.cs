@@ -7,7 +7,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Loader;
 
 // The arena-base loads macOS 27's guard over [0x10_0000_0000, 0x70_0000_0000) makes the loader move:
-// RAGE's stored streaming arena base and a base loaded for a one-entry sceKernelBatchMap.
+// RAGE's stored streaming arena base and the bases loaded for a one-entry sceKernelBatchMap.
 public sealed class GuestVaHolePatcherTests
 {
     [Fact]
@@ -35,8 +35,28 @@ public sealed class GuestVaHolePatcherTests
             0x48, 0x8D, 0x7D, 0xC0,
             0xBE, 0x02, 0x00, 0x00, 0x00,
             0x31, 0xD2,
+            // A second arena whose base is stored into the entry first: movabs r12, 0x1100000000;
+            // mov [rbp-0x48], r12; lea rdi, [rbp-0x48]; mov esi, 1; xor edx, edx  (offset 90, setup at 100)
+            0x49, 0xBC, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00,
+            0x4C, 0x89, 0x65, 0xB8,
+            0x48, 0x8D, 0x7D, 0xB8,
+            0xBE, 0x01, 0x00, 0x00, 0x00,
+            0x31, 0xD2,
+            // A third chosen on another path: movabs r12, 0x1500000000; mov [r14+0xa0], rbx; jmp to the
+            // store above (offset 115; the jmp ends at 137, the setup is at 100: rel32 = -37)
+            0x49, 0xBC, 0x00, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00,
+            0x49, 0x89, 0x9E, 0xA0, 0x00, 0x00, 0x00,
+            0xE9, 0xDB, 0xFF, 0xFF, 0xFF,
+            // An unaligned constant in the window is not an arena base.
+            0x48, 0xB9, 0x18, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00,
+            0x4C, 0x89, 0x65, 0xB8,
+            0x48, 0x8D, 0x7D, 0xB8,
+            0xBE, 0x01, 0x00, 0x00, 0x00,
+            0x31, 0xD2,
         ];
 
-        Assert.Equal([1, 33], GuestVaHolePatcher.FindArenaBaseSites(code));
+        Assert.Equal(
+            [new(1, 0x10_0000_0000), new(33, 0x10_0000_0000), new(90, 0x11_0000_0000), new(115, 0x15_0000_0000)],
+            GuestVaHolePatcher.FindArenaBaseSites(code));
     }
 }
