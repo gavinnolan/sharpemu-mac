@@ -2375,6 +2375,11 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public void EmitGlobalBarrier()
     {
+        if (PostToWorker(EmitGlobalBarrier))
+        {
+            return;
+        }
+
         DrainDraws();
         if (_renderEncoder != 0 || _computeEncoder != 0)
         {

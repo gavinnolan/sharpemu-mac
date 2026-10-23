@@ -1650,6 +1650,11 @@ internal sealed partial class MetalRenderHost :
             return true;
         }
 
+        if (OnCommandThread)
+        {
+            return ReadOnCommandThread(address, destination);
+        }
+
         // A read of bytes an image the GPU drew into owns comes after the draws deferred before it.
         // Command memory is read packet by packet, so the rest is not drained for: a deferred draw
         // records no write anywhere else that the read would wait for (an operand read drains).
@@ -1848,6 +1853,11 @@ internal sealed partial class MetalRenderHost :
             return true;
         }
 
+        if (OnCommandThread)
+        {
+            return ReadWaitOperandOnCommandThread(address, destination, commitPendingWrite);
+        }
+
         DrainDraws();
 
         if (!PollWithoutWaiting)
@@ -1918,6 +1928,13 @@ internal sealed partial class MetalRenderHost :
     /// </remarks>
     public bool CommitPendingOperandWrite(ulong address, ulong size)
     {
+        if (OnCommandThread)
+        {
+            var committed = false;
+            RunTagged(() => committed = CommitPendingOperandWrite(address, size));
+            return committed;
+        }
+
         DrainDraws();
         if (size == 0 || !PollWithoutWaiting)
         {
@@ -2316,6 +2333,8 @@ internal sealed partial class MetalRenderHost :
             // Programs resolved ahead of their draws (ParallelResolve): resolved, abandoned, taken,
             // refused when taken, and how long the worker waited for them.
             $"prefetch=[{FormatPrefetchCounters()}] " +
+            // The command thread's synchronous calls and their wait, its wait for room in the queue, and its items.
+            $"cthread=[{FormatCommandThreadCounters()}] " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +

@@ -135,6 +135,13 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public bool HasPendingGpuWrite(ulong address, ulong size)
     {
+        if (OnCommandThread)
+        {
+            var pending = false;
+            RunTagged(() => pending = HasPendingGpuWrite(address, size));
+            return pending;
+        }
+
         // A deferred draw may be what writes the bytes.
         DrainDraws();
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.PendingGpuWriteQuery);

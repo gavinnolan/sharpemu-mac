@@ -279,4 +279,29 @@ public sealed class MetalGpuWriteRangesTests
         // The gap between the clusters is never reported as written.
         Assert.Equal(0UL, ranges.PendingSerial(0x4000_0000UL, 0x1000, completed: 0));
     }
+
+    // The snapshot a thread other than the worker takes answers as PendingSerial does for records the
+    // GPU has not finished, without retiring any (the worker's records are left as they were).
+    [Fact]
+    public void TheSnapshotAnswersLikeThePendingQueryAndRetiresNothing()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        ranges.Note(0x1_0000, 0x1000, serial: 5);
+        ranges.Note(0x10_0FFC, 8, serial: 3, MetalGpuWriteOrigin.EndOfPipeLabel);
+        ranges.Note(0x3_0000, 0x100, serial: 9);
+
+        Assert.True(ranges.TryPendingSerialSnapshot(0x1_0800, 0x10, completed: 0, out var buffer));
+        Assert.Equal(5UL, buffer);
+        Assert.True(ranges.TryPendingSerialSnapshot(0x10_1000, 4, completed: 0, out var label));
+        Assert.Equal(3UL, label);
+        Assert.True(ranges.TryPendingSerialSnapshot(0x2_0000, 0x10, completed: 0, out var none));
+        Assert.Equal(0UL, none);
+
+        // Finished by the GPU: not pending, and still recorded until the worker retires it.
+        Assert.True(ranges.TryPendingSerialSnapshot(0x1_0800, 0x10, completed: 5, out var finished));
+        Assert.Equal(0UL, finished);
+        Assert.Equal(3, ranges.Count);
+        Assert.True(ranges.TryPendingSerialSnapshot(0x3_0000, 0x10, completed: 5, out var later));
+        Assert.Equal(9UL, later);
+    }
 }

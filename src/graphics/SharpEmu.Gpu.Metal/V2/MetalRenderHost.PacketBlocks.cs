@@ -32,6 +32,13 @@ internal sealed partial class MetalRenderHost
     public bool TryReadCommandBlock(ulong address, Span<byte> block, out CommandReadToken token)
     {
         token = CurrentCommandReadToken();
+        if (OnCommandThread)
+        {
+            // The hinted pending query is the worker's; off it, the ownership test that only reads.
+            return PacketBlockReads.Enabled && !block.IsEmpty &&
+                !IsOwnedConcurrent(ConcurrentQuery.Word, address, (ulong)block.Length) && _memory.TryRead(address, block);
+        }
+
         return PacketBlockReads.Enabled && !block.IsEmpty && TryReadUnownedBytes(address, (ulong)block.Length, block);
     }
 

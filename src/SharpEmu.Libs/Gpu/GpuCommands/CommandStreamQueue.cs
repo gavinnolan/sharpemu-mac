@@ -768,6 +768,22 @@ public sealed class CommandStreamQueue
         }
     }
 
+    /// <summary>
+    /// The submission a pending label lands with, learned after the label was noted: a host that
+    /// records labels on another thread than the one interpreting notes a provisional tick and
+    /// gives the real one here. An entry already gone (its provisional tick passed) stays gone.
+    /// </summary>
+    public void UpdatePendingLabelTick(ulong address, ulong tick)
+    {
+        lock (_labelGate)
+        {
+            if (_pendingLabels.TryGetValue(address, out var entry) && entry.Tick < tick)
+            {
+                _pendingLabels[address] = (entry.Value, entry.Size, tick);
+            }
+        }
+    }
+
     private void NotePendingLabel(ulong address, int size, ulong value)
     {
         var tick = _host.PendingLabelTick;

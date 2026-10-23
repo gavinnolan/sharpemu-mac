@@ -100,6 +100,25 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     public void Start() => _thread.Start();
 
+    // The producer's side since the last TakeCounters: synchronous calls, their wait, the wait for
+    // room in the queue, and the items handed over.
+    private long _syncRuns;
+    private long _syncWaitTicks;
+    private long _spaceWaitTicks;
+    private long _itemsEnqueued;
+
+    public (long SyncRuns, double SyncWaitMs, double SpaceWaitMs, long Items) TakeCounters() =>
+        (Interlocked.Exchange(ref _syncRuns, 0),
+            Interlocked.Exchange(ref _syncWaitTicks, 0) * 1000.0 / Stopwatch.Frequency,
+            Interlocked.Exchange(ref _spaceWaitTicks, 0) * 1000.0 / Stopwatch.Frequency,
+            Interlocked.Exchange(ref _itemsEnqueued, 0));
+
+    /// <summary>
+    /// Called on the command stream thread when nothing in the queue can run and it is about to wait:
+    /// the backend may need to submit what it recorded so the work the stream waits on can land.
+    /// </summary>
+    public Action? ProducerIdle { get; set; }
+
     public bool IsProducerThread => Environment.CurrentManagedThreadId == _thread.ManagedThreadId;
 
     public long Gate => _enqueuedNonDraw;
@@ -124,8 +143,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     public void Run(Action action)
     {
         var item = new Item { Kind = Kind.Call, Action = action, Sync = true };
+        Interlocked.Increment(ref _syncRuns);
         Enqueue(item);
+        var started = Stopwatch.GetTimestamp();
         WaitFor(item);
+        Interlocked.Add(ref _syncWaitTicks, Stopwatch.GetTimestamp() - started);
     }
 
     public T Run<T>(Func<T> function)
@@ -232,9 +254,12 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
             _enqueuedNonDraw++;
         }
 
+        Interlocked.Increment(ref _itemsEnqueued);
         if (Volatile.Read(ref _outstanding) >= MaxOutstanding)
         {
+            var started = Stopwatch.GetTimestamp();
             WaitForSpace();
+            Interlocked.Add(ref _spaceWaitTicks, Stopwatch.GetTimestamp() - started);
         }
 
         lock (_lock)
@@ -478,14 +503,17 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 switch (result)
                 {
                     case SliceResult.NoWork:
+                        ProducerIdle?.Invoke();
                         _ = _queue.WaitForWork(8);
                         break;
                     case SliceResult.AllBlocked:
+                        ProducerIdle?.Invoke();
                         WaitBlocked(ref lastProgress);
                         break;
                     case SliceResult.BlockedWithoutProgress:
                         if (!_queue.HasUnblockedPending)
                         {
+                            ProducerIdle?.Invoke();
                             WaitBlocked(ref lastProgress);
                         }
 

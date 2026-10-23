@@ -1370,7 +1370,8 @@ internal sealed partial class MetalRenderHost
 
     public int PipelinesCompiling => _compiler?.InFlight ?? 0;
 
-    public bool SupportsPipelineSuspend => !SynchronousPipelines;
+    // A dispatch the command thread deferred cannot suspend its packet: the worker waits for its compile.
+    public bool SupportsPipelineSuspend => !SynchronousPipelines && !UsesCommandThread;
 
     public void NotePipelineNotReady()
     {

@@ -54,6 +54,12 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // A deferred draw's operands (indirect arguments, a GPU-written list) are read after it.
     bool SharpEmu.Libs.Gpu.GpuCommands.ICommandStreamHost.TryReadGuestOperand(ulong address, Span<byte> destination)
     {
+        // An operand GPU work may produce is read after everything queued before it.
+        if (OnCommandThread)
+        {
+            return ReadOnWorker(address, destination, (at, bytes) => ((SharpEmu.Libs.Gpu.GpuCommands.ICommandStreamHost)this).TryReadGuestOperand(at, bytes));
+        }
+
         DrainDraws();
         return TryReadGuest(address, destination);
     }
@@ -178,9 +184,15 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ||
         (query == ConcurrentQuery.Word && IsGpuWritePendingConcurrent(address, size)) ||
         (_cpOverlay.Count != 0 &&
-            _cpOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None) ||
+            _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None) ||
         (_labelOverlay.Count != 0 &&
-            _labelOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None);
+            _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None);
+
+    // The shared event's value, read from any thread: CompletedSerial also notes it in the worker's
+    // completion state.
+    private ulong SignaledSerial() => MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+
+    private Func<ulong>? _signaledSerialReader;
 
     // The answer for a range, recorded: from its page when the page is known clean or turns out clean,
     // otherwise for the range itself.
@@ -217,8 +229,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return false;
         }
 
-        // The event's value itself: CompletedSerial also notes it in the worker's completion state.
-        var completed = MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+        var completed = SignaledSerial();
         for (var attempt = 0; attempt < 4; attempt++)
         {
             if (_gpuWrites.TryPendingSerialSnapshot(address, size, completed, out var pending))
