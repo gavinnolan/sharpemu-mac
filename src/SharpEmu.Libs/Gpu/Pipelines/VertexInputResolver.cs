@@ -312,12 +312,11 @@ public static class VertexInputResolver
             }
 
             var descriptorAddress = bufferTable + index * 16u;
-            for (var component = 0; component < 4; component++)
+            // The V# in one read: every draw resolves its vertex inputs, a word at a time this
+            // was four guest reads per attribute.
+            if (!context.Memory.TryRead(descriptorAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(descriptorWords)))
             {
-                if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptorWords[component]))
-                {
-                    throw GpuFatal.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
-                }
+                throw GpuFatal.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
             }
 
             var descriptor = BufferDescriptorWords.From(descriptorWords);
