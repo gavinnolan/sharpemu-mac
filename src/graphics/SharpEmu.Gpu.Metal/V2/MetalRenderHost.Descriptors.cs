@@ -765,10 +765,15 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            // A range mapped whole - nearly every binding - is answered by one query; ClampMappedSize
+            // asks again from its first byte only for a range that runs past its mapping.
             bool readable;
+            bool mappedWhole;
             using (var checkScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingBufferCheck))
             {
-                readable = requested <= ulong.MaxValue - descriptor.Address && _memory.CanRead(descriptor.Address, 1);
+                var inRange = requested <= ulong.MaxValue - descriptor.Address;
+                mappedWhole = inRange && _memory.CanRead(descriptor.Address, requested);
+                readable = mappedWhole || (inRange && _memory.CanRead(descriptor.Address, 1));
             }
 
             if (!readable)
@@ -782,7 +787,7 @@ internal sealed partial class MetalRenderHost
                     $"user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}].");
             }
 
-            var size = ClampMappedSize(descriptor.Address, requested);
+            var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
