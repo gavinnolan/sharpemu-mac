@@ -949,7 +949,7 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), PixelFunctionOf(pixelModule, description.LodStatistics));
             }
 
-            if (parameters.AlphaToCoverageEnable)
+            if (parameters.AlphaToCoverageEnable && !MetalV2Diagnostics.IgnoreAlphaToCoverage)
             {
                 MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setAlphaToCoverageEnabled:"), true);
             }
@@ -1590,7 +1590,7 @@ internal sealed partial class MetalRenderHost
     {
         var parameters = entry.StaticParameters;
         var stencilEnabled = state.StencilTestEnabled && entry.HasStencil && parameters is not null &&
-            !MetalV2Diagnostics.IgnoreFragmentTests;
+            !MetalV2Diagnostics.IgnoreStencilTest;
         var key = MixDepthStencilKey(entry, in state, stencilEnabled);
         if (_depthStencilStates.TryGetValue(key, out var found))
         {
@@ -1607,8 +1607,9 @@ internal sealed partial class MetalRenderHost
 
         try
         {
-            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreFragmentTests
-                ? MetalV2Formats.CompareFunction(state.DepthCompare)
+            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreDepthTest
+                ? MetalV2Formats.CompareFunction(
+                    MetalV2Diagnostics.LoosenDepthEqual && state.DepthCompare == GpuCompareOp.Equal ? GpuCompareOp.Always : state.DepthCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
             MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setDepthCompareFunction:"), depthCompare);
             MetalNative.SendVoidBool(

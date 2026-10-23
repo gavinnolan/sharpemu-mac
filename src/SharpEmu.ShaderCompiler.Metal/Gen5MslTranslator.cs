@@ -293,6 +293,12 @@ public static partial class Gen5MslTranslator
 
         private static readonly bool DebugVertexPosition =
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_VS_POSITION") == "1";
+
+        // SHARPEMU_MSL_DEBUG_NO_DISCARD=1 (diagnostic): a pixel program never discards, whatever its valid mask
+        // says (SHARPEMU_MSL_DEBUG_HASH narrows it to one program). Geometry that appears with it was being killed
+        // by its own pixel program; geometry still missing never reached the pixel stage.
+        internal static readonly bool DebugNoDiscard =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_NO_DISCARD") == "1";
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
         private readonly uint[] _pixelInputCntl;
@@ -1027,13 +1033,17 @@ public static partial class Gen5MslTranslator
                 // EXP.VM publishes EXEC as the pixel-valid mask. EXEC can be
                 // restored afterward, so only malformed shaders without VM
                 // fall back to the final EXEC value.
-                source.AppendLine(
-                    _usesPixelValidMask
-                        ? "    if (!pixel_valid_mask_active)"
-                        : "    if (!exec)");
-                source.AppendLine("    {");
-                source.AppendLine("        discard_fragment();");
-                source.AppendLine("    }");
+                if (!(DebugNoDiscard && DebugsThisProgram))
+                {
+                    source.AppendLine(
+                        _usesPixelValidMask
+                            ? "    if (!pixel_valid_mask_active)"
+                            : "    if (!exec)");
+                    source.AppendLine("    {");
+                    source.AppendLine("        discard_fragment();");
+                    source.AppendLine("    }");
+                }
+
                 source.AppendLine("    return sharpemu_out;");
             }
             else if (_stage == Gen5MslStage.Vertex)

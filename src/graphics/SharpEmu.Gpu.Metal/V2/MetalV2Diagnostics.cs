@@ -25,9 +25,24 @@ internal static class MetalV2Diagnostics
     // SHARPEMU_METAL_V2_IGNORE_TESTS=1 drops face culling, the depth compare and the
     // stencil test from every draw. A pass whose target never changes either had its
     // fragments thrown away by one of those three or never had a fragment to throw
-    // away, and nothing in a target dump tells the two apart.
-    public static readonly bool IgnoreFragmentTests =
-        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IGNORE_TESTS"), "1", StringComparison.Ordinal);
+    // away, and nothing in a target dump tells the two apart. A comma-separated list of
+    // depth, stencil, cull and bounds drops only those, to tell which one it was.
+    private static readonly string[] IgnoredTests =
+        (Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IGNORE_TESTS") ?? "").Split(',', StringSplitOptions.TrimEntries);
+
+    public static readonly bool IgnoreFragmentTests = IgnoredTests.Contains("1");
+    public static readonly bool IgnoreDepthTest = IgnoreFragmentTests || IgnoredTests.Contains("depth");
+    public static readonly bool IgnoreStencilTest = IgnoreFragmentTests || IgnoredTests.Contains("stencil");
+    public static readonly bool IgnoreCulling = IgnoreFragmentTests || IgnoredTests.Contains("cull");
+    public static readonly bool IgnoreDepthBounds = IgnoreFragmentTests || IgnoredTests.Contains("bounds");
+
+    // equal: a depth compare of EQUAL passes ALWAYS instead - a pass drawn against a prepass's depth
+    // that its own positions do not reproduce bit for bit loses its fragments to EQUAL.
+    public static readonly bool LoosenDepthEqual = IgnoredTests.Contains("equal");
+
+    // a2c: alpha to coverage stays off - an MRT0 alpha that reads 0 drops every sample of a draw
+    // that never meant its alpha as coverage.
+    public static readonly bool IgnoreAlphaToCoverage = IgnoredTests.Contains("a2c");
 
     // SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT=1 keeps the vertex descriptor each
     // pipeline was built with, for the per-draw report: a stride or an attribute format

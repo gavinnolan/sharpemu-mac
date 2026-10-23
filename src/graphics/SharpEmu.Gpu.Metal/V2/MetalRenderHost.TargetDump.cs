@@ -522,8 +522,9 @@ internal sealed partial class MetalRenderHost
 
         DrainSnapshots();
         var flip = _dumpFlipIndex++;
-        _dumpThisFlip = flip >= _dumpAfterFlips && DumpWindowOpen &&
-            (flip - _dumpAfterFlips) % _dumpEveryFlips == 0;
+        _dumpThisFlip = _dumpTriggerPath is not null
+            ? TakeDumpTrigger()
+            : flip >= _dumpAfterFlips && DumpWindowOpen && (flip - _dumpAfterFlips) % _dumpEveryFlips == 0;
         if (_pendingDumps.Count == 0)
         {
             return;
@@ -538,6 +539,30 @@ internal sealed partial class MetalRenderHost
     }
 
     private static bool DumpTargetsEnabled => _dumpTargetsDirectory is not null;
+
+    // SHARPEMU_METAL_V2_DUMP_TRIGGER=<file>: dump the frame after the one during which the file
+    // appears, then delete it - a script that has just pointed the camera at the broken object
+    // creates the file instead of guessing a flip count.
+    private static readonly string? _dumpTriggerPath =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_TRIGGER") is { Length: > 0 } trigger ? trigger : null;
+
+    private static bool TakeDumpTrigger()
+    {
+        if (!File.Exists(_dumpTriggerPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            File.Delete(_dumpTriggerPath!);
+        }
+        catch (IOException)
+        {
+        }
+
+        return true;
+    }
 
     private static readonly nint SelDumpCopyTextureToBuffer =
         MetalNative.Selector("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:options:");
