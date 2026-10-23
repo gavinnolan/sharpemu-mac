@@ -49,6 +49,7 @@ internal sealed partial class MetalImageCache
     private MetalPageWatchSet? _fencedPages;
     private int _fencedWritebackCount;
     private long _fencedWritebacksAdded;
+    private long _fencesExtended;
     private long _fenceWaits;
     private long _fenceWaitTicks;
     private long _fenceTimeouts;
@@ -92,11 +93,18 @@ internal sealed partial class MetalImageCache
     {
         FlushUnwrittenWritebackReports();
         var added = Interlocked.Exchange(ref _fencedWritebacksAdded, 0);
+        long extended;
+        lock (_fenceGate)
+        {
+            extended = _fencesExtended;
+            _fencesExtended = 0;
+        }
+
         var waits = Interlocked.Exchange(ref _fenceWaits, 0);
         var ticks = Interlocked.Exchange(ref _fenceWaitTicks, 0);
         var timeouts = Interlocked.Exchange(ref _fenceTimeouts, 0);
         var waitMs = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        return $" wb_fenced={added} wb_fence_live={FencedWritebackCount} wb_fence_waits={waits} " +
+        return $" wb_fenced={added} wb_fence_extended={extended} wb_fence_live={FencedWritebackCount} wb_fence_waits={waits} " +
             $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts} " +
             $"wb_staged_runs_total={Interlocked.Read(ref _stagedWritebackRuns)} " +
             $"wb_partial_total={Interlocked.Read(ref _shortWritebacks)} " +
@@ -127,6 +135,7 @@ internal sealed partial class MetalImageCache
             {
                 var entry = _fencedWritebacks[index];
                 _fencedWritebacks[index] = entry with { Serial = Math.Max(entry.Serial, serial), Cause = cause };
+                _fencesExtended++;
             }
             else
             {
@@ -153,15 +162,33 @@ internal sealed partial class MetalImageCache
         }
     }
 
+    // A completed fence of a live image's writeback - for an alias or a binding, which the GPU
+    // consumes - keeps its watch this many submissions, and at most this many fences are kept: a
+    // range written back again soon (an alias written back for its partner every frame, which
+    // Black Myth: Wukong does some 700 times a second) takes its entry back instead of the guard
+    // unwatching and then watching every 4 KiB page of it again, two walks of thousands of pages
+    // a writeback. A guest store that faults on a completed fence drops it at once
+    // (WaitForFencedWritebacks), and a managed write waits only for one still pending. A released
+    // image's range, which the guest is about to reuse, and a host read's lose the watch on completion.
+    private const ulong RetainedFenceSerials = 64;
+    private const int MaxRetainedFences = 256;
+
+    private static bool RetainsFence(MetalWritebackCause cause) =>
+        cause is MetalWritebackCause.ImageOverlap or MetalWritebackCause.BufferBinding or MetalWritebackCause.StorageDescriptor;
+
     private void PruneFencedWritebacksLocked(ulong completed)
     {
+        var excess = _fencedWritebacks.Count - MaxRetainedFences;
         var kept = 0;
         for (var index = 0; index < _fencedWritebacks.Count; index++)
         {
             var entry = _fencedWritebacks[index];
-            if (entry.Serial <= completed)
+            // Oldest first: the excess goes from the front, completed ones only.
+            if (entry.Serial <= completed &&
+                (!RetainsFence(entry.Cause) || completed - entry.Serial >= RetainedFenceSerials || excess > 0))
             {
                 _fencedPages!.Remove(entry.Address, entry.Size);
+                excess--;
                 continue;
             }
 
