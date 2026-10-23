@@ -292,7 +292,7 @@ public sealed partial class GuestImageCache
             return false;
         }
 
-        grown.MipLayout[0].Size = grown.Data.Size;
+        grown.MipLayout[0] = grown.MipLayout[0] with { Size = grown.Data.Size };
         grown.Resources = grown.Resources with { Layers = layers };
         info = grown;
         return true;

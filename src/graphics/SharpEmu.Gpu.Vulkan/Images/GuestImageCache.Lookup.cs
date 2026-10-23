@@ -97,8 +97,8 @@ public sealed partial class GuestImageCache
 
         for (var level = 0; level < ImageDescription.MaxLevels; level++)
         {
-            ref readonly var first = ref left.MipLayout[level];
-            ref readonly var second = ref right.MipLayout[level];
+            var first = left.MipLayout[level];
+            var second = right.MipLayout[level];
             if (first.Offset != second.Offset || first.Size != second.Size ||
                 first.Pitch != second.Pitch || first.Height != second.Height)
             {

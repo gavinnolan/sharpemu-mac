@@ -440,7 +440,7 @@ public sealed unsafe partial class GuestImageCacheTests
         var depth = AsDepthTarget(color, GpuFormat.D32Sfloat);
         depth.Description.Data = new GuestSpan(address, sliceSize);
         depth.Description.Resources = SubresourceCount.Single;
-        depth.Description.MipLayout[0].Size = sliceSize;
+        depth.Description.MipLayout[0] = depth.Description.MipLayout[0] with { Size = sliceSize };
         depth.Description.Metadata = new MetadataDescription
         {
             Kind = MetadataKind.Htile,
@@ -500,7 +500,7 @@ public sealed unsafe partial class GuestImageCacheTests
         var first = layered;
         first.Description.Data = new GuestSpan(address, depthSlice);
         first.Description.Resources = SubresourceCount.Single;
-        first.Description.MipLayout[0].Size = depthSlice;
+        first.Description.MipLayout[0] = first.Description.MipLayout[0] with { Size = depthSlice };
         first.Description.Stencil = new GuestSpan(stencilAddress, stencilSlice);
         first.View = first.View with { Type = GpuImageViewType.Type2D, LayerCount = 1 };
         Assert.Equal(layeredIdentifier, harness.Acquire(ref first));
