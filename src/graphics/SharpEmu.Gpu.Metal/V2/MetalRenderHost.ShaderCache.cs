@@ -299,6 +299,8 @@ internal sealed partial class MetalRenderHost
                 ReleaseLibrary(module.RectangleLibrary);
             }
 
+            ReleaseRemappedFunctions(module);
+
             Volatile.Write(ref module.Function, 0);
             module.Library = 0;
             module.RectangleFunction = 0;

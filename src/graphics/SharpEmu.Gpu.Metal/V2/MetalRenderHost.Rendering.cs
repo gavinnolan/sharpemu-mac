@@ -955,9 +955,15 @@ internal sealed partial class MetalRenderHost
         }
 
         if (!continues && launch is null && !foldedClear && _pendingClears.Count == 0 &&
-            !_imageCache.HasDeferredRefreshes && TryJoinDepthOnly(in state, upcoming))
+            !_imageCache.HasDeferredRefreshes && (TryJoinDepthOnly(in state, upcoming) || TryJoinColorSubset(in state, upcoming)))
         {
             return;
+        }
+
+        if (!continues && CountJoinRefusals && _renderingActive && state.ColorAttachmentCount != 0)
+        {
+            _ = RefuseSubsetJoin(launch is not null ? "launch" : foldedClear ? "folded-clear" :
+                _pendingClears.Count != 0 ? "pending-clear" : _imageCache.HasDeferredRefreshes ? "deferred-refresh" : "tried");
         }
 
         if (continues)
@@ -2380,18 +2386,12 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        DrainDraws();
-        if (_renderEncoder != 0 || _computeEncoder != 0)
-        {
-            RecordMemoryBarrier();
-            return;
-        }
         if (TryDeferBehindDraws(_emitOrderedGlobalBarrier ??= EmitOrderedGlobalBarrier))
         {
             return;
         }
 
-
+        DrainDraws();
         EmitOrderedGlobalBarrier();
     }
 
@@ -2399,16 +2399,16 @@ internal sealed partial class MetalRenderHost
 
     private void EmitOrderedGlobalBarrier()
     {
+        if (_renderEncoder != 0 || _computeEncoder != 0)
+        {
+            RecordMemoryBarrier();
+            return;
+        }
+
         EndRendering();
         EndComputeEncoder();
     }
 
-    // How a guest clear arrives: with no pass open, with one open that has drawn
-    // nothing yet, or with one open that has. Only the first two can become the next
-    // pass's load action; the third has to be a real clear.
-    private long _clearNoPass;
-    private long _clearEmptyPass;
-    private long _clearDrawnPass;
     // A barrier or release only orders GPU commands, so behind deferred draws it joins their queue
     // instead of draining them: a drain at every barrier left the program resolver, which only
     // starts a draw's programs once it is submitted, no lead over the draws the drain runs.
@@ -2432,6 +2432,12 @@ internal sealed partial class MetalRenderHost
         MetalV2Diagnostics.DeferBarriers && _translation is { HasPendingDraws: true, IsDraining: false } translation &&
         _relay.IsGpuQueueThread && !translation.PendingWorkMayWrite(address, size);
 
+    // How a guest clear arrives: with no pass open, with one open that has drawn
+    // nothing yet, or with one open that has. Only the first two can become the next
+    // pass's load action; the third has to be a real clear.
+    private long _clearNoPass;
+    private long _clearEmptyPass;
+    private long _clearDrawnPass;
 
     internal string TakeClearArrivals()
     {
