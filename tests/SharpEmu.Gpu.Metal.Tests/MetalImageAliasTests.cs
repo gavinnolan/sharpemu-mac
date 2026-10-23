@@ -1009,4 +1009,42 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
     }
 
     private static readonly Lazy<nint> Device = new(MetalNative.MTLCreateSystemDefaultDevice);
+
+    // A sampled binding beside an alias over its bytes is memoised: the stamp holds while neither
+    // image moves, and goes once the alias is drawn into, or the texture itself is.
+    [Fact]
+    public void ASampledBindingBesideAnAliasIsMemoisedUntilEitherIsWritten()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var large = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+        rig.Acquire(ImageAddress + 0x2000, SmallSide, ImageRole.Texture);
+        var request = Rig.Request(ImageAddress, LargeSide, ImageRole.Texture);
+
+        var stamp = StampOf(rig, ImageAddress, LargeSide);
+        Assert.NotNull(stamp);
+        Assert.NotNull(stamp.Value.Others);
+        Assert.True(rig.Cache.TextureStampMayHold(stamp.Value));
+        Assert.True(rig.Cache.TryReacquireTextureView(large, request, stamp.Value));
+
+        rig.Acquire(ImageAddress + 0x2000, SmallSide, ImageRole.ColorTarget);
+        Assert.False(rig.Cache.TextureStampMayHold(stamp.Value));
+        Assert.False(rig.Cache.TryReacquireTextureView(large, request, stamp.Value));
+
+        stamp = StampOf(rig, ImageAddress, LargeSide);
+        Assert.NotNull(stamp);
+        Assert.True(rig.Cache.TryReacquireTextureView(large, request, stamp.Value));
+        rig.Acquire(ImageAddress, LargeSide, ImageRole.ColorTarget);
+        Assert.False(rig.Cache.TryReacquireTextureView(large, request, stamp.Value));
+    }
+
+    // The full acquire a memoised binding stands for, with the stamp it issues.
+    private static MetalImageCache.TextureMemoStamp? StampOf(Rig rig, ulong address, uint side)
+    {
+        var request = Rig.Request(address, side, ImageRole.Texture);
+        var pages = rig.Cache.RequestPageVersions(in request);
+        var identifier = rig.Cache.FindImage(ref request);
+        rig.Cache.AcquireTextureViewForMemo(identifier, request, pages, out _, out var stamp);
+        return stamp;
+    }
 }

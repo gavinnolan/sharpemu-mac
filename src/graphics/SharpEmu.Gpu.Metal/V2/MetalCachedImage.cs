@@ -121,6 +121,18 @@ internal sealed class MetalCachedImage : IDisposable
     /// </summary>
     public long AlonePageVersions = -1;
 
+    /// <summary>
+    /// What the last alias sync of this image left beside it (MetalImageCache.SynchronizeAliases):
+    /// the other images over its bytes, the versions of all of them, this image's contents, the
+    /// owner-list counts there and the kind of sync, so a repeat that would change nothing is
+    /// skipped. Null when it was not recorded.
+    /// </summary>
+    public MetalCachedImage[]? SyncedOthers;
+    public long SyncedPageVersions = -1;
+    public long SyncedVersion;
+    public long SyncedContent;
+    public byte SyncedKind;
+
     public MetalCachedImage(in ImageDescription description, in MetalTextureShape shape, nint texture)
     {
         Description = description;

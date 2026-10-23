@@ -123,12 +123,13 @@ public sealed unsafe partial class MetalDccMaterializationTests
         rig.Cache.AcquireTextureView(alias, in textureRequest);
         Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
 
-        // Sampled again, and again behind a pass that only tests depth: nothing to copy.
+        // Sampled again, and again behind a pass that only tests depth: nothing to copy. The
+        // alias sync is skipped outright while neither image moved since the last one.
         rig.Cache.AcquireTextureView(alias, in textureRequest);
         rig.Cache.AcquireDepthTargetView(depth, in depthRequest, writes: false);
         rig.Cache.AcquireTextureView(alias, in textureRequest);
         Assert.Equal(0, rig.Cache.TakeDeviceAliasPublishes());
-        Assert.Equal(2, rig.Cache.TakeDeviceAliasReuses());
+        Assert.Equal(2, rig.Cache.TakeDeviceAliasReuses() + rig.Cache.TakeAliasSyncsSkipped());
         Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
         Assert.False(rig.Cache.GetImage(alias).IsCpuDirty);
 

@@ -434,7 +434,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        var kind = !takesGpuOwnership ? SyncRead : keepsDepthPlane ? SyncWriteKeepingDepth : SyncWrite;
+        if (AliasSyncSkipEnabled && SyncStillHolds(image, pageVersions, kind))
+        {
+            _aliasSyncsSkipped++;
+            return;
+        }
+
         var alone = true;
+        _syncedScratch.Clear();
         foreach (var otherIdentifier in FindImagesInRange(address, size, pageOverlap: false))
         {
             if (otherIdentifier == imageIdentifier ||
@@ -444,6 +452,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             alone = false;
+            _syncedScratch.Add(other);
 
             if (takesGpuOwnership && other.IsWindowLinearView)
             {
@@ -606,6 +615,95 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         image.AlonePageVersions = alone ? pageVersions : -1;
+        RecordSync(image, alone, pageVersions, kind);
+    }
+
+    // The kinds of alias sync. A write leaves every other image over the bytes cleared of GPU
+    // ownership and stale over what they share, so nothing is left for a later sync of any kind to
+    // publish or mark; one that keeps the depth plane leaves the others that owed guest memory
+    // nothing as they were, which a full write still has to mark. A read can publish others into
+    // this image again only while it is the image, not they, that wrote last.
+    private const byte SyncRead = 1;
+    private const byte SyncWriteKeepingDepth = 2;
+    private const byte SyncWrite = 3;
+
+    // Past this many images beside it, an image's syncs always run.
+    private const int MaxSyncedOthers = 8;
+
+    // SHARPEMU_METAL_V2_ALIAS_SYNC_SKIP=0 runs every alias sync of an image beside others in full.
+    private static readonly bool AliasSyncSkipEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_SYNC_SKIP") != "0";
+
+    private readonly List<MetalCachedImage> _syncedScratch = [];
+    private long _aliasSyncsSkipped;
+
+    /// <summary>Alias syncs skipped because the last one left nothing to change; reported and reset.</summary>
+    public long TakeAliasSyncsSkipped() => Interlocked.Exchange(ref _aliasSyncsSkipped, 0);
+
+    // Every count here only grows, so the sum moves whenever any of them does.
+    private static long SyncVersion(MetalCachedImage image, MetalCachedImage[] others)
+    {
+        var version = Volatile.Read(ref image.BindingVersion);
+        foreach (var other in others)
+        {
+            version += Volatile.Read(ref other.BindingVersion) + other.ContentVersion;
+        }
+
+        return version;
+    }
+
+    // Whether the last sync of this image left nothing a sync of this kind would change: the same
+    // images over its bytes, none of them (nor this one's binding state) moved since, and a kind
+    // that the last one leaves nothing to do for.
+    private static bool SyncStillHolds(MetalCachedImage image, long pageVersions, byte kind)
+    {
+        if (image.SyncedOthers is not { } others || image.SyncedPageVersions != pageVersions ||
+            SyncVersion(image, others) != image.SyncedVersion)
+        {
+            return false;
+        }
+
+        return image.SyncedKind switch
+        {
+            SyncWrite => true,
+            SyncWriteKeepingDepth => kind != SyncWrite,
+            _ => kind == SyncRead && image.ContentVersion == image.SyncedContent,
+        };
+    }
+
+    // Caller holds the lock, after the sync's loop: the others' versions as it left them.
+    private void RecordSync(MetalCachedImage image, bool alone, long pageVersions, byte kind)
+    {
+        if (alone || !AliasSyncSkipEnabled || _syncedScratch.Count > MaxSyncedOthers)
+        {
+            image.SyncedOthers = null;
+            return;
+        }
+
+        var others = image.SyncedOthers;
+        if (others is null || others.Length != _syncedScratch.Count || !SameImages(others, _syncedScratch))
+        {
+            others = [.. _syncedScratch];
+        }
+
+        image.SyncedOthers = others;
+        image.SyncedPageVersions = pageVersions;
+        image.SyncedVersion = SyncVersion(image, others);
+        image.SyncedContent = image.ContentVersion;
+        image.SyncedKind = kind;
+    }
+
+    private static bool SameImages(MetalCachedImage[] others, List<MetalCachedImage> current)
+    {
+        for (var index = 0; index < others.Length; index++)
+        {
+            if (!ReferenceEquals(others[index], current[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // Depth images with a stencil plane. The page owner index holds an image's depth
@@ -881,20 +979,47 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     /// <summary>When a memoised sampled binding still holds; see <see cref="TryStampTextureLocked"/>.</summary>
     internal readonly record struct TextureMemoStamp(
-        MetalCachedImage Image, long ImageVersion, ulong RangeStart, ulong RangeSize, long PageVersions, long StencilOwners);
+        MetalCachedImage Image, long ImageVersion, ulong RangeStart, ulong RangeSize, long PageVersions, long StencilOwners,
+        MetalCachedImage[]? Others = null, long OthersVersion = 0);
+
+    // The images over the same bytes a memoised binding can stand beside: past this many the
+    // binding takes the full acquire every time.
+    private const int MaxMemoAliases = 8;
+
+    // SHARPEMU_METAL_V2_ALIAS_MEMO=0 memoises only an image alone over its bytes, as before.
+    private static readonly bool AliasMemoEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_MEMO") != "0";
+
+    // What the acquire of an image beside others depends on: their versions and contents, and the
+    // image's own content (a write to it since makes the newer-writer rule act on the others). Each
+    // count only grows, so the sum moves whenever any of them does.
+    private static long AliasVersion(MetalCachedImage image, MetalCachedImage[] others)
+    {
+        var version = image.ContentVersion;
+        foreach (var other in others)
+        {
+            version += Volatile.Read(ref other.BindingVersion) + other.ContentVersion;
+        }
+
+        return version;
+    }
 
     /// <summary>The owner-list change counts over a request's bytes, read before its lookup.</summary>
     public long RequestPageVersions(in ImageRequest request) =>
         _pageOwners.VersionSum(request.Description.Data.Address, request.Description.Data.Size);
 
     /// <summary>
-    /// The stamp of a sampled binding just acquired, or null when it may not be memoised. Only an
-    /// image alone over its bytes and the request's qualifies: no alias whose writes the acquire
-    /// would publish, no other image a lookup could pick, no depth image whose stencil plane lies
-    /// there. Nor does one whose acquire reads guest DCC metadata (a DCC request or image), which
-    /// changes without the cache counting it. The stamp then holds while the image's own
+    /// The stamp of a sampled binding just acquired, or null when it may not be memoised. No depth
+    /// image whose stencil plane lies over its bytes and the request's may be there, and no image
+    /// whose acquire reads guest DCC metadata (a DCC request or image), which changes without the
+    /// cache counting it. The stamp then holds while the image's own
     /// <see cref="MetalCachedImage.BindingVersion"/>, the owner lists over those bytes and the stencil
-    /// owners stay as they are and no deferred refresh waits. Caller holds the lock.
+    /// owners stay as they are and no deferred refresh waits. Up to MaxMemoAliases other images may
+    /// lie over the bytes too (Black Myth: Wukong's pooled transients: about two thirds of its
+    /// unmemoised bindings): the acquire just made left them and the image agreeing, the lookup
+    /// picks among the same images by their descriptions, and while none of them nor the image's
+    /// contents change (AliasVersion) the next acquire would publish nothing and pick the same image.
+    /// Caller holds the lock.
     /// </summary>
     private TextureMemoStamp? TryStampTextureLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, long requestPagesBefore)
     {
@@ -911,12 +1036,21 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         var start = Math.Min(data.Address, image.Description.Data.Address);
         var end = Math.Max(data.Address + data.Size, image.Description.Data.Address + image.Description.Data.Size);
+        List<MetalCachedImage>? others = null;
         foreach (var other in FindImagesInRange(start, end - start, pageOverlap: false))
         {
-            if (other != imageIdentifier)
+            if (other == imageIdentifier)
+            {
+                continue;
+            }
+
+            if (!AliasMemoEnabled || _slots.TryGet(other) is not { } otherImage ||
+                (others ??= new List<MetalCachedImage>(2)).Count == MaxMemoAliases)
             {
                 return null;
             }
+
+            others.Add(otherImage);
         }
 
         foreach (var ownerIdentifier in _stencilOwners)
@@ -928,8 +1062,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
         }
 
+        var aliases = others?.ToArray();
         return new TextureMemoStamp(image, image.BindingVersion, start, end - start,
-            _pageOwners.VersionSum(start, end - start), _stencilOwnersVersion);
+            _pageOwners.VersionSum(start, end - start), _stencilOwnersVersion,
+            aliases, aliases is null ? 0 : AliasVersion(image, aliases));
     }
 
     /// <summary>
@@ -939,6 +1075,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public bool TextureStampMayHold(in TextureMemoStamp stamp) =>
         !HasDeferredRefreshes &&
         Volatile.Read(ref stamp.Image.BindingVersion) == stamp.ImageVersion &&
+        (stamp.Others is null || AliasVersion(stamp.Image, stamp.Others) == stamp.OthersVersion) &&
         _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) == stamp.PageVersions;
 
     private nint AcquireTextureViewLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
@@ -1017,6 +1154,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var image = stamp.Image;
         if (_deferredRefreshes.Count != 0 || !ReferenceEquals(_slots.TryGet(imageIdentifier), image) ||
             image.BindingVersion != stamp.ImageVersion || _stencilOwnersVersion != stamp.StencilOwners ||
+            (stamp.Others is not null && AliasVersion(image, stamp.Others) != stamp.OthersVersion) ||
             _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) != stamp.PageVersions)
         {
             return false;
