@@ -936,9 +936,12 @@ internal sealed partial class MetalRenderHost
             ? (bytes + 3) & ~3
             : 32;
 
-    private static HashSet<ulong> ParseDumpBufferHashes()
+    private static HashSet<ulong> ParseDumpBufferHashes() => ParseDumpBufferHashesFrom("SHARPEMU_METAL_V2_DUMP_BUFFERS");
+
+    // A comma-separated list of program hashes (hex, 0x optional) from an environment variable.
+    private static HashSet<ulong> ParseDumpBufferHashesFrom(string variable)
     {
-        var value = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFERS");
+        var value = Environment.GetEnvironmentVariable(variable);
         var hashes = new HashSet<ulong>();
         if (string.IsNullOrWhiteSpace(value))
         {

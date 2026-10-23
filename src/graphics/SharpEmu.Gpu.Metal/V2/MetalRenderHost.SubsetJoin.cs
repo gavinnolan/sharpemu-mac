@@ -22,8 +22,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 // The depth-only join's conditions hold: the same depth subresource, render area, layers and
 // samples, no clear on any attachment of the draw, nothing it samples is one of the pass's
 // attachments, and no copy waits at the encoder boundary for something it binds. Besides, every
-// colour attachment of the draw is one of the pass's at the same subresource and format, and its
-// pixel program blends with no second source.
+// colour attachment of the draw is one of the pass's at the same subresource and format, its
+// pixel program blends with no second source and writes no sample mask, and alpha to coverage
+// keeps its first output where it was.
 // SHARPEMU_METAL_V2_JOIN_SUBSETS=0 turns it off.
 internal sealed partial class MetalRenderHost
 {
@@ -38,6 +39,10 @@ internal sealed partial class MetalRenderHost
 
     // SHARPEMU_METAL_V2_JOIN_REASONS=1: why draws did not join, in the TBDR line (subset_refused).
     private static readonly bool CountJoinRefusals = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_REASONS") == "1";
+
+    // SHARPEMU_METAL_V2_JOIN_EXCLUDE=<pixel hash>[,...]: draws with these pixel programs never join,
+    // for finding the draw a join changes.
+    private static readonly HashSet<ulong> JoinExcludedPixelPrograms = ParseDumpBufferHashesFrom("SHARPEMU_METAL_V2_JOIN_EXCLUDE");
     private readonly Dictionary<string, long> _subsetRefusals = new();
 
     private bool RefuseSubsetJoin(string reason)
@@ -145,6 +150,25 @@ internal sealed partial class MetalRenderHost
         }
 
         var remapsOutputs = !inOrder && description.PixelStage is not null && description.PixelProgram.IsValid;
+        if (JoinExcludedPixelPrograms.Count != 0 && description.PixelStage is { } pixelStage &&
+            JoinExcludedPixelPrograms.Contains(pixelStage.Hash))
+        {
+            return RefuseSubsetJoin("excluded");
+        }
+
+        if (MovesCoverageSource(description.StaticParameters, placement))
+        {
+            return RefuseSubsetJoin("alpha-to-coverage");
+        }
+
+        // A pixel program that writes its own sample mask opens its own pass. Grand Theft Auto V's
+        // hair normals (one draw into the normal, flag and velocity targets, coverage from the hair
+        // texture) drawn joined left a shell of the last frame's head lit around Michael's hair in
+        // its opening cutscene; drawn in a pass of its own, as before the join, they do not.
+        if (description.PixelInfo is { SampleMaskExportEnable: true })
+        {
+            return RefuseSubsetJoin("coverage");
+        }
 
         if (SamplesOpenColorAttachment())
         {
@@ -176,6 +200,11 @@ internal sealed partial class MetalRenderHost
         PassProfileNoteJoin();
         return true;
     }
+
+    // Metal takes alpha to coverage from whatever [[color(0)]] returns: with the draw's first output
+    // moved to another attachment of the pass, its coverage would come from an output it does not have.
+    internal static bool MovesCoverageSource(PipelineStaticParameters parameters, uint placement) =>
+        parameters.AlphaToCoverageEnable && (placement & 0xF) != 1;
 
     // The draw's pipeline remade for the open pass's colour formats; null while it compiles (the
     // draw then opens its own pass, as before).

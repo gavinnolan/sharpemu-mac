@@ -80,6 +80,20 @@ public sealed class MetalSubsetJoinTests
     }
 
     [Fact]
+    public void AlphaToCoverageKeepsTheFirstOutputInPlace()
+    {
+        var parameters = new PipelineStaticParameters { ColorCount = 1, Samples = 1 };
+        // The draw's first output at the pass's index 0, then at index 1.
+        Assert.False(MetalRenderHost.MovesCoverageSource(parameters, 0x1));
+        Assert.False(MetalRenderHost.MovesCoverageSource(parameters, 0x2));
+
+        parameters.AlphaToCoverageEnable = true;
+        Assert.False(MetalRenderHost.MovesCoverageSource(parameters, 0x21));
+        Assert.True(MetalRenderHost.MovesCoverageSource(parameters, 0x2));
+        Assert.True(MetalRenderHost.MovesCoverageSource(parameters, 0x12));
+    }
+
+    [Fact]
     public void ARemapIsPartOfThePipelineKey()
     {
         var parameters = new PipelineStaticParameters { ColorCount = 1, Samples = 1 };
