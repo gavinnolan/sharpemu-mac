@@ -41,7 +41,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // TryReadBacking millions of times per second, a few bytes at a time, while views
     // change rarely. Single-view accesses search this immutable copy of _views without
     // the lock; every change to _views republishes it under the lock.
-    private ViewRecord[] _snapshot = [];
+    private ViewSnapshot _snapshot = ViewSnapshot.Empty;
 
     // Chunked backing only: view records reaching into each chunk, so a release never empties
     // a chunk some guest address still maps. Changed under _lock (SetViewLocked/RemoveViewAtLocked).
@@ -1238,29 +1238,18 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         var current = address;
         while (current < end)
         {
-            var low = 0;
-            var high = snapshot.Length - 1;
-            var found = -1;
-            while (low <= high)
-            {
-                var middle = low + ((high - low) >> 1);
-                if (snapshot[middle].Address <= current)
-                {
-                    found = middle;
-                    low = middle + 1;
-                }
-                else
-                {
-                    high = middle - 1;
-                }
-            }
-
-            if (found < 0 || current >= snapshot[found].Address + snapshot[found].Size)
+            if (!snapshot.TryFind(current, out var chunk, out var index))
             {
                 return false;
             }
 
-            current = Math.Min(end, snapshot[found].Address + snapshot[found].Size);
+            ref readonly var found = ref snapshot.At(chunk, index);
+            if (current >= found.Address + found.Size)
+            {
+                return false;
+            }
+
+            current = Math.Min(end, found.Address + found.Size);
         }
 
         return true;
@@ -1495,9 +1484,20 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // Must be called under _lock after every change to _views.
     private void PublishSnapshot()
     {
-        if (_disposed || _disposeRequested) { Volatile.Write(ref _snapshot, []); return; }
-        var snapshot = new ViewRecord[_views.Count];
-        _views.Values.CopyTo(snapshot, 0);
+        if (_disposed || _disposeRequested)
+        {
+            Volatile.Write(ref _snapshot, ViewSnapshot.Empty);
+            (_changedLow, _changedHigh) = (ulong.MaxValue, 0);
+            return;
+        }
+
+        var current = _snapshot;
+        var snapshot = _changedLow > _changedHigh
+            ? current.Republished()
+            : ReferenceEquals(current, ViewSnapshot.Empty)
+                ? ViewSnapshot.Build(_views)
+                : current.Rebuilt(_views, _changedLow, _changedHigh);
+        (_changedLow, _changedHigh) = (ulong.MaxValue, 0);
         Volatile.Write(ref _snapshot, snapshot);
     }
 
@@ -1595,14 +1595,13 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             return true;
         }
 
-        var index = FindRecordIndex(snapshot, address);
-        if (index < 0 || Volatile.Read(ref _disposed) || _backing is null)
+        if (!snapshot.TryFind(address, out var chunk, out var index) || Volatile.Read(ref _disposed) || _backing is null)
         {
             target = 0;
             return false;
         }
 
-        var record = snapshot[index];
+        var record = snapshot.At(chunk, index);
         if (address >= record.Address + record.Size)
         {
             target = 0;
@@ -1613,13 +1612,13 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         var covered = record.Address + record.Size - address;
         while (covered < size)
         {
-            if (++index >= snapshot.Length)
+            if (!snapshot.TryNext(ref chunk, ref index))
             {
                 target = 0;
                 return false;
             }
 
-            var next = snapshot[index];
+            var next = snapshot.At(chunk, index);
             // Adjacent in guest space and continuing at the next backing byte.
             if (next.Address != record.Address + record.Size || next.Offset != record.Offset + record.Size)
             {
@@ -1641,52 +1640,12 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         return true;
     }
 
-    // The last record whose address is at or below this one, or -1.
-    private static int FindRecordIndex(ViewRecord[] snapshot, ulong address)
-    {
-        var low = 0;
-        var high = snapshot.Length - 1;
-        var found = -1;
-        while (low <= high)
-        {
-            var middle = low + ((high - low) >> 1);
-            if (snapshot[middle].Address <= address)
-            {
-                found = middle;
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
-        }
-
-        return found;
-    }
-
-    private bool TryFindAlias(ViewRecord[] snapshot, ulong address, ulong size, out ulong target)
+    private bool TryFindAlias(ViewSnapshot snapshot, ulong address, ulong size, out ulong target)
     {
         target = 0;
-        var low = 0;
-        var high = snapshot.Length - 1;
-        var found = -1;
-        while (low <= high)
+        if (snapshot.TryFind(address, out var chunk, out var index) && !_disposed && _backing != null)
         {
-            var middle = low + ((high - low) >> 1);
-            if (snapshot[middle].Address <= address)
-            {
-                found = middle;
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
-        }
-
-        if (found >= 0 && !_disposed && _backing != null)
-        {
-            var record = snapshot[found];
+            var record = snapshot.At(chunk, index);
             if (address + size <= record.Address + record.Size)
             {
                 var offset = record.Offset + address - record.Address;
@@ -1708,14 +1667,22 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // many view records reach into each chunk. Must be called under _lock.
     private void SetViewLocked(ViewRecord record)
     {
-        if (_views.TryGetValue(record.Address, out var replaced)) CountChunkViews(replaced, -1);
+        if (_views.TryGetValue(record.Address, out var replaced))
+        {
+            CountChunkViews(replaced, -1);
+            NoteViewChangeLocked(replaced);
+        }
+
         _views[record.Address] = record;
         CountChunkViews(record, 1);
+        NoteViewChangeLocked(record);
     }
 
     private void RemoveViewAtLocked(int index)
     {
-        CountChunkViews(_views.Values[index], -1);
+        var removed = _views.Values[index];
+        CountChunkViews(removed, -1);
+        NoteViewChangeLocked(removed);
         _views.RemoveAt(index);
     }
 
