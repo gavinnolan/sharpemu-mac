@@ -2386,7 +2386,19 @@ internal sealed partial class MetalRenderHost
             RecordMemoryBarrier();
             return;
         }
+        if (TryDeferBehindDraws(_emitOrderedGlobalBarrier ??= EmitOrderedGlobalBarrier))
+        {
+            return;
+        }
 
+
+        EmitOrderedGlobalBarrier();
+    }
+
+    private Action? _emitOrderedGlobalBarrier;
+
+    private void EmitOrderedGlobalBarrier()
+    {
         EndRendering();
         EndComputeEncoder();
     }
@@ -2397,6 +2409,29 @@ internal sealed partial class MetalRenderHost
     private long _clearNoPass;
     private long _clearEmptyPass;
     private long _clearDrawnPass;
+    // A barrier or release only orders GPU commands, so behind deferred draws it joins their queue
+    // instead of draining them: a drain at every barrier left the program resolver, which only
+    // starts a draw's programs once it is submitted, no lead over the draws the drain runs.
+    private bool TryDeferBehindDraws(Action ordered, ulong writeAddress = 0, ulong writeSize = 0)
+    {
+        if (!MetalV2Diagnostics.DeferBarriers || _translation is not { HasPendingDraws: true, IsDraining: false } translation ||
+            !_relay.IsGpuQueueThread)
+        {
+            return false;
+        }
+
+        translation.EnqueuePendingAction(ordered, writeAddress, writeSize);
+        _deferredBarriers++;
+        return true;
+    }
+
+    private long _deferredBarriers;
+
+    // Whether the stream may read these bytes with the deferred work still queued.
+    private bool QueuedWorkLeaves(ulong address, ulong size) =>
+        MetalV2Diagnostics.DeferBarriers && _translation is { HasPendingDraws: true, IsDraining: false } translation &&
+        _relay.IsGpuQueueThread && !translation.PendingWorkMayWrite(address, size);
+
 
     internal string TakeClearArrivals()
     {

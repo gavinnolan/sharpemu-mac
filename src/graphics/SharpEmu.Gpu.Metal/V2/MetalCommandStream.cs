@@ -369,6 +369,25 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        // Behind deferred draws the label waits in their queue, as on the command thread: it lands
+        // after their work either way, and the drain records it with the serial it rides.
+        if (MetalV2Diagnostics.DeferEndOfPipe)
+        {
+            var deferred = write;
+            if (TryDeferBehindDraws(() =>
+                {
+                    if (PendingLabelsVisible && EndOfPipeLabelBytes(deferred.Kind) != 0)
+                    {
+                        CommandStream.UpdatePendingLabelTick(deferred.Destination, SubmissionSerial);
+                    }
+
+                    RecordEndOfPipe(in deferred);
+                }, write.Destination, write.Destination == 0 ? 0 : Math.Max(sizeof(ulong), (ulong)EndOfPipeLabelBytes(write.Kind))))
+            {
+                return;
+            }
+        }
+
         DrainDraws();
         using var endOfPipeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandEndOfPipe);
@@ -2302,9 +2321,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        if (TryDeferBehindDraws(_releaseOrderedShaderWrites ??= () => _translation?.ReleaseShaderWrites()))
+        {
+            return;
+        }
+
         DrainDraws();
         _translation?.ReleaseShaderWrites();
     }
+
+    private Action? _releaseOrderedShaderWrites;
 
     /// <summary>
     /// Runs interpreter slices until nothing is runnable or the budget ends; blocked

@@ -44,6 +44,25 @@ internal static class MetalV2Diagnostics
     // that never meant its alpha as coverage.
     public static readonly bool IgnoreAlphaToCoverage = IgnoredTests.Contains("a2c");
 
+    // SHARPEMU_METAL_V2_DRAIN_CALLERS=1 counts which host entry points drain the deferred draws, in the
+    // PERF line's prefetch block (a drain inside a draining draw counts too).
+    public static readonly bool CountDrainCallers =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DRAIN_CALLERS") == "1";
+
+    // SHARPEMU_METAL_V2_DEFER_BARRIERS=1 (experiment): a barrier queues behind the deferred draws instead
+    // of draining them, and an operand or poll read nothing queued can produce leaves them queued
+    // (MetalRenderHost.TryDeferBehindDraws, QueuedWorkLeaves). It cuts the render thread's waits on the
+    // program resolver by about a third in Grand Theft Auto V's street, but its frame rate did not
+    // move (gdab A/B: 14.74/15.25 against 14.95/15.32 median/mean fps).
+    public static readonly bool DeferBarriers =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_BARRIERS") == "1";
+
+    // SHARPEMU_METAL_V2_DEFER_EOP=1 queues end-of-pipe writes behind the deferred draws too. It halves
+    // the render thread's waits on the program resolver but lowered GTA V's frame rate (gdb-4/5): the
+    // labels a title paces its frames on land later.
+    public static readonly bool DeferEndOfPipe =
+        DeferBarriers && Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_EOP") == "1";
+
     // SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT=1 keeps the vertex descriptor each
     // pipeline was built with, for the per-draw report: a stride or an attribute format
     // that does not match what the program fetches is invisible in everything else.

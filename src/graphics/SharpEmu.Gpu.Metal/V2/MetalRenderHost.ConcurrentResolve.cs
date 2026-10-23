@@ -43,11 +43,16 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // the stream: everything but a draw may record into the same command buffer (a label, a
     // command-processor write, a transfer, a dispatch) or read what they use. Only the worker drains;
     // a completion that reaches an entry point from another thread leaves the draws to it.
-    private void DrainDraws()
+    private void DrainDraws([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
         if (_translation is { HasPendingDraws: true } translation && _relay.IsGpuQueueThread)
         {
             _drains++;
+            if (MetalV2Diagnostics.CountDrainCallers)
+            {
+                CollectionsMarshalAdd(caller);
+            }
+
             var before = translation.PendingDrawCount;
             translation.DrainPendingDraws();
             _drainedDraws += before;
@@ -63,11 +68,42 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return ReadOnWorker(address, destination, (at, bytes) => ((SharpEmu.Libs.Gpu.GpuCommands.ICommandStreamHost)this).TryReadGuestOperand(at, bytes));
         }
 
+        // Draws that store nothing produce no operand: they stay deferred, so their programs
+        // keep resolving ahead of the drain that runs them.
+        if (QueuedWorkLeaves(address, (ulong)destination.Length))
+        {
+            _operandReadsKept++;
+            return TryReadGuest(address, destination);
+        }
+
         DrainDraws();
         return TryReadGuest(address, destination);
     }
 
+    private long _operandReadsKept;
+
     private long _drains;
+
+    // SHARPEMU_METAL_V2_DRAIN_CALLERS=1: which host entry points drain the deferred draws, in the PERF line.
+    private readonly Dictionary<string, long> _drainCallers = new();
+
+    private void CollectionsMarshalAdd(string caller)
+    {
+        ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_drainCallers, caller, out _);
+        count++;
+    }
+
+    private string TakeDrainCallers()
+    {
+        if (!MetalV2Diagnostics.CountDrainCallers || _drainCallers.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var top = string.Join(",", _drainCallers.OrderByDescending(pair => pair.Value).Take(8).Select(pair => $"{pair.Key}:{pair.Value}"));
+        _drainCallers.Clear();
+        return $" drain_callers=({top})";
+    }
     private long _drainedDraws;
 
     private string FormatPrefetchCounters()
@@ -82,9 +118,11 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
         var (resolved, abandoned, taken, refused, waitMs) = prefetch.TakeCounters();
         var drains = Interlocked.Exchange(ref _drains, 0);
+        var deferredBarriers = Interlocked.Exchange(ref _deferredBarriers, 0);
+        var operandReadsKept = Interlocked.Exchange(ref _operandReadsKept, 0);
         var drained = Interlocked.Exchange(ref _drainedDraws, 0);
-        return $"resolved={resolved} abandoned={abandoned} taken={taken} refused={refused} drains={drains} drained={drained} " +
-            $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} {own}";
+        return $"resolved={resolved} abandoned={abandoned} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
+            $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} {own}{TakeDrainCallers()}";
     }
 
     internal enum ConcurrentQuery : byte

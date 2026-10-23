@@ -1895,7 +1895,12 @@ internal sealed partial class MetalRenderHost :
             return ReadWaitOperandOnCommandThread(address, destination, commitPendingWrite);
         }
 
-        DrainDraws();
+        // A label queued behind deferred draws is the one bytes a poll may wait for; anything
+        // else polled is read with them still queued.
+        if (!QueuedWorkLeaves(address, (ulong)destination.Length))
+        {
+            DrainDraws();
+        }
 
         if (!PollWithoutWaiting)
         {
