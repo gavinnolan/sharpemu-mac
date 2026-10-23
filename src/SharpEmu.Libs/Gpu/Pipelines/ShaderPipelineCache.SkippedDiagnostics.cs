@@ -91,7 +91,7 @@ internal sealed partial class ShaderPipelineCache
                     },
                     geometryResource1 = vertex.GeometryResource1,
                     geometryResource2 = vertex.GeometryResource2,
-                    userData = vertex.GeometryUserScalars.Values.AsSpan().ToArray(),
+                    userData = ((ReadOnlySpan<uint>)vertex.GeometryUserScalars.Values).ToArray(),
                     ranges = captures,
                     rejectedDraw = true,
                 }, new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }));

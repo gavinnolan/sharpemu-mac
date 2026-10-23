@@ -11,25 +11,35 @@ public enum UserScalarKind : uint
     Region = 2,
 }
 
+[System.Runtime.CompilerServices.InlineArray(UserScalarRegisters.Capacity)]
+public struct UserScalarValues
+{
+    private uint _first;
+}
+
+[System.Runtime.CompilerServices.InlineArray(UserScalarRegisters.Capacity)]
+public struct UserScalarKinds
+{
+    private UserScalarKind _first;
+}
+
+// A stage's user data registers. They are copied on the first write after every draw's register
+// snapshot (RegisterBanks.PrepareShaderWrite), so the values are held inline: one copy is one
+// object, not an object and two arrays.
 public sealed class UserScalarRegisters
 {
     public const int Capacity = 32;
 
-    public uint[] Values = new uint[Capacity];
-    public UserScalarKind[] Kinds = new UserScalarKind[Capacity];
+    public UserScalarValues Values;
+    public UserScalarKinds Kinds;
     public uint Count;
 
-    public UserScalarRegisters Copy() => new()
-    {
-        Values = (uint[])Values.Clone(),
-        Kinds = (UserScalarKind[])Kinds.Clone(),
-        Count = Count,
-    };
+    public UserScalarRegisters Copy() => (UserScalarRegisters)MemberwiseClone();
 
     public void Set(uint index, uint value, UserScalarKind kind)
     {
-        Values[index] = value;
-        Kinds[index] = kind;
+        Values[(int)index] = value;
+        Kinds[(int)index] = kind;
         if (index + 1 > Count)
         {
             Count = index + 1;

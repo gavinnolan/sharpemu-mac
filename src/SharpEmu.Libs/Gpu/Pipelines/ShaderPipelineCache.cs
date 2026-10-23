@@ -158,7 +158,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         // Nothing mutates a source's user data, so a draw whose registers match the last one's shares its array.
-        var words = registers.Values.AsSpan(0, (int)count);
+        var words = ((ReadOnlySpan<uint>)registers.Values)[..(int)count];
         if (previous is not null && words.SequenceEqual(previous))
         {
             return previous;
