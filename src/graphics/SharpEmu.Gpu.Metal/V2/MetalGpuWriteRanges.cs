@@ -619,12 +619,13 @@ internal sealed class MetalGpuWriteRanges
     }
 
     // How many records reach into each 2 MiB bucket, for records spanning at most MaxRecordBuckets
-    // of them; the wider ones are only counted. A query whose buckets hold none, with no wide
-    // record live, skips the walk of every record: the command processor reads its register tables,
-    // labels and operands through here (Grand Theft Auto V: ~400,000 queries a second over some
-    // 200 records each, nearly all finding nothing). Kept by the worker alone, like the records.
+    // of them; the wider ones are listed by their extents. A query whose buckets hold none and that
+    // no wide record reaches skips the walk of every record: the command processor reads its
+    // register tables, labels and operands through here (Grand Theft Auto V: ~400,000 queries a
+    // second over some 200 records each, nearly all finding nothing), and Black Myth: Wukong keeps
+    // a 128 MiB written range live nearly all the time. Kept by the worker alone, like the records.
     private readonly Dictionary<ulong, int> _recordBuckets = [];
-    private int _wideRecords;
+    private readonly List<(ulong Start, ulong End)> _wideRecords = [];
     private const int RecordBucketShift = 21;
     private const ulong MaxRecordBuckets = 32;
 
@@ -637,7 +638,15 @@ internal sealed class MetalGpuWriteRanges
         var last = (end - 1) >> RecordBucketShift;
         if (last - first >= MaxRecordBuckets)
         {
-            _wideRecords += delta;
+            if (delta > 0)
+            {
+                _wideRecords.Add((start, end));
+            }
+            else
+            {
+                _wideRecords.Remove((start, end));
+            }
+
             return;
         }
 
@@ -660,9 +669,12 @@ internal sealed class MetalGpuWriteRanges
             return false;
         }
 
-        if (_wideRecords != 0)
+        foreach (var (start, wideEnd) in _wideRecords)
         {
-            return true;
+            if (wideEnd > address && start < end)
+            {
+                return true;
+            }
         }
 
         var first = address >> RecordBucketShift;
@@ -804,7 +816,7 @@ internal sealed class MetalGpuWriteRanges
             Version++;
             _count = 0;
             _recordBuckets.Clear();
-            _wideRecords = 0;
+            _wideRecords.Clear();
             _labelCount = 0;
             _newestCount = 0;
             _newestOverflow = false;
@@ -883,7 +895,7 @@ internal sealed class MetalGpuWriteRanges
 
         _count = kept + tail;
         _recordBuckets.Clear();
-        _wideRecords = 0;
+        _wideRecords.Clear();
         for (var index = 0; index < _count; index++)
         {
             CountRecordBuckets(_records[index].Start, _records[index].End, 1);
