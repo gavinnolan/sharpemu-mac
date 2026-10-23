@@ -926,6 +926,10 @@ internal sealed partial class MetalRenderHost
                     MetalV2Native.SendVoidValue(
                         descriptor, MetalNative.Selector("setTessellationControlPointIndexType:"), controlPointIndexType);
                 }
+                else if (vertexModule.Shader.Tessellation is { Role: Gen5TessellationRole.Domain } tessellation)
+                {
+                    SetTessellatorState(descriptor, tessellation);
+                }
             }
             else
             {
@@ -1028,7 +1032,8 @@ internal sealed partial class MetalRenderHost
                     descriptor, MetalNative.Selector("setStencilAttachmentPixelFormat:"), (nuint)stencilFormat);
             }
 
-            if (mesh is null && description.VertexInput.AttributeCount != 0)
+            // A domain program fetches no vertices: its inputs are the tessellator's coordinates.
+            if (mesh is null && description.VertexInput.AttributeCount != 0 && vertexModule.Shader.Tessellation is null)
             {
                 var vertexDescriptor = CreateVertexDescriptor(description, rectangleList, out vertexLayout);
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexDescriptor:"), vertexDescriptor);

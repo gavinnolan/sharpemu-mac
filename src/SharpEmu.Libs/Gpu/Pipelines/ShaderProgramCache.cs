@@ -665,6 +665,8 @@ internal sealed class ShaderProgramCache
         _staticState.Add(tessellation.ControlPoints);
         _staticState.Add(tessellation.OffchipBlockBytes);
         _staticState.Add(tessellation.FactorBytesPerPatch);
+        _staticState.Add((uint)tessellation.Partition | (tessellation.OutputClockwise ? 0x100u : 0u));
+        _staticState.Add(tessellation.MaxFactor);
     }
 
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)

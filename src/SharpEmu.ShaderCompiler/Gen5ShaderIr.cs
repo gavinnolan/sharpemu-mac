@@ -181,24 +181,37 @@ public enum Gen5TessellationRole : byte
 {
     // The merged local/hull program: one guest wave64 per threadgroup of PatchesPerGroup patches.
     Hull,
-    // The domain (export) program: three vertices per patch, at its corners.
+    // The domain (export) program: a post-tessellation vertex function over triangle patches.
     Domain,
 }
 
-// A tessellated draw run without a fixed-function tessellator. The hull program runs as a compute
+// VGT_TF_PARAM.PARTITIONING, in the register's order.
+public enum Gen5TessellationPartition : byte
+{
+    Integer,
+    Pow2,
+    FractionalOdd,
+    FractionalEven,
+}
+
+// A tessellated draw on a host whose hull stage is a compute kernel. The hull program runs as a
 // kernel whose threadgroup is one guest wave of PatchesPerGroup patches (ControlPoints lanes each,
 // one per input and output control point): its local half reads the control points' vertices by the
 // ids the host computed from the index buffer, and its hull half hands each patch to the domain stage
 // through the guest's off-chip buffer, OffchipBlockBytes per threadgroup, and writes its tessellation
-// factors, FactorBytesPerPatch per patch, to the guest's factor ring. The domain program then runs
-// per vertex at the three corners of each patch, so every patch is drawn as one triangle: the
-// result of tessellation factor 1, which keeps the corners of every patch where they are.
+// factors, FactorBytesPerPatch per patch, to the guest's factor ring. The host's tessellator then
+// subdivides every patch by those factors (Partition, triangles wound OutputClockwise, factors up to
+// MaxFactor) and the domain program runs as its post-tessellation vertex function, at each point the
+// tessellator makes. Partition, winding and MaxFactor are pipeline state the domain program carries.
 public sealed record Gen5TessellationLaunch(
     Gen5TessellationRole Role,
     uint PatchesPerGroup,
     uint ControlPoints,
     uint OffchipBlockBytes,
-    uint FactorBytesPerPatch)
+    uint FactorBytesPerPatch,
+    Gen5TessellationPartition Partition = Gen5TessellationPartition.Integer,
+    bool OutputClockwise = false,
+    uint MaxFactor = 16)
 {
     // The hull kernel's launch dwords (patch count, first instance) and the control points' vertex ids.
     public const int HullLaunchBufferIndex = 2;

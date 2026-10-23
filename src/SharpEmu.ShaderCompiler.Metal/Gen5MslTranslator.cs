@@ -536,12 +536,13 @@ public static partial class Gen5MslTranslator
                 {
                     UsesPerVertexInputs = UsesVertexValueInputs,
                     UsesMipStatisticsConstant = UsesMipStatisticsConstant,
-                    ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition
+                    ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition && _request.Tessellation is null
                         ? EvaluateConstantPositions(_request.Program.Instructions, _request.ClipSpace)
                         : null,
                     CannotDiscard = _stage == Gen5MslStage.Pixel && _usesPixelValidMask && !_validMaskFromExec,
                     ColorOutputMask = _stage == Gen5MslStage.Pixel ? ColorOutputLocations(_pixelOutputBindings) : 0,
                     PersistentThreads = IsPersistentThreadsKernel(),
+                    Tessellation = _request.Tessellation,
                 };
                 return true;
             }
@@ -715,6 +716,21 @@ public static partial class Gen5MslTranslator
                 EmitInterpolantOutputMembers(source);
                 source.AppendLine("};");
                 source.AppendLine();
+                if (_request.Tessellation is { Role: Gen5TessellationRole.Domain } tessellator)
+                {
+                    if (_vertexInputsByPc.Count != 0)
+                    {
+                        throw new NotSupportedException("A domain program that fetches vertex attributes is not supported.");
+                    }
+
+                    // The tessellator's state is pipeline state; it is written into the source so
+                    // two domain programs that differ only in it never share a library or a state.
+                    source.AppendLine(
+                        $"// tessellator: partition={tessellator.Partition} " +
+                        $"output={(tessellator.OutputClockwise ? "cw" : "ccw")} max={tessellator.MaxFactor}");
+                    source.AppendLine($"[[patch(triangle, {tessellator.ControlPoints})]]");
+                }
+
                 source.AppendLine($"vertex Gen5VsOut {EntryPointName}(");
                 if (_vertexInputsByPc.Count != 0)
                 {
@@ -785,7 +801,13 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
             }
 
-            if (_stage == Gen5MslStage.Vertex)
+            if (_stage == Gen5MslStage.Vertex && _request.Tessellation is { Role: Gen5TessellationRole.Domain })
+            {
+                source.AppendLine("    uint sharpemu_patch_id [[patch_id]],");
+                source.AppendLine("    float3 sharpemu_patch_position [[position_in_patch]],");
+                source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
+            }
+            else if (_stage == Gen5MslStage.Vertex)
             {
                 source.AppendLine("    uint sharpemu_vertex_id [[vertex_id]],");
                 source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
@@ -1054,7 +1076,7 @@ public static partial class Gen5MslTranslator
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
-                if (DebugVertexPosition && DebugsThisProgram)
+                if (DebugVertexPosition && DebugsThisProgram && _request.Tessellation is null)
                 {
                     // SHARPEMU_MSL_DEBUG_VS_POSITION=1 throws the program's own clip
                     // position away and puts every triple of vertices across the whole
@@ -1384,19 +1406,16 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    active = true;");
         }
 
-        // The domain program at one corner of one patch: three vertices per patch, corner c of patch p
-        // at tessellation coordinates (1, 0), (0, 1) or (0, 0) - u in v5, v in v6 - with the patch
-        // within its hull threadgroup in v7, the patch in v8 and that group's off-chip offset in s4.
+        // The domain program at one point the tessellator made: its barycentric u and v in v5/v6, the
+        // patch within its hull threadgroup in v7, the patch in v8 and that group's off-chip offset in s4.
         private static void EmitDomainLaunchState(StringBuilder source, Gen5TessellationLaunch domain)
         {
             var patches = domain.PatchesPerGroup;
-            source.AppendLine("    uint sharpemu_domain_patch = sharpemu_vertex_id / 3u;");
-            source.AppendLine("    uint sharpemu_domain_corner = sharpemu_vertex_id - sharpemu_domain_patch * 3u;");
-            source.AppendLine("    v[5] = as_type<uint>(sharpemu_domain_corner == 0u ? 1.0f : 0.0f);");
-            source.AppendLine("    v[6] = as_type<uint>(sharpemu_domain_corner == 1u ? 1.0f : 0.0f);");
-            source.AppendLine($"    v[7] = sharpemu_domain_patch % {patches}u;");
-            source.AppendLine("    v[8] = sharpemu_domain_patch;");
-            source.AppendLine($"    s[4] = (sharpemu_domain_patch / {patches}u) * {domain.OffchipBlockBytes}u;");
+            source.AppendLine("    v[5] = as_type<uint>(sharpemu_patch_position.x);");
+            source.AppendLine("    v[6] = as_type<uint>(sharpemu_patch_position.y);");
+            source.AppendLine($"    v[7] = sharpemu_patch_id % {patches}u;");
+            source.AppendLine("    v[8] = sharpemu_patch_id;");
+            source.AppendLine($"    s[4] = (sharpemu_patch_id / {patches}u) * {domain.OffchipBlockBytes}u;");
         }
 
         private static void EmitComputeSystemRegister(

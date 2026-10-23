@@ -784,7 +784,7 @@ public sealed partial class RenderExecutor
     private static (uint Count, uint First) UpcomingVertices(
         UserConfigRegisters userConfig, in DrawCall draw, in DrawEmission emission)
     {
-        if (emission.Indexed || emission.IndirectArgumentsAddress != 0)
+        if (emission.Indexed || emission.IndirectArgumentsAddress != 0 || emission.PatchControlPoints != 0)
         {
             return (0, 0);
         }
@@ -804,17 +804,9 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (emission.PlainList)
+        if (emission.PatchControlPoints != 0)
         {
-            if (emission.Indexed)
-            {
-                _host.DrawIndexed(draw.Count, draw.InstanceCount, 0, emission.VertexOffset, emission.FirstInstance);
-            }
-            else
-            {
-                _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
-            }
-
+            _host.DrawPatches(emission.PatchControlPoints, draw.Count, draw.InstanceCount, emission.FirstInstance);
             return;
         }
 

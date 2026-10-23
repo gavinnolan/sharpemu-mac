@@ -4,14 +4,15 @@
 using System.Text.RegularExpressions;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
 
-// A tessellated draw on a host without a tessellator (Gen5TessellationLaunch): the merged local/hull
+// A tessellated draw whose hull stage is a compute kernel (Gen5TessellationLaunch): the merged local/hull
 // program starts as the hardware's hull stage would start it, one guest wave64 per threadgroup of whole
-// patches, and the domain program per vertex at the corners of each patch. Grand Theft Auto V's palm
+// patches, and the domain program is the host tessellator's post-tessellation vertex function. Grand Theft Auto V's palm
 // trunks: 3 control points, 21 patches a group, 32 KB of the off-chip buffer and 16 factor bytes a patch.
-public sealed class Gen5MslTessellationLaunchTests
+public sealed class Gen5MslTessellationLaunchTests(ITestOutputHelper output)
 {
     private static readonly uint[] EndProgram =
     [
@@ -42,28 +43,58 @@ public sealed class Gen5MslTessellationLaunchTests
     }
 
     [Fact]
-    public void ADomainVertexIsOneCornerOfOnePatch()
+    public void TheDomainProgramIsAPostTessellationVertexFunction()
     {
         var source = Compile(ShaderStage.Vertex,
-            new Gen5TessellationLaunch(Gen5TessellationRole.Domain, 21, 3, 0x8000, 16));
+            new Gen5TessellationLaunch(Gen5TessellationRole.Domain, 21, 3, 0x8000, 16,
+                Gen5TessellationPartition.FractionalOdd, OutputClockwise: true, MaxFactor: 15));
 
-        Assert.Contains("uint sharpemu_domain_patch = sharpemu_vertex_id / 3u;", source, StringComparison.Ordinal);
-        // u and v: corners (1, 0), (0, 1) and (0, 0).
-        Assert.Contains("v5 = as_type<uint>(sharpemu_domain_corner == 0u ? 1.0f : 0.0f);", source, StringComparison.Ordinal);
-        Assert.Contains("v6 = as_type<uint>(sharpemu_domain_corner == 1u ? 1.0f : 0.0f);", source, StringComparison.Ordinal);
-        // The patch within its hull group, the patch, and that group's off-chip offset.
-        Assert.Contains("v7 = sharpemu_domain_patch % 21u;", source, StringComparison.Ordinal);
-        Assert.Contains("v8 = sharpemu_domain_patch;", source, StringComparison.Ordinal);
-        Assert.Contains("s4 = (sharpemu_domain_patch / 21u) * 32768u;", source, StringComparison.Ordinal);
+        // The tessellator's state is in the source, so domain programs differing only in it never share a library.
+        Assert.Contains("// tessellator: partition=FractionalOdd output=cw max=15\n[[patch(triangle, 3)]]\nvertex Gen5VsOut",
+            source.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.Contains("uint sharpemu_patch_id [[patch_id]],", source, StringComparison.Ordinal);
+        Assert.Contains("float3 sharpemu_patch_position [[position_in_patch]],", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("[[vertex_id]]", source, StringComparison.Ordinal);
+        // u and v, the patch within its hull group, the patch, and that group's off-chip offset.
+        Assert.Contains("v5 = as_type<uint>(sharpemu_patch_position.x);", source, StringComparison.Ordinal);
+        Assert.Contains("v6 = as_type<uint>(sharpemu_patch_position.y);", source, StringComparison.Ordinal);
+        Assert.Contains("v7 = sharpemu_patch_id % 21u;", source, StringComparison.Ordinal);
+        Assert.Contains("v8 = sharpemu_patch_id;", source, StringComparison.Ordinal);
+        Assert.Contains("s4 = (sharpemu_patch_id / 21u) * 32768u;", source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Gen5TessellationRole.Hull)]
+    [InlineData(Gen5TessellationRole.Domain)]
+    public void MetalCompilesBothStages(Gen5TessellationRole role)
+    {
+        if (!MetalNative.IsAvailable)
+        {
+            Assert.False(
+                OperatingSystem.IsMacOS() && Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1",
+                "The required gate cannot compile the tessellation stages without a Metal device.");
+            output.WriteLine("No Metal device on this host; the tessellation compile test skipped.");
+            return;
+        }
+
+        var shader = CompileShader(role == Gen5TessellationRole.Hull ? ShaderStage.Compute : ShaderStage.Vertex,
+            new Gen5TessellationLaunch(role, 21, 3, 0x8000, 16, Gen5TessellationPartition.FractionalOdd, OutputClockwise: true, MaxFactor: 15));
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), $"Metal rejected the {role} MSL: {error}\n{shader.Source}");
     }
 
     private static string Compile(ShaderStage stage, Gen5TessellationLaunch tessellation)
+    {
+        // Registers the program never indexes are emitted as locals (s2) rather than file entries (s[2]).
+        return Regex.Replace(CompileShader(stage, tessellation).Source, @"\b([sv])\[(\d+)\]", "$1$2");
+    }
+
+    private static Gen5MslShader CompileShader(ShaderStage stage, Gen5TessellationLaunch tessellation)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("tessellation", EndProgram, 0, 0));
         var request = Gen5ComputeFixtures.RequestOrThrow(program, stage,
             waveLaneCount: 64, localSizeX: 64, tessellation: tessellation);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
-        // Registers the program never indexes are emitted as locals (s2) rather than file entries (s[2]).
-        return Regex.Replace(shader.Source, @"\b([sv])\[(\d+)\]", "$1$2");
+        Assert.Same(tessellation, shader.Tessellation);
+        return shader;
     }
 }

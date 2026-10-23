@@ -11,16 +11,15 @@ using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
-// A tessellated draw on a host without a tessellator (IRenderHost.SupportsTessellationEmulation).
+// A tessellated draw on a host whose hull stage is a compute kernel (IRenderHost.SupportsTessellationEmulation).
 //
-// Grand Theft Auto V tessellates the near version of its palm trunks and other meshes; the shadow
-// passes draw them untessellated, so their shadows fall where the trunks are missing. The draw runs
-// as the hardware would run it with every tessellation factor at 1: the merged local/hull program as
-// a compute kernel over the patches (one guest wave64 per threadgroup, as many whole patches as fit),
-// which hands each patch to the domain stage through the guest's off-chip buffer, and then the domain
-// program per vertex at the three corners of every patch, drawn as a triangle list with the pixel
-// program as usual. A factor of 1 keeps every patch's corners where they are, so the mesh is the one
-// the shadow pass draws, shaded by the draw's own programs (Gen5TessellationLaunch).
+// Grand Theft Auto V tessellates the near version of its palm trunks and other meshes (curved
+// PN triangles with a displacement texture); the shadow passes draw them untessellated. The merged
+// local/hull program runs as a compute kernel over the patches (one guest wave64 per threadgroup, as
+// many whole patches as fit), which hands each patch to the domain stage through the guest's off-chip
+// buffer and writes its tessellation factors to the guest's factor ring; the host turns those into its
+// tessellator's factors, and the patches are drawn through that tessellator with the domain program as
+// the post-tessellation vertex function and the pixel program as usual (Gen5TessellationLaunch).
 //
 // Only triangle patches with as many output control points as input ones are taken, and only as many
 // patches as the guest's off-chip buffer and factor ring hold at once; anything else is skipped as
@@ -31,19 +30,18 @@ public sealed partial class RenderExecutor
     private const uint LocalStageEnable = 0x1;
     private const uint HullStageEnable = 0x4;
 
-    // DI_PT_PATCH, and VGT_TF_PARAM.TYPE's triangle domain.
+    // DI_PT_PATCH, and VGT_TF_PARAM.TYPE's triangle domain and TOPOLOGY's two triangle windings.
     private const uint PatchPrimitiveType = 9;
     private const uint TriangleTessellationDomain = 1;
+    private const uint TriangleClockwiseTopology = 2;
+    private const uint TriangleCounterClockwiseTopology = 3;
 
     private static readonly bool EmulateTessellation =
         Environment.GetEnvironmentVariable("SHARPEMU_TESSELLATION") != "0";
 
     private static int _tessellationRefusalWarnings;
-    private long _tessellatedDraws;
-    private long _tessellatedPatches;
-
-    internal (long Draws, long Patches) TakeTessellationCounters() =>
-        (Interlocked.Exchange(ref _tessellatedDraws, 0), Interlocked.Exchange(ref _tessellatedPatches, 0));
+    private static int _instancedTessellationWarnings;
+    private bool _tessellationAnnounced;
 
     // Whether this draw is a tessellated one the host runs, and how many control points its patches have.
     private bool IsEmulatedTessellation(RegisterBanks banks, out uint controlPoints)
@@ -61,11 +59,16 @@ public sealed partial class RenderExecutor
         var configuration = banks.Context.ShaderInterface.LocalHullConfiguration;
         var inputPoints = (configuration >> 8) & 0x3F;
         var outputPoints = (configuration >> 14) & 0x3F;
-        var domain = banks.Context.ShaderInterface.TessellationFactorParameter & 0x3;
-        if (inputPoints == 0 || inputPoints != outputPoints || inputPoints > 32 || domain != TriangleTessellationDomain)
+        var parameter = banks.Context.ShaderInterface.TessellationFactorParameter;
+        var domain = parameter & 0x3;
+        var partition = (parameter >> 2) & 0x7;
+        var topology = (parameter >> 5) & 0x7;
+        if (inputPoints == 0 || inputPoints != outputPoints || inputPoints > 32 || domain != TriangleTessellationDomain ||
+            partition > 3 || (topology != TriangleClockwiseTopology && topology != TriangleCounterClockwiseTopology))
         {
             WarnTessellationRefused(
-                $"control points {inputPoints} in, {outputPoints} out, domain {domain} (VGT_LS_HS_CONFIG=0x{configuration:X8})");
+                $"control points {inputPoints} in, {outputPoints} out, domain {domain}, partition {partition}, topology {topology} " +
+                $"(VGT_LS_HS_CONFIG=0x{configuration:X8} VGT_TF_PARAM=0x{parameter:X8})");
             return false;
         }
 
@@ -95,13 +98,26 @@ public sealed partial class RenderExecutor
         // allocated; the factor ring holds its size over the bytes of one patch.
         var offchipBlocks = (TessellationRings.OffchipParameter & 0x1FF) + 1;
         var factorPatches = TessellationRings.TessFactorRingSize / ShaderPipelineCache.TessellationFactorBytesPerPatch;
+        if (TessellationRings.TessFactorRing == 0)
+        {
+            WarnTessellationRefused("the guest has set no tessellation-factor ring");
+            return;
+        }
+
         if (groups > offchipBlocks || patchCount > factorPatches)
         {
             WarnTessellationRefused($"{patchCount} patches in {groups} groups, the guest's rings hold {offchipBlocks} groups and {factorPatches} patches");
             return;
         }
 
-        var draw = new DrawCall("DrawTessellated", RecordedOperation.DrawIndex, patchCount * 3, arguments.InstanceCount, arguments.FirstInstance);
+        if (arguments.InstanceCount > 1 && Interlocked.Increment(ref _instancedTessellationWarnings) <= 4)
+        {
+            // The hull kernel runs for the first instance only; every instance draws its patches.
+            Console.Error.WriteLine(
+                $"[GPU][WARN] A tessellated draw of {arguments.InstanceCount} instances runs its hull stage for the first one only.");
+        }
+
+        var draw = new DrawCall("DrawTessellated", RecordedOperation.DrawIndex, patchCount, arguments.InstanceCount, arguments.FirstInstance);
         ref var state = ref BeginDrawState();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
@@ -136,21 +152,20 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        // The corners of every patch, three vertices each, in patch order (EmitDomainLaunchState).
-        var emission = new DrawEmission(false, 0, 0, arguments.FirstInstance, PlainList: true);
+        // Every patch through the host's tessellator, with the factors TryRunHull had it make.
+        var emission = new DrawEmission(false, 0, 0, arguments.FirstInstance, PatchControlPoints: controlPoints);
         var indexSource = new IndexSource(false, 0, null, 0, GpuIndexType.Uint16);
         _ = RecordDraw(submitId, banks, in draw, ref state, GpuPrimitiveTopology.TriangleList, in emission, in indexSource,
             primitiveRestart: false, setBindDebug: true, setAutoDebug: false);
         _host.ResetBindings();
-        if (_tessellatedDraws++ == 0)
+        if (!_tessellationAnnounced)
         {
+            _tessellationAnnounced = true;
             Console.Error.WriteLine(
-                $"[GPU][INFO] Tessellated draws run as a hull kernel and a draw of every patch's corners: " +
+                $"[GPU][INFO] Tessellated draws run as a hull kernel and a patch draw through the host's tessellator: " +
                 $"first draw {patchCount} patches of {controlPoints} control points in {groups} groups, " +
                 $"local=0x{banks.Shader.Vertex.LocalAddress:X16} domain=0x{banks.Shader.Vertex.ExportAddress:X16}.");
         }
-
-        _tessellatedPatches += patchCount;
     }
 
     // Runs the hull kernel over every patch of the draw; false while its pipeline still compiles
@@ -189,6 +204,11 @@ public sealed partial class RenderExecutor
             _host.Dispatch(groups, 1, 1);
             _host.EndComputeImageSnapshot(imageSnapshot, bindings);
             _host.ShaderAccessBarrier();
+            var shaderInterface = banks.Context.ShaderInterface;
+            _host.PrepareTessellationFactors(
+                TessellationRings.TessFactorRing, patchCount,
+                BitConverter.UInt32BitsToSingle(shaderInterface.MinTessellationLevel),
+                BitConverter.UInt32BitsToSingle(shaderInterface.MaxTessellationLevel));
         }
 
         _host.ResetBindings();

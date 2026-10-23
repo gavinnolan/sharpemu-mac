@@ -255,9 +255,17 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     public static uint TessellationPatchesPerGroup(uint controlPoints) =>
         controlPoints == 0 ? 0 : HullWaveLanes / controlPoints;
 
-    // The programs of a tessellated draw run without a tessellator (Gen5TessellationLaunch): the
-    // domain program per vertex with the pixel program as for any draw, and the merged local/hull
-    // program as a compute kernel the executor runs first.
+    // The largest factor the guest's tessellator allows (VGT_HOS_MAX_TESS_LEVEL), rounded up: part of
+    // the domain program's pipeline state, which the host sizes its own tessellator's limit from.
+    public static uint TessellationMaxFactor(uint maxLevelBits)
+    {
+        var level = BitConverter.UInt32BitsToSingle(maxLevelBits);
+        return float.IsFinite(level) ? (uint)Math.Clamp(MathF.Ceiling(level), 1f, 64f) : 64u;
+    }
+
+    // The programs of a tessellated draw (Gen5TessellationLaunch): the domain program as the host
+    // tessellator's post-tessellation vertex function with the pixel program as for any draw, and
+    // the merged local/hull program as a compute kernel the executor runs first.
     public TessellationPrograms? GetTessellationPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
@@ -270,9 +278,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool stencilAspectBound,
         uint controlPoints)
     {
+        // VGT_TF_PARAM: PARTITIONING [4:2], TOPOLOGY [7:5] (2 = triangles wound clockwise, 3 =
+        // counter-clockwise; RenderExecutor.IsEmulatedTessellation takes no other).
+        var parameter = shaderInterface.TessellationFactorParameter;
         var domain = new Gen5TessellationLaunch(
             Gen5TessellationRole.Domain, TessellationPatchesPerGroup(controlPoints), controlPoints,
-            TessellationOffchipBlockBytes, TessellationFactorBytesPerPatch);
+            TessellationOffchipBlockBytes, TessellationFactorBytesPerPatch,
+            (Gen5TessellationPartition)((parameter >> 2) & 0x3),
+            OutputClockwise: ((parameter >> 5) & 0x7) == 2,
+            TessellationMaxFactor(shaderInterface.MaxTessellationLevel));
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
         lock (_resolveGate)
         {

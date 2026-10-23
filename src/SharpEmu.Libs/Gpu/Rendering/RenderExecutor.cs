@@ -72,11 +72,11 @@ public sealed partial class RenderExecutor
     // IndirectIndexLimit bounds an indexed draw's count as the bound index range does.
     // TriangleListIndices: nonzero when the draw was converted to an indexed triangle list of
     // that many indices (TriangulateFans), which EmitDraw then draws whatever the guest type.
-    // PlainList: the draw is the list its count says whatever the guest primitive type (a tessellated
-    // draw's patch corners, RenderExecutor.Tessellation.cs).
+    // PatchControlPoints: the draw is that many patches of this many control points through the
+    // host's tessellator, whatever the guest primitive type (RenderExecutor.Tessellation.cs).
     private readonly record struct DrawEmission(bool Indexed, int VertexOffset, uint FirstVertex, uint FirstInstance,
         ulong IndirectArgumentsAddress = 0, uint IndirectIndexLimit = uint.MaxValue, uint TriangleListIndices = 0,
-        bool PlainList = false);
+        uint PatchControlPoints = 0);
 
     private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, GpuIndexType Type);
 
