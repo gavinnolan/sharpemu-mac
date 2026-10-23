@@ -199,6 +199,24 @@ public sealed partial class RenderExecutor
         public static DrawState Create() => new() { PixelActive = true, Programs = null! };
     }
 
+    // The draw being recorded. As a local, the 3.5 KB DrawState pushed the draw methods'
+    // frames past a page, so every draw called the stack-probe helper and zeroed the frame
+    // (~5% of the GPU worker under Rosetta). Only what a draw reads before it writes is
+    // reset; colors past ColorCount are never read. Draws nest only where the outer draw
+    // returns right after the inner one.
+    private DrawState _drawState = DrawState.Create();
+
+    private ref DrawState BeginDrawState()
+    {
+        ref var state = ref _drawState;
+        state.ColorCount = 0;
+        state.Depth = default;
+        state.PixelActive = true;
+        state.Rendering = default;
+        state.Programs = null!;
+        return ref state;
+    }
+
     private static ReadOnlySpan<ColorTargetState> BoundColors(ref DrawState state) =>
         ((ReadOnlySpan<ColorTargetState>)state.Colors)[..(int)state.ColorCount];
 
@@ -460,7 +478,7 @@ public sealed partial class RenderExecutor
             expandedIndices,
             expandedIndices is null ? indexSize : (ulong)expandedIndices.Length,
             indexType);
-        var state = DrawState.Create();
+        ref var state = ref BeginDrawState();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
             TraceDisposition("no-targets");
@@ -658,7 +676,7 @@ public sealed partial class RenderExecutor
 
         ValidateDrawRegisters(banks);
         var draw = new DrawCall("DrawAuto", RecordedOperation.DrawIndexAuto, arguments.VertexCount, arguments.InstanceCount, arguments.FirstInstance);
-        var state = DrawState.Create();
+        ref var state = ref BeginDrawState();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
             TraceDrawTargets(banks, "no-targets");
