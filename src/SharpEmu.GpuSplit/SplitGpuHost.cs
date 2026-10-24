@@ -289,6 +289,9 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 GuestGpuMemoryHook.Attach(_memory);
                 VideoOutBackendServices.Bridge = _bridge;
                 EndOfPipeEvents.Redirect = new InterruptSink(this);
+                // The overlay counts guest flip submissions, which happen in the guest process;
+                // this one presents every guest frame, so it counts those instead (else 0 fps).
+                PerfOverlay.UsePresentedGuestFrameTiming();
                 _globalsInstalled = true;
             }
 
