@@ -31,6 +31,7 @@ internal sealed class SplitWriter
     private readonly GpuRemoteChannel _channel;
     private ulong _written;
     private int _stallReported;
+    private bool _closed;
 
     public SplitWriter(GpuRemoteChannel channel, RingWriter ring, object gate)
     {
@@ -77,9 +78,26 @@ internal sealed class SplitWriter
         }
     }
 
+    /// <summary>
+    /// No more writes: once a write in progress is done, every later one fails. Called before the
+    /// region is unmapped.
+    /// </summary>
+    public void Close()
+    {
+        lock (Gate)
+        {
+            _closed = true;
+        }
+    }
+
     /// <summary>Writes with <see cref="Gate"/> already held (a caller that numbers its records under it).</summary>
     public bool WriteLocked(GpuRemoteMessage type, ReadOnlySpan<byte> payload)
     {
+        if (_closed)
+        {
+            return false;
+        }
+
         if (_ring.Write((uint)type, payload, StallNanoseconds) ||
             (_channel.IsPeerAlive && ReportStall(type) && _ring.Write((uint)type, payload, TimeoutNanoseconds - StallNanoseconds)))
         {

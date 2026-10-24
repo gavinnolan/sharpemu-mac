@@ -445,26 +445,36 @@ public sealed class SplitGpuSession : IDisposable
     // this process's spans; one no longer registered here (unmapped meanwhile) is left alone.
     private void Apply(in ProtectRequestMessage request)
     {
-        var space = _memory.AddressSpace;
-        if (!_memory.Covers(request.Address, request.Size))
+        try
         {
-            Interlocked.Increment(ref _protectsSkipped);
-        }
-        else
-        {
-            var applied = (request.Flags & ProtectRequestFlags.Derived) != 0 && space is IGuestDerivedProtectionAddressSpace derived
-                ? derived.TryApplyDerivedProtection(request.Address, request.Size, (GuestPageProtection)request.GuestAccess,
-                    (GuestPageProtection)request.Access, (request.Flags & ProtectRequestFlags.OrdinaryEnrollment) != 0)
-                : space.TryProtect(request.Address, request.Size, (GuestPageProtection)request.Access);
-            if (applied)
+            var space = _memory.AddressSpace;
+            if (!_memory.Covers(request.Address, request.Size))
             {
-                Interlocked.Increment(ref _protectsApplied);
+                Interlocked.Increment(ref _protectsSkipped);
             }
             else
             {
-                Report($"Page protection #{request.Sequence} (0x{request.Address:X16}+0x{request.Size:X} -> " +
-                    $"{(GuestPageProtection)request.Access}) could not be applied.");
+                var applied = (request.Flags & ProtectRequestFlags.Derived) != 0 && space is IGuestDerivedProtectionAddressSpace derived
+                    ? derived.TryApplyDerivedProtection(request.Address, request.Size, (GuestPageProtection)request.GuestAccess,
+                        (GuestPageProtection)request.Access, (request.Flags & ProtectRequestFlags.OrdinaryEnrollment) != 0)
+                    : space.TryProtect(request.Address, request.Size, (GuestPageProtection)request.Access);
+                if (applied)
+                {
+                    Interlocked.Increment(ref _protectsApplied);
+                }
+                else
+                {
+                    Report($"Page protection #{request.Sequence} (0x{request.Address:X16}+0x{request.Size:X} -> " +
+                        $"{(GuestPageProtection)request.Access}) could not be applied.");
+                }
             }
+        }
+        catch (Exception exception)
+        {
+            // The runtime tearing the guest memory down under a late request, or a protection
+            // that threw: either way it is acknowledged, or the GPU host would wait it out.
+            Interlocked.Increment(ref _protectsSkipped);
+            Report($"Page protection #{request.Sequence} failed: {exception.Message}");
         }
 
         _state.ProtectApplied.Publish(request.Sequence);
@@ -674,6 +684,7 @@ public sealed class SplitGpuSession : IDisposable
             Detach();
         }
 
+        Writer.Close();
         _events.CompleteAdding();
         _channel.WakeAll();
         // The process's teardown unmaps the region: these threads must be off it first.
