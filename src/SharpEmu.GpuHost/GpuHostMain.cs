@@ -96,6 +96,9 @@ public static class GpuHostMain
                 QueryHdrOutputSupport = probe ? null : static () => HostVideoHost.IsHdrOutputSupported,
             });
             client.Service = service;
+            // Calls that wait for the GPU (a frame boundary, a fault's writeback, a bracket) each
+            // hold a thread; enough of them that a write fault never queues behind those.
+            client.SyncThreadCount = 8;
 
             var exitCode = GpuProcessClient.ExitClean;
             var ring = new Thread(() =>

@@ -35,12 +35,30 @@ public static class SplitGpuComposition
         Console.Error.WriteLine("[LOADER][INFO] GPU backend: Metal v2 in a separate GPU process (SHARPEMU_GPU_PROCESS=1).");
     }
 
+    // GuestGpu asks again after a factory that threw: a GPU host that could not start is not
+    // started again (and again) for every later export, it fails the same way.
     private static IGuestGpuBackend CreateBackend()
     {
-        var session = SplitGpuSession.Start(Volatile.Read(ref _videoOptions));
-        Volatile.Write(ref _session, session);
-        return session.Backend;
+        if (Volatile.Read(ref _startFailure) is { } failure)
+        {
+            throw new GpuProcessException(failure.Message, failure);
+        }
+
+        try
+        {
+            var session = SplitGpuSession.Start(Volatile.Read(ref _videoOptions));
+            Volatile.Write(ref _session, session);
+            return session.Backend;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[GPU-SPLIT][ERROR] {exception.Message}");
+            Volatile.Write(ref _startFailure, exception);
+            throw;
+        }
     }
+
+    private static Exception? _startFailure;
 
     // Before the GPU host exists the options wait for its start; after, they are sent.
     private static bool ConfigureVideo(HostVideoOptions options)
