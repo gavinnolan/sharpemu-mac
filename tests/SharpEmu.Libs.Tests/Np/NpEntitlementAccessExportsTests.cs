@@ -73,6 +73,71 @@ public sealed class NpEntitlementAccessExportsTests
             NpEntitlementAccessExports.NpEntitlementAccessGetAddcontEntitlementInfo(context));
     }
 
+    [Fact]
+    public void AddcontList_IsEmptyForATitleWithoutKnownAddons()
+    {
+        try
+        {
+            NpEntitlementAccessExports.ConfigureApplicationInfo("PPSA27366");
+            var (result, hitNum, labels) = GetAddcontList(listNum: 8);
+
+            Assert.Equal(0, result);
+            Assert.Equal(0U, hitNum);
+            Assert.Empty(labels);
+        }
+        finally
+        {
+            NpEntitlementAccessExports.ConfigureApplicationInfo(null);
+        }
+    }
+
+    [Theory]
+    [InlineData("PPSA04264", new[] { "85y-je", "5d5c48", "_mtqu6" })]
+    [InlineData("PPSA26344", new[] { "GHOST2APP0000000", "GHOST2BASE000000" })]
+    public void AddcontList_ReportsOnlyTheRunningTitlesLabels(string titleId, string[] expected)
+    {
+        try
+        {
+            NpEntitlementAccessExports.ConfigureApplicationInfo(titleId);
+            var (result, hitNum, labels) = GetAddcontList(listNum: 8);
+
+            Assert.Equal(0, result);
+            Assert.Equal((uint)expected.Length, hitNum);
+            Assert.Equal(expected, labels);
+        }
+        finally
+        {
+            NpEntitlementAccessExports.ConfigureApplicationInfo(null);
+        }
+    }
+
+    private static (int Result, uint HitNum, string[] Labels) GetAddcontList(uint listNum)
+    {
+        const int InfoSize = 0x1C;
+        var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var listAddress = MemoryBase + 0x100;
+        var hitNumAddress = MemoryBase + 0x800;
+        context[CpuRegister.Rsi] = listAddress;
+        context[CpuRegister.Rdx] = listNum;
+        context[CpuRegister.Rcx] = hitNumAddress;
+
+        var result = NpEntitlementAccessExports.NpEntitlementAccessGetAddcontEntitlementInfoList(context);
+
+        Span<byte> hitNumBytes = stackalloc byte[sizeof(uint)];
+        Assert.True(memory.TryRead(hitNumAddress, hitNumBytes));
+        var hitNum = BinaryPrimitives.ReadUInt32LittleEndian(hitNumBytes);
+        var labels = new List<string>();
+        Span<byte> info = stackalloc byte[InfoSize];
+        for (var index = 0u; index < Math.Min(hitNum, listNum); index++)
+        {
+            Assert.True(memory.TryRead(listAddress + index * InfoSize, info));
+            labels.Add(ReadCString(info[..17]));
+        }
+
+        return (result, hitNum, labels.ToArray());
+    }
+
     private static string ReadCString(ReadOnlySpan<byte> value)
     {
         var length = value.IndexOf((byte)0);

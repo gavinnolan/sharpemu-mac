@@ -32,14 +32,46 @@ public static class NpEntitlementAccessExports
     // game entitlements before it creates the frontend.  These represent the
     // locally installed main package only; optional editions and add-ons remain
     // unowned.
-    private static readonly AddcontEntitlement[] OwnedAddcontEntitlements =
+    private static readonly AddcontEntitlement[] GtaVEntitlements =
     [
         new("85y-je", PackageTypePsal, DownloadStatusInstalled),
         new("5d5c48", PackageTypePsal, DownloadStatusInstalled),
         new("_mtqu6", PackageTypePsal, DownloadStatusInstalled),
+    ];
+
+    private static readonly AddcontEntitlement[] GhostOfYoteiEntitlements =
+    [
         new("GHOST2APP0000000", PackageTypePsal, DownloadStatusInstalled),
         new("GHOST2BASE000000", PackageTypePsal, DownloadStatusInstalled),
     ];
+
+    // A label lookup only names a label the title already knows, so lookups search every
+    // known label and need no title id (GTA V ships under several regional ids).
+    private static readonly AddcontEntitlement[] OwnedAddcontEntitlements =
+        [.. GtaVEntitlements, .. GhostOfYoteiEntitlements];
+
+    // The list call enumerates what is installed, so it reports only the running title's
+    // labels. A title outside this table owns no add-ons: AI LIMIT (PPSA27366) treated the
+    // GTA V labels it was handed as its own installed DLC and stopped booting. Only
+    // PPSA04264 was checked against a dump; the other GTA V ids are its store regions.
+    private static readonly Dictionary<string, AddcontEntitlement[]> AddcontEntitlementsByTitle =
+        new(StringComparer.Ordinal)
+        {
+            ["PPSA01721"] = GtaVEntitlements,
+            ["PPSA03420"] = GtaVEntitlements,
+            ["PPSA04264"] = GtaVEntitlements,
+            ["PPSA26344"] = GhostOfYoteiEntitlements,
+        };
+
+    private static AddcontEntitlement[] _titleAddcontEntitlements = [];
+
+    public static void ConfigureApplicationInfo(string? titleId) =>
+        Volatile.Write(
+            ref _titleAddcontEntitlements,
+            titleId is not null &&
+            AddcontEntitlementsByTitle.TryGetValue(titleId.Trim(), out var entitlements)
+                ? entitlements
+                : []);
 
     private readonly record struct AddcontEntitlement(
         string Label,
@@ -131,7 +163,8 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(NpEntitlementAccessErrorParameter);
         }
 
-        var hitNum = (uint)OwnedAddcontEntitlements.Length;
+        var entitlements = Volatile.Read(ref _titleAddcontEntitlements);
+        var hitNum = (uint)entitlements.Length;
         Span<byte> hitNumBytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(hitNumBytes, hitNum);
         if (!ctx.Memory.TryWrite(hitNumAddress, hitNumBytes))
@@ -157,7 +190,7 @@ public static class NpEntitlementAccessExports
                 if (!TryWriteAddcontEntitlementInfo(
                         ctx,
                         listAddress + index * (ulong)AddcontEntitlementInfoSize,
-                        OwnedAddcontEntitlements[(int)index]))
+                        entitlements[(int)index]))
                 {
                     return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
