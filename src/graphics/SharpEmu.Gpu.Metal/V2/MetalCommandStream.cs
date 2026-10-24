@@ -2201,6 +2201,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // flip is this host's frame boundary, so SHARPEMU_PROFILE_RENDER=1 reports the
         // same breakdown here without any Metal-specific instrumentation.
         SharpEmu.Libs.VideoOut.RenderPhaseProfile.RecordFrame();
+        SharpEmu.Libs.VideoOut.PresentTimeLog.Record();
     }
 
     // What the flip actually resolved to. A title whose frames come out black has either

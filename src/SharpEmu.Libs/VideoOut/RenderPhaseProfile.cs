@@ -236,12 +236,23 @@ public static class RenderPhaseProfile
             "1",
             StringComparison.Ordinal);
 
+    // SHARPEMU_PROFILE_SLOW_FRAME_MS=<n> (with the profile on): a frame whose flip comes n ms or
+    // more after the previous one prints its own phase breakdown at once, so a hitch can be told
+    // apart - the render thread busy (and where), or idle waiting for the guest.
+    private static readonly long SlowFrameTicks =
+        double.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_SLOW_FRAME_MS"),
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var slowMilliseconds) && slowMilliseconds > 0
+            ? (long)(slowMilliseconds * Stopwatch.Frequency / 1000.0)
+            : 0;
+
     internal static readonly bool FrameTraceEnabled =
         Enabled &&
-        string.Equals(
+        (SlowFrameTicks > 0 || string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"),
             "1",
-            StringComparison.Ordinal);
+            StringComparison.Ordinal));
 
     private static readonly double _reportSeconds =
         double.TryParse(
@@ -537,6 +548,11 @@ public static class RenderPhaseProfile
             _frameTrace[traceOffset + 1] = _previousFrameTimestamp == 0 ? 0 : now - _previousFrameTimestamp;
             _frameTrace[traceOffset + 2] = Interlocked.Read(ref _lastSubmissionTimestamp);
             _frameTrace[traceOffset + 3] = Interlocked.Read(ref _submissionCount);
+            if (SlowFrameTicks > 0 && _previousFrameTimestamp != 0 && now - _previousFrameTimestamp >= SlowFrameTicks)
+            {
+                WriteSlowFrame(now - _previousFrameTimestamp);
+            }
+
             Array.Copy(_framePhaseTicks, 0, _frameTrace, traceOffset + 4, (int)Phase.Count);
             Array.Clear(_framePhaseTicks);
             _previousFrameTimestamp = now;
@@ -544,6 +560,18 @@ public static class RenderPhaseProfile
         }
 
         ReportWindow(now);
+    }
+
+    private static void WriteSlowFrame(long gapTicks)
+    {
+        var phases = Enumerable.Range(0, (int)Phase.Count)
+            .Where(phase => _framePhaseTicks[phase] > 0)
+            .OrderByDescending(phase => _framePhaseTicks[phase])
+            .Take(12)
+            .Select(phase => $"{(Phase)phase}={_framePhaseTicks[phase] * 1000.0 / Stopwatch.Frequency:F1}");
+        Console.Error.WriteLine(
+            $"[PERF][SLOW_FRAME] unix_ms={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} " +
+            $"gap_ms={gapTicks * 1000.0 / Stopwatch.Frequency:F1} {string.Join(" ", phases)}");
     }
 
     private static void ReportIfWindowElapsed()

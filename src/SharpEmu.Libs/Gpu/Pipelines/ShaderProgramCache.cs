@@ -210,8 +210,11 @@ internal sealed class ShaderProgramCache
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
+    // SHARPEMU_RESOURCE_CACHE_KEYS=<n> sets the keys per generation (SHARPEMU_RESOURCE_CACHE_MB the bytes).
     private readonly ResourceMaterializationCache? _materializations =
-        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null : new();
+        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null
+        : int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_KEYS"), out var keys) && keys > 0 ? new(keys)
+        : new();
     private ulong _nextProgramId;
 
     public ResourceMaterializationCache? Materializations => _materializations;
