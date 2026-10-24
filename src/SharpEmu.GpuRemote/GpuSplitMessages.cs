@@ -414,6 +414,13 @@ public struct HandledResponse
 {
     public uint Handled;
     public uint Reserved;
+
+    /// <summary>
+    /// A fault no store handled: the GPU process's write-restoration version of the page (its watch
+    /// was removed, and its protection is applied by now), or 0. The guest retries the store once per
+    /// version, as one process retries a write whose watch was removed before the fault reached it.
+    /// </summary>
+    public long RestorationVersion;
 }
 
 [StructLayout(LayoutKind.Sequential)]

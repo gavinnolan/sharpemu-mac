@@ -67,9 +67,9 @@ many, so they come after A's earlier records.
 | `SubmitDone` (barrier) | - | IdleOutcome | B's `SubmitDone`: returns at the frame boundary. With A's session shutdown requested A sends `RequestClose` and answers `Cancelled` itself. |
 | `BracketBegin` | kind, barrier (AfterPendingCommandStreams only) | bracket id | `GuestGpuMemory.RunMappingChange` / `Unregister` in A (kind MappingChange: the relay's `TryRunAfterPendingWork`) and `RunAfterPendingCommandStreams` (kind AfterPendingCommandStreams). B parks its GPU worker (`WorkerBracket`: B's own `RunMappingChange` / `RunAfterPendingCommandStreams` hand the worker a park loop); A then runs the work itself, as the GPU queue thread (`RemoteGpuQueueRelay.IsGpuQueueThread`). |
 | `BracketEnd` | bracket id, viewLogSequence | - | B syncs its replica that far on the parked worker and lets it go. |
-| `Fault` | kind, address, size | handled | From A's signal handler (`RemoteImageStore.MarkCpuWrite`, allocation-free). B runs its stores' fault path, then waits until A applied every protection B requested so far: the guest retries the access as soon as this answers. Every write fault crosses (the page faulted because B protected it). |
+| `Fault` | kind, address, size | handled, restoration version | From A's signal handler (`RemoteImageStore.MarkCpuWrite`, allocation-free). B runs its stores' fault path, then waits until A applied every protection B requested so far: the guest retries the access as soon as this answers. Every write fault crosses (the page faulted because B protected it). When no store handled it, B answers its guard's write-restoration version of the page: a watch removed before the fault reached the store. A retries the store once per version when the page is writable (one process's `TryRetryReleasedWrite`, from B's guard). |
 | `CpuWrite` | address, size | handled | A managed write before it lands, when the summary marks it: B's `MarkCpuWrite` (the cache publishes a GPU-written image before the write lands over it). From A's reverse-call threads and from inside a bracket it is sent as a `CpuWrite` record instead (there B's worker cannot take the writeback: the in-process cache's rule for a store from the worker). No barrier. |
-| `SpanRegister` / `SpanProtect` / `SpanUnregister` | address, size, protection, bracket id | (handled) | B's `GuestGpuMemory` follows A's spans and permission ledger (`IGuestSpanObserver`, `RemoteImageStore.Unregister`). An unregistration inside a bracket runs on B's parked worker. B waits for the protections it requested before it answers, so they land before A unmaps or remaps. |
+| `SpanRegister` / `SpanProtect` / `SpanUnregister` | address, size, protection, bracket id | (handled) | B's `GuestGpuMemory` follows A's spans and permission ledger (`IGuestSpanObserver`, `RemoteImageStore.Unregister`). B's page guard owns the host protections of every span: A's `Register` / `NoteProtected` apply none of their own when the call succeeds (A's watch-less guard would hand back, for a moment, rights B's watches took); on a failed call A applies the plain guest protection. An unregistration inside a bracket runs on B's parked worker. B waits for the protections it requested before it answers, so they land before A unmaps, remaps or lets the guest go on. |
 | `Query` | which | value | Performance counters, HDR output support, mesh pipelines. |
 
 `IsGpuGuestImageAvailable` and `RegisterKnownDisplayBuffer` are constants in Metal v2 and are answered in A.
@@ -80,7 +80,7 @@ many, so they come after A's earlier records.
 | Message | Fields | Semantics |
 |---|---|---|
 | `ProtectRequest` | sequence, address, size, guest access, access, flags | B's `PageGuard` (watch arm/drop, ledger changes). A applies it at once on its inbound thread (`TryApplyDerivedProtection`, skipping memory A no longer registers) and raises the shared protection counter (below). A request that takes rights away waits in B until it is applied; one that gives them back does not (the fault path waits instead). |
-| `Interrupt` | eventId, contextId | `EndOfPipeEvents.Deliver` in A (B's `EndOfPipeEvents.Redirect`). |
+| `Interrupt` | eventId, contextId | `EndOfPipeEvents.Deliver` in A, for an interrupt raised on B's ring thread. Elsewhere interrupts are calls (below). |
 | `FlipEvent` | kind, flipRequestId | Flip steps sent from B's ring thread (a refused `FlipRequest`). Elsewhere flip steps are calls (below). |
 | `VideoOutNotice` | kind, text | CancelOutstandingFlips, PresentationWindowClosed, ReportPresentedFrame, SelectedGpuName. |
 | `Input` | focus, pressed keys, gamepad state and name | B polls its `HostWindowInput` every 4 ms and sends it when it changed; A applies it to its own `HostWindowInput`. |
@@ -93,9 +93,12 @@ A's inbound thread applies protections itself and hands everything else to an ev
 What B's GPU code asks of A's video-out state (`VideoOutBackendServices.Bridge` in B is `RemoteVideoOutBridge`):
 `TryReserveFlip` (with A's HDR flag), `IsFlipDone`, `CanPresentFlip`, `NextFlipPresentTimestamp`, `TryGetDisplayBuffer`,
 `GetFlipEventCount`, `ReleaseNoBufferFlip`, `IsFlipPresentationPending`, `IsHdrOutputRequested`, `QueryString`
-(window title), and `FlipEvent` (CompleteOnGpu, Presented, Discarded, Cancelled, Completed: applied before the call
-returns, so the presenter's next question sees it). `Stopwatch` timestamps cross unchanged: both processes read the same
-clock. A serves them on four threads.
+(window title), `FlipEvent` (CompleteOnGpu, Presented, Discarded, Cancelled, Completed: applied before the call
+returns, so the presenter's next question sees it) and `TriggerInterrupt` (B's `EndOfPipeEvents.Redirect`): the GPU's
+completion thread raises interrupts and flip steps in the order the GPU finished them, and as calls they reach the guest
+in that order. `Stopwatch` timestamps cross unchanged: both processes read the same clock. A serves them on four
+threads. A reverse call is never retried (a flip reservation must not happen twice), so it waits as long as A's own
+long calls do.
 
 ### The rule that keeps the threads apart
 
@@ -133,10 +136,13 @@ bridge refuses (and reports) a call from the ring thread.
 
 - B exits when A exits (parent watch). A's `Shutdown` record on a clean session end exits it with code 0.
 - When B dies, the transport fails every pending and later call promptly; `SplitGpuSession` detaches its proxies (the
-  memory manager stops waiting for a GPU worker) and stops the guest through the window-closed shutdown, after
-  `[GPU-SPLIT][ERROR] The GPU process exited unexpectedly. The guest is stopped.`
-- Every wait has a timeout and checks the peer state: ring writes 10 min (reported after 30 s), frame boundary and
-  brackets 10 min, faults, managed writes and span changes 60 s, reverse calls 30 s, protection waits 30 s.
+  memory manager stops waiting for a GPU worker), gives every span its plain guest protection back (B's watches would
+  otherwise turn guest stores into faults nothing resolves), and stops the guest through the window-closed shutdown,
+  after `[GPU-SPLIT][ERROR] The GPU process exited unexpectedly. The guest is stopped.`
+- Every wait has a timeout and checks the peer state: ring writes 10 min (reported after 30 s), frame boundary,
+  brackets, span changes and reverse calls 10 min (B's own waits inside them 9 min, so B answers first), faults and
+  managed writes 60 s, protection waits 30 s. A park nobody ends lets B's worker go after 11 min.
+- B's ring thread hands `RequestClose` (which joins the GPU worker) to a thread of its own.
 - B's console is A's console (inherited); B tees it into `SHARPEMU_GPU_HOST_LOG`, which the CLI sets to
   `<log>.gpuhost.log` when it runs with `--log-file`.
 
@@ -148,3 +154,7 @@ bridge refuses (and reports) a call from the ring thread.
 - Fast paths: restricting watches wait one round trip each (batch them and wait once before the bytes are read);
   `CanPresentFlip`/`NextFlipPresentTimestamp` cost a round trip per presenter pass (mirror the pacing state); managed
   writes under a watch are a call each.
+- Known windows, not closed yet: B's page-guard block lock (a spin) is held while a protection that takes rights away
+  waits for A's acknowledgement; managed writes made inside a bracket reach B as records and may be handled after the
+  worker resumes; the shutdown no longer orders B's watch teardown before A releases its page guard (A's guard holds no
+  watches, and A acknowledges late requests without applying them).

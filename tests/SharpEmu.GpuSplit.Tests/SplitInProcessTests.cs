@@ -177,6 +177,8 @@ public sealed unsafe class SplitInProcessTests
         using var split = new InProcessSplit();
         var address = split.Guest.Address;
         split.GuestMemory.Register(address, SharedGuestMemory.ViewBytes, ReadWrite);
+        // The GPU side owns the protections: the span's protection is applied once, by its request.
+        Assert.Single(split.GuestSpace.Protections, protection => protection.Address == address);
 
         // B arms a watch: A applies it before AddWatch returns, and the summary shows it.
         var watcher = new Thread(() => split.GpuMemory.Pages.AddWatch(address, 0x1000, blockReads: false));
@@ -207,6 +209,19 @@ public sealed unsafe class SplitInProcessTests
         Assert.True(split.GpuStore.Saw("fault", address + 16));
         Assert.Equal(ReadWrite, split.GuestSpace.Last(address).Access);
         Assert.True(split.Session.ProtectCounts.Applied >= 2);
+
+        // A watch removed before the fault reaches the store: the store declines, and the page's
+        // restoration lets the store retry once - not twice for the same restoration.
+        var page = address + 0x2000;
+        var watcherAgain = new Thread(() => split.GpuMemory.Pages.AddWatch(page, 0x1000, blockReads: false));
+        watcherAgain.Start();
+        Assert.True(watcherAgain.Join(10_000));
+        var remover = new Thread(() => split.GpuMemory.Pages.RemoveWatch(page, 0x1000, blockReads: false));
+        remover.Start();
+        Assert.True(remover.Join(10_000));
+        split.GpuStore.OnFault = null;
+        Assert.True(split.GuestMemory.TryResolveFault(FaultKind.Write, page + 8));
+        Assert.False(split.GuestMemory.TryResolveFault(FaultKind.Write, page + 8));
     }
 
     [MacOSFact]
@@ -314,6 +329,12 @@ public sealed unsafe class SplitInProcessTests
         split.Host.SendInterrupt(5, 2);
         Wait.Until(() => split.GuestSide.Interrupts.Contains((5, 2u)), "the interrupt");
 
+        // From a GPU thread an interrupt is a call: delivered before it returns.
+        var completion = new Thread(() => split.Host.TriggerInterrupt(6, 1));
+        completion.Start();
+        Assert.True(completion.Join(10_000));
+        Assert.Contains((6, 1u), split.GuestSide.Interrupts);
+
         HostWindowInput.Connect();
         try
         {
@@ -386,10 +407,16 @@ public sealed unsafe class SplitInProcessTests
     {
         using var split = new InProcessSplit();
         split.GuestMemory.Register(split.Guest.Address, SharedGuestMemory.ViewBytes, ReadWrite);
+        var watcher = new Thread(() => split.GpuMemory.Pages.AddWatch(split.Guest.Address, 0x1000, blockReads: false));
+        watcher.Start();
+        Assert.True(watcher.Join(10_000));
+        Assert.Equal(GuestPageProtection.Read, split.GuestSpace.Last(split.Guest.Address).Access);
         split.KillGpuSide();
         Wait.Until(() => split.GuestSide.LostReason is not null, "the loss report");
         Assert.Contains("exited unexpectedly", split.GuestSide.LostReason);
         Assert.False(split.Session.IsAlive);
+        // The dead side's watch comes off before the guest is stopped.
+        Assert.Equal(ReadWrite, split.GuestSpace.Last(split.Guest.Address).Access);
 
         // Nothing waits for the dead GPU process any more.
         var watch = Stopwatch.StartNew();

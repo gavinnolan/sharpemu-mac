@@ -215,7 +215,8 @@ public sealed class PageGuard : IDisposable
             : allowedAccess != GuestPageProtection.None;
     }
 
-    internal long GetWriteRestorationVersion(ulong address)
+    // Public for the two-process split: the GPU process answers a guest write fault with it.
+    public long GetWriteRestorationVersion(ulong address)
     {
         var block = FindBlock(address);
         if (block == null) return 0;

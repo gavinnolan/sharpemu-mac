@@ -102,6 +102,9 @@ public sealed class SplitGpuSession : IDisposable
     /// <summary>The view log as of now: what the GPU host's replica must have replayed before it acts.</summary>
     internal ulong ViewLogSequence => _viewTable.LogSequence;
 
+    /// <summary>The guest address space this process protects.</summary>
+    internal IGuestAddressSpace GuestSpace => _memory.AddressSpace;
+
     /// <summary>True on the threads answering the GPU host's calls (see <see cref="RemoteImageStore"/>).</summary>
     internal static bool OnReverseServerThread => t_reverseServer;
 
@@ -608,6 +611,13 @@ public sealed class SplitGpuSession : IDisposable
                 case GpuRemoteReverseOpcode.IsHdrOutputRequested:
                     return Value(response, _guest.IsHdrOutputRequested ? 1 : 0);
 
+                case GpuRemoteReverseOpcode.TriggerInterrupt:
+                {
+                    var call = GpuSplitWire.Read<InterruptMessage>(request);
+                    _guest.TriggerInterrupt(call.EventId, call.ContextId);
+                    return Value(response, 0);
+                }
+
                 default:
                     status = GpuSplitStatus.UnknownOpcode;
                     return 0;
@@ -639,7 +649,23 @@ public sealed class SplitGpuSession : IDisposable
         }
 
         Detach();
+        RestoreGuestProtections();
         _guest.OnGpuProcessLost("The GPU process exited unexpectedly.");
+    }
+
+    // The dead GPU host's watches stay applied here, and a guest store into one of those pages
+    // would now be a fault nothing resolves: this process's guard (which holds no watches) gives
+    // every span its plain guest protection back before the guest is stopped.
+    private void RestoreGuestProtections()
+    {
+        try
+        {
+            _memory.ForEachSpan((address, size) => _memory.Pages.Reapply(address, size));
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[GPU-SPLIT][ERROR] The guest protections could not be restored: {exception.Message}");
+        }
     }
 
     // The memory manager waits for a detached relay before it changes mappings on its own, so a

@@ -26,9 +26,16 @@ public interface IPageWatchObserver
 /// </summary>
 public interface IGuestSpanObserver
 {
-    /// <summary>After <see cref="GuestGpuMemory.Register"/> applied the span here.</summary>
-    void OnSpanRegistered(ulong address, ulong size, GuestPageProtection protection);
+    /// <summary>
+    /// <see cref="GuestGpuMemory.Register"/> recorded the span and its ledger. True when the
+    /// observer applied the span's host protections itself before returning (the split's guest
+    /// process: the GPU process's page guard owns them); false leaves them to the manager's guard.
+    /// </summary>
+    bool OnSpanRegistered(ulong address, ulong size, GuestPageProtection protection);
 
-    /// <summary>After <see cref="GuestGpuMemory.NoteProtected"/> applied the change here.</summary>
-    void OnSpanProtected(ulong address, ulong size, GuestPageProtection protection);
+    /// <summary>
+    /// <see cref="GuestGpuMemory.NoteProtected"/> recorded the change in the ledger; true as for
+    /// <see cref="OnSpanRegistered"/>.
+    /// </summary>
+    bool OnSpanProtected(ulong address, ulong size, GuestPageProtection protection);
 }

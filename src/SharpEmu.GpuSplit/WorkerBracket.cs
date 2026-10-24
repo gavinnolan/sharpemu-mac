@@ -24,6 +24,9 @@ internal sealed class WorkerBracket
     private readonly ManualResetEventSlim _parked = new(false);
     private readonly ManualResetEventSlim _finished = new(false);
     private readonly Func<bool> _alive;
+
+    // A park nobody ends within this (the guest process gave up on its call) lets the worker go.
+    private static readonly long ParkLimitMilliseconds = (long)TimeSpan.FromMinutes(11).TotalMilliseconds;
     private Action? _atEnd;
     private bool _ending;
 
@@ -132,6 +135,7 @@ internal sealed class WorkerBracket
     private void Park()
     {
         _parked.Set();
+        var parkedAt = Environment.TickCount64;
         while (true)
         {
             Action? next = null;
@@ -143,6 +147,13 @@ internal sealed class WorkerBracket
                 {
                     if (!_alive())
                     {
+                        _ending = true;
+                        break;
+                    }
+
+                    if (Environment.TickCount64 - parkedAt > ParkLimitMilliseconds)
+                    {
+                        Console.Error.WriteLine($"[GPU-SPLIT][ERROR] GPU worker bracket {Id} was never ended; the worker goes on.");
                         _ending = true;
                         break;
                     }

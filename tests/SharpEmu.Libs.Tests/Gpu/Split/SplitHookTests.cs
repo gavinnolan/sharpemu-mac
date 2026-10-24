@@ -101,6 +101,25 @@ public sealed class SplitHookTests : IDisposable
     }
 
     [Fact]
+    public void AnObserverThatAppliesTheProtectionsReplacesTheManagersOwn()
+    {
+        var space = new RecordingAddressSpace();
+        using var memory = new GuestGpuMemory(space);
+        var observer = new RecordingSpanObserver { Applies = true };
+        memory.AttachSpanObserver(observer);
+
+        memory.Register(0x400000, 0x2000, ReadWrite);
+        Assert.True(memory.NoteProtected(0x400000, 0x1000, GuestPageProtection.Read));
+        Assert.Empty(space.Protects);
+        Assert.Equal(GuestPageProtection.Read, memory.Pages.Permissions.Lookup(0x400000));
+
+        // One that does not (a failed call) leaves them to the guard, as without an observer.
+        observer.Applies = false;
+        memory.Register(0x500000, 0x1000, ReadWrite);
+        Assert.Equal(new[] { (0x500000UL, 0x1000UL, ReadWrite) }, space.Protects);
+    }
+
+    [Fact]
     public void TheVideoOutBridgeTakesEveryStateCall()
     {
         var bridge = new RecordingBridge();
@@ -236,11 +255,19 @@ public sealed class SplitHookTests : IDisposable
     {
         public List<string> Events { get; } = new();
 
-        public void OnSpanRegistered(ulong address, ulong size, GuestPageProtection protection) =>
-            Events.Add($"register 0x{address:X}+0x{size:X} {protection}");
+        public bool Applies { get; set; }
 
-        public void OnSpanProtected(ulong address, ulong size, GuestPageProtection protection) =>
+        public bool OnSpanRegistered(ulong address, ulong size, GuestPageProtection protection)
+        {
+            Events.Add($"register 0x{address:X}+0x{size:X} {protection}");
+            return Applies;
+        }
+
+        public bool OnSpanProtected(ulong address, ulong size, GuestPageProtection protection)
+        {
             Events.Add($"protect 0x{address:X}+0x{size:X} {protection}");
+            return Applies;
+        }
     }
 
     private sealed class RecordingSink : IEndOfPipeSink

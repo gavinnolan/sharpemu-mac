@@ -84,9 +84,14 @@ public sealed record SplitGpuEnvironment(GuestGpuMemory Memory, ICpuMemory Addre
 public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDisposable
 {
     private const long ProtectTimeoutNanoseconds = 30_000_000_000;
-    private const long ReverseTimeoutNanoseconds = 30_000_000_000;
-    private static readonly TimeSpan LongWait = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan BracketWorkWait = TimeSpan.FromSeconds(60);
+    // A reverse call is never retried (a flip reservation must not happen twice) and an abandoned
+    // one is dropped unserved, so it waits as long as the guest's own long calls do.
+    private const long ReverseTimeoutNanoseconds = 600_000_000_000;
+
+    // Under the guest process's 10-minute call timeout, so B answers (or gives up) first and a
+    // bracket or unregistration is never left behind a call the guest abandoned.
+    private static readonly TimeSpan LongWait = TimeSpan.FromMinutes(9);
+    private static readonly TimeSpan BracketWorkWait = TimeSpan.FromMinutes(9);
     private const int MaxReports = 16;
 
     [ThreadStatic]
@@ -321,9 +326,10 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 backend.HideSplashScreen();
                 break;
             case GpuSplitControl.RequestClose:
-                // The guest process is leaving: the worker's teardown and the window follow.
+                // The guest process is leaving: the worker's teardown and the window follow, off
+                // the ring thread (the teardown joins the worker, which may be in a call to the guest).
                 HostSessionControl.RequestShutdown("the guest process closed the GPU backend");
-                backend.RequestClose();
+                new Thread(backend.RequestClose) { IsBackground = true, Name = "SharpEmu GPU split close" }.Start();
                 break;
             case GpuSplitControl.CountShaderCompilation:
                 backend.CountShaderCompilation();
@@ -454,7 +460,13 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                     // The store may have dropped watches: the guest retries the access as soon as
                     // this answers, so their protections must be in place first.
                     _ = WaitApplied(LastRequested);
-                    return GpuSplitWire.Write(response, new HandledResponse { Handled = handled ? 1u : 0u });
+                    // No store held the page: its watch may have gone between the fault and this
+                    // call. Its restoration version lets the guest retry the store once
+                    // (GuestGpuMemory.TryRetryReleasedWrite does this from the guard in one process).
+                    var restoration = !handled && call.Kind == (uint)FaultKind.Write
+                        ? memory.Pages.GetWriteRestorationVersion(call.Address)
+                        : 0;
+                    return GpuSplitWire.Write(response, new HandledResponse { Handled = handled ? 1u : 0u, RestorationVersion = restoration });
                 }
 
                 case GpuRemoteSyncOpcode.CpuWrite:
@@ -474,7 +486,13 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 {
                     var call = GpuSplitWire.Read<SpanRequest>(request);
                     _memory!.Register(call.Address, call.Size, (GuestPageProtection)call.Protection);
-                    _ = WaitApplied(LastRequested);
+                    // The guest applies no protection of its own for the span (IGuestSpanObserver):
+                    // when ours did not land, it falls back to the plain guest protection.
+                    if (!WaitApplied(LastRequested))
+                    {
+                        status = GpuSplitStatus.Failed;
+                    }
+
                     return 0;
                 }
 
@@ -482,7 +500,11 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 {
                     var call = GpuSplitWire.Read<SpanRequest>(request);
                     var handled = _memory!.NoteProtected(call.Address, call.Size, (GuestPageProtection)call.Protection);
-                    _ = WaitApplied(LastRequested);
+                    if (!WaitApplied(LastRequested))
+                    {
+                        status = GpuSplitStatus.Failed;
+                    }
+
                     return GpuSplitWire.Write(response, new HandledResponse { Handled = handled ? 1u : 0u });
                 }
 
@@ -670,6 +692,17 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
         _ = _writer.Write(GpuRemoteMessage.Interrupt, in message);
     }
 
+    // A call, like the flip steps beside it on the GPU's completion thread, so the guest sees
+    // interrupts and flips in the order the GPU finished them; a record from the ring thread.
+    internal void TriggerInterrupt(int eventId, uint contextId)
+    {
+        if (OnRingThread || !CallGuest(GpuRemoteReverseOpcode.TriggerInterrupt,
+                new InterruptMessage { EventId = eventId, ContextId = contextId }, out ValueResponse _))
+        {
+            SendInterrupt(eventId, contextId);
+        }
+    }
+
     /// <summary>
     /// A call into the guest's video-out state. False when it could not be made: from the ring
     /// thread (see the type remarks), with the guest process gone, or unanswered in time.
@@ -811,12 +844,20 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
 
     // ---- teardown ----
 
+    // The guest process is gone or shut down: no more writes to its ring (a thread in the middle of
+    // one finishes it first), so nothing writes into the region after the client unmaps it.
     public void Stop()
     {
         _stopping = true;
+        _writer.Close();
         lock (_barrierGate)
         {
             Monitor.PulseAll(_barrierGate);
+        }
+
+        if (_inputThread is { } input && input != Thread.CurrentThread)
+        {
+            _ = input.Join(TimeSpan.FromSeconds(2));
         }
     }
 
@@ -840,6 +881,6 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
 
     private sealed class InterruptSink(SplitGpuHost host) : IEndOfPipeSink
     {
-        public void TriggerInterrupt(int eventId, uint contextId) => host.SendInterrupt(eventId, contextId);
+        public void TriggerInterrupt(int eventId, uint contextId) => host.TriggerInterrupt(eventId, contextId);
     }
 }

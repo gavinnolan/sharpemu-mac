@@ -47,6 +47,14 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
         _state = state;
     }
 
+    // The last released-write retry of this thread, so an immediate repeat needs a new restoration
+    // (the guard of GuestGpuMemory.TryRetryReleasedWrite, which keeps it per thread as well).
+    [ThreadStatic]
+    private static ulong t_retriedPage;
+
+    [ThreadStatic]
+    private static long t_retriedVersion;
+
     // From the guest's write-fault signal handler: nothing here may allocate, lock or throw.
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public bool MarkCpuWrite(ulong address, ulong size)
@@ -59,6 +67,7 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
         HandledResponse response;
         response.Handled = 0;
         response.Reserved = 0;
+        response.RestorationVersion = 0;
         var result = _calls.Call(
             (uint)GpuRemoteSyncOpcode.Fault,
             (byte*)&request,
@@ -68,7 +77,30 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
             out var length,
             out var status,
             FaultTimeoutNanoseconds);
-        return result == SyncCallStatus.Completed && status == GpuSplitStatus.Ok && length >= sizeof(HandledResponse) && response.Handled != 0;
+        if (result != SyncCallStatus.Completed || status != GpuSplitStatus.Ok || length < sizeof(HandledResponse))
+        {
+            return false;
+        }
+
+        if (response.Handled != 0)
+        {
+            return true;
+        }
+
+        // The GPU process removed the page's watch before the fault reached it, and its protection
+        // is applied by now: the store may be retried, once per restoration, when the page is
+        // writable here.
+        var page = address & ~(TrackerLayout.PageBytes - 1);
+        if (response.RestorationVersion == 0 ||
+            (t_retriedPage == page && t_retriedVersion == response.RestorationVersion) ||
+            (_session.GuestSpace is IGuestBackedSpace backed && !backed.AllowsMappedAccess(address, GuestPageProtection.Write)))
+        {
+            return false;
+        }
+
+        t_retriedPage = page;
+        t_retriedVersion = response.RestorationVersion;
+        return true;
     }
 
     public bool MarkPreciseCpuWrite(ulong address, ulong size)
@@ -100,25 +132,28 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
             Address = address,
             Size = size,
             BracketId = RemoteGpuQueueRelay.CurrentBracket,
-        }, SplitGpuSession.CallNanoseconds);
+        }, SplitGpuSession.LongCallNanoseconds);
 
-    public void OnSpanRegistered(ulong address, ulong size, GuestPageProtection protection) =>
-        _ = _session.Call(GpuRemoteSyncOpcode.SpanRegister, new SpanRequest
+    // The GPU process's page guard owns the host protections: it derives them from the ledger these
+    // calls keep equal to this process's, with its watches, and they are applied here before the
+    // call answers. When the call fails this process's own guard applies the plain guest ones.
+    public bool OnSpanRegistered(ulong address, ulong size, GuestPageProtection protection) =>
+        _session.Call(GpuRemoteSyncOpcode.SpanRegister, new SpanRequest
         {
             Address = address,
             Size = size,
             Protection = (uint)protection,
             BracketId = RemoteGpuQueueRelay.CurrentBracket,
-        }, SplitGpuSession.CallNanoseconds);
+        }, SplitGpuSession.LongCallNanoseconds);
 
-    public void OnSpanProtected(ulong address, ulong size, GuestPageProtection protection) =>
-        _ = _session.Call(GpuRemoteSyncOpcode.SpanProtect, new SpanRequest
+    public bool OnSpanProtected(ulong address, ulong size, GuestPageProtection protection) =>
+        _session.Call(GpuRemoteSyncOpcode.SpanProtect, new SpanRequest
         {
             Address = address,
             Size = size,
             Protection = (uint)protection,
             BracketId = RemoteGpuQueueRelay.CurrentBracket,
-        }, out HandledResponse _, SplitGpuSession.CallNanoseconds);
+        }, out HandledResponse response, SplitGpuSession.LongCallNanoseconds) && response.Handled != 0;
 
     /// <summary>
     /// Compiles the fault path and makes one call through it from an ordinary thread, so the

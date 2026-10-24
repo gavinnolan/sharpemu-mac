@@ -160,6 +160,9 @@ public enum GpuRemoteReverseOpcode : uint
 
     /// <summary>Nothing → <see cref="ValueResponse"/> (0 or 1): whether the guest flips HDR now.</summary>
     IsHdrOutputRequested = 11,
+
+    /// <summary><see cref="InterruptMessage"/> → nothing: an end-of-pipe interrupt, delivered before the call returns.</summary>
+    TriggerInterrupt = 12,
 }
 
 /// <summary>Handshake record, sent each way.</summary>
