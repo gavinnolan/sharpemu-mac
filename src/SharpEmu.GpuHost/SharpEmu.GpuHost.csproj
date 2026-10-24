@@ -7,8 +7,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
   Process B of the two-process split: the native arm64 GPU host. SharpEmu.CLI (process A)
   runs guest code under Rosetta and starts this executable through GpuProcessHost when
   SHARPEMU_GPU_PROCESS=1; the two talk through SharpEmu.GpuRemote's shared-memory region.
-  Today it only attaches, handshakes and answers pings; the Metal backend
-  (SharpEmu.Gpu.Metal) moves in here next.
+  It hosts the Metal backend (SharpEmu.Gpu.Metal) over the guest memory A shares, wired by
+  SharpEmu.GpuSplit (docs/macos/split-protocol.md).
 
   osx-arm64 always (Directory.Build.props pins the RID): running natively is the reason it
   exists. Self-contained like SharpEmu.CLI, so it needs no installed arm64 runtime - the
@@ -29,6 +29,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <ProjectReference Include="..\SharpEmu.GpuRemote\SharpEmu.GpuRemote.csproj" />
+    <ProjectReference Include="..\SharpEmu.GpuSplit\SharpEmu.GpuSplit.csproj" />
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
   </ItemGroup>
 
 </Project>
