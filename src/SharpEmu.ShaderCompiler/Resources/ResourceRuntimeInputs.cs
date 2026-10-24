@@ -51,6 +51,46 @@ public sealed class ResourceRuntimeInputs
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
         DataWritePending = DataWritePending,
     };
+
+    // The inputs of a linked plan whose call entries read their arguments from user data
+    // (ScalarValueGraph.CallArgumentRegisterBase): this draw's user data, then two registers per argument.
+    public ResourceRuntimeInputs WithCallArguments(uint userDataBase, IReadOnlyList<ulong> arguments)
+    {
+        if (userDataBase > ScalarValueGraph.CallArgumentRegisterBase ||
+            UserData.Count > ScalarValueGraph.CallArgumentRegisterBase - userDataBase)
+        {
+            throw new ArgumentOutOfRangeException(nameof(userDataBase), "The user data reaches the call argument registers.");
+        }
+
+        var first = (int)(ScalarValueGraph.CallArgumentRegisterBase - userDataBase);
+        var userData = new uint[first + arguments.Count * 2];
+        for (var index = 0; index < UserData.Count; index++)
+        {
+            userData[index] = UserData[index];
+        }
+
+        var offset = first;
+        foreach (var argument in arguments)
+        {
+            userData[offset++] = (uint)argument;
+            userData[offset++] = (uint)(argument >> 32);
+        }
+
+        return new()
+        {
+            UserData = userData,
+            ShaderBase = ShaderBase,
+            ReadMemory = ReadMemory,
+            ReadCleanMemory = ReadCleanMemory,
+            ComputeState = ComputeState,
+            TraceImageCandidate = TraceImageCandidate,
+            TablePhase = TablePhase,
+            ReadResidentMemory = ReadResidentMemory,
+            CompareResidentMemory = CompareResidentMemory,
+            ReadsClean = ReadsClean,
+            DataWritePending = DataWritePending,
+        };
+    }
 }
 
 public readonly record struct ComputeSelectorState(uint WaveSize, uint ThreadsX, uint ThreadsY, uint ThreadsZ,

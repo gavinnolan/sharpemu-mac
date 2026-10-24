@@ -35,6 +35,9 @@ public sealed partial class ScalarValueGraph
         private readonly Stack<RegisterState> _spareStates = new();
         private bool _recording;
 
+        // The index of each call entry's argument in Gen5ShaderCallLinker.CallEntryArguments, when it is read from user data.
+        private readonly Dictionary<uint, uint> _callEntries = [];
+
         public void Run()
         {
             var controlFlow = _graph.ControlFlow;
@@ -59,6 +62,24 @@ public sealed partial class ScalarValueGraph
             }
 
             _graph.Accesses = new MemoryAccessBinding?[_graph.Memory.Count];
+            if (_graph.CallArgumentRegisters != 0)
+            {
+                var arguments = new Dictionary<ulong, uint>();
+                foreach (var instruction in _program.Instructions)
+                {
+                    if (instruction.Control is ShaderCallEntryControl { Argument: not 0 } call)
+                    {
+                        if (!arguments.TryGetValue(call.Argument, out var index))
+                        {
+                            index = (uint)arguments.Count;
+                            arguments.Add(call.Argument, index);
+                        }
+
+                        _callEntries.Add(instruction.Pc, index);
+                    }
+                }
+            }
+
             if (blockCount == 0)
             {
                 return;
@@ -224,6 +245,8 @@ public sealed partial class ScalarValueGraph
             }
 
             _uniformJoin = pending ? null : FindUniformJoin(block, visited);
+            _phiSources = null;
+            Array.Clear(_mergeUndefined);
 
             for (var register = 0; register < ScalarRegisterCount; register++)
             {
@@ -338,26 +361,26 @@ public sealed partial class ScalarValueGraph
             return taken.IsUndefined || taken.IsConstant ? null : (taken, takenPredecessor);
         }
 
+        // A block's instructions are in program order, so its terminator is the last one. Scanning the whole program for
+        // it cost a linked ray-tracing shader (889K instructions, 5,800 two-way joins) most of its 17 s graph build.
         private bool TryGetTerminator(int block, out Gen5ShaderInstruction terminator)
         {
-            var range = _graph.ControlFlow.Blocks[block];
-            terminator = null!;
-            foreach (var instruction in _program.Instructions)
-            {
-                if (instruction.Pc >= range.StartPc && instruction.Pc < range.EndPc)
-                {
-                    terminator = instruction;
-                }
-            }
-
+            var instructions = _blockInstructions[block];
+            terminator = instructions.Length != 0 ? instructions[^1] : null!;
             return terminator is not null;
         }
 
         private static uint BranchTarget(Gen5ShaderInstruction branch) =>
             (uint)(branch.Pc + 4 + (short)(branch.Words[0] & 0xFFFF) * 4);
 
+        // The undefined value of each type for the merge in progress. A merge applies no instruction, so every undefined
+        // slot of one merge is charged to the same one; interning it once per slot made the 90,000 single-predecessor
+        // merges of a linked ray-tracing shader cost 32 us each.
+        private readonly ScalarValue?[] _mergeUndefined = new ScalarValue?[3];
+
         // Equal incoming values pass through; differing or still unknown ones meet in a
         // phi owned by this block and register. Any undefined input stays undefined.
+        // The reader takes the slot, so the registers' readers are static and nothing is allocated per slot.
         private ScalarValue MergeSlot(
             int block,
             int slot,
@@ -374,7 +397,7 @@ public sealed partial class ScalarValueGraph
                 var value = ReadSlot(state, kind, index, lane);
                 if (value.IsUndefined)
                 {
-                    return _graph.Undefined(first.Type);
+                    return _mergeUndefined[(int)first.Type] ??= _graph.Undefined(first.Type);
                 }
 
                 same &= ReferenceEquals(value, first);
@@ -398,38 +421,17 @@ public sealed partial class ScalarValueGraph
                 _phis[(block, slot)] = phi;
             }
 
-            // Every phi of the block lists the same predecessors, so they share one array.
-            if (_phiOrderBlock != block || _phiOrder is null)
-            {
-                var predecessors = _graph.ControlFlow.Predecessors[block];
-                _phiOrder = block == 0 ? new[] { -1 }.Concat(predecessors).ToArray() : predecessors.ToArray();
-                _phiOrderBlock = block;
-            }
-
-            var order = _phiOrder;
+            var (order, sources) = _phiSources ??= PhiSources(block, visited);
             // A phi seen again keeps its operand array when the predecessors are the same.
             var operands = phi.Operands.Length == order.Length ? phi.Operands : new ScalarValue[order.Length];
             for (var position = 0; position < order.Length; position++)
             {
-                RegisterState? source = null;
-                foreach (var (visitedBlock, visitedState) in visited)
-                {
-                    if (visitedBlock == order[position])
-                    {
-                        source = visitedState;
-                        break;
-                    }
-                }
-
-                operands[position] = source is null ? phi : ReadSlot(source, kind, index, lane);
+                operands[position] = sources[position] is { } source ? ReadSlot(source, kind, index, lane) : phi;
             }
 
             phi.SetPhiOperands(order, operands);
             return phi;
         }
-
-        private int[]? _phiOrder;
-        private int _phiOrderBlock = -1;
 
         private enum SlotKind { Scalar, Vector, Exec, Vcc, Scc, Lane, Mask }
 
@@ -443,6 +445,30 @@ public sealed partial class ScalarValueGraph
             SlotKind.Lane => state.Lanes[((uint)index, lane)],
             _ => state.ThreadBits[(uint)index],
         };
+
+        // The predecessor order of one merge's phis and the state each operand comes from (null while the predecessor is
+        // pending). The phis of a merge share them: matching every operand of every slot by a search of the predecessors
+        // took a join of 600 call records 250 ms per visit.
+        private (int[] Order, RegisterState?[] Sources)? _phiSources;
+
+        private (int[] Order, RegisterState?[] Sources) PhiSources(int block, List<(int Block, RegisterState State)> visited)
+        {
+            var predecessors = _graph.ControlFlow.Predecessors[block];
+            var order = block == 0 ? new[] { -1 }.Concat(predecessors).ToArray() : predecessors.ToArray();
+            var states = new Dictionary<int, RegisterState>(visited.Count);
+            foreach (var (predecessor, state) in visited)
+            {
+                states.TryAdd(predecessor, state);
+            }
+
+            var sources = new RegisterState?[order.Length];
+            for (var index = 0; index < order.Length; index++)
+            {
+                sources[index] = states.GetValueOrDefault(order[index]);
+            }
+
+            return (order, sources);
+        }
 
         private RegisterState Transfer(int block, RegisterState state)
         {
@@ -461,7 +487,27 @@ public sealed partial class ScalarValueGraph
             if (instruction.Control is ShaderCallEntryControl call)
             {
                 state.WritePair(call.ReturnRegister, _graph.Constant((uint)call.ReturnAddress), _graph.Constant((uint)(call.ReturnAddress >> 32)));
-                state.WritePair(call.ArgumentRegister, _graph.Constant((uint)call.Argument), _graph.Constant((uint)(call.Argument >> 32)));
+                if (call.RuntimeArgument)
+                {
+                    // The record's argument stays the caller's value; the descriptors read through it are call records.
+                    if (_recording)
+                    {
+                        _graph.CallRecordArguments[instruction.Pc] = (state.Read(call.ArgumentRegister), state.Read(call.ArgumentRegister + 1));
+                    }
+
+                    return;
+                }
+
+                if (_callEntries.TryGetValue(instruction.Pc, out var entry))
+                {
+                    var register = CallArgumentRegisterBase + entry * 2;
+                    state.WritePair(call.ArgumentRegister, _graph.UserData(register), _graph.UserData(register + 1));
+                }
+                else
+                {
+                    state.WritePair(call.ArgumentRegister, _graph.Constant((uint)call.Argument), _graph.Constant((uint)(call.Argument >> 32)));
+                }
+
                 return;
             }
             switch (instruction.Encoding)
@@ -2012,9 +2058,13 @@ public sealed partial class ScalarValueGraph
                 return;
             }
 
-            foreach (var key in Lanes.Keys.Where(key => key.Register == register).ToArray())
+            // Removing while enumerating is allowed and removes in the same order, without a copy of the keys per write.
+            foreach (var key in Lanes.Keys)
             {
-                Lanes.Remove(key);
+                if (key.Register == register)
+                {
+                    Lanes.Remove(key);
+                }
             }
         }
 

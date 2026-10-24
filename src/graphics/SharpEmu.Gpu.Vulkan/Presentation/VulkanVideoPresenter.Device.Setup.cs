@@ -1051,6 +1051,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
             var supportsNullDescriptor = robustness2Features.NullDescriptor;
+            _bindlessHeapSupported = BindlessHeapSupported(in vulkan12Features, supportsNullDescriptor);
             var supportsRobustness2 = supportsRobustImageAccess2 || supportsNullDescriptor;
             _canRequireComputeSubgroup32 &= vulkan13Features.SubgroupSizeControl;
             _canRequireComputeSubgroup64 &= vulkan13Features.SubgroupSizeControl;
@@ -1200,6 +1201,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
                     ShaderOutputLayer = _supportsShaderLayer,
                     ShaderOutputViewportIndex = supportsViewportIndexLayer,
+                    DescriptorIndexing = _bindlessHeapSupported,
+                    RuntimeDescriptorArray = _bindlessHeapSupported,
+                    ShaderSampledImageArrayNonUniformIndexing = _bindlessHeapSupported,
+                    DescriptorBindingSampledImageUpdateAfterBind = _bindlessHeapSupported,
+                    DescriptorBindingPartiallyBound = _bindlessHeapSupported,
+                    DescriptorBindingUpdateUnusedWhilePending = _bindlessHeapSupported,
                     PNext = supportsRobustness2
                         ? &robustness2Features
                         : (supportsMaintenance8 ? &maintenance8Features : null),
@@ -1353,6 +1360,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateBufferCache();
             CreateImageCache();
             _descriptorHeap = new DescriptorHeap(_deviceInfo, _scheduler);
+            CreateBindlessHeapLayout();
             CreateCommandStream();
             LoadDebugUtilsCommands();
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
@@ -1382,6 +1390,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 !string.Equals(cacheMode, "0", StringComparison.Ordinal) &&
                 (useShards || !OperatingSystem.IsWindows() || cacheMode is "1" or "file");
             _pipelineCachePath = persistentCacheEnabled ? GetPipelineCachePath() : null;
+            _linkedPipelineCacheDirectory = cacheMode != "0"
+                ? VulkanPipelineCacheStorage.LinkedDirectory(VideoOutBackendServices.GetApplicationTitleId(),
+                    Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH"))
+                : null;
             if (_pipelineCachePath is not null &&
                 useShards)
             {

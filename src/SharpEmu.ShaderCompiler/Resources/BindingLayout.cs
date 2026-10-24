@@ -20,6 +20,14 @@ public enum DescriptorBindingKind : uint
     ShaderData,
     MipStatistics,
     Count,
+
+    // Only programs linked with run-time call records bind these; they are numbered past both stages' bindings, so theirs stay.
+    CallRecords = 2 * Count,
+    CallMarks,
+
+    // Only programs with shader calls bind this: the readable address their branchless device-address loads read for an
+    // access they do not make.
+    DeviceAddressFallback,
 }
 
 // Thirty-two dwords of push data shared by the stages of one pipeline.
@@ -361,6 +369,14 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint BufferWordCount;
     public bool UsesDispatchThreadLimits { get; init; }
     public bool UsesMeshDrawParameters { get; init; }
+
+    // The distinct nonzero arguments of the module's call records (Gen5ShaderCallLinker.CallEntryArguments), two dwords each.
+    public uint CallArgumentCount { get; init; }
+
+    // The addresses of the module's callees (Gen5ShaderCallLinker.CallTargets), two dwords each.
+    public uint CallTargetCount { get; init; }
+    // The program reads call records through descriptor set 1 (see BindlessHeap).
+    public bool UsesBindlessHeap { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
@@ -378,7 +394,11 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint MeshDrawParametersDword => MipStatisticsDword + MipStatisticsCount;
 
-    public uint ShaderDataDwordCount => MeshDrawParametersDword + (UsesMeshDrawParameters ? 6u : 0u);
+    public uint CallArgumentsDword => MeshDrawParametersDword + (UsesMeshDrawParameters ? 6u : 0u);
+
+    public uint CallTargetsDword => CallArgumentsDword + CallArgumentCount * 2;
+
+    public uint ShaderDataDwordCount => CallTargetsDword + CallTargetCount * 2;
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -608,8 +628,15 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public static bool UsesGlobalDataShare(Gen5ShaderProgram program) =>
         program.Instructions.Any(instruction => instruction.Control is Gen5DataShareControl { Gds: true });
 
+    // A linked call's return address is the shader base plus the call's offset.
     public static bool ReadsShaderBase(Gen5ShaderProgram program) =>
-        program.Instructions.Any(instruction => instruction.Opcode == "SGetpcB64");
+        program.Instructions.Any(instruction => instruction.Opcode == "SGetpcB64" || instruction.Control is ShaderCallEntryControl);
+
+    public static uint CountCallArguments(Gen5ShaderProgram program) =>
+        (uint)Gen5ShaderCallLinker.CallEntryArguments(program).Length;
+
+    public static uint CountCallTargets(Gen5ShaderProgram program) =>
+        (uint)Gen5ShaderCallLinker.CallTargets(program).Length;
 
     // Allocates one program's bindings: buffers, image groups (one element per mip for a
     // dynamic-mip storage image), samplers, shared buffers, push data or its fallback.
@@ -622,6 +649,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         uint pushDataStartDword = 0,
         bool usesDispatchThreadLimits = false,
         bool usesMeshDrawParameters = false,
+        uint callArgumentCount = 0,
+        uint callTargetCount = 0,
         bool? portableBuffers = null)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
@@ -635,7 +664,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             .DefaultIfEmpty(0u)
             .Max();
         var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + bufferWordCount +
-            (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u);
+            (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
+            callArgumentCount * 2 + callTargetCount * 2;
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0)
@@ -712,6 +742,21 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.MipStatistics, []));
         }
 
+        if (info.UsesCallRecords)
+        {
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.CallRecords, []));
+        }
+
+        if (info.UsesDeviceAddressFallback)
+        {
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.DeviceAddressFallback, []));
+        }
+
+        if (info.UsesCallMarks)
+        {
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.CallMarks, []));
+        }
+
         return new BindingLayout
         {
             PushDataStartDword = pushStart,
@@ -724,6 +769,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MipStatisticsCount = mipStatisticsCount,
             BindlessImageTableCount = bindlessImageTableCount,
             UsesMeshDrawParameters = usesMeshDrawParameters,
+            CallArgumentCount = callArgumentCount,
+            CallTargetCount = callTargetCount,
+            UsesBindlessHeap = info.UsesBindlessHeap,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
         };
@@ -747,6 +795,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MipStatisticsCount != other.MipStatisticsCount ||
             BindlessImageTableCount != other.BindlessImageTableCount ||
             UsesMeshDrawParameters != other.UsesMeshDrawParameters ||
+            CallArgumentCount != other.CallArgumentCount ||
+            CallTargetCount != other.CallTargetCount ||
+            UsesBindlessHeap != other.UsesBindlessHeap ||
             !SameValues(UserDataRegisters, other.UserDataRegisters))
         {
             return false;
@@ -826,7 +877,7 @@ public static class BindingLayoutValidator
 
         var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare,
             usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
-            layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters,
+            layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters, layout.CallArgumentCount, layout.CallTargetCount,
             portableBuffers: layout.BufferWordCount != 0);
         if (!expected.Equals(layout))
         {

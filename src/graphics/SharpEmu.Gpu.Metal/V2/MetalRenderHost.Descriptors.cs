@@ -451,6 +451,7 @@ internal sealed partial class MetalRenderHost
         }
 
         stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
+        stage.WriteCallData(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
         return prepared;
     }
 

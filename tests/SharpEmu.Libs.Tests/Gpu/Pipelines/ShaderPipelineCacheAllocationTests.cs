@@ -47,8 +47,9 @@ public sealed class ShaderPipelineCacheAllocationTests(ITestOutputHelper output)
 
         var perDraw = Enumerable.Range(0, 4).Select(_ => Draw()).ToArray();
         output.WriteLine($"pixel_active={pixelActive} per draw (bytes): {string.Join(' ', perDraw)}");
-        // GraphicsPrograms, VertexInputInfo and, with a pixel stage, PixelInputInfo: about 130 bytes each.
-        Assert.True(perDraw[^1] <= (pixelActive ? 512 : 384), $"bytes={perDraw[^1]}");
+        // GraphicsPrograms, VertexInputInfo and, with a pixel stage, PixelInputInfo: about 130 bytes each, and 32 more for each
+        // input's stage, whose shader-call fields (ShaderStageResources.CallArguments and the rest) stay null for a draw.
+        Assert.True(perDraw[^1] <= (pixelActive ? 576 : 416), $"bytes={perDraw[^1]}");
         var first = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
             banks.Context, mappings, pixelActive, depthBound: false, depthAspectBound: false);
         var second = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
