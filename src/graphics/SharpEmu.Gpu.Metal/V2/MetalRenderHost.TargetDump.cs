@@ -264,6 +264,12 @@ internal sealed partial class MetalRenderHost
 
     private const long MaxSnapshotBytes = 3L << 30;
 
+    // SHARPEMU_METAL_V2_DUMP_DEPTH_RAW=1: a depth (or R32 float alias) snapshot keeps each texel's float bits as its
+    // RGBA bytes (little-endian, R lowest) instead of a grey level, so a depth-equal failure can
+    // be read off the exact values the test compares (material depth IDs sit far below 1/255).
+    private static readonly bool _dumpDepthRaw = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_DEPTH_RAW"), "1", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_DUMP_SNAPSHOT_MATCH=<a,b,...>: snapshot only targets whose label
     // contains one of the texts ("-cs" for compute, a format, an address), so a frame's
     // budget reaches the pass that matters instead of every geometry pass before it.
@@ -784,6 +790,12 @@ internal sealed partial class MetalRenderHost
             case MtlFormat.Depth32Float:
             case MtlFormat.Depth32FloatStencil8:
                 sourceBytes = 4;
+                if (_dumpDepthRaw)
+                {
+                    convert = static (source, target) => source[..Math.Min(source.Length, target.Length)].CopyTo(target);
+                    return true;
+                }
+
                 convert = static (source, target) =>
                 {
                     for (int i = 0, o = 0; i + 3 < source.Length; i += 4, o += 4)
@@ -801,6 +813,12 @@ internal sealed partial class MetalRenderHost
             // A depth plane sampled as a colour alias reads as the depth it holds.
             case MtlFormat.R32Float:
                 sourceBytes = 4;
+                if (_dumpDepthRaw)
+                {
+                    convert = static (source, target) => source[..Math.Min(source.Length, target.Length)].CopyTo(target);
+                    return true;
+                }
+
                 convert = static (source, target) =>
                 {
                     for (int i = 0, o = 0; i + 3 < source.Length; i += 4, o += 4)

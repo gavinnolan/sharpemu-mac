@@ -40,6 +40,29 @@ internal static class MetalV2Diagnostics
     // that its own positions do not reproduce bit for bit loses its fragments to EQUAL.
     public static readonly bool LoosenDepthEqual = IgnoredTests.Contains("equal");
 
+    // SHARPEMU_METAL_V2_LOOSEN_EQUAL_VS=<vertex hash>[,...]: depth EQUAL passes ALWAYS only for draws with these vertex
+    // programs, for finding the draws whose positions miss their depth prepass.
+    private static readonly HashSet<ulong> LoosenEqualVertexHashes = ParseHashes(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOOSEN_EQUAL_VS"));
+
+    public static bool LoosensEqualFor(ulong vertexHash) =>
+        LoosenEqualVertexHashes.Count != 0 && LoosenEqualVertexHashes.Contains(vertexHash);
+
+    private static HashSet<ulong> ParseHashes(string? text)
+    {
+        var hashes = new HashSet<ulong>();
+        foreach (var part in (text ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var digits = part.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? part[2..] : part;
+            if (ulong.TryParse(digits, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash))
+            {
+                hashes.Add(hash);
+            }
+        }
+
+        return hashes;
+    }
+
     // a2c: alpha to coverage stays off - an MRT0 alpha that reads 0 drops every sample of a draw
     // that never meant its alpha as coverage.
     public static readonly bool IgnoreAlphaToCoverage = IgnoredTests.Contains("a2c");

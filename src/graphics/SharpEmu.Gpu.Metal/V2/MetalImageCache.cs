@@ -509,10 +509,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
+                var reusesBefore = _deviceAliasReuses;
                 if (TryPublishAliasOnDevice(image, other))
                 {
                     _aliasPublishes++;
-                    NoteAliasPublication("on-device", image, other, otherOwedGuestMemory, otherStart, otherEnd);
+                    NoteAliasPublication(
+                        _deviceAliasReuses != reusesBefore ? "on-device-reuse" : "on-device",
+                        image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     // A device copy leaves the source GPU-modified, so a write through this
                     // image still has to take ownership from it, or both would publish.
                     if (takesGpuOwnership)

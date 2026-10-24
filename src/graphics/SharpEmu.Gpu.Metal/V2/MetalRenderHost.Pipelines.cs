@@ -1622,9 +1622,10 @@ internal sealed partial class MetalRenderHost
 
         try
         {
+            var loosenEqual = MetalV2Diagnostics.LoosenDepthEqual || MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash);
             var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreDepthTest
                 ? MetalV2Formats.CompareFunction(
-                    MetalV2Diagnostics.LoosenDepthEqual && state.DepthCompare == GpuCompareOp.Equal ? GpuCompareOp.Always : state.DepthCompare)
+                    loosenEqual && state.DepthCompare == GpuCompareOp.Equal ? GpuCompareOp.Always : state.DepthCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
             MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setDepthCompareFunction:"), depthCompare);
             MetalNative.SendVoidBool(
@@ -1711,6 +1712,7 @@ internal sealed partial class MetalRenderHost
         Mix(state.DepthTestEnabled ? 1UL : 0UL);
         Mix(state.DepthWriteEnabled ? 1UL : 0UL);
         Mix((ulong)state.DepthCompare);
+        Mix(MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash) ? 1UL : 0UL);
         Mix(stencilEnabled ? 1UL : 0UL);
         if (stencilEnabled && entry.StaticParameters is { } parameters)
         {
