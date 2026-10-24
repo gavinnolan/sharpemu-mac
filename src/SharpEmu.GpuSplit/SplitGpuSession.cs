@@ -129,6 +129,14 @@ public sealed class SplitGpuSession : IDisposable
         }
 
         var server = MacOSHost.ServeGuestMemory(export, table.Region, out var serviceName);
+        // B is another executable in another directory (osx-arm64 beside osx-x64), so it would resolve a data
+        // root of its own: its own, cold pipeline cache and shader archive (Black Myth: Wukong then compiled
+        // every program again and ran at a fraction of its speed). B inherits this process's environment.
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(SharpEmu.Logging.SharpEmuPaths.DataRootVariable)))
+        {
+            Environment.SetEnvironmentVariable(SharpEmu.Logging.SharpEmuPaths.DataRootVariable, SharpEmu.Logging.SharpEmuPaths.DataRoot);
+        }
+
         GpuProcessHost? process = null;
         SplitGpuSession? session = null;
         try
