@@ -662,6 +662,20 @@ public static partial class ResourceMaterializer
         UsableImageCandidate(candidate, image.R128) &&
         (!image.CubeAccess || GuestImageFormat.ImageTypeOf(candidate) == GuestImageFormat.ImageTypeCube);
 
+    // A call record's image the host can give a float view without a conversion in the shader: a valid sampled T# of a
+    // float format. A freed T# (0xFEFEFEFE words) fails the reserved-bit check.
+    public static bool IsFloatHeapImage(ReadOnlySpan<uint> words)
+    {
+        if (words.Length < 8 || !UsableImageCandidate(words, r128: false))
+        {
+            return false;
+        }
+
+        var format = GuestImageFormat.FormatOf(words);
+        return GuestImageFormat.SampledNumericClass(format) == ImageNumericClass.Float &&
+            ImageConversionFormat(format) == GuestImageFormat.Invalid;
+    }
+
     private static ulong ScalarBufferSize(ReadOnlySpan<uint> descriptor)
     {
         var stride = (descriptor[1] >> 16) & 0x3FFF;
@@ -1474,6 +1488,18 @@ public static partial class ResourceMaterializer
             }
 
             image = image with { MipCount = mipCount };
+            if (index < info.Images.Count && plan.DescriptorSources[(int)baseImage.Source].CallRecord is { } callRecord)
+            {
+                // A call record's image is resolved for each record by the host: the instruction names its class.
+                images[index] = image with
+                {
+                    NumericClass = ImageNumericClass.Float,
+                    Dimension = baseImage.Dimension,
+                    Cube = callRecord.Cube,
+                };
+                continue;
+            }
+
             if (NullImageDescriptor(descriptor))
             {
                 images[index] = image with

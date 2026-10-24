@@ -34,6 +34,12 @@ public static partial class Gen5MslTranslator
         Gen5MslCodegenOptions? options = null)
     {
         shader = default!;
+        if (request.UsesBindlessHeap)
+        {
+            error = "Metal does not support bindless heap descriptors.";
+            return false;
+        }
+
         // The guest mesh stage (Vulkan's task/mesh path) has no MSL emission; the Metal mesh path
         // compiles NGG primitive shaders as Vertex requests with PrimitiveShader set instead.
         if (request.Stage == ShaderStage.Mesh)
