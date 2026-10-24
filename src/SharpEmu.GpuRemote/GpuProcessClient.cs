@@ -7,15 +7,21 @@ namespace SharpEmu.GpuRemote;
 
 /// <summary>
 /// Process B's end of the split: attaches to the region A created, answers the handshake,
-/// watches A, and runs the message loop. For now the loop only answers pings and the
-/// throughput probes; it is where the Metal backend's command intake will go.
+/// watches A, and runs the message loop. The loop answers pings and the throughput probes
+/// itself and hands every other record and call to the <see cref="Service"/> - the split's
+/// GPU host (SharpEmu.GpuSplit) - when one is installed.
 /// </summary>
 /// <remarks>
-/// Two threads serve A: the caller of <see cref="Run"/> drains the A → B ring, and a dedicated
-/// thread serves the synchronous call table, so a call never queues behind ring traffic. Both
-/// spin for <see cref="SpinNanoseconds"/> after each piece of work before sleeping on their
-/// doorbells. When A exits - cleanly, by <see cref="GpuRemoteMessage.Shutdown"/>, or by dying,
-/// which the parent watch reports - both loops end and <see cref="Run"/> returns.
+/// <para>Threads: the caller of <see cref="Run"/> drains the A → B ring, and
+/// <see cref="SyncThreadCount"/> threads serve the synchronous call table, each claiming one
+/// call at a time (<see cref="SyncCallTable.ServeOne"/>), so a call never queues behind ring
+/// traffic and a slow call (a frame boundary waiting for the GPU) never holds up a quick one
+/// (a write fault). All spin for <see cref="SpinNanoseconds"/> after each piece of work before
+/// sleeping on their doorbells. When A exits - cleanly, by <see cref="GpuRemoteMessage.Shutdown"/>,
+/// or by dying, which the parent watch reports - the loops end and <see cref="Run"/> returns.</para>
+///
+/// <para>The B → A ring has one writer at a time: the ring thread's own answers and every
+/// thread of the service take <see cref="OutboundLock"/> around their writes.</para>
 /// </remarks>
 public sealed class GpuProcessClient : IDisposable
 {
@@ -29,7 +35,7 @@ public sealed class GpuProcessClient : IDisposable
 
     private readonly int _parentProcessId;
     private readonly ManualResetEventSlim _parentExited = new(false);
-    private Thread? _syncThread;
+    private readonly List<Thread> _syncThreads = new();
     private volatile bool _stopRequested;
     private int _disposed;
 
@@ -50,6 +56,18 @@ public sealed class GpuProcessClient : IDisposable
 
     /// <summary>Records consumed by <see cref="GpuRemoteMessage.Sink"/>; diagnostics.</summary>
     public long SinkRecords { get; private set; }
+
+    /// <summary>
+    /// Handles the records and calls this client does not know; set before <see cref="Run"/>.
+    /// Null drops them with a warning (records) or answers status -1 (calls).
+    /// </summary>
+    public IGpuHostService? Service { get; set; }
+
+    /// <summary>Threads serving the A → B call table; read by <see cref="Run"/>.</summary>
+    public int SyncThreadCount { get; set; } = 4;
+
+    /// <summary>Taken around every write to the B → A ring (see the type remarks).</summary>
+    public object OutboundLock { get; } = new();
 
     /// <summary>
     /// Attaches to <paramref name="regionName"/>, reads A's handshake, answers it, and starts
@@ -125,12 +143,16 @@ public sealed class GpuProcessClient : IDisposable
     /// </summary>
     public int Run()
     {
-        _syncThread = new Thread(ServeSyncCalls, 256 * 1024)
+        for (var index = 0; index < Math.Max(1, SyncThreadCount); index++)
         {
-            IsBackground = true,
-            Name = "SharpEmu GPU host sync calls",
-        };
-        _syncThread.Start();
+            var thread = new Thread(ServeSyncCalls, 1024 * 1024)
+            {
+                IsBackground = true,
+                Name = $"SharpEmu GPU host sync calls {index}",
+            };
+            _syncThreads.Add(thread);
+            thread.Start();
+        }
 
         try
         {
@@ -145,7 +167,12 @@ public sealed class GpuProcessClient : IDisposable
         {
             _stopRequested = true;
             Channel.SyncCalls.WakeAll();
-            _ = _syncThread.Join(TimeSpan.FromSeconds(2));
+            foreach (var thread in _syncThreads)
+            {
+                _ = thread.Join(TimeSpan.FromSeconds(2));
+            }
+
+            Service?.Stop();
         }
     }
 
@@ -165,7 +192,11 @@ public sealed class GpuProcessClient : IDisposable
 
         _stopRequested = true;
         Channel.WakeAll();
-        _ = _syncThread?.Join(TimeSpan.FromSeconds(2));
+        foreach (var thread in _syncThreads)
+        {
+            _ = thread.Join(TimeSpan.FromSeconds(2));
+        }
+
         Channel.Dispose();
     }
 
@@ -198,7 +229,13 @@ public sealed class GpuProcessClient : IDisposable
                     {
                         var ping = RingReader.Read<PingMessage>(payload);
                         inbound.Advance();
-                        if (!outbound.Write((uint)GpuRemoteMessage.Pong, in ping, -1))
+                        bool written;
+                        lock (OutboundLock)
+                        {
+                            written = outbound.Write((uint)GpuRemoteMessage.Pong, in ping, -1);
+                        }
+
+                        if (!written)
                         {
                             return ExitHostGone;
                         }
@@ -219,7 +256,13 @@ public sealed class GpuProcessClient : IDisposable
                     {
                         var burst = RingReader.Read<BurstMessage>(payload);
                         inbound.Advance();
-                        if (!WriteBurst(outbound, burst))
+                        bool written;
+                        lock (OutboundLock)
+                        {
+                            written = WriteBurst(outbound, burst);
+                        }
+
+                        if (!written)
                         {
                             return ExitHostGone;
                         }
@@ -228,7 +271,22 @@ public sealed class GpuProcessClient : IDisposable
                     }
 
                     default:
-                        Console.Error.WriteLine($"[GPUHOST][WARN] Ignoring unknown record type {type} ({payload.Length} bytes).");
+                        if (Service is { } service)
+                        {
+                            try
+                            {
+                                service.HandleRecord(type, payload);
+                            }
+                            catch (Exception exception) when (exception is not InvalidDataException)
+                            {
+                                Console.Error.WriteLine($"[GPUHOST][ERROR] Record type {type} failed: {exception}");
+                            }
+                        }
+                        else
+                        {
+                            Console.Error.WriteLine($"[GPUHOST][WARN] Ignoring unknown record type {type} ({payload.Length} bytes).");
+                        }
+
                         inbound.Advance();
                         break;
                 }
@@ -265,7 +323,9 @@ public sealed class GpuProcessClient : IDisposable
         {
             if (calls.WaitForRequests(-1, SpinNanoseconds))
             {
-                _ = calls.ServePending(handler);
+                while (!_stopRequested && calls.ServeOne(handler))
+                {
+                }
             }
             else if (!Channel.IsPeerAlive)
             {
@@ -274,7 +334,7 @@ public sealed class GpuProcessClient : IDisposable
         }
     }
 
-    private static int Serve(uint opcode, ReadOnlySpan<byte> request, Span<byte> response, out int status)
+    private int Serve(uint opcode, ReadOnlySpan<byte> request, Span<byte> response, out int status)
     {
         switch ((GpuRemoteSyncOpcode)opcode)
         {
@@ -283,6 +343,11 @@ public sealed class GpuProcessClient : IDisposable
                 status = 0;
                 return request.Length;
             default:
+                if (Service is { } service)
+                {
+                    return service.HandleCall(opcode, request, response, out status);
+                }
+
                 status = -1;
                 return 0;
         }
@@ -294,4 +359,27 @@ public sealed class GpuProcessClient : IDisposable
         Console.Error.WriteLine($"[GPUHOST][INFO] Host process {_parentProcessId} is gone; exiting.");
         Channel.MarkPeerExited();
     }
+}
+
+/// <summary>
+/// What process B runs on top of <see cref="GpuProcessClient"/>: the split's GPU host. The
+/// client keeps the handshake, pings and teardown; everything else comes here.
+/// </summary>
+public interface IGpuHostService
+{
+    /// <summary>
+    /// One A → B record the client does not handle, on the ring thread, in ring order. The
+    /// payload points into the ring and is valid only during the call. Throw
+    /// <see cref="InvalidDataException"/> for a malformed record, which stops the loop.
+    /// </summary>
+    void HandleRecord(uint type, ReadOnlySpan<byte> payload);
+
+    /// <summary>
+    /// One A → B call the client does not handle, on one of the call threads. Request and
+    /// response share the slot: read the whole request before writing the response.
+    /// </summary>
+    int HandleCall(uint opcode, ReadOnlySpan<byte> request, Span<byte> response, out int status);
+
+    /// <summary>The message loop has ended (A shut down or went away).</summary>
+    void Stop();
 }
