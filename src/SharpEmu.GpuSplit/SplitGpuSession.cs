@@ -232,6 +232,9 @@ public sealed class SplitGpuSession : IDisposable
             _ = Writer.Write(GpuRemoteMessage.ShaderHeader, new ShaderHeaderMessage { CodeAddress = code, HeaderAddress = header });
         }
 
+        TessellationRings.Observer = SendTessellationRings;
+        SendTessellationRings();
+
         Gen5ShaderTranslator.FusedProgramObserver = SendFusedProgram;
         if (_memory.AddressSpace is ICpuMemory guest)
         {
@@ -678,6 +681,16 @@ public sealed class SplitGpuSession : IDisposable
 
     // The memory manager waits for a detached relay before it changes mappings on its own, so a
     // relay that can no longer reach the GPU host must come off.
+    // The tessellation memory the guest driver set: the GPU process draws tessellated draws through it.
+    private void SendTessellationRings() =>
+        _ = Writer.Write(GpuRemoteMessage.TessellationRings, new TessellationRingsMessage
+        {
+            FactorRing = TessellationRings.TessFactorRing,
+            FactorRingSize = TessellationRings.TessFactorRingSize,
+            OffchipBuffer = TessellationRings.OffchipBuffer,
+            OffchipParameter = TessellationRings.OffchipParameter,
+        });
+
     private void Detach()
     {
         _memory.AttachSpanObserver(null);
@@ -686,6 +699,7 @@ public sealed class SplitGpuSession : IDisposable
         if (_globalsInstalled)
         {
             AgcBackendServices.ShaderHeaderObserver = null;
+            TessellationRings.Observer = null;
             Gen5ShaderTranslator.FusedProgramObserver = null;
         }
     }

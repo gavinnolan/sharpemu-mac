@@ -198,6 +198,16 @@ public struct ShaderHeaderMessage
     public ulong HeaderAddress;
 }
 
+/// <summary>What sceAgcDriverSetTFRing and sceAgcDriverSetHsOffchipParam set (TessellationRings).</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct TessellationRingsMessage
+{
+    public ulong FactorRing;
+    public ulong OffchipBuffer;
+    public uint FactorRingSize;
+    public uint OffchipParameter;
+}
+
 /// <summary>A fused program registered (all four set) or unregistered (only <see cref="Entry"/> set).</summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct FusedProgramMessage
