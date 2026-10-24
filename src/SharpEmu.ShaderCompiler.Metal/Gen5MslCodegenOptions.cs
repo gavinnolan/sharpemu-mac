@@ -55,11 +55,11 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// the queue; a graphics program's runaway loop is ended by the GPU watchdog, and the counter
 /// is a register and a compare on every back edge. Compute and mesh programs keep the cap
 /// either way. <c>SHARPEMU_SHADER_MAX_STEPS_GRAPHICS=1</c> restores it.</param>
-/// <param name="LaneSpillCopies">Serve a wave64 V_READLANE_B32 that reloads an SGPR the
-/// guest compiler spilled to a VGPR lane from a per-thread copy taken at the spill, which
-/// saves the cross-simdgroup exchange and its barrier
-/// (see <see cref="Ir.Gen5LaneSpillAnalysis"/>). <c>SHARPEMU_MSL_SPILLCOPY=0</c> reads every
-/// lane through the exchange.</param>
+/// <param name="LaneSpillCopies">Serve a V_READLANE_B32 that reloads an SGPR the guest compiler
+/// spilled to a VGPR lane from a per-thread copy taken at the spill: for wave64 it saves the
+/// cross-simdgroup exchange and its barrier, and it keeps the spill when the lane is missing from
+/// a partial simdgroup (see <see cref="Ir.Gen5LaneSpillAnalysis"/>). <c>SHARPEMU_MSL_SPILLCOPY=0</c>
+/// reads every lane, except in a stage that models a single lane, where only the copy is right.</param>
 /// <param name="PersistentWaitFences">Make every S_WAITCNT of a persistent-thread kernel a
 /// device-scope memory fence. Such a kernel hands work between workgroups through memory: a
 /// group stores an item, waits for its stores (S_WAITCNT_VSCNT), then publishes it with an

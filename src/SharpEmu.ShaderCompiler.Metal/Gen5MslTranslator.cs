@@ -1591,10 +1591,16 @@ public static partial class Gen5MslTranslator
                     // defined only asks that a writelane reach each reload first.
                     _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program);
                 }
-                else if (_options.LaneSpillCopies && _stage == Gen5MslStage.Compute && IsWave64)
+                else if (_options.LaneSpillCopies)
                 {
-                    // A compute launch loads the thread IDs into v0..v2.
-                    _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program, firstUndefinedVector: 3);
+                    // Real lanes too: the parked value is scalar, so the copy is what the lane holds,
+                    // and a lane a partial simdgroup (or the inactive half of a narrow wave64) does
+                    // not have keeps nothing to shuffle from - the hardware's lanes always exist. A
+                    // compute launch loads the thread IDs into v0..v2; any other stage's inputs are
+                    // treated as defined.
+                    _laneSpillPlan = _stage == Gen5MslStage.Compute
+                        ? Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program, firstUndefinedVector: 3)
+                        : Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program);
                 }
             }
 
