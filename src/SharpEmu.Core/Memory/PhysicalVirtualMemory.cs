@@ -2383,10 +2383,19 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
             var region = FindRegion(virtualAddress, (ulong)destination.Length);
             if (IsBackedSpan(region, virtualAddress, (ulong)destination.Length))
             {
-                return _backedSpace!.TryReadBacking(virtualAddress, destination);
-            }
+                // A range that starts in a view and runs on into another region (no single
+                // region holds it) is read by parts below.
+                if (_backedSpace!.TryReadBacking(virtualAddress, destination))
+                {
+                    return true;
+                }
 
-            if (region is not null &&
+                if (region is not null)
+                {
+                    return false;
+                }
+            }
+            else if (region is not null &&
                 TryResolveRegionOffset(
                     virtualAddress,
                     (ulong)destination.Length,
@@ -2429,7 +2438,7 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
 
         if (!requiresExclusiveAccess)
         {
-            return false;
+            return TryReadAcrossRegions(virtualAddress, destination);
         }
 
         var dsWriteLock = DsLock.EnterWrite(_gate, 2);
@@ -2441,6 +2450,79 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
         {
             DsLock.ExitWrite(_gate, 2, dsWriteLock);
         }
+    }
+
+    // A range no single region holds - in the split layout a module image is several regions,
+    // views of the backing between private pieces, and a table or string can straddle two - is
+    // read and written as its part in each region, in order. Null unless regions cover the
+    // range without a gap and it has more than one part.
+    private List<(int Offset, int Length)>? SplitAcrossRegions(ulong virtualAddress, int length)
+    {
+        if (length <= 1 || _disposed || virtualAddress > ulong.MaxValue - (ulong)length)
+        {
+            return null;
+        }
+
+        var parts = new List<(int Offset, int Length)>(2);
+        _gate.EnterReadLock();
+        try
+        {
+            var done = 0;
+            while (done < length)
+            {
+                var address = virtualAddress + (ulong)done;
+                if (FindRegion(address, 1) is not { } region)
+                {
+                    return null;
+                }
+
+                var take = (int)Math.Min((ulong)(length - done), region.VirtualAddress + region.Size - address);
+                parts.Add((done, take));
+                done += take;
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+
+        return parts.Count > 1 ? parts : null;
+    }
+
+    private bool TryReadAcrossRegions(ulong virtualAddress, Span<byte> destination)
+    {
+        if (SplitAcrossRegions(virtualAddress, destination.Length) is not { } parts)
+        {
+            return false;
+        }
+
+        foreach (var (offset, length) in parts)
+        {
+            if (!TryRead(virtualAddress + (ulong)offset, destination.Slice(offset, length)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryWriteAcrossRegions(ulong virtualAddress, ReadOnlySpan<byte> source)
+    {
+        if (SplitAcrossRegions(virtualAddress, source.Length) is not { } parts)
+        {
+            return false;
+        }
+
+        foreach (var (offset, length) in parts)
+        {
+            if (!TryWriteCore(virtualAddress + (ulong)offset, source.Slice(offset, length), out _, out _))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public bool TryScanCString(ulong address, byte needle, bool findLast, ulong maxLength, out ulong match)
@@ -2599,7 +2681,21 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
     {
         OrdinaryWriteFailure failure = default;
         GuestSpaceOwner? diagnosticSpace = null;
-        try { return TryWriteCore(virtualAddress, source, out failure, out diagnosticSpace); }
+        try
+        {
+            if (TryWriteCore(virtualAddress, source, out failure, out diagnosticSpace))
+            {
+                return true;
+            }
+
+            if (TryWriteAcrossRegions(virtualAddress, source))
+            {
+                failure = default;
+                return true;
+            }
+
+            return false;
+        }
         finally
         {
             // All OUR write/read lock scopes have unwound. Recursive callers

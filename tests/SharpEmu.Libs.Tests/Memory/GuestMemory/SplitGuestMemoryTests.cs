@@ -322,6 +322,31 @@ public sealed unsafe class SplitGuestMemoryTests : IDisposable
     }
 
     [Fact]
+    public void ReadsAndWritesAcrossAViewAndAPrivatePieceGoPieceByPiece()
+    {
+        if (!_shareable) return;
+        var host = HostViewMemory.Create();
+        var layout = Layout(ProbeGuestAddress(host, ArenaBytes));
+        using var memory = CreateMemory(host, layout);
+        var imageBase = ProbeGuestAddress(host, ModuleBytes);
+        // The image ends part way into its last guest page, which stays private after the views:
+        // Black Myth: Wukong's dynamic table straddles exactly such an end, and the loader read it
+        // as one range (a failed read there left the eboot unrelocated).
+        var size = ModuleBytes - Page + 0x1000;
+        Assert.True(memory.TryAllocateModuleImage(imageBase, size, ModuleCode, out _));
+        var tail = imageBase + ModuleBytes - Page;
+        Assert.True(memory.IsBackedRange(tail - Page, Page));
+        Assert.False(memory.IsBackedRange(tail, 1));
+
+        var written = Pattern(0x200, 0x5A);
+        Assert.True(memory.TryWrite(tail - 0x100, written));
+        var read = new byte[written.Length];
+        Assert.True(memory.TryRead(tail - 0x100, read));
+        Assert.Equal(written, read);
+        Assert.Equal(written, new ReadOnlySpan<byte>((void*)(tail - 0x100), written.Length).ToArray());
+    }
+
+    [Fact]
     public void TheLoaderMapsAModulesDataFromTheBacking()
     {
         if (!_shareable) return;
