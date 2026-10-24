@@ -238,8 +238,16 @@ public static partial class Gen5MslTranslator
         // meet. With nth = log, every qualifying lane (up to PcProbeLogRecords per flush) stores up
         // to 24 registers as one record, which the host appends to SHARPEMU_MSL_PC_PROBE_LOG. A
         // diagnostic: it reads lanes' values without touching the program's results.
-        private static readonly (ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition)? PcProbe = ParsePcProbe(
-            Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE"));
+        // Several probes may be given, separated by ';' (one per program): the host keeps a log region
+        // per probed program, so two programs of the same frame (a prepass and its base pass) can be
+        // compared record for record.
+        private static readonly (ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition)[] PcProbes =
+            (Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE") ?? string.Empty)
+                .Split(';', StringSplitOptions.RemoveEmptyEntries)
+                .Select(ParsePcProbe)
+                .Where(static probe => probe is not null)
+                .Select(static probe => probe!.Value)
+                .ToArray();
 
         private static (ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition)? ParsePcProbe(string? value)
         {
@@ -1603,9 +1611,12 @@ public static partial class Gen5MslTranslator
                     Line($"// 0x{instruction.Pc:X4} {instruction.Opcode}");
                 }
 
-                if (PcProbe is { } pcProbe && pcProbe.Hash == _request.Hash && pcProbe.Pc == instruction.Pc)
+                foreach (var pcProbe in PcProbes)
                 {
-                    Line(PcProbeCode(pcProbe));
+                    if (pcProbe.Hash == _request.Hash && pcProbe.Pc == instruction.Pc)
+                    {
+                        Line(PcProbeCode(pcProbe));
+                    }
                 }
 
                 if (IsWave64 && _usesLds)
