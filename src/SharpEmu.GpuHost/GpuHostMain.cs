@@ -63,6 +63,8 @@ public static class GpuHostMain
             return Usage("--shm and --parent are required");
         }
 
+        MirrorConsoleToLogFile();
+
         // Before anything can post the window: the presenter runs it on this thread.
         HostMainThread.Enable();
         GpuProcessClient client;
@@ -133,6 +135,63 @@ public static class GpuHostMain
         }
 
         return GuestGpu.Current;
+    }
+
+    // SHARPEMU_GPU_HOST_LOG: this process's console also goes to that file. The guest process's
+    // own log file is a managed mirror of its console that this process cannot write into; the CLI
+    // sets the variable next to it (<log>.gpuhost.log) when it has one.
+    private static void MirrorConsoleToLogFile()
+    {
+        var path = Environment.GetEnvironmentVariable(LogEnvironment);
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        try
+        {
+            var file = new StreamWriter(new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite), new System.Text.UTF8Encoding(false))
+            {
+                AutoFlush = true,
+            };
+            Console.SetError(TextWriter.Synchronized(new TeeWriter(Console.Error, file)));
+            Console.SetOut(TextWriter.Synchronized(new TeeWriter(Console.Out, file)));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[GPUHOST][WARN] Could not open the log file {path}: {exception.Message}");
+        }
+    }
+
+    public const string LogEnvironment = "SHARPEMU_GPU_HOST_LOG";
+
+    private sealed class TeeWriter(TextWriter primary, TextWriter mirror) : TextWriter
+    {
+        public override System.Text.Encoding Encoding => primary.Encoding;
+
+        public override void Write(char value)
+        {
+            primary.Write(value);
+            mirror.Write(value);
+        }
+
+        public override void Write(string? value)
+        {
+            primary.Write(value);
+            mirror.Write(value);
+        }
+
+        public override void WriteLine(string? value)
+        {
+            primary.WriteLine(value);
+            mirror.WriteLine(value);
+        }
+
+        public override void Flush()
+        {
+            primary.Flush();
+            mirror.Flush();
+        }
     }
 
     private static int Usage(string problem)
