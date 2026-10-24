@@ -1539,6 +1539,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     public (ulong Base, ulong Size) BackingAliasRange =>
         !_disposed && _backedSpace is { } backed ? (backed.AliasBase, backed.BackingSize) : (0, 0);
 
+    // The two-process split's view of guest memory (SHARPEMU_GPU_PROCESS=1): what another process
+    // needs to map the backing, and the shared table of guest views into it. Null otherwise.
+    public GuestBackingExport? GuestBackingExport => _backedSpace?.BackingExport;
+
+    public GuestViewTable? GuestViewTable => _backedSpace?.ViewTable;
+
     private bool HasBackingOwner() => !_disposed && _backedSpace != null;
 
     // A span may cross adjacent view records; the owner validates full coverage.

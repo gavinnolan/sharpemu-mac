@@ -61,6 +61,22 @@ internal static class HostBackendUnderTest
     }
 
     /// <summary>
+    /// Picks whether backings this thread creates are shareable with another process (an export
+    /// and a shared view table): null whatever SHARPEMU_GUEST_BACKING_SHAREABLE and
+    /// SHARPEMU_GPU_PROCESS say. Only macOS shares backings; false when the host cannot.
+    /// </summary>
+    public static bool SetShareableBacking(bool? shareable)
+    {
+#if SHARPEMU_HOST_MACOS
+        SharpEmu.Host.MacOS.MacHostViews.ShareableBackingForTests = shareable;
+        return true;
+#else
+        _ = shareable;
+        return false;
+#endif
+    }
+
+    /// <summary>
     /// Forces the placeholder protection step to fail. Windows-only: the
     /// POSIX backends have no separate protect step inside TryMapView.
     /// </summary>

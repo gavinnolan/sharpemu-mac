@@ -50,6 +50,10 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // Chunked backing only: which chunks a texture holds instead of the alias (GuestSingleCopy).
     private readonly GuestSingleCopy? _singleCopy;
 
+    // Shareable backing only (SHARPEMU_GPU_PROCESS=1): every view record and a log of their changes,
+    // in shared memory, for a process that replicates the views. Changed under _lock (SetViewLocked/RemoveViewAtLocked).
+    private readonly GuestViewTable? _viewTable;
+
     // Single-view accesses in flight; Dispose waits for them before releasing the alias.
     // A copy reservation also waits for these: they touch the alias without checking it.
     private int _activeAccesses;
@@ -86,6 +90,11 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             }
             throw;
         }
+
+        // Last: nothing above can fail after it, so the table needs no cleanup here. Protection
+        // changes are only logged: tracking them in the entries costs every write fault a split.
+        if (_backing?.Export is not null && host is IHostGuestMirrorMemory mirrorHost)
+            _viewTable = GuestViewTable.TryCreate(mirrorHost, _backing.Size, trackProtection: false);
     }
 
     public bool IsAvailable => _backing != null && !Volatile.Read(ref _disposeRequested) && !Volatile.Read(ref _disposed) && !_backing.IsClosing && !_backing.IsDisposed;
@@ -93,6 +102,12 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     public bool CleanupComplete => Volatile.Read(ref _cleanupComplete);
 
     public ulong AliasBase => _backing?.AliasBase ?? 0;
+
+    /// <summary>What another process needs to map this backing; null unless the host made it shareable.</summary>
+    public GuestBackingExport? BackingExport => _backing?.Export;
+
+    /// <summary>The shared table of this backing's views; null unless the backing is shareable.</summary>
+    public GuestViewTable? ViewTable => _viewTable;
 
     public ulong Size => _backing?.Size ?? 0;
 
@@ -1379,6 +1394,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
                 }
             }
             _backing?.Dispose();
+            _viewTable?.Dispose();
             lock (_lock) Volatile.Write(ref _cleanupComplete, true);
         }
         finally { Monitor.Exit(_disposeGate); }
@@ -1667,7 +1683,8 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // many view records reach into each chunk. Must be called under _lock.
     private void SetViewLocked(ViewRecord record)
     {
-        if (_views.TryGetValue(record.Address, out var replaced))
+        var hadRecord = _views.TryGetValue(record.Address, out var replaced);
+        if (hadRecord)
         {
             CountChunkViews(replaced, -1);
             NoteViewChangeLocked(replaced);
@@ -1676,6 +1693,9 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         _views[record.Address] = record;
         CountChunkViews(record, 1);
         NoteViewChangeLocked(record);
+        if (_viewTable is not { } table) return;
+        if (hadRecord) table.Remap(replaced.Address, replaced.Size, record.Address, record.Size, record.Offset, record.Protection);
+        else table.Map(record.Address, record.Size, record.Offset, record.Protection);
     }
 
     private void RemoveViewAtLocked(int index)
@@ -1684,6 +1704,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         CountChunkViews(removed, -1);
         NoteViewChangeLocked(removed);
         _views.RemoveAt(index);
+        _viewTable?.Unmap(removed.Address, removed.Size);
     }
 
     private void CountChunkViews(ViewRecord record, int delta)
