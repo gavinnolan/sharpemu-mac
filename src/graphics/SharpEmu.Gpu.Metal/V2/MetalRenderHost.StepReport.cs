@@ -38,6 +38,8 @@ internal sealed partial class MetalRenderHost
             : 8;
     private int _probeLogFlushes;
 
+    // One region per probed program; its records are Gen5MslTranslator.PcProbeLogRecordWords long
+    // (the probe index, then the registers), so a program probed at several PCs keeps them apart.
     private static (ulong Hash, int Registers)[] ParseProbeLogs()
     {
         var logs = new List<(ulong, int)>();
@@ -47,9 +49,10 @@ internal sealed partial class MetalRenderHost
             var parts = spec.Split(':');
             if (parts.Length is (4 or 5) && parts[2] == "log" &&
                 ulong.TryParse(parts[0].Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
-                    NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hash))
+                    NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hash) &&
+                !logs.Exists(log => log.Item1 == hash))
             {
-                logs.Add((hash, Math.Min(24, parts[3].Split('/', StringSplitOptions.RemoveEmptyEntries).Length)));
+                logs.Add((hash, Gen5MslTranslator.PcProbeLogRecordWords(hash)));
             }
         }
 

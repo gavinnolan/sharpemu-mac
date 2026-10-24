@@ -149,6 +149,9 @@ public static partial class Gen5MslTranslator
     /// <summary>The records a SHARPEMU_MSL_PC_PROBE in log mode keeps per flush.</summary>
     public const int PcProbeLogRecords = 65536;
 
+    /// <summary>The words of one SHARPEMU_MSL_PC_PROBE log record of a program (probe index, then registers).</summary>
+    public static int PcProbeLogRecordWords(ulong hash) => CompilationContext.ProbeRecordWords(hash);
+
     /// <summary>How the translated shaders in this process came out. A shader whose
     /// control flow no MSL construct expresses falls back to the PC dispatcher, so the
     /// ratio is what says whether the structured emitter is covering a game's shaders;
@@ -268,20 +271,30 @@ public static partial class Gen5MslTranslator
                 parts.Length == 5 ? parts[4] : null);
         }
 
+        /// <summary>
+        /// The words of one log record of a probed program: the index of the probe that wrote it among
+        /// all the probes given, then the registers, padded to the largest probe of that program (all
+        /// the log probes of a program share its report region, so several PCs of one program stay apart).
+        /// </summary>
+        internal static int ProbeRecordWords(ulong hash) =>
+            1 + PcProbes.Where(probe => probe.Hash == hash && probe.Nth == uint.MaxValue)
+                .Select(static probe => probe.Registers.Length).DefaultIfEmpty(0).Max();
+
         private string PcProbeCode((ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition) probe)
         {
             var report = $"{ResourcesName}.{Gen5MslArgumentLayout.StepReportName}";
             var condition = probe.Condition is null ? string.Empty : $" && ({probe.Condition})";
             var log = probe.Nth == uint.MaxValue;
+            var recordWords = ProbeRecordWords(probe.Hash);
             var text = new StringBuilder($"if (exec{condition} && {report} != nullptr) {{ uint sharpemu_probe_n = atomic_fetch_add_explicit({report}, 1u, memory_order_relaxed); ");
             text.Append(log
-                ? $"if (sharpemu_probe_n < {PcProbeLogRecords}u) {{"
+                ? $"if (sharpemu_probe_n < {PcProbeLogRecords}u) {{ atomic_store_explicit({report} + 1u + sharpemu_probe_n * {recordWords}u, {Array.IndexOf(PcProbes, probe)}u, memory_order_relaxed);"
                 : $"if (sharpemu_probe_n == {probe.Nth}u) {{");
             for (var index = 0; index < probe.Registers.Length; index++)
             {
                 var name = probe.Registers[index];
                 var value = name == "exec" ? "(exec ? 1u : 0u)" : $"as_type<uint>({name})";
-                var word = log ? $"1u + sharpemu_probe_n * {probe.Registers.Length}u + {index}u" : $"{index + 1}";
+                var word = log ? $"1u + sharpemu_probe_n * {recordWords}u + {index + 1}u" : $"{index + 1}";
                 text.Append($" atomic_store_explicit({report} + {word}, {value}, memory_order_relaxed);");
             }
 
