@@ -437,6 +437,63 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
     }
 
+    [Theory]
+    [InlineData(100u, null)]
+    [InlineData(68u, 40u)]
+    [InlineData(100u, 3u)]
+    public void AmplifiedWave64SubgroupExportsFromItsSecondWaveForItsOwnWorkgroup(uint firstVertex, uint? readLane)
+    {
+        if (SkipWithoutMetalDevice("the amplified mesh execution test")) return;
+
+        // Two workgroups (points 0 and 1) of two real 64-lane waves. The triangle only
+        // reaches the center if thread ids firstVertex..+2 of wave 1 export it and the ES
+        // vertex index of workgroup 1 is 1; workgroup 0's copy lands off screen. With a read
+        // lane in the other half of the wave, the V_READLANE crosses the bridge too.
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.AmplifiedWave64Triangle(firstVertex, readLane), Gen5NggFixtures.AmplifiedStageInfo);
+        var mesh = shader.MeshInfo!;
+        Assert.True(mesh.Amplified);
+        Assert.Equal(128u, mesh.ThreadsPerThreadgroup);
+        Assert.Equal(2u, mesh.WavesPerThreadgroup);
+        Assert.Equal(1u, Gen5MslMeshLaunch.SubgroupCount(mesh, Gen5MslMeshInputTopology.PointList, 1));
+        var source = shader.Source + FragmentSource;
+        if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+        {
+            throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+        }
+
+        var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+        Gen5MslMeshLaunch.FillDrawInfo(
+            mesh, Gen5MslMeshInputTopology.PointList, words, count: 2, instanceCount: 1, indexed: false,
+            indexType: 0, firstIndex: 0, baseVertex: 0, firstInstance: 0);
+        var drawInfo = new byte[words.Length * sizeof(uint)];
+        Buffer.BlockCopy(words, 0, drawInfo, 0, drawInfo.Length);
+
+        Assert.True(
+            MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_test_fs",
+                [
+                    (BuildArgumentBuffer(shader), 0u),
+                    (new byte[64], 1u),
+                    (drawInfo, mesh.DrawInfoBufferIndex),
+                    (new byte[16], mesh.IndexBufferIndex),
+                    (new byte[16], Gen5MslMeshInfo.MeshletBufferIndex),
+                ],
+                threadgroups: 2,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var renderError),
+            $"the mesh draw failed: {renderError}");
+
+        Assert.Equal(1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+        Assert.Equal(0.0f, Green(pixels, 1, 1), 3);
+        Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
+    }
+
     [Fact]
     public void BufferFetchedVerticesRasterizeThroughAMeshPipeline()
     {

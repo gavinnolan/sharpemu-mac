@@ -385,12 +385,14 @@ public sealed class ShaderCompileRequest
     /// otherwise the resource plan never sees those loads, the fetch has no buffer binding,
     /// and the program cannot be compiled. A passthrough primitive shader that hands its
     /// pixel program per-vertex values (<see cref="MeshPerVertexParameterMask"/>) is a mesh
-    /// function too.</summary>
+    /// function too, and so is an amplified subgroup (Gen5NggStageInfo.AmplifiedVerticesOut).</summary>
     public static bool AllowsEmbeddedVertexFetch(
         Gen5ShaderProgram program,
         Gen5NggStageInfo? primitiveShader,
         uint meshPerVertexParameterMask = 0) =>
-        primitiveShader is null || (meshPerVertexParameterMask == 0 && !RequiresPrimitiveShaderWorkgroup(program));
+        primitiveShader is null ||
+        (meshPerVertexParameterMask == 0 && primitiveShader.Value.AmplifiedVerticesOut == 0 &&
+            !RequiresPrimitiveShaderWorkgroup(program));
 
     public int RequiredVertexOutputCount { get; init; }
     public uint? MeshOutputLocationMask { get; init; }

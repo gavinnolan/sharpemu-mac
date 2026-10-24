@@ -53,8 +53,14 @@ public sealed record Gen5MslMeshInfo(
     bool NarrowWave64 = false,
     bool DeviceLds = false,
     bool Wave64 = false,
-    uint LdsBytes = 0)
+    uint LdsBytes = 0,
+    bool Amplified = false)
 {
+    /// <summary>Lanes in one guest wave of this program: an amplified wave64 subgroup runs
+    /// its 64-lane waves as two bridged simdgroups each; everything else runs a guest wave
+    /// as one simdgroup (<see cref="WaveLanes"/>).</summary>
+    public uint GuestWaveLanes => Amplified && Wave64 ? 64u : WaveLanes;
+
     /// <summary>The mesh slot the device-memory LDS pool is bound at when
     /// <see cref="DeviceLds"/> is set.</summary>
     public const uint LdsPoolBufferIndex = 5;

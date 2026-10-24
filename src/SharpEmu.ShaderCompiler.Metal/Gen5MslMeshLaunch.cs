@@ -41,6 +41,12 @@ public static class Gen5MslMeshLaunch
     /// </summary>
     public static uint SubgroupCount(Gen5MslMeshInfo mesh, Gen5MslMeshInputTopology input, uint count)
     {
+        if (mesh.Amplified)
+        {
+            // An amplified subgroup takes one input vertex: one workgroup per point.
+            return count;
+        }
+
         if (mesh.HasGeometryHalf)
         {
             // A GS half assembles its input primitives from the draw's own topology, so the
@@ -80,7 +86,9 @@ public static class Gen5MslMeshLaunch
         words[2] = indexed ? count : 0;
         words[3] = indexed ? indexType : 0;
         words[4] = indexed ? firstIndex : 0;
-        words[5] = unchecked((uint)baseVertex);
+        // An amplified draw's workgroup index is its point's vertex index, so a non-indexed
+        // one counts on from the first vertex.
+        words[5] = mesh.Amplified && !indexed ? firstIndex : unchecked((uint)baseVertex);
         words[6] = instanceCount;
         words[7] = firstInstance;
         // A GS half learns where each subgroup's share of input primitives starts and how
@@ -131,6 +139,7 @@ public static class Gen5MslMeshLaunch
         parameters[11] = mesh.HasGeometryHalf ? mesh.InputPrimitivesPerSubgroup(input) : 0;
         parameters[12] = unchecked((uint)maxThreadgroups);
         parameters[13] = (uint)(maxThreadgroups >> 32);
+        parameters[14] = mesh.Amplified ? 1u : 0u;
     }
 
     /// <summary>
@@ -172,6 +181,7 @@ public static class Gen5MslMeshLaunch
             uint input_primitives_per_subgroup;
             uint max_threadgroups_low;
             uint max_threadgroups_high;
+            uint amplified;
         };
 
         kernel void {{KernelFunction}}(
@@ -211,7 +221,11 @@ public static class Gen5MslMeshLaunch
             const uint first_instance = p.indexed != 0u ? arguments[4] : arguments[3];
 
             uint subgroups;
-            if (p.has_geometry_half != 0u)
+            if (p.amplified != 0u)
+            {
+                subgroups = count;
+            }
+            else if (p.has_geometry_half != 0u)
             {
                 uint input_primitives = count / 3u;
                 if (p.input_topology == {{(uint)Gen5MslMeshInputTopology.TriangleStrip}}u)
@@ -241,7 +255,7 @@ public static class Gen5MslMeshLaunch
             block[2] = p.indexed != 0u ? count : 0u;
             block[3] = p.indexed != 0u ? p.index_type : 0u;
             block[4] = first_index;
-            block[5] = base_vertex;
+            block[5] = p.amplified != 0u && p.indexed == 0u ? arguments[2] : base_vertex;
             block[6] = instances;
             block[7] = first_instance;
             for (uint word = 8u; word < 13u; word++)

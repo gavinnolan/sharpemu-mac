@@ -106,6 +106,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             IsWave64 = VgtShaderStages.IsGeometryWave64(shaderStages),
             Passthrough = VgtShaderStages.IsPrimitivePassthrough(shaderStages),
+            AmplifiedVerticesOut = VgtShaderStages.AmplifiedVerticesOut(shaderStages, shaderInterface),
         };
     }
 

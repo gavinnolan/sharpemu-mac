@@ -320,6 +320,7 @@ internal static class StaticStageInputs
             {
                 IsWave64 = statePrimitive.IsWave64,
                 Passthrough = statePrimitive.Passthrough,
+                AmplifiedVerticesOut = statePrimitive.AmplifiedVerticesOut,
             }
             : null;
         var options = new StageCompileOptions

@@ -262,6 +262,18 @@ public readonly record struct Gen5NggStageInfo(
     /// export takes it (three 10-bit vertex fields) in v0, instead of the GS vertex offsets,
     /// and the program exports that register as it is.</summary>
     public bool Passthrough { get; init; }
+
+    /// <summary>VGT_GS_MAX_VERT_OUT of a merged ES/GS subgroup that amplifies a single input
+    /// vertex (GS_EN, GE_NGG_SUBGRP_CNTL.PRIM_AMP_FACTOR above 1, ES_VERTS_PER_SUBGRP 1):
+    /// how Prospero runs a mesh shader. Every point of a point-list draw launches one
+    /// workgroup, whose first lane's ES vertex index is the point (the workgroup index),
+    /// and the workgroup emits up to this many vertices and PRIM_AMP_FACTOR primitives, one
+    /// per thread. Black Myth: Wukong's Nanite hardware rasterizer is one. Zero otherwise.</summary>
+    public uint AmplifiedVerticesOut { get; init; }
+
+    /// <summary>The most primitives one amplified subgroup emits
+    /// (GE_NGG_SUBGRP_CNTL.PRIM_AMP_FACTOR).</summary>
+    public uint AmplifiedPrimitivesOut => PrimitiveAmplificationFactor & 0x1FFu;
 }
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)

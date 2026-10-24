@@ -407,8 +407,29 @@ public static partial class Gen5MslTranslator
         /// them, so a barrier inside one would never be met by the other waves and the
         /// GPU hangs. Larger workgroups run each 32-wide simdgroup as a wave.</summary>
         private bool IsWave64 =>
-            _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
-            (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
+            (_waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
+                (ulong)_localSizeX * _localSizeY * _localSizeZ == 64) ||
+            IsBridgedMeshWave64;
+
+        /// <summary>An amplified wave64 mesh subgroup (Prospero's mesh shader): its threads are
+        /// numbered (merged-wave subgroup id &lt;&lt; 6) + lane and each exports its own vertex and
+        /// primitive, so a guest wave has to be all 64 lanes - two bridged simdgroups, several
+        /// waves per threadgroup. Their exchanges meet at a pair barrier of the wave's two
+        /// simdgroups instead of a threadgroup barrier, since the other waves need not be at
+        /// the same exchange (see <see cref="Wave64Barrier"/>).</summary>
+        private bool IsBridgedMeshWave64 => _stage == Gen5MslStage.Mesh && _meshInfo is { Amplified: true, Wave64: true };
+
+        /// <summary>Where the two halves of a bridged wave64 meet: a threadgroup barrier when
+        /// the wave is the whole threadgroup (compute), else the wave's own pair barrier. The
+        /// pair barrier fences this half's threadgroup writes, counts it in, and waits for the
+        /// other half to count in for the same exchange; both halves run the same sequence of
+        /// exchanges (their scalar state is the same), so each waits only for its partner.</summary>
+        private string Wave64Barrier => IsBridgedMeshWave64
+            ? "{ simdgroup_barrier(mem_flags::mem_threadgroup); sharpemu_wave_gen += 2u; " +
+              "if ((sharpemu_lane & 31u) == 0u) { atomic_fetch_add_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], 1u, memory_order_relaxed); } " +
+              "while (atomic_load_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], memory_order_relaxed) < sharpemu_wave_gen) { } " +
+              "simdgroup_barrier(mem_flags::mem_threadgroup); }"
+            : "threadgroup_barrier(mem_flags::mem_threadgroup);";
 
         /// <summary>A guest wave32 program: VCC is VCC_LO alone, so a mask write (V_CMP,
         /// a carry-out) leaves s107 untouched and VCCZ reads s106 only (EXECZ likewise reads
@@ -931,6 +952,18 @@ public static partial class Gen5MslTranslator
                     source.AppendLine("    uint sharpemu_wave_set = 0u;");
                 }
 
+            }
+            else if (IsBridgedMeshWave64)
+            {
+                // Each guest wave owns both slot sets of its own, at wave * WaveScratchDwords,
+                // and a pair-barrier counter its two halves count into (zeroed by the mesh
+                // declarations' seed block before the program starts).
+                var waves = Mesh.WavesPerThreadgroup;
+                source.AppendLine("    const uint sharpemu_lane = sharpemu_tg_index & 63u;");
+                source.AppendLine($"    threadgroup uint sharpemu_wave_scratch[{WaveScratchDwords * waves}];");
+                source.AppendLine($"    uint sharpemu_wave_set = (sharpemu_tg_index >> 6u) * {WaveScratchDwords}u;");
+                source.AppendLine($"    threadgroup atomic_uint sharpemu_wave_pair[{waves}];");
+                source.AppendLine("    uint sharpemu_wave_gen = 0u;");
             }
             if (!HasRealWaveLanes)
             {
@@ -1523,7 +1556,7 @@ public static partial class Gen5MslTranslator
             // block hands over with no half's LDS access still in flight.
             if (emitted && _ldsPhase != LdsPhase.None && !(terminator.Kind == TerminatorKind.Jump && terminator.TrueTarget == ExitTarget))
             {
-                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                Line(Wave64Barrier);
             }
 
             return emitted;
@@ -1657,7 +1690,7 @@ public static partial class Gen5MslTranslator
                     {
                         if (barriers.Contains(instruction.Pc))
                         {
-                            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                            Line(Wave64Barrier);
                         }
                     }
                     else
@@ -1675,7 +1708,7 @@ public static partial class Gen5MslTranslator
                         {
                             if (_ldsPhase != LdsPhase.None && _ldsPhase != nextPhase)
                             {
-                                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                                Line(Wave64Barrier);
                             }
 
                             _ldsPhase = nextPhase;

@@ -2165,7 +2165,7 @@ internal sealed partial class MetalRenderHost
         // threadgroup then holds the unique vertices of up to MaxPrimitives triangles, as the
         // geometry engine packs a subgroup, instead of three own vertices per triangle.
         MetalMeshletCache.Meshlets meshlets = default;
-        var useMeshlets = !mesh.HasGeometryHalf && indexed &&
+        var useMeshlets = !mesh.HasGeometryHalf && !mesh.Amplified && indexed &&
             TryGetMeshlets(mesh, count, firstIndexOrVertex, out meshlets);
         if (useMeshlets)
         {
