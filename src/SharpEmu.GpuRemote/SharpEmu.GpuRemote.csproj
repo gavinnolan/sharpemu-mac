@@ -5,13 +5,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <!--
   The cross-process transport of the two-process split: process A (SharpEmu.CLI, x86-64 under
-  Rosetta) and process B (SharpEmu.GpuHost, native arm64, the future home of the Metal backend)
-  share one POSIX shared-memory region holding byte rings, doorbells and synchronous call slots.
+  Rosetta) and process B (SharpEmu.GpuHost, native arm64, the Metal backend's host) share one
+  POSIX shared-memory region holding byte rings, doorbells, synchronous call slots both ways and
+  an application block.
 
   A leaf assembly with no SharpEmu references, built AnyCPU, so both architectures' processes
-  can load it, and so can any layer that later has to cross the line - the fault handler in
-  SharpEmu.Cpu.DirectExecution.MacOS.X64 included. Not wired into the emulator yet; see
-  GpuProcessHost (A) and GpuProcessClient (B).
+  can load it, and so can any layer that has to cross the line - the fault handler in
+  SharpEmu.Cpu.DirectExecution.MacOS.X64 included. The split's wiring on top of it is
+  SharpEmu.GpuSplit; see GpuProcessHost (A) and GpuProcessClient (B) for the processes.
 -->
 <Project Sdk="Microsoft.NET.Sdk">
 

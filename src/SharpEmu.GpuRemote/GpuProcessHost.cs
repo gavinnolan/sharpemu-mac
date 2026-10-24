@@ -38,18 +38,19 @@ public sealed class GpuProcessException(string message, Exception? inner = null)
 /// <c>SharpEmu.GpuHost</c> natively arm64, completes the handshake, watches it, and shuts it down.
 /// </summary>
 /// <remarks>
-/// <para>Opt-in behind <see cref="EnableEnvironment"/> (<c>SHARPEMU_GPU_PROCESS=1</c>); nothing in
-/// the emulator starts one yet. The GPU path still runs in-process; this is the foundation the
-/// <c>IGuestGpuBackend</c> proxy will sit on (phase 2 of the split plan).</para>
+/// <para>Opt-in behind <see cref="EnableEnvironment"/> (<c>SHARPEMU_GPU_PROCESS=1</c>), under which
+/// SharpEmu.GpuSplit's <c>SplitGpuSession</c> starts one and puts the <c>IGuestGpuBackend</c> proxy
+/// on it (docs/macos/split-protocol.md).</para>
 ///
 /// <para>Lifetime: if A exits or dies, B notices through its parent watch and exits; if B dies,
 /// A's watch reaps it, marks the channel's peer exited and wakes every waiter, so pings, calls
 /// and ring waits return failure instead of hanging. The region's name is unlinked as soon as
 /// B has attached.</para>
 ///
-/// <para>Threading: <see cref="TryPing"/> and the benchmarks use the channel's rings under
-/// <see cref="SyncRoot"/>; a future owner of the rings takes over that role. Sync calls are
-/// lock-free and may run concurrently from any thread.</para>
+/// <para>Threading: writers of the A → B ring take <see cref="SyncRoot"/>. <see cref="TryPing"/>
+/// and the benchmarks also read the B → A ring, so they are for a host nothing else reads from:
+/// once a split session owns the rings it drains the B → A ring itself. Sync calls are lock-free
+/// and may run concurrently from any thread.</para>
 /// </remarks>
 public sealed class GpuProcessHost : IDisposable
 {
