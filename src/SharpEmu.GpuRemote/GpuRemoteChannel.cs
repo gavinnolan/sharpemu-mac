@@ -27,6 +27,18 @@ public sealed record GpuRemoteLayout
     public int SyncSlotCount { get; init; } = SyncCallTable.MaxSlots;
 
     public int SyncSlotPayloadBytes { get; init; } = 512;
+
+    /// <summary>Slots of the B → A call table (B calls, A serves).</summary>
+    public int ReverseSyncSlotCount { get; init; } = 32;
+
+    public int ReverseSyncSlotPayloadBytes { get; init; } = 512;
+
+    /// <summary>
+    /// Bytes of the application block: shared memory the transport lays out but never reads,
+    /// for state both processes keep in place (the split's page summary and acknowledgement
+    /// counters). Rounded up to whole cache lines; 0 for none.
+    /// </summary>
+    public int ApplicationBytes { get; init; }
 }
 
 [StructLayout(LayoutKind.Explicit, Size = Size)]
@@ -77,6 +89,21 @@ internal struct RegionHeader
     [FieldOffset(68)]
     public int GpuProcessId;
 
+    [FieldOffset(72)]
+    public ulong ReverseSyncOffset;
+
+    [FieldOffset(80)]
+    public int ReverseSyncSlotCount;
+
+    [FieldOffset(84)]
+    public int ReverseSyncSlotPayloadBytes;
+
+    [FieldOffset(88)]
+    public ulong ApplicationOffset;
+
+    [FieldOffset(96)]
+    public ulong ApplicationBytes;
+
     /// <summary>A <see cref="GpuRemoteChannel"/> peer state of process A.</summary>
     [FieldOffset(128)]
     public uint HostState;
@@ -88,13 +115,16 @@ internal struct RegionHeader
 
 /// <summary>
 /// One process's view of the shared region of the split: a header, the A → B ring, the B → A
-/// ring and the synchronous call table, all in one <see cref="SharedMemoryRegion"/>.
+/// ring, the two synchronous call tables (A → B and B → A) and an optional application block,
+/// all in one <see cref="SharedMemoryRegion"/>.
 /// </summary>
 /// <remarks>
 /// <para>Process A creates the region (<see cref="Create"/>) and passes its name to B, which
 /// attaches (<see cref="Attach"/>). Each side sees the rings from its own end:
 /// <see cref="Outbound"/> is the ring it writes, <see cref="Inbound"/> the one it reads; calls
-/// go A → B through <see cref="SyncCalls"/>.</para>
+/// go A → B through <see cref="SyncCalls"/> and B → A through <see cref="ReverseSyncCalls"/>.
+/// Only the A → B table is signal-safe for its caller in practice: B's calls come from its
+/// ordinary threads.</para>
 ///
 /// <para>The header also carries each side's state (<see cref="PeerRunning"/>,
 /// <see cref="PeerExited"/>). Every blocking wait in the transport checks the other side's
@@ -138,6 +168,8 @@ public sealed unsafe class GpuRemoteChannel : IDisposable
         }
 
         SyncCalls = new SyncCallTable(start + _header->SyncOffset, _header->SyncSlotCount, _header->SyncSlotPayloadBytes, peerState);
+        ReverseSyncCalls = new SyncCallTable(
+            start + _header->ReverseSyncOffset, _header->ReverseSyncSlotCount, _header->ReverseSyncSlotPayloadBytes, peerState);
     }
 
     public GpuRemoteSide Side { get; }
@@ -156,6 +188,17 @@ public sealed unsafe class GpuRemoteChannel : IDisposable
     /// <summary>A → B synchronous calls; A calls, B serves.</summary>
     public SyncCallTable SyncCalls { get; }
 
+    /// <summary>B → A synchronous calls; B calls, A serves.</summary>
+    public SyncCallTable ReverseSyncCalls { get; }
+
+    /// <summary>The application block (see <see cref="GpuRemoteLayout.ApplicationBytes"/>); null when it has none.</summary>
+    public byte* Application => _header->ApplicationBytes == 0 ? null : _region.Pointer + _header->ApplicationOffset;
+
+    public int ApplicationBytes => (int)_header->ApplicationBytes;
+
+    /// <summary>The other side's state word, for primitives laid out in the application block.</summary>
+    public uint* PeerStateAddress => PeerStateWord;
+
     public int HostProcessId => Volatile.Read(ref _header->HostProcessId);
 
     public int GpuProcessId => Volatile.Read(ref _header->GpuProcessId);
@@ -171,20 +214,32 @@ public sealed unsafe class GpuRemoteChannel : IDisposable
     private uint* OwnStateWord => Side == GpuRemoteSide.Host ? &_header->HostState : &_header->GpuState;
 
     /// <summary>Bytes a region with <paramref name="layout"/> occupies, before rounding to pages.</summary>
-    public static int RegionSize(GpuRemoteLayout layout, out int hostToGpuOffset, out int gpuToHostOffset, out int syncOffset)
+    public static int RegionSize(GpuRemoteLayout layout, out int hostToGpuOffset, out int gpuToHostOffset, out int syncOffset) =>
+        RegionSize(layout, out hostToGpuOffset, out gpuToHostOffset, out syncOffset, out _, out _);
+
+    /// <summary>
+    /// <see cref="RegionSize(GpuRemoteLayout, out int, out int, out int)"/> with the B → A call
+    /// table and the application block placed too.
+    /// </summary>
+    public static int RegionSize(
+        GpuRemoteLayout layout, out int hostToGpuOffset, out int gpuToHostOffset, out int syncOffset, out int reverseSyncOffset,
+        out int applicationOffset)
     {
         ArgumentNullException.ThrowIfNull(layout);
+        ArgumentOutOfRangeException.ThrowIfNegative(layout.ApplicationBytes);
         hostToGpuOffset = Align(RegionHeader.Size);
         gpuToHostOffset = Align(hostToGpuOffset + SpscRing.BlockSize(layout.HostToGpuRingBytes));
         syncOffset = Align(gpuToHostOffset + SpscRing.BlockSize(layout.GpuToHostRingBytes));
-        return Align(syncOffset + SyncCallTable.BlockSize(layout.SyncSlotCount, layout.SyncSlotPayloadBytes));
+        reverseSyncOffset = Align(syncOffset + SyncCallTable.BlockSize(layout.SyncSlotCount, layout.SyncSlotPayloadBytes));
+        applicationOffset = Align(reverseSyncOffset + SyncCallTable.BlockSize(layout.ReverseSyncSlotCount, layout.ReverseSyncSlotPayloadBytes));
+        return Align(applicationOffset + layout.ApplicationBytes);
     }
 
     /// <summary>Process A: creates the region under <paramref name="name"/> and lays it out.</summary>
     public static GpuRemoteChannel Create(string name, GpuRemoteLayout? layout = null)
     {
         layout ??= new GpuRemoteLayout();
-        var size = RegionSize(layout, out var hostToGpu, out var gpuToHost, out var sync);
+        var size = RegionSize(layout, out var hostToGpu, out var gpuToHost, out var sync, out var reverseSync, out var application);
         var region = SharedMemoryRegion.Create(name, (nuint)size);
         try
         {
@@ -200,6 +255,11 @@ public sealed unsafe class GpuRemoteChannel : IDisposable
             header->GpuToHostCapacity = layout.GpuToHostRingBytes;
             header->SyncSlotCount = layout.SyncSlotCount;
             header->SyncSlotPayloadBytes = layout.SyncSlotPayloadBytes;
+            header->ReverseSyncOffset = (ulong)reverseSync;
+            header->ReverseSyncSlotCount = layout.ReverseSyncSlotCount;
+            header->ReverseSyncSlotPayloadBytes = layout.ReverseSyncSlotPayloadBytes;
+            header->ApplicationOffset = (ulong)application;
+            header->ApplicationBytes = (ulong)Align(layout.ApplicationBytes);
             header->HostProcessId = Environment.ProcessId;
             header->HostState = PeerRunning;
             Volatile.Write(ref header->Magic, RegionHeader.ExpectedMagic);
@@ -236,10 +296,14 @@ public sealed unsafe class GpuRemoteChannel : IDisposable
                 GpuToHostRingBytes = header->GpuToHostCapacity,
                 SyncSlotCount = header->SyncSlotCount,
                 SyncSlotPayloadBytes = header->SyncSlotPayloadBytes,
+                ReverseSyncSlotCount = header->ReverseSyncSlotCount,
+                ReverseSyncSlotPayloadBytes = header->ReverseSyncSlotPayloadBytes,
+                ApplicationBytes = (int)Math.Min(header->ApplicationBytes, int.MaxValue),
             };
-            var size = RegionSize(layout, out var hostToGpu, out var gpuToHost, out var sync);
+            var size = RegionSize(layout, out var hostToGpu, out var gpuToHost, out var sync, out var reverseSync, out var application);
             if (header->HeaderSize != RegionHeader.Size || (ulong)size > region.Size || header->TotalSize != region.Size ||
-                header->HostToGpuOffset != (ulong)hostToGpu || header->GpuToHostOffset != (ulong)gpuToHost || header->SyncOffset != (ulong)sync)
+                header->HostToGpuOffset != (ulong)hostToGpu || header->GpuToHostOffset != (ulong)gpuToHost || header->SyncOffset != (ulong)sync ||
+                header->ReverseSyncOffset != (ulong)reverseSync || header->ApplicationOffset != (ulong)application)
             {
                 throw new InvalidDataException($"{name} has an inconsistent layout.");
             }
@@ -292,6 +356,7 @@ public sealed unsafe class GpuRemoteChannel : IDisposable
         }
 
         SyncCalls.WakeAll();
+        ReverseSyncCalls.WakeAll();
     }
 
     /// <summary>

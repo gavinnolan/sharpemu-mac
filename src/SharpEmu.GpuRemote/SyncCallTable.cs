@@ -288,52 +288,91 @@ public sealed unsafe class SyncCallTable
         {
             var index = BitOperations.TrailingZeroCount(pending);
             pending &= pending - 1;
-            var slot = Slot(index);
-            var observed = Interlocked.CompareExchange(ref slot->State, SyncSlotState.Serving, SyncSlotState.Posted);
-            if (observed != SyncSlotState.Posted)
+            if (ServeSlot(index, handler))
             {
-                if (observed == SyncSlotState.Abandoned)
-                {
-                    Release(slot);
-                }
+                served++;
+            }
+        }
 
+        return served;
+    }
+
+    /// <summary>
+    /// Server side: claims the lowest posted request and serves it with
+    /// <paramref name="handler"/>; false when none was pending. Several threads may call this
+    /// at once: each claims a request of its own, so a slow call holds up only its own thread
+    /// (<see cref="ServePending"/> serves everything it took in a row).
+    /// </summary>
+    public bool ServeOne(SyncCallHandler handler)
+    {
+        while (true)
+        {
+            var pending = Volatile.Read(ref _control->Pending);
+            if (pending == 0)
+            {
+                return false;
+            }
+
+            var bit = pending & (~pending + 1);
+            if ((Interlocked.And(ref _control->Pending, ~bit) & bit) == 0)
+            {
+                // Another server thread claimed it first.
                 continue;
             }
 
-            var payload = (byte*)slot + SyncSlotHeader.Size;
-            var requestLength = (int)Math.Min(slot->RequestLength, (uint)_payloadCapacity);
-            int length;
-            int status;
-            try
+            if (ServeSlot(BitOperations.TrailingZeroCount(bit), handler))
             {
-                length = handler(slot->Opcode, new ReadOnlySpan<byte>(payload, requestLength), new Span<byte>(payload, _payloadCapacity), out status);
+                return true;
             }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine($"[GPU-REMOTE][ERROR] Sync call {slot->Opcode} failed: {exception}");
-                length = 0;
-                status = int.MinValue;
-            }
+        }
+    }
 
-            slot->ResponseLength = (uint)Math.Clamp(length, 0, _payloadCapacity);
-            slot->Status = status;
-            observed = Interlocked.CompareExchange(ref slot->State, SyncSlotState.Completed, SyncSlotState.Serving);
-            if (observed == SyncSlotState.Serving)
-            {
-                if (Volatile.Read(ref slot->Sleepers) != 0)
-                {
-                    RemoteWait.WakeAll(&slot->State);
-                }
-            }
-            else if (observed == SyncSlotState.Abandoned)
+    // True when the slot held a request and it was answered (or handed back abandoned).
+    private bool ServeSlot(int index, SyncCallHandler handler)
+    {
+        var slot = Slot(index);
+        var observed = Interlocked.CompareExchange(ref slot->State, SyncSlotState.Serving, SyncSlotState.Posted);
+        if (observed != SyncSlotState.Posted)
+        {
+            if (observed == SyncSlotState.Abandoned)
             {
                 Release(slot);
             }
 
-            served++;
+            return false;
         }
 
-        return served;
+        var payload = (byte*)slot + SyncSlotHeader.Size;
+        var requestLength = (int)Math.Min(slot->RequestLength, (uint)_payloadCapacity);
+        int length;
+        int status;
+        try
+        {
+            length = handler(slot->Opcode, new ReadOnlySpan<byte>(payload, requestLength), new Span<byte>(payload, _payloadCapacity), out status);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[GPU-REMOTE][ERROR] Sync call {slot->Opcode} failed: {exception}");
+            length = 0;
+            status = int.MinValue;
+        }
+
+        slot->ResponseLength = (uint)Math.Clamp(length, 0, _payloadCapacity);
+        slot->Status = status;
+        observed = Interlocked.CompareExchange(ref slot->State, SyncSlotState.Completed, SyncSlotState.Serving);
+        if (observed == SyncSlotState.Serving)
+        {
+            if (Volatile.Read(ref slot->Sleepers) != 0)
+            {
+                RemoteWait.WakeAll(&slot->State);
+            }
+        }
+        else if (observed == SyncSlotState.Abandoned)
+        {
+            Release(slot);
+        }
+
+        return true;
     }
 
     /// <summary>

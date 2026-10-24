@@ -113,6 +113,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup Condition="'$(_SharpEmuTargetsMac)' == 'true'">
     <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
     <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+    <!-- The two-process split's guest side (SHARPEMU_GPU_PROCESS=1). The GPU host it starts,
+         SharpEmu.GpuHost, is built on its own (osx-arm64), next to this output. -->
+    <ProjectReference Include="..\SharpEmu.GpuSplit\SharpEmu.GpuSplit.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">

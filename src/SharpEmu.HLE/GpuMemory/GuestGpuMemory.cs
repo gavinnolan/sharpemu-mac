@@ -40,6 +40,7 @@ public sealed class GuestGpuMemory : IDisposable
     private GpuAttachment? _attachment;
     private IGuestBufferStore? _buffers;
     private IGuestImageStore? _images;
+    private IGuestSpanObserver? _spanObserver;
 
     public GuestGpuMemory(IGuestAddressSpace addressSpace)
     {
@@ -60,6 +61,42 @@ public sealed class GuestGpuMemory : IDisposable
     {
         Volatile.Write(ref _buffers, buffers);
         Volatile.Write(ref _images, images);
+    }
+
+    // The two-process split: the observer hears of every span registered and every guest protection
+    // change from here on, and first of every span registered so far, one call per run of its ledger.
+    // Detaching it (null) gives the host protections back to this manager's own guard: callers that
+    // detach an observer which applied them call Pages.Reapply over the spans.
+    // The replay holds the span lock, so a registration racing it is reported after it (Register
+    // reports once its span is in), never lost; an unregistration racing it can leave the observer a
+    // span that is already gone, which the next registration over it replaces.
+    public void AttachSpanObserver(IGuestSpanObserver? observer)
+    {
+        _spansLock.EnterWriteLock();
+        try
+        {
+            Volatile.Write(ref _spanObserver, observer);
+            if (observer is null)
+            {
+                return;
+            }
+
+            _spans.ForEach((address, size) =>
+            {
+                var end = address + size;
+                for (var cursor = address; cursor < end;)
+                {
+                    var protection = _pages.Permissions.Lookup(cursor, out var validEnd);
+                    var runEnd = validEnd > cursor ? Math.Min(validEnd, end) : end;
+                    _ = observer.OnSpanRegistered(cursor, runEnd - cursor, protection);
+                    cursor = runEnd;
+                }
+            });
+        }
+        finally
+        {
+            _spansLock.ExitWriteLock();
+        }
     }
 
     // Retry after recovery, including a watch removed before the fault reached its store.
@@ -273,6 +310,11 @@ public sealed class GuestGpuMemory : IDisposable
             _pages.ClearWriteRestorations(address, size);
         using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterPermissions))
             _pages.Permissions.Set(address, size, protection);
+        // An observer that owns the host protections (the split's guest process, whose GPU process
+        // keeps the page watches) applies them before it returns; applying them here as well would
+        // hand back, for a moment, rights the watches took.
+        if (Volatile.Read(ref _spanObserver)?.OnSpanRegistered(address, size, protection) == true)
+            return;
         using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterReapply))
             _pages.Reapply(address, size);
     }
@@ -288,7 +330,8 @@ public sealed class GuestGpuMemory : IDisposable
         }
 
         _pages.Permissions.Set(address, size, protection);
-        _pages.Reapply(address, size);
+        if (Volatile.Read(ref _spanObserver)?.OnSpanProtected(address, size, protection) != true)
+            _pages.Reapply(address, size);
         return true;
     }
 

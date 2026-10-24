@@ -28,7 +28,17 @@ internal static class GpuComposition
         // duplicate OperatingSystem.IsMacOS() here would only hide the real guard.
 #pragma warning disable CA1416
         SharpEmu.Platform.MacOS.MacPlatform.Register();
-        SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
+        if (SharpEmu.GpuSplit.SplitGpuComposition.IsRequested)
+        {
+            // SHARPEMU_GPU_PROCESS=1: the Metal backend runs in the native arm64 GPU host
+            // (SharpEmu.GpuHost), which starts with the first use of the renderer; this process
+            // talks to it through proxies (docs/macos/split-protocol.md).
+            SharpEmu.GpuSplit.SplitGpuComposition.Register();
+        }
+        else
+        {
+            SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
+        }
 #pragma warning restore CA1416
 #elif SHARPEMU_GPU_VULKAN
         SharpEmu.Adapters.Sdl.SdlPlatform.Register();

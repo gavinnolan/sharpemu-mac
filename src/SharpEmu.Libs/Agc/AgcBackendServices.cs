@@ -14,6 +14,23 @@ public static class AgcBackendServices
     public static AgcExports.CommandStreamTranslation CreateCommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host) =>
         AgcExports.CreateCommandStreamTranslation(memory, host);
 
+    /// <summary>
+    /// Told of every shader header the guest registers (code address, header address): the
+    /// two-process split's guest process forwards them to the GPU process.
+    /// </summary>
+    public static Action<ulong, ulong>? ShaderHeaderObserver
+    {
+        get => AgcExports.ShaderHeaderObserver;
+        set => AgcExports.ShaderHeaderObserver = value;
+    }
+
+    /// <summary>Every shader header registered so far (code address, header address).</summary>
+    public static KeyValuePair<ulong, ulong>[] SnapshotShaderHeaders() => AgcExports.SnapshotShaderHeaders();
+
+    /// <summary>The GPU process's side of <see cref="ShaderHeaderObserver"/>: one entry into this process's table.</summary>
+    public static void MirrorShaderHeader(ulong codeAddress, ulong headerAddress) =>
+        AgcExports.MirrorShaderHeader(codeAddress, headerAddress);
+
     public static ulong? ParseOptionalHexAddress(string? value) =>
         AgcExports.ParseOptionalHexAddress(value);
 
