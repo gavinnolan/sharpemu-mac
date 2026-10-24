@@ -121,6 +121,7 @@ public sealed class PageGuard : IDisposable
     }
 
     private readonly IGuestAddressSpace _addressSpace;
+    private readonly IPageWatchObserver? _watchObserver;
     private readonly PageBlock?[] _blocks = new PageBlock?[TrackerLayout.BlockCount];
     private readonly object _blockGate = new();
 
@@ -133,6 +134,7 @@ public sealed class PageGuard : IDisposable
         }
 
         _addressSpace = addressSpace;
+        _watchObserver = addressSpace as IPageWatchObserver;
     }
 
     public GuestPermissionLedger Permissions { get; } = new();
@@ -390,7 +392,16 @@ public sealed class PageGuard : IDisposable
             if (address >= guestValidEnd)
                 guest = Permissions.Lookup(address, out guestValidEnd);
             var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
+            var wasWatched = pages[pageIndex].WriteWatchCount != 0 || pages[pageIndex].ReadWatchCount != 0;
             var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address, WriteWatchLimit);
+            // Before the page's protection is applied below: the split's page summary must show a
+            // watch before the watch can let a GPU cache rely on it.
+            if (update && _watchObserver is { } observer &&
+                wasWatched != (pages[pageIndex].WriteWatchCount != 0 || pages[pageIndex].ReadWatchCount != 0))
+            {
+                observer.OnPageWatchChanged(address, !wasWatched);
+            }
+
             if (update && !isRead)
             {
                 writeWatchDelta += track ? 1 : -1;

@@ -40,6 +40,7 @@ public sealed class GuestGpuMemory : IDisposable
     private GpuAttachment? _attachment;
     private IGuestBufferStore? _buffers;
     private IGuestImageStore? _images;
+    private IGuestSpanObserver? _spanObserver;
 
     public GuestGpuMemory(IGuestAddressSpace addressSpace)
     {
@@ -60,6 +61,40 @@ public sealed class GuestGpuMemory : IDisposable
     {
         Volatile.Write(ref _buffers, buffers);
         Volatile.Write(ref _images, images);
+    }
+
+    // The two-process split: the observer hears of every span registered and every guest protection
+    // change from here on, and first of every span registered so far, one call per run of its ledger.
+    // The replay holds the span lock, so a registration racing it is reported after it (Register
+    // reports once its span is in), never lost; an unregistration racing it can leave the observer a
+    // span that is already gone, which the next registration over it replaces.
+    public void AttachSpanObserver(IGuestSpanObserver? observer)
+    {
+        _spansLock.EnterWriteLock();
+        try
+        {
+            Volatile.Write(ref _spanObserver, observer);
+            if (observer is null)
+            {
+                return;
+            }
+
+            _spans.ForEach((address, size) =>
+            {
+                var end = address + size;
+                for (var cursor = address; cursor < end;)
+                {
+                    var protection = _pages.Permissions.Lookup(cursor, out var validEnd);
+                    var runEnd = validEnd > cursor ? Math.Min(validEnd, end) : end;
+                    observer.OnSpanRegistered(cursor, runEnd - cursor, protection);
+                    cursor = runEnd;
+                }
+            });
+        }
+        finally
+        {
+            _spansLock.ExitWriteLock();
+        }
     }
 
     // Retry after recovery, including a watch removed before the fault reached its store.
@@ -275,6 +310,7 @@ public sealed class GuestGpuMemory : IDisposable
             _pages.Permissions.Set(address, size, protection);
         using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterReapply))
             _pages.Reapply(address, size);
+        Volatile.Read(ref _spanObserver)?.OnSpanRegistered(address, size, protection);
     }
 
     // A guest mprotect on a covered range: the ledger changes, then every page gets its derived protection.
@@ -289,6 +325,7 @@ public sealed class GuestGpuMemory : IDisposable
 
         _pages.Permissions.Set(address, size, protection);
         _pages.Reapply(address, size);
+        Volatile.Read(ref _spanObserver)?.OnSpanProtected(address, size, protection);
         return true;
     }
 

@@ -15,7 +15,53 @@ public static class HostWindowInput
     private static string? _gamepadName;
     private static HostGamepadState _gamepadState;
     private static IHostGamepadOutput? _gamepadOutput;
+    private static long _version;
     private static readonly WindowInputSource Source = new();
+
+    /// <summary>Moves on every change of the state below; a reader polls it to find changes.</summary>
+    public static long Version => Interlocked.Read(ref _version);
+
+    /// <summary>
+    /// The whole state at once, for the two-process split's GPU process, which owns the window and
+    /// sends it to the guest process: the pressed keys (as many as fit), whether the window has
+    /// focus, and the gamepad. Returns how many keys it wrote.
+    /// </summary>
+    public static int CopyState(Span<int> keys, out bool focused, out HostGamepadState gamepad, out string? gamepadName)
+    {
+        lock (Gate)
+        {
+            focused = _focused;
+            gamepad = _gamepadConnected ? _gamepadState : default;
+            gamepadName = _gamepadConnected ? _gamepadName : null;
+            var count = 0;
+            foreach (var key in PressedKeys)
+            {
+                if (count == keys.Length)
+                {
+                    break;
+                }
+
+                keys[count++] = key;
+            }
+
+            return count;
+        }
+    }
+
+    /// <summary>Replaces the pressed keys with <paramref name="keys"/> (the guest process's side of <see cref="CopyState"/>).</summary>
+    public static void SetKeys(ReadOnlySpan<int> keys)
+    {
+        lock (Gate)
+        {
+            PressedKeys.Clear();
+            foreach (var key in keys)
+            {
+                PressedKeys.Add(key);
+            }
+
+            _version++;
+        }
+    }
 
     public static void Connect(IHostGamepadOutput? gamepadOutput = null)
     {
@@ -24,6 +70,7 @@ public static class HostWindowInput
             _focused = true;
             _gamepadOutput = gamepadOutput;
             PressedKeys.Clear();
+            _version++;
         }
 
         HostWindowInputSource.Set(Source);
@@ -39,6 +86,7 @@ public static class HostWindowInput
             _gamepadState = default;
             _gamepadOutput = null;
             PressedKeys.Clear();
+            _version++;
         }
 
         HostWindowInputSource.Clear(Source);
@@ -53,6 +101,8 @@ public static class HostWindowInput
             {
                 PressedKeys.Clear();
             }
+
+            _version++;
         }
     }
 
@@ -68,6 +118,8 @@ public static class HostWindowInput
             {
                 PressedKeys.Remove(virtualKey);
             }
+
+            _version++;
         }
     }
 
@@ -78,6 +130,7 @@ public static class HostWindowInput
             _gamepadConnected = state.Connected;
             _gamepadName = name;
             _gamepadState = state;
+            _version++;
         }
     }
 
@@ -88,6 +141,7 @@ public static class HostWindowInput
             _gamepadConnected = false;
             _gamepadName = null;
             _gamepadState = default;
+            _version++;
         }
     }
 
