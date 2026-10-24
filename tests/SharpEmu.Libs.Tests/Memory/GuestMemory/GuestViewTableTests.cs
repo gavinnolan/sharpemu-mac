@@ -253,6 +253,13 @@ public sealed unsafe class GuestViewTableTests
             }
         })).ToArray();
 
+        // Under a loaded test run the readers' pool threads can start late: race only once they read.
+        var started = Environment.TickCount64;
+        while (Interlocked.Read(ref reads) == 0 && Environment.TickCount64 - started < 10_000)
+        {
+            Thread.Sleep(1);
+        }
+
         var writer = new System.Random(7);
         var deadline = Environment.TickCount64 + 300;
         while (Environment.TickCount64 < deadline)
