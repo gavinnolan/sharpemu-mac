@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.HLE.DsTrace;
+using SharpEmu.HLE.GpuMemory;
 
 namespace SharpEmu.Libs.Fiber;
 
@@ -217,6 +218,7 @@ public static class FiberExports
 
         _continuations.TryRemove(fiber, out _);
         _stackRanges.TryRemove(fiber, out _);
+        GuestGpuMemoryHook.NoteStackReleased(fiber);
         _ = TryWriteUInt32(ctx, fiber + FiberStateOffset, FiberStateTerminated);
         return SetReturn(ctx, 0);
     }
@@ -592,6 +594,7 @@ public static class FiberExports
         if (contextAddress != 0 && contextSize != 0)
         {
             _stackRanges[fiber] = new FiberStackRange(contextAddress, contextSize);
+            GuestGpuMemoryHook.NoteStack(fiber, contextAddress, contextSize);
         }
 
         if (TraceEnabled)
@@ -1016,6 +1019,7 @@ public static class FiberExports
             ContextSize = contextSize,
         };
         _stackRanges[fiber] = new FiberStackRange(contextAddress, contextSize);
+        GuestGpuMemoryHook.NoteStack(fiber, contextAddress, contextSize);
         return 0;
     }
 

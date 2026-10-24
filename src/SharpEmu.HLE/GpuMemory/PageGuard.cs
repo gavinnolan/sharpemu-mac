@@ -137,6 +137,8 @@ public sealed class PageGuard : IDisposable
 
     public GuestPermissionLedger Permissions { get; } = new();
 
+    public CpuStackRanges Stacks { get; } = new();
+
     /// <summary>The most write watches one page holds: 7 bits of its count byte.</summary>
     public const int MaxWriteWatchesPerPage = 0x7f;
 
@@ -295,7 +297,41 @@ public sealed class PageGuard : IDisposable
 
     private GuestPageProtection Derive(ulong address, in PageCounts counts) => Derive(Permissions.Lookup(address), counts.GetAllowedAccess());
 
+    // Pages a thread runs on as its stack keep the guest's own access (CpuStackRanges).
     private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess,
+        GuestPageProtection guestAccess, bool ordinaryEnrollment)
+    {
+        var stacks = Stacks.Snapshot;
+        var cursor = address;
+        var end = address + size;
+        for (var index = CpuStackRanges.FirstEndingAfter(stacks, address); index < stacks.Length && stacks[index].Start < end; index++)
+        {
+            var stackStart = Math.Max(stacks[index].Start, cursor);
+            var stackEnd = Math.Min(stacks[index].End, end);
+            if (cursor < stackStart)
+            {
+                Protect(cursor, stackStart - cursor, allowedAccess, guestAccess, ordinaryEnrollment);
+            }
+
+            for (var page = stackStart; page < stackEnd;)
+            {
+                var guest = Permissions.Lookup(page, out var guestValidEnd);
+                var partEnd = Math.Min(guestValidEnd, stackEnd);
+                Protect(page, partEnd - page, Derive(guest, GuestPageProtection.Read | GuestPageProtection.Write), guest,
+                    ordinaryEnrollment);
+                page = partEnd;
+            }
+
+            cursor = stackEnd;
+        }
+
+        if (cursor < end)
+        {
+            Protect(cursor, end - cursor, allowedAccess, guestAccess, ordinaryEnrollment);
+        }
+    }
+
+    private void Protect(ulong address, ulong size, GuestPageProtection allowedAccess,
         GuestPageProtection guestAccess, bool ordinaryEnrollment)
     {
         using var profile = GpuMemoryAccessProfile.MeasureAccess(
