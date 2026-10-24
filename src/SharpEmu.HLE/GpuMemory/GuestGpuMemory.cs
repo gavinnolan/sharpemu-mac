@@ -100,6 +100,13 @@ public sealed class GuestGpuMemory : IDisposable
         var buffers = Buffers;
         var images = Images;
         bool handled;
+        SplitCrossingStats.Count(kind switch
+        {
+            FaultKind.Write => SplitCrossing.FaultWrite,
+            FaultKind.Read => SplitCrossing.FaultRead,
+            _ => SplitCrossing.FaultOther,
+        });
+        var storeStart = SplitCrossingStats.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         if (kind == FaultKind.Write)
         {
             handled = (buffers?.MarkCpuWrite(address, faultSize) ?? false) | (images?.MarkCpuWrite(address, faultSize) ?? false);
@@ -107,6 +114,12 @@ public sealed class GuestGpuMemory : IDisposable
         else
         {
             handled = buffers?.DownloadToCpu(address, faultSize) ?? false;
+        }
+
+        if (storeStart != 0)
+        {
+            SplitCrossingStats.Count(SplitCrossing.FaultToStores);
+            SplitCrossingStats.StoreFaultTime(System.Diagnostics.Stopwatch.GetTimestamp() - storeStart);
         }
 
         if (!handled && kind == FaultKind.Write && TryRetryReleasedWrite(address, faultSize))
@@ -161,6 +174,8 @@ public sealed class GuestGpuMemory : IDisposable
             return false;
         }
 
+        SplitCrossingStats.Count(SplitCrossing.ManagedWrite);
+
         _ = Buffers?.MarkCpuWrite(address, size);
         _ = Images?.MarkPreciseCpuWrite(address, size);
         return true;
@@ -176,6 +191,7 @@ public sealed class GuestGpuMemory : IDisposable
             return;
         }
 
+        SplitCrossingStats.Count(SplitCrossing.ManagedWriteLanded);
         // The new bytes must be visible before the store reads its page state.
         Interlocked.MemoryBarrier();
         Buffers?.MarkCpuWriteLanded(address, size);
@@ -340,6 +356,7 @@ public sealed class GuestGpuMemory : IDisposable
     // Enter the GPU worker before the caller takes locks used by GPU memory reads.
     public void RunMappingChange(Action change)
     {
+        SplitCrossingStats.Count(SplitCrossing.MappingChange);
         using var requestScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRequest);
         for (;;)
         {

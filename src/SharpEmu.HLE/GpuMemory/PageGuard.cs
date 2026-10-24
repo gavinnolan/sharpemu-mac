@@ -173,13 +173,29 @@ public sealed class PageGuard : IDisposable
         }
     }
 
-    public void AddWatch(ulong address, ulong size, bool blockReads) => UpdatePages(address, size, true, blockReads);
+    public void AddWatch(ulong address, ulong size, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchAdd);
+        UpdatePages(address, size, true, blockReads);
+    }
 
-    public void RemoveWatch(ulong address, ulong size, bool blockReads) => UpdatePages(address, size, false, blockReads);
+    public void RemoveWatch(ulong address, ulong size, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchRemove);
+        UpdatePages(address, size, false, blockReads);
+    }
 
-    public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads) => UpdateMask(blockBase, pages, true, blockReads);
+    public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchAdd);
+        UpdateMask(blockBase, pages, true, blockReads);
+    }
 
-    public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads) => UpdateMask(blockBase, pages, false, blockReads);
+    public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchRemove);
+        UpdateMask(blockBase, pages, false, blockReads);
+    }
 
     // Watcher state only; the guest's own permissions are the ledger's.
     public bool Allows(ulong address, FaultKind kind)

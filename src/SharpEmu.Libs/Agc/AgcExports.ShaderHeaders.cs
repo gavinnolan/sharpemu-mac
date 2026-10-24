@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Pipelines;
 
@@ -10,8 +11,11 @@ public static partial class AgcExports
 {
     // This partial exposes the shader headers the create export registered.
 
-    internal static ulong GetShaderHeaderAddress(ulong codeAddress) =>
-        _shaderHeadersByCode.TryGetValue(codeAddress, out var header) ? header : 0;
+    internal static ulong GetShaderHeaderAddress(ulong codeAddress)
+    {
+        SplitCrossingStats.Count(SplitCrossing.ShaderHeaderLookup);
+        return _shaderHeadersByCode.TryGetValue(codeAddress, out var header) ? header : 0;
+    }
 
     internal static ShaderHeaderRegistry CreateShaderHeaderRegistry(CpuContext context) =>
         new(

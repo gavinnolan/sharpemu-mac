@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.HLE.DsTrace;
@@ -211,6 +212,7 @@ public static partial class AgcExports
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.CommandSubmissionGate)
         {
+            SplitCrossingStats.Count(SplitCrossing.SubmitDone);
             var outcome = GuestGpu.Current.SubmitDone(ctx.Memory);
             if (outcome != IdleOutcome.Completed)
             {
@@ -395,6 +397,7 @@ public static partial class AgcExports
         {
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendEntered,
                 queue, submissionId, address, dwordCount);
+            SplitCrossingStats.Count(SplitCrossing.SubmitCommandStream);
             var backend = GuestGpu.Current;
             if (backend is IGuestSubmissionPreparationBackend preparing)
                 preparation = preparing.SubmitCommandStreamWithPreparation(memory, queue, address, dwordCount, submissionId, geometrySnapshots);

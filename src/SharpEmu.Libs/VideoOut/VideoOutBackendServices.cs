@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE;
 using static SharpEmu.Libs.VideoOut.VideoOutExports;
 
@@ -32,8 +33,11 @@ public static class VideoOutBackendServices
 
     // A presenter that reports presentation: the GPU side of the flip only; the guest's
     // flip count and event follow MarkFlipPresented or DiscardFlip.
-    public static void CompleteFlipOnGpu(ulong requestId) =>
+    public static void CompleteFlipOnGpu(ulong requestId)
+    {
+        SplitCrossingStats.Count(SplitCrossing.FlipComplete);
         VideoOutExports.CompleteFlipOnGpu(requestId);
+    }
 
     public static void DiscardFlip(ulong requestId) =>
         VideoOutExports.DiscardFlip(requestId);

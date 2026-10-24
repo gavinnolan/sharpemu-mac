@@ -424,6 +424,7 @@ public static partial class VideoOutExports
     public static int VideoOutClose(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        SplitCrossingStats.Count(SplitCrossing.RunAfterPending);
         GuestGpu.Current.RunAfterPendingCommandStreams(() =>
         {
             lock (_stateGate)
@@ -1411,6 +1412,7 @@ public static partial class VideoOutExports
         }
 
         var result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        SplitCrossingStats.Count(SplitCrossing.RunAfterPending);
         GuestGpu.Current.RunAfterPendingCommandStreams(() =>
         {
             lock (_stateGate)
@@ -1721,6 +1723,7 @@ public static partial class VideoOutExports
             TryGetDisplayBufferInfo(handle, bufferIndex, out var displayBuffer))
         {
             guestImageAddress = displayBuffer.Address;
+            SplitCrossingStats.Count(SplitCrossing.FlipSubmit);
             guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
                 handle,
                 bufferIndex,
