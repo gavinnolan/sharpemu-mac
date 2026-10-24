@@ -84,6 +84,7 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
             }
 
+            TraceFrameDispatch("zero-sized", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             return;
         }
 
@@ -104,6 +105,7 @@ public sealed partial class RenderExecutor
 
         if (computeProgram.Consumed)
         {
+            TraceFrameDispatch("consumed", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             return;
         }
 
@@ -114,6 +116,7 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Skipping a dispatch without a program: shader=0x{compute.Address:X16} groups={groupsX}x{groupsY}x{groupsZ}");
             }
 
+            TraceFrameDispatch("no-program", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             return;
         }
 
@@ -138,30 +141,35 @@ public sealed partial class RenderExecutor
             (ulong)groupsX * groupsY * groupsZ >= MetadataClearMinimumGroups &&
             TryConsumeMetadataClear(input))
         {
+            TraceFrameDispatch("metadata-clear", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
         {
+            TraceFrameDispatch("constant-fill", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
+            TraceFrameDispatch("bounded-fill", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
+            TraceFrameDispatch("bounded-copy", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
+            TraceFrameDispatch("image-clear", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
@@ -219,6 +227,7 @@ public sealed partial class RenderExecutor
                 {
                     KeepSuspendedDispatch(submitId, compute.Address, indirectArgumentsAddress, retry);
                     _host.NotePipelineNotReady();
+                    TraceFrameDispatch("suspended", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
                     return;
                 }
             }
@@ -275,6 +284,7 @@ public sealed partial class RenderExecutor
                 physicalGroups[axisOrder[logical]] = logicalGroups[logical];
             }
 
+            TraceFrameDispatch(hasStorageWrites ? "dispatched-writes" : "dispatched", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
@@ -285,6 +295,17 @@ public sealed partial class RenderExecutor
         }
 
         _host.ResetBindings();
+    }
+
+    // Under a dump-triggered frame, what became of each dispatch: a pass that never ran leaves
+    // no snapshot behind, so the list of dispositions is the only record of it.
+    private void TraceFrameDispatch(string disposition, ulong shader, ulong hash, uint groupsX, uint groupsY, uint groupsZ, ulong indirect)
+    {
+        if (_host.TraceFrameActive)
+        {
+            Console.Error.WriteLine(
+                $"[FRAME-DISPATCH] {disposition} hash=0x{hash:X16} shader=0x{shader:X} groups={groupsX}x{groupsY}x{groupsZ} indirect=0x{indirect:X}");
+        }
     }
 
     // The dispatches suspended on their pipeline, by submission: a submission runs its packets

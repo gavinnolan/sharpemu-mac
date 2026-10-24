@@ -45,6 +45,17 @@ internal static class MetalV2Diagnostics
     private static readonly HashSet<ulong> LoosenEqualVertexHashes = ParseHashes(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOOSEN_EQUAL_VS"));
 
+    // SHARPEMU_METAL_V2_LOOSEN_EQUAL_TO=ge|le: what a loosened EQUAL becomes (default ALWAYS). GREATER-OR-EQUAL
+    // or LESS-OR-EQUAL keeps the prepass depth occluding everything else, and which of the two lets a
+    // draw's fragments through says on which side of its prepass depth its own positions land.
+    public static readonly SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp LoosenEqualTo =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOOSEN_EQUAL_TO") switch
+        {
+            "ge" => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.GreaterOrEqual,
+            "le" => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.LessOrEqual,
+            _ => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.Always,
+        };
+
     public static bool LoosensEqualFor(ulong vertexHash) =>
         LoosenEqualVertexHashes.Count != 0 && LoosenEqualVertexHashes.Contains(vertexHash);
 

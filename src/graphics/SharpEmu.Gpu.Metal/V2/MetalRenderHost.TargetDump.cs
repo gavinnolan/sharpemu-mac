@@ -67,6 +67,8 @@ internal sealed partial class MetalRenderHost
     private long _dumpFlipIndex;
     private bool _dumpThisFlip;
 
+    public bool TraceFrameActive => DumpTargetsEnabled && _dumpThisFlip;
+
     private int _targetDumps;
     private readonly Dictionary<nint, int> _dumpsByTexture = new();
     private bool _dumpDirectoryReady;
@@ -185,7 +187,7 @@ internal sealed partial class MetalRenderHost
             "vp=({3},{4} {5}x{6} z{7}..{8}) " +
             "scissor=({9},{10})-({11},{12}) cull={13} winding={14} clip={15} " +
             "depth={16} test={17} write={18} cmp={19} clear={20} stencil={21} " +
-            "colormask={22:X} colorcount={23} hostmasks=[{29}] ps={24}",
+            "colormask={22:X} colorcount={23} hostmasks=[{29}] bias={30}/{31}/{32}/{33} bounds={34}/{35}/{36} sent={37}/{38} ps={24}",
             _drawStateLines, _passDrawCount, _renderingState.ColorAttachmentCount,
             state.ViewportX, state.ViewportY, state.ViewportWidth, state.ViewportHeight,
             state.ViewportMinDepth, state.ViewportMaxDepth,
@@ -196,7 +198,10 @@ internal sealed partial class MetalRenderHost
             depth.DepthClear ? BitConverter.UInt32BitsToSingle(depth.ClearWord0) : float.NaN,
             state.StencilTestEnabled, state.ColorWriteEnableMask, state.ColorWriteCount,
             entry?.Profile ?? "-",
-            kind, shape.ToString(), entry?.PrimitiveType, _vertexBufferCount, masks));
+            kind, shape.ToString(), entry?.PrimitiveType, _vertexBufferCount, masks,
+            state.DepthBiasEnabled ? "on" : "off", state.DepthBiasConstantFactor, state.DepthBiasSlopeFactor, state.DepthBiasClamp,
+            state.DepthBoundsTestEnabled ? "on" : "off", state.DepthMinBounds, state.DepthMaxBounds,
+            _boundDepthMinBound, _boundDepthMaxBound));
         Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} {streams}");
         // What the pixel stage samples, by guest address: a composite that shows stale
         // or unrelated pictures read the wrong surface, which only the addresses tell.
@@ -270,6 +275,11 @@ internal sealed partial class MetalRenderHost
     private static readonly bool _dumpDepthRaw = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_DEPTH_RAW"), "1", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_DUMP_RAW_BIN=1: every snapshot also writes its texels as read back, before
+    // any conversion, to a .bin beside the PNG, so HDR values below 1/255 can be read exactly.
+    private static readonly bool _dumpRawBin = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_RAW_BIN"), "1", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_DUMP_SNAPSHOT_MATCH=<a,b,...>: snapshot only targets whose label
     // contains one of the texts ("-cs" for compute, a format, an address), so a frame's
     // budget reaches the pass that matters instead of every geometry pass before it.
@@ -280,6 +290,10 @@ internal sealed partial class MetalRenderHost
 
     private readonly List<(nint Buffer, nint Contents, uint Width, uint Height, ulong Format, nint Texture, string Label)>
         _snapshots = new();
+
+    // Under SHARPEMU_METAL_V2_DUMP_RAW_BIN, the bytes a 3D snapshot read back for every slice, by readback buffer:
+    // the PNG shows the first slice, the .bin holds the whole volume.
+    private readonly Dictionary<nint, long> _snapshotVolumeBytes = new();
 
     private readonly List<(nint Texture, string Label)> _computeStorageNoted = new();
     private long _snapshotBytes;
@@ -347,7 +361,13 @@ internal sealed partial class MetalRenderHost
             return true;
         }
 
-        var readback = _guestMemory.CreateReportBuffer(total, "SharpEmu TargetSnapshot", out var contents, out _);
+        var depth = _dumpRawBin ? Math.Max((uint)MetalV2Native.SendValue(texture, MetalNative.Selector("depth")), 1u) : 1u;
+        if (depth > 1 && _snapshotBytes + (long)(total * depth) > MaxSnapshotBytes)
+        {
+            depth = 1;
+        }
+
+        var readback = _guestMemory.CreateReportBuffer(total * depth, "SharpEmu TargetSnapshot", out var contents, out _);
         var blit = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (blit == 0)
@@ -358,7 +378,7 @@ internal sealed partial class MetalRenderHost
 
         MetalNative.SendCopyTextureToBufferOptions(
             blit, SelDumpCopyTextureToBuffer, texture, 0, 0, default,
-            new MtlSize { Width = width, Height = height, Depth = 1 },
+            new MtlSize { Width = width, Height = height, Depth = depth },
             readback, 0, (nuint)rowBytes, (nuint)total,
             (nuint)(pixelFormat == MtlFormat.Depth32FloatStencil8
                 ? MtlBlitOption.DepthFromDepthStencil
@@ -366,7 +386,12 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendVoid(blit, SelEndEncoding);
         _snapshots.Add((readback, contents, width, height, pixelFormat, texture,
             $"s{_snapshotSerial++:D4}-{label}"));
-        _snapshotBytes += (long)total;
+        if (depth > 1)
+        {
+            _snapshotVolumeBytes[readback] = (long)(total * depth);
+        }
+
+        _snapshotBytes += (long)(total * depth);
         return true;
     }
 
@@ -445,7 +470,10 @@ internal sealed partial class MetalRenderHost
                     _dumpsByTexture.TryGetValue(texture, out var seen);
                     _dumpsByTexture[texture] = seen + 1;
                     _targetDumps++;
-                    WriteDumpPng(rgba, width, height, label, seen, texture);
+                    var raw = _snapshotVolumeBytes.Remove(buffer, out var volumeBytes)
+                        ? DumpSpan(contents, (int)volumeBytes)
+                        : source;
+                    WriteDumpPng(rgba, width, height, label, seen, texture, raw);
                 }
             }
             catch (Exception exception)
@@ -605,13 +633,35 @@ internal sealed partial class MetalRenderHost
         }
 
         _dumpsByTexture.TryGetValue(texture, out var seen);
+        if (!TryReadTextureRgba(texture, width, height, pixelFormat, label.StartsWith("flip", StringComparison.Ordinal),
+                out var rgba, out var source))
+        {
+            return;
+        }
+
+        _dumpsByTexture[texture] = seen + 1;
+        _targetDumps++;
+        WriteDumpPng(rgba, width, height, label, seen, texture, source);
+    }
+
+    /// <summary>
+    /// Reads a colour texture back as RGBA8 (and its raw bytes). Flushes and waits, so it
+    /// is for diagnostics only. An opaque picture drops the guest's alpha: the presenter's
+    /// layer is opaque, so the screen never shows a flip's alpha, and a viewer that
+    /// composites the guest's (often zero) alpha would show a correct frame as white or black.
+    /// </summary>
+    private bool TryReadTextureRgba(
+        nint texture, uint width, uint height, ulong pixelFormat, bool opaque, out byte[] rgba, out byte[] source)
+    {
+        rgba = [];
+        source = [];
         if (!TryDescribeDumpFormat(pixelFormat, out var sourceBytes, out var convert))
         {
             MetalV2Diagnostics.WarnOnce(
                 $"dump-format-{pixelFormat}",
                 $"A render target cannot be dumped because its format is not one the dumper reads: " +
                 $"format={pixelFormat} {width}x{height}.");
-            return;
+            return false;
         }
 
         try
@@ -626,7 +676,7 @@ internal sealed partial class MetalRenderHost
                 MetalMemoryTelemetry.BlitEncoders.Add();
                 if (blit == 0)
                 {
-                    return;
+                    return false;
                 }
 
                 MetalNative.SendCopyTextureToBufferOptions(
@@ -639,22 +689,18 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendVoid(blit, SelEndEncoding);
                 FlushAndWaitForGpu();
 
-                var source = DumpSpan(contents, (int)total);
-                var rgba = new byte[(int)(4UL * width * height)];
+                source = DumpSpan(contents, (int)total).ToArray();
+                rgba = new byte[(int)(4UL * width * height)];
                 convert(source, rgba);
-                if (label.StartsWith("flip", StringComparison.Ordinal))
+                if (opaque)
                 {
-                    // The presenter's layer is opaque, so the screen never shows a flip's alpha;
-                    // a viewer that composites the guest's (often zero) alpha would show a
-                    // correct frame as white or black.
                     for (var alpha = 3; alpha < rgba.Length; alpha += 4)
                     {
                         rgba[alpha] = 0xFF;
                     }
                 }
-                _dumpsByTexture[texture] = seen + 1;
-                _targetDumps++;
-                WriteDumpPng(rgba, width, height, label, seen, texture);
+
+                return true;
             }
             finally
             {
@@ -666,13 +712,83 @@ internal sealed partial class MetalRenderHost
             MetalV2Diagnostics.WarnOnce(
                 "dump-failed",
                 $"A render target could not be dumped: {exception.Message}");
+            return false;
         }
+    }
+
+    // SHARPEMU_METAL_V2_FLIP_LUMA_EVERY=<n>: every n-th flip, the mean of the display surface
+    // as [METAL-V2][FLIP-LUMA], for scripts that wait on the picture (a scene fading in from
+    // a loading screen) when the window cannot be captured, e.g. behind a locked screen.
+    // Flushes and waits on the GPU, so it is a diagnostic.
+    private static readonly int _flipLumaEvery =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLIP_LUMA_EVERY"), out var every) && every > 0
+            ? every
+            : 0;
+    private long _flipLumaCount;
+
+    // SHARPEMU_METAL_V2_FLIP_THUMB_DIR=<dir>: each sampled flip is also written there at half size
+    // (NNNNNN-flip-WxH.png), a picture sequence for comparing against reference footage without
+    // window screenshots.
+    private static readonly string? _flipThumbDirectory =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLIP_THUMB_DIR") is { Length: > 0 } thumbs ? thumbs : null;
+
+    private void SampleFlipLuma(nint texture)
+    {
+        if (_flipLumaEvery == 0 || texture == 0 || ++_flipLumaCount % _flipLumaEvery != 0)
+        {
+            return;
+        }
+
+        var width = (uint)MetalV2Native.SendValue(texture, SelWidth);
+        var height = (uint)MetalV2Native.SendValue(texture, SelHeight);
+        if (width == 0 || height == 0 ||
+            !TryReadTextureRgba(texture, width, height, MetalV2Native.SendValue(texture, SelPixelFormat), true, out var rgba, out _))
+        {
+            return;
+        }
+
+        ulong sum = 0;
+        for (var i = 0; i < rgba.Length; i += 4)
+        {
+            sum += (ulong)(rgba[i] + rgba[i + 1] + rgba[i + 2]);
+        }
+
+        if (_flipThumbDirectory is not null)
+        {
+            var halfWidth = width / 2;
+            var halfHeight = height / 2;
+            var thumb = new byte[halfWidth * halfHeight * 4];
+            for (var y = 0u; y < halfHeight; y++)
+            {
+                for (var x = 0u; x < halfWidth; x++)
+                {
+                    for (var channel = 0u; channel < 4; channel++)
+                    {
+                        var top = (2 * y * width + 2 * x) * 4 + channel;
+                        var bottom = top + width * 4;
+                        thumb[(y * halfWidth + x) * 4 + channel] =
+                            (byte)((rgba[top] + rgba[top + 4] + rgba[bottom] + rgba[bottom + 4] + 2) / 4);
+                    }
+                }
+            }
+
+            Directory.CreateDirectory(_flipThumbDirectory);
+            File.WriteAllBytes(
+                Path.Combine(_flipThumbDirectory, $"{_flipLumaCount:D6}-flip-{halfWidth}x{halfHeight}.png"),
+                EncodePng(thumb, halfWidth, halfHeight));
+        }
+
+        Console.Error.WriteLine(string.Format(
+            CultureInfo.InvariantCulture,
+            "[METAL-V2][FLIP-LUMA] flip={0} mean_rgb={1:F2}",
+            _flipLumaCount,
+            sum / (double)(rgba.Length / 4 * 3)));
     }
 
     private static unsafe ReadOnlySpan<byte> DumpSpan(nint contents, int length) =>
         new((void*)contents, length);
 
-    private void WriteDumpPng(byte[] rgba, uint width, uint height, string label, int index, nint texture)
+    private void WriteDumpPng(byte[] rgba, uint width, uint height, string label, int index, nint texture, ReadOnlySpan<byte> raw = default)
     {
         if (!_dumpDirectoryReady)
         {
@@ -685,6 +801,10 @@ internal sealed partial class MetalRenderHost
             CultureInfo.InvariantCulture, "{0:D4}-{1}-{2}x{3}-{4}.png", _targetDumps, safe, width, height, index);
         var path = Path.Combine(_dumpTargetsDirectory!, name);
         File.WriteAllBytes(path, EncodePng(rgba, width, height));
+        if (_dumpRawBin && !raw.IsEmpty)
+        {
+            File.WriteAllBytes(Path.ChangeExtension(path, ".bin"), raw.ToArray());
+        }
 
         // A target that was only cleared and a target that was drawn into with zeros look
         // the same in a mean, so report the extremes and the first pixel that is not
@@ -878,8 +998,26 @@ internal sealed partial class MetalRenderHost
                     }
                 };
                 return true;
+            // A 16-bit unorm colour (a Lumen card depth atlas) reads like a 16-bit depth.
+            case MtlFormat.R16Unorm:
             case MtlFormat.Depth16Unorm:
                 sourceBytes = 2;
+                if (_dumpDepthRaw)
+                {
+                    // The 16-bit value as R (low byte) and G (high byte).
+                    convert = static (source, target) =>
+                    {
+                        for (int i = 0, o = 0; i + 1 < source.Length; i += 2, o += 4)
+                        {
+                            target[o] = source[i];
+                            target[o + 1] = source[i + 1];
+                            target[o + 2] = 0;
+                            target[o + 3] = 255;
+                        }
+                    };
+                    return true;
+                }
+
                 convert = static (source, target) =>
                 {
                     for (int i = 0, o = 0; i + 1 < source.Length; i += 2, o += 4)

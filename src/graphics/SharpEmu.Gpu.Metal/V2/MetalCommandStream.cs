@@ -2161,6 +2161,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-before-refresh"); }
         _imageCache.RefreshImage(imageIdentifier);
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
+        SampleFlipLuma(image.Texture);
         var texture = PresentationViewOf(imageIdentifier, image, in request);
         var serial = SubmissionSerial;
         FlushCommandBuffer(PassEndCause.Present);

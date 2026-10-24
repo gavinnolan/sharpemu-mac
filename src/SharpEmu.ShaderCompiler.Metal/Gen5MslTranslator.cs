@@ -146,6 +146,9 @@ public static partial class Gen5MslTranslator
         return true;
     }
 
+    /// <summary>The records a SHARPEMU_MSL_PC_PROBE in log mode keeps per flush.</summary>
+    public const int PcProbeLogRecords = 65536;
+
     /// <summary>How the translated shaders in this process came out. A shader whose
     /// control flow no MSL construct expresses falls back to the PC dispatcher, so the
     /// ratio is what says whether the structured emitter is covering a game's shaders;
@@ -226,6 +229,57 @@ public static partial class Gen5MslTranslator
                 out var probeHash)
                 ? probeHash
                 : 0;
+
+        // SHARPEMU_MSL_PC_PROBE=<hash>:<pc>:<nth>:<reg>/<reg>/...[:<condition>]: when an active lane of that program
+        // reaches the instruction at pc, it counts itself in the program's step-report word, and the
+        // nth one stores up to seven registers (state before the instruction) into the probe words,
+        // which the host prints as a [METAL-V2][STEP-CAP] line. The optional condition is an MSL
+        // expression over the register names (as_type<float>(v40) <= 0.0f) that a lane must also
+        // meet. With nth = log, every qualifying lane (up to PcProbeLogRecords per flush) stores up
+        // to 24 registers as one record, which the host appends to SHARPEMU_MSL_PC_PROBE_LOG. A
+        // diagnostic: it reads lanes' values without touching the program's results.
+        private static readonly (ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition)? PcProbe = ParsePcProbe(
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE"));
+
+        private static (ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition)? ParsePcProbe(string? value)
+        {
+            var parts = (value ?? string.Empty).Split(':');
+            if (parts.Length is not (4 or 5) ||
+                !ulong.TryParse(parts[0].Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash) ||
+                !uint.TryParse(parts[1].Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var pc) ||
+                !(uint.TryParse(parts[2], out var nth) || parts[2] == "log"))
+            {
+                return null;
+            }
+
+            var log = parts[2] == "log";
+            return (hash, pc, log ? uint.MaxValue : nth,
+                parts[3].Split('/', StringSplitOptions.RemoveEmptyEntries).Take(log ? 24 : 7).ToArray(),
+                parts.Length == 5 ? parts[4] : null);
+        }
+
+        private string PcProbeCode((ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition) probe)
+        {
+            var report = $"{ResourcesName}.{Gen5MslArgumentLayout.StepReportName}";
+            var condition = probe.Condition is null ? string.Empty : $" && ({probe.Condition})";
+            var log = probe.Nth == uint.MaxValue;
+            var text = new StringBuilder($"if (exec{condition} && {report} != nullptr) {{ uint sharpemu_probe_n = atomic_fetch_add_explicit({report}, 1u, memory_order_relaxed); ");
+            text.Append(log
+                ? $"if (sharpemu_probe_n < {PcProbeLogRecords}u) {{"
+                : $"if (sharpemu_probe_n == {probe.Nth}u) {{");
+            for (var index = 0; index < probe.Registers.Length; index++)
+            {
+                var name = probe.Registers[index];
+                var value = name == "exec" ? "(exec ? 1u : 0u)" : $"as_type<uint>({name})";
+                var word = log ? $"1u + sharpemu_probe_n * {probe.Registers.Length}u + {index}u" : $"{index + 1}";
+                text.Append($" atomic_store_explicit({report} + {word}, {value}, memory_order_relaxed);");
+            }
+
+            text.Append(" } }");
+            return text.ToString();
+        }
 
         private string StepCapReportCode
         {
@@ -1547,6 +1601,11 @@ public static partial class Gen5MslTranslator
                 if (Gen5MslDump.Enabled)
                 {
                     Line($"// 0x{instruction.Pc:X4} {instruction.Opcode}");
+                }
+
+                if (PcProbe is { } pcProbe && pcProbe.Hash == _request.Hash && pcProbe.Pc == instruction.Pc)
+                {
+                    Line(PcProbeCode(pcProbe));
                 }
 
                 if (IsWave64 && _usesLds)

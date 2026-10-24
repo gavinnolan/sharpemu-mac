@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Globalization;
+using SharpEmu.ShaderCompiler.Metal;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -15,12 +16,37 @@ namespace SharpEmu.Gpu.Metal.V2;
 // [METAL-V2][STEP-CAP] with the hash to dump with SHARPEMU_SHADER_MSL_DUMP_HASH.
 internal sealed partial class MetalRenderHost
 {
-    private const int StepReportSlots = 1024;
+    private const int StepReportSlots = 8192;
 
     // Each program's report is a counter followed by seven probe words a capped invocation
     // may fill (SHARPEMU_MSL_STEPCAP_PROBE).
     private const int StepReportStride = 8;
     private const int MaxStepCapReports = 64;
+
+    // SHARPEMU_MSL_PC_PROBE in log mode (<hash>:<pc>:log:<regs>...): the probed program's
+    // report pointer goes to a region after the slots, a counter followed by
+    // Gen5MslTranslator.PcProbeLogRecords records of one word per register. The records of
+    // the flushes around a dump-trigger frame are appended to SHARPEMU_MSL_PC_PROBE_LOG as
+    // (count, registers) headers followed by the words.
+    private static readonly (ulong Hash, int Registers)? ProbeLog = ParseProbeLog();
+    private static readonly string? ProbeLogPath = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE_LOG");
+    private int _probeLogFlushes;
+
+    private static (ulong Hash, int Registers)? ParseProbeLog()
+    {
+        var parts = (Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE") ?? string.Empty).Split(':');
+        if (parts.Length is not (4 or 5) || parts[2] != "log" ||
+            !ulong.TryParse(parts[0].Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hash))
+        {
+            return null;
+        }
+
+        return (hash, Math.Min(24, parts[3].Split('/', StringSplitOptions.RemoveEmptyEntries).Length));
+    }
+
+    private static int ProbeLogWords =>
+        ProbeLog is { } log ? 1 + Gen5MslTranslator.PcProbeLogRecords * log.Registers : 0;
 
     private nint _stepReportBuffer;
     private nint _stepReportContents;
@@ -39,6 +65,13 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private ulong StepReportAddress(ulong hash, string stage)
     {
+        if (ProbeLog is { } log && log.Hash == hash)
+        {
+            EnsureStepReportBuffer();
+            NoteUsedResource(_stepReportBuffer, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
+            return _stepReportGpuAddress + (ulong)(StepReportSlots * StepReportStride * sizeof(uint));
+        }
+
         if (!_stepReportSlotByHash.TryGetValue(hash, out var slot))
         {
             if (_stepReportUsed == StepReportSlots)
@@ -50,16 +83,7 @@ internal sealed partial class MetalRenderHost
                 return 0;
             }
 
-            if (_stepReportBuffer == 0)
-            {
-                _stepReportBuffer = _guestMemory.CreateReportBuffer(
-                    StepReportSlots * StepReportStride * sizeof(uint),
-                    "SharpEmu StepReport",
-                    out _stepReportContents,
-                    out _stepReportGpuAddress);
-                StepReportWords.Clear();
-            }
-
+            EnsureStepReportBuffer();
             slot = _stepReportUsed++;
             _stepReportSlotByHash[hash] = slot;
             _stepReportHashBySlot[slot] = hash;
@@ -70,10 +94,58 @@ internal sealed partial class MetalRenderHost
         return _stepReportGpuAddress + (ulong)(slot * StepReportStride * sizeof(uint));
     }
 
+    private void EnsureStepReportBuffer()
+    {
+        if (_stepReportBuffer != 0)
+        {
+            return;
+        }
+
+        _stepReportBuffer = _guestMemory.CreateReportBuffer(
+            (ulong)((StepReportSlots * StepReportStride + ProbeLogWords) * sizeof(uint)),
+            "SharpEmu StepReport",
+            out _stepReportContents,
+            out _stepReportGpuAddress);
+        StepReportWords.Clear();
+        ProbeLogWordsSpan.Clear();
+    }
+
     private unsafe Span<uint> StepReportWords =>
         _stepReportContents == 0
             ? []
             : new Span<uint>((void*)_stepReportContents, StepReportSlots * StepReportStride);
+
+    private unsafe Span<uint> ProbeLogWordsSpan =>
+        _stepReportContents == 0 || ProbeLogWords == 0
+            ? []
+            : new Span<uint>((uint*)_stepReportContents + StepReportSlots * StepReportStride, ProbeLogWords);
+
+    private void DrainProbeLog()
+    {
+        var words = ProbeLogWordsSpan;
+        if (words.IsEmpty || ProbeLog is not { } log)
+        {
+            return;
+        }
+
+        if (_dumpThisFlip)
+        {
+            _probeLogFlushes = 8;
+        }
+
+        var count = Math.Min(words[0], (uint)Gen5MslTranslator.PcProbeLogRecords);
+        words[0] = 0;
+        if (count == 0 || _probeLogFlushes == 0 || ProbeLogPath is null)
+        {
+            return;
+        }
+
+        _probeLogFlushes--;
+        using var file = new FileStream(ProbeLogPath, FileMode.Append, FileAccess.Write);
+        Span<uint> header = [count, (uint)log.Registers];
+        file.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(header));
+        file.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.Slice(1, (int)count * log.Registers)));
+    }
 
     /// <summary>
     /// Reads back and clears the step-report words. Called once per flush: the counts
@@ -82,6 +154,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private void ReportStepCaps()
     {
+        DrainProbeLog();
         if (_stepReportUsed == 0 || _stepReportContents == 0)
         {
             return;

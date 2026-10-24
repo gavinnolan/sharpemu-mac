@@ -24,6 +24,11 @@ internal sealed partial class MetalImageCache
 
     private int _dccTraceLines;
 
+    // SHARPEMU_METAL_V2_DCC_TRACE_MATCH=<text> keeps only the scan lines that contain the text (a format and
+    // extent such as "Bgra8Unorm 960x540"), for a transient surface whose metadata moves from run to run.
+    private static readonly string? DccTraceMatch =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_TRACE_MATCH") is { Length: > 0 } dccMatch ? dccMatch : null;
+
     // SHARPEMU_METAL_V2_DCC_TRACE_AFTER_SECONDS=<n> starts the trace n seconds after the cache loads.
     private static readonly double DccTraceAfterSeconds =
         double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_TRACE_AFTER_SECONDS"), out var after) ? after : 0;
@@ -37,15 +42,22 @@ internal sealed partial class MetalImageCache
 
     private void TraceDcc(ResourceSlotIdentifier image, in ImageRequest request, ulong address, ulong size, string what)
     {
-        if (!DccTraceActive || !DccTraceCovers(address, size) || Interlocked.Increment(ref _dccTraceLines) > DccTraceMax)
+        if (!DccTraceActive || !DccTraceCovers(address, size))
         {
             return;
         }
 
         var d = request.Description;
-        Console.Error.WriteLine(
+        var line =
             $"[METAL-V2][DCC] image={image} role={request.Role} fmt={request.View.Format} " +
-            $"{d.Extent.Width}x{d.Extent.Height} at=0x{d.Data.Address:X}+0x{d.Data.Size:X} meta=0x{address:X}+0x{size:X} {what}");
+            $"{d.Extent.Width}x{d.Extent.Height} at=0x{d.Data.Address:X}+0x{d.Data.Size:X} meta=0x{address:X}+0x{size:X} {what}";
+        if ((DccTraceMatch is not null && !line.Contains(DccTraceMatch, StringComparison.Ordinal)) ||
+            Interlocked.Increment(ref _dccTraceLines) > DccTraceMax)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(line);
     }
 
     // The first byte that differs from the code, and how many bytes of the slice hold it.

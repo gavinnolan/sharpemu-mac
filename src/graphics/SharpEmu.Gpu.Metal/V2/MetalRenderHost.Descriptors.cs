@@ -936,6 +936,11 @@ internal sealed partial class MetalRenderHost
             ? (bytes + 3) & ~3
             : 32;
 
+    // SHARPEMU_METAL_V2_DUMP_BUFFER_BIN=<dir>: also writes each reported binding whole (up to
+    // 64 MiB, as the CPU sees guest memory) to <dir>/<hash>-buf<index>-<n>.bin.
+    private static readonly string? _dumpBufferBinDirectory =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFER_BIN");
+
     private static HashSet<ulong> ParseDumpBufferHashes() => ParseDumpBufferHashesFrom("SHARPEMU_METAL_V2_DUMP_BUFFERS");
 
     // A comma-separated list of program hashes (hex, 0x optional) from an environment variable.
@@ -988,6 +993,12 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        // Under a dump trigger, the bindings of the dumped frame, beside its snapshots.
+        if (_dumpTriggerPath is not null && !_dumpThisFlip)
+        {
+            return;
+        }
+
         var key = (hash, index);
         _dumpedBufferCounts.TryGetValue(key, out var seen);
         if (seen >= MaxBufferDumpsPerBinding)
@@ -996,6 +1007,16 @@ internal sealed partial class MetalRenderHost
         }
 
         _dumpedBufferCounts[key] = seen + 1;
+        if (_dumpBufferBinDirectory is not null)
+        {
+            var whole = new byte[(int)Math.Min(size, 64UL << 20)];
+            if (_guestMemory.TryPeek(descriptor.Address, whole))
+            {
+                Directory.CreateDirectory(_dumpBufferBinDirectory);
+                File.WriteAllBytes(Path.Combine(_dumpBufferBinDirectory, $"{hash:X16}-buf{index}-{seen}.bin"), whole);
+            }
+        }
+
         var count = (int)Math.Min((ulong)_dumpBufferBytes, Math.Max(size, 4));
         var host = new byte[count];
         var read = _guestMemory.TryPeek(descriptor.Address, host);

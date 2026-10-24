@@ -384,6 +384,10 @@ public interface IRenderHost
     // a cleared mark was dropped.
     bool NoteHtileWritten(ulong address) => false;
 
+    /// <summary>Whether the frame being recorded is one a diagnostic dump captures, so the executor can
+    /// describe its work (SHARPEMU_METAL_V2_DUMP_TRIGGER).</summary>
+    bool TraceFrameActive => false;
+
     // A dispatch that runs and fills the buffer at the address with HTILE clear codes.
     void NoteHtileCleared(ulong address)
     {
