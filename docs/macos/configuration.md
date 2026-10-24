@@ -38,6 +38,7 @@ them for measurements or to isolate a problem.
 | `SHARPEMU_LOG_DIR` | `<data root>/user/logs` | Folder for every log, trace, crash dump and dump below. The dump variables that name a folder accept `1` for their default subfolder there. |
 | `SHARPEMU_OVERLAY` | unset | `0` starts the [performance display](../performance-overlay.md) hidden. |
 | `SHARPEMU_GUEST_BACKING` | chunked | `shm` backs guest memory with one POSIX shared-memory object instead of 2 MiB purgeable memory objects. The default allows memory the guest frees to return to the OS. |
+| `SHARPEMU_GUEST_BACKING_SHAREABLE` | unset | `1` makes the guest backing shareable with another process, and keeps a shared table and log of guest views. This is groundwork for the two-process split (`SHARPEMU_GPU_PROCESS=1` sets it too). See [Guest memory for the two-process split](split-shared-memory.md). |
 | `SHARPEMU_HLE_FAST_PATH` | on | `0` disables the native stubs for `pthread_self` and `pthread_getspecific`. They are also off while import or pthread tracing is active. |
 | `SHARPEMU_STALL_WATCHDOG_SECONDS` | `20` | Seconds without import progress before the stall watchdog acts. `0` disables it. |
 

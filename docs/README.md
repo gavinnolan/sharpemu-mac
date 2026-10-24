@@ -13,6 +13,7 @@ This fork targets macOS with the Metal backend. Start here.
 - [Running games on macOS](macos/running-games.md): GUI and command line, game layouts, controls, caches and the data folder.
 - [macOS configuration](macos/configuration.md): environment variables for the host, memory, shader translation and diagnostics.
 - [Metal backend](macos/metal-backend.md): how the Metal renderer is structured, with pointers into the source.
+- [Guest memory for the two-process split](macos/split-shared-memory.md): how a second process maps guest memory, and what it cannot see yet.
 - [Testing on macOS](macos/testing.md): the .NET and Python tests, CI, and the game harness scripts.
 - [macOS troubleshooting](macos/troubleshooting.md): startup, performance and rendering problems and what to check.
 

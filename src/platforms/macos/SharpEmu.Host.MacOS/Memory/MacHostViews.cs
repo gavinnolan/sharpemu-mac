@@ -236,7 +236,12 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
 
             try
             {
-                backing = new HostBackingObject((ulong)alias, size, PageSize, ReleaseOwnedBackingObject) { Descriptor = descriptor };
+                backing = new HostBackingObject((ulong)alias, size, PageSize, ReleaseOwnedBackingObject)
+                {
+                    Descriptor = descriptor,
+                    // Shareable (MacHostViews.Sharing.cs): the descriptor is all another process needs.
+                    Export = UseShareableBacking ? SharedObjectExport(descriptor, size) : null,
+                };
                 MacMappedCopyState.Ledger?.RegisterBacking(backing);
             }
             catch (Exception error)
@@ -675,6 +680,8 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             // the descriptor while alias ownership remains uncertain.
             return new(HostBackingReleaseStatus.AliasOutcomeUnknown, error);
         }
+        // A shareable chunked backing kept its entry ports for other processes; they go with it.
+        if (backing.Export is { Kind: GuestBackingExportKind.MemoryEntries } export) ReleaseEntries(export.Entries);
         // A chunked backing has no descriptor: its chunks die with their last mapping.
         if (backing.Descriptor >= 0 && close(backing.Descriptor) != 0)
         {

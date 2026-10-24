@@ -94,6 +94,14 @@ public sealed class HostBackingObject : IDisposable
     public Func<HostBackingObject, IHostBackingGpuAlias?>? CreateGpuAlias { get; init; }
 
     /// <summary>
+    /// What another process needs to map this backing (<see cref="IHostGuestMirrorMemory.TryMapMirror"/>);
+    /// null unless the backend was asked to make it shareable. Its descriptor or handles belong to
+    /// this backing and are released with it.
+    /// </summary>
+    /// <remarks>Host-package contract; written by the owning backend.</remarks>
+    public GuestBackingExport? Export { get; init; }
+
+    /// <summary>
     /// Creates a backing object for storage the caller has already reserved at
     /// <paramref name="aliasBase"/>.
     /// </summary>
