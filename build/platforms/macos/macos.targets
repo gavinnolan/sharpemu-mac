@@ -46,6 +46,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SharpEmuMacOutputCheckScript>$(RepoRoot)build/platforms/macos/check-macos-output.sh</SharpEmuMacOutputCheckScript>
     <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacStripForbiddenAssets)' == 'true'">$(_SharpEmuMacCheckFlags) --strip</_SharpEmuMacCheckFlags>
     <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacForbidSdl)' == 'true'">$(_SharpEmuMacCheckFlags) --forbid-sdl</_SharpEmuMacCheckFlags>
+    <!-- The one osx-arm64 artifact, the two-process split's native GPU host
+         (SharpEmu.GpuHost), is held to the same policy with the slice flipped. -->
+    <_SharpEmuMacCheckFlags Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">$(_SharpEmuMacCheckFlags) --arch arm64</_SharpEmuMacCheckFlags>
   </PropertyGroup>
 
   <!-- Rosetta places the initial host stack relative to the executable layout.

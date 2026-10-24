@@ -23,6 +23,8 @@ public sealed class ExtractedPackageContractTests
         { "src/platforms/macos/SharpEmu.Host.MacOS", "SharpEmu.Host.MacOS" },
         { "src/platforms/linux/SharpEmu.Host.Linux", "SharpEmu.Host.Linux" },
         { "src/platforms/windows/SharpEmu.Host.Windows", "SharpEmu.Host.Windows" },
+        { "src/SharpEmu.GpuRemote", "SharpEmu.GpuRemote" },
+        { "src/SharpEmu.GpuHost", "SharpEmu.GpuHost" },
     };
 
     [Theory]
