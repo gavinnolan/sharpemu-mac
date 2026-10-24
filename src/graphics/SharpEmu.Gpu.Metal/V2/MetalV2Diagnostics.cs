@@ -56,6 +56,14 @@ internal static class MetalV2Diagnostics
             _ => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.Always,
         };
 
+    // SHARPEMU_METAL_V2_LOG_STENCIL_VS=<vertex hash>[,...] (or "all"): each depth/stencil state made for draws with
+    // these vertex programs is logged once with its stencil compare, operations, masks and reference.
+    private static readonly string? LogStencilVs = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOG_STENCIL_VS");
+    private static readonly HashSet<ulong> LogStencilVertexHashes = ParseHashes(LogStencilVs);
+
+    public static bool LogsStencilFor(ulong vertexHash) =>
+        LogStencilVs == "all" || (LogStencilVertexHashes.Count != 0 && LogStencilVertexHashes.Contains(vertexHash));
+
     public static bool LoosensEqualFor(ulong vertexHash) =>
         LoosenEqualVertexHashes.Count != 0 && LoosenEqualVertexHashes.Contains(vertexHash);
 

@@ -1632,6 +1632,19 @@ internal sealed partial class MetalRenderHost
                 descriptor,
                 MetalNative.Selector("setDepthWriteEnabled:"),
                 entry.HasDepth && state.DepthWriteEnabled);
+            if (MetalV2Diagnostics.LogsStencilFor(entry.VertexHash))
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][STENCIL] vs=0x{entry.VertexHash:X16} enabled={stencilEnabled} test={state.StencilTestEnabled} " +
+                    $"has={entry.HasStencil} depth={depthCompare} depth_write={state.DepthWriteEnabled} " +
+                    (parameters is null ? "no-static-parameters" :
+                        $"front={parameters.StencilFront.Compare}/{parameters.StencilFront.FailOperation}/{parameters.StencilFront.PassOperation}/" +
+                        $"{parameters.StencilFront.DepthFailOperation} ref={state.FrontStencil.Reference} read=0x{state.FrontStencil.CompareMask:X} " +
+                        $"write=0x{state.FrontStencil.WriteMask:X} back={parameters.StencilBack.Compare}/{parameters.StencilBack.FailOperation}/" +
+                        $"{parameters.StencilBack.PassOperation}/{parameters.StencilBack.DepthFailOperation} ref={state.BackStencil.Reference} " +
+                        $"read=0x{state.BackStencil.CompareMask:X} write=0x{state.BackStencil.WriteMask:X}"));
+            }
+
             if (stencilEnabled)
             {
                 ConfigureStencil(
