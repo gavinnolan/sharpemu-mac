@@ -166,6 +166,8 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        NoteHtileStores(input);
+
         if (useThreadDimensions)
         {
             // The indirect buffer carries thread counts in this mode, while Vulkan indirect
@@ -359,6 +361,12 @@ public sealed partial class RenderExecutor
     // transient surface's HTILE was registered, and taken for a clear it never ran.
     private const ulong MetadataClearMinimumGroups = 2;
 
+    // Each program and surface it was taken to clear, reported once.
+    private readonly HashSet<(ulong Hash, ulong Address)> _loggedMetadataClears = new();
+
+    // SHARPEMU_TRACE_HTILE=1 reports every metadata clear and HTILE store, not the first of each.
+    public static readonly bool TraceHtile = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_HTILE") == "1";
+
     private bool TryConsumeMetadataClear(ComputeInputInfo input)
     {
         var program = input.Stage.Program!;
@@ -419,12 +427,71 @@ public sealed partial class RenderExecutor
             var descriptor = DecodeBufferDescriptor(resources, i);
             if (_host.ClearMetadata(descriptor.Address))
             {
+                if (_loggedMetadataClears.Add((program.Hash, descriptor.Address)) || TraceHtile)
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU][INFO] A compute dispatch is taken as a metadata clear: hash=0x{program.Hash:X16} " +
+                        $"metadata=0x{descriptor.Address:X16} records={descriptor.RecordCount} stride={descriptor.Stride} " +
+                        $"constant=0x{program.ConstantStoreValue ?? 0:X8}.");
+                }
+
                 return true;
             }
         }
 
         return false;
     }
+
+    // A dispatch that runs and stores into registered HTILE leaves it holding what it wrote,
+    // so a cleared mark from before (a memset taken for a clear, or a surface's first
+    // registration) no longer stands: UE5's Nanite depth export writes the material depth and
+    // the HTILE that describes it, and the mark loaded that depth as zero, so every Nanite
+    // material draw failed its depth-equal test (Black Myth: Wukong's tree trunks).
+    private void NoteHtileStores(ComputeInputInfo input)
+    {
+        var program = input.Stage.Program!;
+        var resources = input.Stage.Resources;
+        if (resources.Buffers.Length != program.Buffers.Length)
+        {
+            return;
+        }
+
+        // A fill of one constant whose ZMask (bits 0-3) is zero stores clear codes, not data:
+        // the memset before UE5's export, when it covers only part of the surface or the
+        // surface is not registered yet. It unmakes no tracked clear, and a surface registered
+        // over it later starts cleared whatever was stored there before.
+        var clearCodes = program.ConstantStoreValue is { } fill && (fill & 0xF) == 0;
+        for (var i = 0; i < program.Buffers.Length; i++)
+        {
+            if (!program.Buffers[i].Written)
+            {
+                continue;
+            }
+
+            var descriptor = DecodeBufferDescriptor(resources, i);
+            if (clearCodes)
+            {
+                _host.NoteHtileCleared(descriptor.Address);
+                continue;
+            }
+
+            var dropped = _host.NoteHtileWritten(descriptor.Address);
+            if (TraceHtile && dropped)
+            {
+                Console.Error.WriteLine($"[GPU][HTILE] store hash=0x{program.Hash:X16} buffer=0x{descriptor.Address:X16} dropped_clear={dropped}");
+            }
+
+            if (dropped && _loggedHtileStores.Add((program.Hash, descriptor.Address)))
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][INFO] A compute dispatch stores into HTILE, so its depth surface no longer loads as a clear: " +
+                    $"hash=0x{program.Hash:X16} htile=0x{descriptor.Address:X16} images={program.Images.Length}.");
+            }
+        }
+    }
+
+    // Each program and HTILE surface reported by the above, once.
+    private readonly HashSet<(ulong Hash, ulong Address)> _loggedHtileStores = new();
 
     // Recognizes a dispatch that fills one formatted buffer with a single value over every record.
     public ComputeImageClear? TryDecodeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator) =>

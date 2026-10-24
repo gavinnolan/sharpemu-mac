@@ -406,6 +406,64 @@ public sealed class RenderExecutorComputeTests : IDisposable
     }
 
     [Fact]
+    public void MetadataStore_ThatRunsMarksTheHtileWritten()
+    {
+        // UE5's Nanite depth export reads and writes the HTILE of the material depth it
+        // exports; the mark a memset of that HTILE left must not survive it.
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [readWrite]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"htile_written {MetadataAddress:X}", _host.Calls);
+        AssertDispatched(4, 1, 1);
+    }
+
+    [Theory]
+    [InlineData(0x0u, false)]
+    [InlineData(0xFFFFFFF0u, false)]
+    [InlineData(0xFFFFFFFFu, true)]
+    public void MetadataFill_MarksTheHtileWrittenOnlyForDataCodes(uint fill, bool marks)
+    {
+        // A constant fill that runs (here it also reads, so it is not taken for a clear):
+        // a zero ZMask is a clear code and leaves the tracking alone, an expanded one is data.
+        _host.MetadataAddresses.Add(MetadataAddress);
+        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [readWrite], constantStore: fill), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Equal(marks, _host.Calls.Contains($"htile_written {MetadataAddress:X}"));
+        Assert.Equal(!marks, _host.Calls.Contains($"htile_cleared {MetadataAddress:X}"));
+        AssertDispatched(4, 1, 1);
+    }
+
+    [Fact]
+    public void MetadataClear_ThatIsConsumedDoesNotMarkTheHtileWritten()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("htile_written", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MetadataRead_DoesNotMarkTheHtileWritten()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        var read = new BufferResourceInfo(true, false, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [read]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("htile_written", StringComparison.Ordinal));
+        AssertDispatched(4, 1, 1);
+    }
+
+    [Fact]
     public void MetadataClear_RefusesAProgramWithBitwiseExclusiveOr()
     {
         _host.ClearableMetadata.Add(MetadataAddress);

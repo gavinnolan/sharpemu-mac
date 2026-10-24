@@ -63,6 +63,9 @@ internal sealed partial class MetalRenderHost
 
     private long _untestedDepthWrites;
 
+    // Each HTILE whose depth target loaded as a clear, reported once.
+    private readonly HashSet<ulong> _loggedMetadataClearLoads = new();
+
     internal long TakeUntestedDepthWrites() => Interlocked.Exchange(ref _untestedDepthWrites, 0);
 
     // Whether the attachment's texture can change under this draw. The guest state calls a
@@ -132,6 +135,13 @@ internal sealed partial class MetalRenderHost
         if (metadataClear)
         {
             _ = _imageCache.SetMetadataSlice(resolution.HtileAddress, layer, false);
+            if (_loggedMetadataClearLoads.Add(resolution.HtileAddress) || SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][INFO] A depth target loads as cleared because its HTILE is marked cleared: " +
+                    $"depth=0x{request.Description.Data.Address:X16} htile=0x{resolution.HtileAddress:X16} " +
+                    $"register_clear={resolution.DepthClearEnabled}.");
+            }
         }
 
         var image = _imageCache.GetImage(imageIdentifier);
@@ -403,6 +413,10 @@ internal sealed partial class MetalRenderHost
     public bool CoversMetadata(ulong address, ulong size) => _imageCache.CoversMetadata(address, size);
 
     public bool ClearMetadata(ulong address) => _imageCache.ClearMetadata(address);
+
+    public bool NoteHtileWritten(ulong address) => _imageCache.NoteHtileWritten(address);
+
+    public void NoteHtileCleared(ulong address) => _imageCache.NoteHtileCleared(address);
 
     public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
     {

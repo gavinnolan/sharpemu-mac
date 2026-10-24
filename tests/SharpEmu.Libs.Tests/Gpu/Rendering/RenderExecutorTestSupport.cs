@@ -491,6 +491,14 @@ internal sealed class RecordingRenderHost : IRenderHost
         return ClearableMetadata.Contains(address);
     }
 
+    public bool NoteHtileWritten(ulong address)
+    {
+        Calls.Add($"htile_written {address:X}");
+        return MetadataAddresses.Contains(address);
+    }
+
+    public void NoteHtileCleared(ulong address) => Calls.Add($"htile_cleared {address:X}");
+
     public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
     {
         Calls.Add($"clear_image {address:X} {size:X} {packedClear:X8}");
@@ -784,7 +792,7 @@ internal static class RenderExecutorFixtures
         return banks;
     }
 
-    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool writesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1) =>
+    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool writesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1, uint? constantStore = null) =>
         new()
         {
             Stage = stage,
@@ -798,6 +806,7 @@ internal static class RenderExecutorFixtures
             HasBitwiseExclusiveOr = exclusiveOr,
             VertexOffsetScalarRegister = vertexOffsetScalar,
             InstanceOffsetScalarRegister = instanceOffsetScalar,
+            ConstantStoreValue = constantStore,
         };
 
     public static ShaderStageResources Stage(ShaderProgramInfo program, uint[][]? buffers = null, uint[]? userData = null) =>

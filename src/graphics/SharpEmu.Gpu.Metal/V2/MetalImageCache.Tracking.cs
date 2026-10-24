@@ -113,7 +113,18 @@ internal sealed partial class MetalImageCache
 
         if (image.Description.HasMetadata)
         {
-            _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
+            var metadataAddress = image.Description.Metadata.Range.Address;
+            // A written HTILE outlives the image released over it: transient memory reuse
+            // releases an older depth image that shares the HTILE of the one in use, and that one
+            // registering again must not start cleared - the frame after Black Myth: Wukong moved
+            // its material depth lost every Nanite material this way.
+            if (_surfaceMetadata.TryGetValue(metadataAddress, out var released) &&
+                released.Kind == SurfaceMetadataKind.HTile && released.ClearMask == 0)
+            {
+                NoteUnregisteredHtileStoreLocked(metadataAddress);
+            }
+
+            _surfaceMetadata.Remove(metadataAddress);
         }
 
         ForgetImageBookkeepingLocked(imageIdentifier, image);
@@ -1527,16 +1538,18 @@ internal sealed partial class MetalImageCache
             _surfaceMetadata.Add(address, new SurfaceMetadata
             {
                 Kind = SurfaceMetadataKind.HTile,
-                ClearMask = description.HtileClearMask,
+                ClearMask = RegisteredHtileClearMaskLocked(address, in description, "none"),
                 Size = description.Metadata.Range.Size,
             });
             return;
         }
 
-        if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
+        // Transient memory reused: metadata another surface registered here (a colour target's
+        // DCC) is this depth target's HTILE now, and the clear state it carried is not this one's.
+        if (metadata.Kind != SurfaceMetadataKind.HTile)
         {
+            metadata.ClearMask = RegisteredHtileClearMaskLocked(address, in description, metadata.Kind.ToString());
             metadata.Kind = SurfaceMetadataKind.HTile;
-            metadata.ClearMask = description.HtileClearMask;
             metadata.FillValue = 0xffffffff;
             metadata.FillSize = 0;
         }
@@ -1630,6 +1643,119 @@ internal sealed partial class MetalImageCache
 
         found.ClearMask = uint.MaxValue;
         return true;
+    }
+
+    /// <summary>
+    /// A dispatch stored into the HTILE registered at the address. Whatever it wrote is
+    /// what the hardware reads, not a clear: UE5's Nanite depth export writes the material
+    /// depth and its HTILE after a memset of that HTILE was taken for a clear, and the
+    /// mark left by the memset loaded the material depth as zero. Every slice drops its
+    /// mark; DCC keeps its own tracking.
+    /// </summary>
+    public bool NoteHtileWritten(ulong address)
+    {
+        using var held = _lock.Hold();
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind != SurfaceMetadataKind.HTile)
+        {
+            // Not an HTILE (yet): a depth target may still name it one before the frame is out.
+            NoteUnregisteredHtileStoreLocked(address);
+            if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile && _everHtileAddresses.Contains(address))
+            {
+                Console.Error.WriteLine($"[METAL-V2][HTILE] store-unregistered htile=0x{address:X16} kind={(found is null ? "none" : found.Kind.ToString())}");
+            }
+
+            return false;
+        }
+
+        if (found.ClearMask == 0)
+        {
+            return false;
+        }
+
+        found.ClearMask = 0;
+        return true;
+    }
+
+    /// <summary>
+    /// A dispatch stored clear codes into the buffer at the address: whatever it held before,
+    /// a surface registered over it now starts cleared, as one registered fresh does.
+    /// </summary>
+    public void NoteHtileCleared(ulong address)
+    {
+        using var held = _lock.Hold();
+        _unregisteredHtileStores.Remove(address);
+        if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile && _everHtileAddresses.Contains(address))
+        {
+            Console.Error.WriteLine($"[METAL-V2][HTILE] clear-codes htile=0x{address:X16}");
+        }
+    }
+
+    // Every address an HTILE was registered at (SHARPEMU_TRACE_HTILE only).
+    private readonly HashSet<ulong> _everHtileAddresses = new();
+
+    // Buffers a running dispatch stored data into before any depth target registered metadata
+    // there, by address, stamped with the order of the stores. UE5's RDG places the material
+    // depth at a new transient address now and then, and its Nanite depth export writes that
+    // depth's HTILE before the material pass registers it: registered as cleared, the frame lost
+    // every Nanite material (Black Myth: Wukong's trunks, rocks and ground blinking out). Only
+    // the last stores count, so one long before cannot vouch for a surface placed there since.
+    private readonly Dictionary<ulong, long> _unregisteredHtileStores = new();
+    private readonly HashSet<ulong> _loggedWrittenHtileRegistrations = new();
+    private long _unregisteredHtileStoreCount;
+    private const long UnregisteredHtileStoreWindow = 8192;
+
+    // The clear state an HTILE starts with when a depth target first names it: cleared, as a
+    // fresh surface is, unless one of the last dispatches stored data there.
+    private uint RegisteredHtileClearMaskLocked(ulong address, in ImageDescription description, string replaced)
+    {
+        if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile)
+        {
+            _everHtileAddresses.Add(address);
+        }
+
+        if (!_unregisteredHtileStores.Remove(address, out var stamp) ||
+            _unregisteredHtileStoreCount - stamp >= UnregisteredHtileStoreWindow)
+        {
+            if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile)
+            {
+                Console.Error.WriteLine($"[METAL-V2][HTILE] registered cleared htile=0x{address:X16} replaced={replaced}");
+            }
+
+            return description.HtileClearMask;
+        }
+
+        if (_loggedWrittenHtileRegistrations.Add(address) || SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][INFO] An HTILE a dispatch wrote before any depth target named it starts as written: " +
+                $"htile=0x{address:X16} replaced={replaced}.");
+        }
+
+        return 0;
+    }
+
+    private void NoteUnregisteredHtileStoreLocked(ulong address)
+    {
+        var stamp = ++_unregisteredHtileStoreCount;
+        _unregisteredHtileStores[address] = stamp;
+        if (_unregisteredHtileStores.Count <= 2 * UnregisteredHtileStoreWindow)
+        {
+            return;
+        }
+
+        var stale = new List<ulong>();
+        foreach (var (candidate, at) in _unregisteredHtileStores)
+        {
+            if (stamp - at >= UnregisteredHtileStoreWindow)
+            {
+                stale.Add(candidate);
+            }
+        }
+
+        foreach (var candidate in stale)
+        {
+            _unregisteredHtileStores.Remove(candidate);
+        }
     }
 
     public bool OverlapsDccMetadata(ulong address, ulong size)

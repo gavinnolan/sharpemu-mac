@@ -379,6 +379,16 @@ public interface IRenderHost
 
     bool ClearMetadata(ulong address);
 
+    // A dispatch that runs and stores into the HTILE registered at the address: the HTILE now
+    // holds what the program wrote, so its depth surface no longer loads as a clear. Whether
+    // a cleared mark was dropped.
+    bool NoteHtileWritten(ulong address) => false;
+
+    // A dispatch that runs and fills the buffer at the address with HTILE clear codes.
+    void NoteHtileCleared(ulong address)
+    {
+    }
+
     bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear);
 
     bool TryAbsorbDccFill(ulong address, ulong size, uint fillValue);
