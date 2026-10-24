@@ -352,19 +352,20 @@ public static partial class Gen5MslTranslator
                 ? watched
                 : -1;
 
-        // Narrows both vertex probes to one program, so what they report is not mixed
-        // with every other vertex shader in the frame.
-        private static readonly ulong DebugVertexHash =
-            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_HASH") is { Length: > 0 } text &&
-            ulong.TryParse(
-                text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text,
-                System.Globalization.NumberStyles.HexNumber,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out var only)
-                ? only
-                : 0;
+        // Narrows the debug switches to these programs (comma-separated), so what they report is not
+        // mixed with every other shader in the frame; unset (or nothing parsable) means every program.
+        private static readonly HashSet<ulong> DebugHashes =
+            (Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_HASH") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(static text => ulong.TryParse(
+                    text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text,
+                    System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var hash) ? hash : 0UL)
+                .Where(static hash => hash != 0)
+                .ToHashSet();
 
-        private bool DebugsThisProgram => DebugVertexHash == 0 || DebugVertexHash == _request.Hash;
+        private bool DebugsThisProgram => DebugHashes.Count == 0 || DebugHashes.Contains(_request.Hash);
 
         private static readonly bool DebugVertexPosition =
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_VS_POSITION") == "1";
