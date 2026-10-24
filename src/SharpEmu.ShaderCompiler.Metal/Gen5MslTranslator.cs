@@ -930,14 +930,6 @@ public static partial class Gen5MslTranslator
                     source.AppendLine("    uint sharpemu_wave_set = 0u;");
                 }
 
-                if (LaneSpillPlan() is { } spills)
-                {
-                    // The per-thread copies of spilled SGPRs (see Ir.Gen5LaneSpillAnalysis).
-                    for (var copy = 0; copy < spills.CopyCount; copy++)
-                    {
-                        source.AppendLine($"    uint sharpemu_spill{copy} = 0u;");
-                    }
-                }
             }
             if (!HasRealWaveLanes)
             {
@@ -946,6 +938,15 @@ public static partial class Gen5MslTranslator
                 // translator's no-subgroup fallback. Ballots degrade to bit 0 in the
                 // prelude and shuffle-family selects resolve to the lane's own value.
                 source.AppendLine("    const uint sharpemu_lane = 0u;");
+            }
+
+            if (LaneSpillPlan() is { } spills)
+            {
+                // The per-thread copies of spilled SGPRs (see Ir.Gen5LaneSpillAnalysis).
+                for (var copy = 0; copy < spills.CopyCount; copy++)
+                {
+                    source.AppendLine($"    uint sharpemu_spill{copy} = 0u;");
+                }
             }
             if (_usesLds)
             {
@@ -1573,14 +1574,24 @@ public static partial class Gen5MslTranslator
         private bool _laneSpillPlanBuilt;
         private Ir.Gen5LaneSpillPlan? _laneSpillPlan;
 
-        /// <summary>The wave64 lane spills whose reloads read a per-thread copy instead of
-        /// the exchange; null when there are none or the option is off.</summary>
+        /// <summary>The lane spills whose reloads read a per-thread copy instead of the lane:
+        /// for a wave64 compute program an optimization (no cross-half exchange), for a stage
+        /// that models a single lane (sharpemu_lane is 0 in every thread) what makes them work
+        /// at all - there a writelane to lane 1 lands nowhere and its reload read lane 0's
+        /// spill (Black Myth: Wukong's hand base pass placed vertices from the wrong scalar).
+        /// Null when there are none, or for wave64 compute when the option is off.</summary>
         private Ir.Gen5LaneSpillPlan? LaneSpillPlan()
         {
             if (!_laneSpillPlanBuilt)
             {
                 _laneSpillPlanBuilt = true;
-                if (_options.LaneSpillCopies && _stage == Gen5MslStage.Compute && IsWave64)
+                if (!HasRealWaveLanes)
+                {
+                    // Which VGPRs the launch defines differs by stage; treating them all as
+                    // defined only asks that a writelane reach each reload first.
+                    _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program);
+                }
+                else if (_options.LaneSpillCopies && _stage == Gen5MslStage.Compute && IsWave64)
                 {
                     // A compute launch loads the thread IDs into v0..v2.
                     _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program, firstUndefinedVector: 3);
