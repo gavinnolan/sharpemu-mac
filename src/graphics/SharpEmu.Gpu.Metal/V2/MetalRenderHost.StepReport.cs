@@ -30,6 +30,12 @@ internal sealed partial class MetalRenderHost
     // probe index << 16) headers followed by the words.
     private static readonly (ulong Hash, int Registers)[] ProbeLogs = ParseProbeLogs();
     private static readonly string? ProbeLogPath = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE_LOG");
+
+    // SHARPEMU_MSL_PC_PROBE_LOG_FLUSHES=<n>: how many flushes after the dump flip are logged (default 8).
+    private static readonly int ProbeLogFlushes =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE_LOG_FLUSHES"), out var flushes) && flushes > 0
+            ? flushes
+            : 8;
     private int _probeLogFlushes;
 
     private static (ulong Hash, int Registers)[] ParseProbeLogs()
@@ -152,7 +158,7 @@ internal sealed partial class MetalRenderHost
 
         if (_dumpThisFlip)
         {
-            _probeLogFlushes = 8;
+            _probeLogFlushes = ProbeLogFlushes;
         }
 
         var write = _probeLogFlushes > 0 && ProbeLogPath is not null;
