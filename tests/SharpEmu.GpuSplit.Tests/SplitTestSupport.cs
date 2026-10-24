@@ -114,7 +114,7 @@ internal sealed unsafe class SharedGuestMemory : IDisposable
         var mirrorHost = MacOSHost.CreateGuestMirrorMemory();
         Assert.True(mirrorHost.TryMapMirror(Export, out var mirror));
         Assert.True(mirrorHost.TryMapSharedRegion(Table.Region.Descriptor, Table.Region.Size, writable: false, out var table));
-        var replica = GuestReplica.TryAttach(mirrorHost, mirror!, table!, windowStart: 0xF0_0000_0000, windowEnd: 0xFC_0000_0000);
+        var replica = GuestReplica.TryAttach(mirrorHost, mirror!, table!, GuestReplica.DefaultBase, windowStart: 0xF0_0000_0000, windowEnd: 0xFC_0000_0000);
         Assert.NotNull(replica);
         return (mirror!, table!, replica!);
     }
