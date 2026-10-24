@@ -402,9 +402,10 @@ public sealed class MetalGpuWriteRangesTests
         }
     }
 
-    // The bucket index over the records only lets a query skip records that cannot reach it: what
-    // PendingSerial answers is what the unindexed walk of every record (the snapshot another thread
-    // reads) answers, over narrow and wide writes, labels, retirement, folds and clears.
+    // The indexes over the records and labels (the bucket dictionary PendingSerial uses, the hashed
+    // counts the snapshot another thread reads) only let a query skip what cannot reach it: both
+    // answer what the unindexed walk of every record and label answers, over narrow and wide writes,
+    // labels, retirement, folds and clears.
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
@@ -446,7 +447,9 @@ public sealed class MetalGpuWriteRangesTests
             {
                 var address = Base + ((ulong)random.Next(0, 0x4000) << 16) + (ulong)random.Next(0, 0x10000);
                 var size = random.Next(10) == 0 ? (ulong)random.Next(1, 64) << 20 : (ulong)random.Next(1, 0x2000);
-                Assert.True(ranges.TryPendingSerialSnapshot(address, size, completed, out var expected));
+                var expected = ranges.UnindexedPendingSerial(address, size, completed);
+                Assert.True(ranges.TryPendingSerialSnapshot(address, size, completed, out var snapshot));
+                Assert.Equal(expected, snapshot);
                 Assert.Equal(expected, ranges.PendingSerial(address, size, completed));
             }
         }

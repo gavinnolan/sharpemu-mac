@@ -445,7 +445,12 @@ internal sealed class MetalGpuWriteRanges
             var end = address + size;
             var found = _unboundedSerial > completed ? _unboundedSerial : 0;
             var records = _records;
-            var count = Math.Min(_count, records.Length);
+            // The hashed counts let a query no record or label can reach skip the walks; they
+            // change only inside a mutation, which the check below rejects the read over.
+            var count = Volatile.Read(ref _wideRecordCount) == 0 &&
+                !HashedMayCover(_bucketHashCounts, address >> RecordBucketShift, (end - 1) >> RecordBucketShift, MaxRecordBucketLookups)
+                ? 0
+                : Math.Min(_count, records.Length);
             for (var index = 0; index < count; index++)
             {
                 var record = records[index];
@@ -456,7 +461,9 @@ internal sealed class MetalGpuWriteRanges
             }
 
             var labels = _labels;
-            var labelCount = Math.Min(_labelCount, labels.Length);
+            var labelCount = HashedMayCover(_labelPageHashCounts, address >> LabelPageShift, (end - 1) >> LabelPageShift, MaxLabelPageLookups)
+                ? Math.Min(_labelCount, labels.Length)
+                : 0;
             for (var index = 0; index < labelCount; index++)
             {
                 var label = labels[index];
@@ -475,6 +482,38 @@ internal sealed class MetalGpuWriteRanges
 
         Interlocked.MemoryBarrier();
         return Volatile.Read(ref _mutation) == before;
+    }
+
+    /// <summary>The newest pending serial over the range by a walk of every record and label,
+    /// with no index: the reference the indexed queries are tested against.</summary>
+    internal ulong UnindexedPendingSerial(ulong address, ulong size, ulong completed)
+    {
+        if (size == 0 || address > ulong.MaxValue - size)
+        {
+            return 0;
+        }
+
+        var end = address + size;
+        var found = _unboundedSerial > completed ? _unboundedSerial : 0;
+        for (var index = 0; index < _count; index++)
+        {
+            ref var record = ref _records[index];
+            if (record.Serial > completed && record.Serial > found && record.End > address && record.Start < end)
+            {
+                found = record.Serial;
+            }
+        }
+
+        for (var index = 0; index < _labelCount; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.Serial > completed && label.Serial > found && label.End > address && label.Start < end)
+            {
+                found = label.Serial;
+            }
+        }
+
+        return found;
     }
 
     public bool MayCover(ulong address, ulong size) =>
@@ -632,6 +671,36 @@ internal sealed class MetalGpuWriteRanges
     // A query reaching more buckets than this walks the records rather than looking each one up.
     private const ulong MaxRecordBucketLookups = 16;
 
+    // The same counts folded into fixed arrays by a hash of the bucket (records) and of the 4 KiB
+    // page (labels), with the wide records counted, for TryPendingSerialSnapshot: another thread
+    // can read an int array as the worker changes it, which it cannot do with the dictionaries.
+    // A collision only makes a query walk.
+    private const int HashSlotBits = 12;
+    private readonly int[] _bucketHashCounts = new int[1 << HashSlotBits];
+    private readonly int[] _labelPageHashCounts = new int[1 << HashSlotBits];
+    private int _wideRecordCount;
+
+    private static int HashSlot(ulong key) => (int)((key * 0x9E3779B97F4A7C15UL) >> (64 - HashSlotBits));
+
+    // Whether any hashed count of keys first..last is non-zero; true for a range too wide to look up.
+    private static bool HashedMayCover(int[] counts, ulong first, ulong last, ulong maxLookups)
+    {
+        if (last - first >= maxLookups)
+        {
+            return true;
+        }
+
+        for (var key = first; key <= last; key++)
+        {
+            if (Volatile.Read(ref counts[HashSlot(key)]) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private void CountRecordBuckets(ulong start, ulong end, int delta)
     {
         var first = start >> RecordBucketShift;
@@ -647,11 +716,13 @@ internal sealed class MetalGpuWriteRanges
                 _wideRecords.Remove((start, end));
             }
 
+            _wideRecordCount += delta;
             return;
         }
 
         for (var bucket = first; bucket <= last; bucket++)
         {
+            _bucketHashCounts[HashSlot(bucket)] += delta;
             ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_recordBuckets, bucket, out _);
             count += delta;
             if (count == 0)
@@ -699,6 +770,7 @@ internal sealed class MetalGpuWriteRanges
     {
         for (var page = start >> LabelPageShift; page <= (end - 1) >> LabelPageShift; page++)
         {
+            _labelPageHashCounts[HashSlot(page)] += delta;
             var count = _labelPages.GetValueOrDefault(page) + delta;
             if (count > 0)
             {
@@ -817,10 +889,13 @@ internal sealed class MetalGpuWriteRanges
             _count = 0;
             _recordBuckets.Clear();
             _wideRecords.Clear();
+            Array.Clear(_bucketHashCounts);
+            _wideRecordCount = 0;
             _labelCount = 0;
             _newestCount = 0;
             _newestOverflow = false;
             _labelPages.Clear();
+            Array.Clear(_labelPageHashCounts);
             _unboundedSerial = 0;
             _boundsStart = ulong.MaxValue;
             _boundsEnd = 0;
@@ -896,6 +971,8 @@ internal sealed class MetalGpuWriteRanges
         _count = kept + tail;
         _recordBuckets.Clear();
         _wideRecords.Clear();
+        Array.Clear(_bucketHashCounts);
+        _wideRecordCount = 0;
         for (var index = 0; index < _count; index++)
         {
             CountRecordBuckets(_records[index].Start, _records[index].End, 1);
