@@ -44,6 +44,7 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        SharpEmu.Logging.GcPauseLog.StartFromEnvironment();
         // A GUI-launched emulator on macOS: lead a process group and exit with the GUI.
         if (args.Length > 0)
         {
