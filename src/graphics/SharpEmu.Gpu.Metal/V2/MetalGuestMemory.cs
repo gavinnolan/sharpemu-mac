@@ -1229,6 +1229,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     public void ReadForStaging(ulong gpuVa, Span<byte> span)
     {
         MetalGpuReferenceCensus.Mark(gpuVa, (ulong)span.Length, MetalRefKind.Staged);
+        // A staged range is one no window covers; the two-process split's GPU process has to
+        // find it in the shared backing all the same, so split mode names any that is private.
+        SharpEmu.HLE.GuestMemory.SplitPrivateAccess.CheckGpuRead(_backing, gpuVa, (ulong)span.Length, "metal-staged-read");
         if (_memory.TryRead(gpuVa, span))
         {
             return;

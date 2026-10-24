@@ -216,9 +216,12 @@ public sealed class SelfLoader : ISelfLoader
 
         if (virtualMemory is PhysicalVirtualMemory physicalVm)
         {
+            // In the two-process split's layout the pages no executable segment touches are views of
+            // the shared backing, so the GPU process sees .rodata (shader binaries), .data and .bss.
+            var executableSpans = CollectExecutableSpans(programHeaders);
             if (clearVirtualMemory)
             {
-                if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
+                if (!physicalVm.TryAllocateModuleImage(imageBase, totalImageSize, executableSpans, out var allocatedBase))
                 {
                     // Exact allocation failed — the host may have already claimed
                     // part of this range (ASLR, Rosetta 2, or another process).
@@ -260,7 +263,8 @@ public sealed class SelfLoader : ISelfLoader
                 // and the diagnostic below should report the base that was
                 // actually requested, not 0.
                 var preferredImageBase = imageBase;
-                if (!TryAllocateAdditionalImageAtExact(physicalVm, preferredImageBase, totalImageSize, isNextGen, out var exactImageBase))
+                if (!TryAllocateAdditionalImageAtExact(physicalVm, preferredImageBase, totalImageSize, isNextGen, out var exactImageBase,
+                        executableSpans))
                 {
                     var allocatedBase = physicalVm.AllocateAt(preferredImageBase, totalImageSize, executable: true);
                     if (allocatedBase != preferredImageBase)
@@ -2280,6 +2284,7 @@ public sealed class SelfLoader : ISelfLoader
 
         var (searchStart, searchEnd) = GetModuleSearchRange(isNextGen);
         var alignedSize = AlignUp(Math.Max(totalImageSize, (ulong)PageSize), (ulong)PageSize);
+        var imageAlignment = ImageAlignment(virtualMemory);
         var candidate = searchStart;
         foreach (var region in virtualMemory.SnapshotRegions())
         {
@@ -2311,7 +2316,28 @@ public sealed class SelfLoader : ISelfLoader
             candidate = searchStart;
         }
 
-        return AlignUp(candidate, (ulong)PageSize);
+        return AlignUp(candidate, imageAlignment);
+    }
+
+    // A split layout maps a module's data pages as views of the backing, a guest page (16 KiB) at
+    // a time: a module on a guest page boundary keeps its segment boundaries on page boundaries.
+    private static ulong ImageAlignment(IVirtualMemory virtualMemory) =>
+        virtualMemory is PhysicalVirtualMemory { SplitsModuleImages: true } ? GuestMemoryLayout.GuestPage : (ulong)PageSize;
+
+    // The image-relative spans of the executable PT_LOAD segments.
+    private static IReadOnlyList<(ulong Offset, ulong Size)> CollectExecutableSpans(IReadOnlyList<ProgramHeader> programHeaders)
+    {
+        var spans = new List<(ulong Offset, ulong Size)>();
+        foreach (var header in programHeaders)
+        {
+            if (header.HeaderType == ProgramHeaderType.Load && header.MemorySize != 0 &&
+                (header.Flags & ProgramHeaderFlags.Execute) != 0)
+            {
+                spans.Add((header.VirtualAddress, header.MemorySize));
+            }
+        }
+
+        return spans;
     }
 
     internal static bool TryAllocateAdditionalImageAtExact(
@@ -2319,7 +2345,8 @@ public sealed class SelfLoader : ISelfLoader
         ulong preferredBase,
         ulong totalImageSize,
         bool isNextGen,
-        out ulong allocatedBase)
+        out ulong allocatedBase,
+        IReadOnlyList<(ulong Offset, ulong Size)>? executableSpans = null)
     {
         var (searchStart, searchEnd) = GetModuleSearchRange(isNextGen);
         var alignedSize = AlignUp(Math.Max(totalImageSize, (ulong)PageSize), (ulong)PageSize);
@@ -2333,25 +2360,28 @@ public sealed class SelfLoader : ISelfLoader
         // gigabyte (Wukong's Wwise plugins found room 448 MB on in a good run). Giving up
         // after a fixed number of steps let the host place the module anywhere, below the
         // range the return-address checks treat as code.
-        return TryAllocateModuleBetween(physicalVm, preferredBase, searchEnd, searchEnd, alignedSize, out allocatedBase) ||
-            TryAllocateModuleBetween(physicalVm, searchStart, preferredBase, searchEnd, alignedSize, out allocatedBase);
+        return TryAllocateModuleBetween(physicalVm, preferredBase, searchEnd, searchEnd, alignedSize, executableSpans, out allocatedBase) ||
+            TryAllocateModuleBetween(physicalVm, searchStart, preferredBase, searchEnd, alignedSize, executableSpans, out allocatedBase);
     }
 
     // Tries every ModulePlacementStep from start for a module that begins before end and
-    // ends by searchEnd.
+    // ends by searchEnd. Without its executable spans the module is one private allocation.
     private static bool TryAllocateModuleBetween(
         PhysicalVirtualMemory physicalVm,
         ulong start,
         ulong end,
         ulong searchEnd,
         ulong alignedSize,
+        IReadOnlyList<(ulong Offset, ulong Size)>? executableSpans,
         out ulong allocatedBase)
     {
-        for (var candidate = AlignUp(start, (ulong)PageSize);
+        for (var candidate = AlignUp(start, ImageAlignment(physicalVm));
             candidate < end && candidate + alignedSize <= searchEnd;
             candidate += ModulePlacementStep)
         {
-            if (physicalVm.TryAllocateAtExact(candidate, alignedSize, executable: true, out allocatedBase))
+            if (executableSpans is null
+                    ? physicalVm.TryAllocateAtExact(candidate, alignedSize, executable: true, out allocatedBase)
+                    : physicalVm.TryAllocateModuleImage(candidate, alignedSize, executableSpans, out allocatedBase))
             {
                 return true;
             }
@@ -2361,8 +2391,17 @@ public sealed class SelfLoader : ISelfLoader
         return false;
     }
 
+    /// <summary>Test override of the range additional modules are placed in, for modules loaded on this thread.</summary>
+    [ThreadStatic]
+    internal static (ulong Start, ulong End)? ModuleSearchRangeForTests;
+
     private static (ulong Start, ulong End) GetModuleSearchRange(bool isNextGen)
     {
+        if (ModuleSearchRangeForTests is { } range)
+        {
+            return range;
+        }
+
         return isNextGen
             ? (Ps5ModuleSearchStart, Ps5ModuleSearchEnd)
             : (Ps4ModuleSearchStart, Ps4ModuleSearchEnd);

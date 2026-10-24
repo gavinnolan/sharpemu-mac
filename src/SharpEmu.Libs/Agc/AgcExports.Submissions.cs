@@ -398,6 +398,7 @@ public static partial class AgcExports
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendEntered,
                 queue, submissionId, address, dwordCount);
             SplitCrossingStats.Count(SplitCrossing.SubmitCommandStream);
+            SharpEmu.HLE.GuestMemory.SplitPrivateAccess.CheckGpuRead(memory, address, (ulong)dwordCount * sizeof(uint), "command-stream");
             var backend = GuestGpu.Current;
             if (backend is IGuestSubmissionPreparationBackend preparing)
                 preparation = preparing.SubmitCommandStreamWithPreparation(memory, queue, address, dwordCount, submissionId, geometrySnapshots);

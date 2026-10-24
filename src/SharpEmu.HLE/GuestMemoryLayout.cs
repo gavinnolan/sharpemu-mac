@@ -10,4 +10,9 @@ public static class GuestMemoryLayout
     public const ulong FlexibleOffset = DirectBytes;
     public const ulong BackingBytes = DirectBytes + FlexibleBytes;
     public const ulong GuestPage = 0x4000;
+
+    // The host's guest allocator arena (IGuestMemoryAllocator): HLE objects the guest is handed
+    // pointers to, the VideoOut buffer labels among them. Outside the guest's own address range.
+    public const ulong AllocatorArenaAddress = 0x00006000_0000_0000;
+    public const ulong AllocatorArenaBytes = 0x2000_0000;
 }
