@@ -15,7 +15,7 @@ namespace SharpEmu.HLE.GuestMemory;
 ///
 /// <para>
 /// It attaches to a mirror of the backing (<see cref="IHostGuestMirrorMemory.TryMapMirror"/>) and to
-/// the owner's <see cref="GuestViewTable"/>, reserves its window of guest addresses + Base, and maps
+/// the owner's <see cref="GuestViewTable"/>, reserves its windows of guest addresses + Base, and maps
 /// what the table holds. <see cref="Sync"/> then replays the table's view log up to a given record,
 /// at the split's sync points: a map becomes a remap of the mirror's range at guest address + Base,
 /// an unmap puts the reservation back. Protection records are skipped and the replica stays
@@ -25,9 +25,9 @@ namespace SharpEmu.HLE.GuestMemory;
 /// </para>
 ///
 /// <para>
-/// Only backing views exist here. Memory private to the owner (module images, stacks, HLE
-/// allocations) is not in the backing, and its guest address + Base stays an inaccessible
-/// reservation (docs/macos/split-shared-memory.md). The replica owns its window, not the mirror or
+/// Only backing views exist here. Memory private to the owner (executable module pages, stacks,
+/// TLS, the HLE libc heap) is not in the backing, and its guest address + Base stays an inaccessible
+/// reservation (docs/macos/split-shared-memory.md). The replica owns its windows, not the mirror or
 /// the table mapping, which must outlive it.
 /// </para>
 /// </summary>
@@ -36,10 +36,21 @@ public sealed unsafe class GuestReplica : IDisposable
     /// <summary>16 TiB: clear of the guest range and of the macOS 27 guard, inside an arm64 process's 47-bit VA.</summary>
     public const ulong DefaultBase = 0x1000_0000_0000;
 
-    /// <summary>The guest addresses a default replica covers: all of the guest range (it ends at 0xFC_0000_0000).</summary>
+    /// <summary>The guest range window: all of the guest range (it ends at 0xFC_0000_0000).</summary>
     public const ulong DefaultWindowStart = 0;
 
     public const ulong DefaultWindowEnd = 0x100_0000_0000;
+
+    /// <summary>
+    /// The guest addresses a default replica covers: the guest range and the guest allocator arena,
+    /// which lies far above it (VideoOut labels; HLE data in split mode). The arena + Base still ends
+    /// inside the 47-bit VA.
+    /// </summary>
+    public static IReadOnlyList<(ulong Start, ulong End)> DefaultWindows { get; } =
+    [
+        (DefaultWindowStart, DefaultWindowEnd),
+        (GuestMemoryLayout.AllocatorArenaAddress, GuestMemoryLayout.AllocatorArenaAddress + GuestMemoryLayout.AllocatorArenaBytes),
+    ];
 
     private readonly IHostGuestMirrorMemory _host;
     private readonly HostBackingObject _mirror;
@@ -48,6 +59,7 @@ public sealed unsafe class GuestReplica : IDisposable
     private readonly int _capacity;
     private readonly GuestViewLogRecord* _log;
     private readonly int _logCapacity;
+    private readonly (ulong Start, ulong End)[] _windows;
     private readonly object _gate = new();
     private ulong _replayed;
     private long _failures;
@@ -56,30 +68,66 @@ public sealed unsafe class GuestReplica : IDisposable
     private bool _disposed;
 
     private GuestReplica(IHostGuestMirrorMemory host, HostBackingObject mirror, HostSharedRegion viewTable, ulong replicaBase,
-        ulong windowStart, ulong windowEnd)
+        (ulong Start, ulong End)[] windows)
     {
         _host = host;
         _mirror = mirror;
         GuestViewTableReader.Open(viewTable.Address, viewTable.Size, out _header, out _entries, out _capacity, out _log, out _logCapacity);
         Base = replicaBase;
-        WindowStart = windowStart;
-        WindowEnd = windowEnd;
+        _windows = windows;
     }
+
+    /// <summary>
+    /// Reserves the <see cref="DefaultWindows"/> + <paramref name="replicaBase"/> and maps every view
+    /// the table holds into them; null when any of those address ranges is taken.
+    /// </summary>
+    public static GuestReplica? TryAttach(IHostGuestMirrorMemory host, HostBackingObject mirror, HostSharedRegion viewTable,
+        ulong replicaBase = DefaultBase) =>
+        TryAttach(host, mirror, viewTable, replicaBase, DefaultWindows);
 
     /// <summary>
     /// Reserves guest [<paramref name="windowStart"/>, <paramref name="windowEnd"/>) + <paramref name="replicaBase"/>
     /// and maps every view the table holds into it; null when any of that address range is taken.
     /// </summary>
     public static GuestReplica? TryAttach(IHostGuestMirrorMemory host, HostBackingObject mirror, HostSharedRegion viewTable,
-        ulong replicaBase = DefaultBase, ulong windowStart = DefaultWindowStart, ulong windowEnd = DefaultWindowEnd)
+        ulong replicaBase, ulong windowStart, ulong windowEnd) =>
+        TryAttach(host, mirror, viewTable, replicaBase, [(windowStart, windowEnd)]);
+
+    /// <summary>
+    /// Reserves each guest window (ascending, not overlapping) + <paramref name="replicaBase"/> and maps
+    /// every view the table holds into them; null when any of those address ranges is taken.
+    /// </summary>
+    public static GuestReplica? TryAttach(IHostGuestMirrorMemory host, HostBackingObject mirror, HostSharedRegion viewTable,
+        ulong replicaBase, IReadOnlyList<(ulong Start, ulong End)> windows)
     {
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(mirror);
         ArgumentNullException.ThrowIfNull(viewTable);
-        if (windowStart >= windowEnd || replicaBase > ulong.MaxValue - windowEnd)
-            throw new ArgumentOutOfRangeException(nameof(windowEnd), "The replica window is empty or past the end of the address space.");
-        var replica = new GuestReplica(host, mirror, viewTable, replicaBase, windowStart, windowEnd);
-        if (!host.TryReserveReplica(replicaBase + windowStart, windowEnd - windowStart)) return null;
+        ArgumentNullException.ThrowIfNull(windows);
+        if (windows.Count == 0)
+            throw new ArgumentOutOfRangeException(nameof(windows), "The replica needs at least one window.");
+        for (var index = 0; index < windows.Count; index++)
+        {
+            var (start, end) = windows[index];
+            if (start >= end || replicaBase > ulong.MaxValue - end || (index != 0 && start < windows[index - 1].End))
+                throw new ArgumentOutOfRangeException(nameof(windows),
+                    "A replica window is empty, overlaps or precedes the one before it, or is past the end of the address space.");
+        }
+
+        var replica = new GuestReplica(host, mirror, viewTable, replicaBase, windows.ToArray());
+        for (var index = 0; index < replica._windows.Length; index++)
+        {
+            var (start, end) = replica._windows[index];
+            if (host.TryReserveReplica(replicaBase + start, end - start)) continue;
+            while (--index >= 0)
+            {
+                (start, end) = replica._windows[index];
+                host.TryReleaseReplica(replicaBase + start, end - start);
+            }
+
+            return null;
+        }
+
         lock (replica._gate) replica.ResyncLocked();
         return replica;
     }
@@ -87,9 +135,8 @@ public sealed unsafe class GuestReplica : IDisposable
     /// <summary>The constant every guest address is replicated at: host address = guest address + Base.</summary>
     public ulong Base { get; }
 
-    public ulong WindowStart { get; }
-
-    public ulong WindowEnd { get; }
+    /// <summary>The guest ranges replicated, in address order.</summary>
+    public IReadOnlyList<(ulong Start, ulong End)> Windows => _windows;
 
     /// <summary>Log records replayed so far: every view change the owner made before record number this.</summary>
     public ulong ReplayedSequence => Volatile.Read(ref _replayed);
@@ -115,9 +162,17 @@ public sealed unsafe class GuestReplica : IDisposable
     /// <summary>Where guest <paramref name="guestAddress"/> is in this process.</summary>
     public ulong HostAddress(ulong guestAddress) => Base + guestAddress;
 
-    /// <summary>Whether all of guest [address, address + size) is inside the replica's window.</summary>
-    public bool Covers(ulong guestAddress, ulong size) =>
-        size != 0 && guestAddress >= WindowStart && guestAddress < WindowEnd && size <= WindowEnd - guestAddress;
+    /// <summary>Whether all of guest [address, address + size) is inside one of the replica's windows.</summary>
+    public bool Covers(ulong guestAddress, ulong size)
+    {
+        if (size == 0) return false;
+        foreach (var (start, end) in _windows)
+        {
+            if (guestAddress >= start && guestAddress < end && size <= end - guestAddress) return true;
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Replays the owner's view log up to record <paramref name="upTo"/> (all it has published, by
@@ -160,8 +215,11 @@ public sealed unsafe class GuestReplica : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            if (!_host.TryReleaseReplica(Base + WindowStart, WindowEnd - WindowStart))
-                throw new InvalidOperationException($"The guest replica at 0x{Base + WindowStart:X} could not be released.");
+            foreach (var (start, end) in _windows)
+            {
+                if (!_host.TryReleaseReplica(Base + start, end - start))
+                    throw new InvalidOperationException($"The guest replica at 0x{Base + start:X} could not be released.");
+            }
         }
     }
 
@@ -175,7 +233,7 @@ public sealed unsafe class GuestReplica : IDisposable
                     _failures++;
                 break;
             case GuestViewLogKind.Unmap:
-                // Nothing outside the window was ever mapped here.
+                // Nothing outside the windows was ever mapped here.
                 if (Covers(record.Address, record.Size) && !_host.TryUnmapReplicaView(Base + record.Address, record.Size))
                     _failures++;
                 break;
@@ -183,15 +241,19 @@ public sealed unsafe class GuestReplica : IDisposable
         }
     }
 
-    // The whole window back to the reservation, then one mapping per run of the table: entries
-    // whose addresses and offsets both continue, whatever their protection, so a run always starts
-    // and ends on view edges (guest pages), never on a page watch's host page.
+    // Every window back to the reservation, then one mapping per run of the table: entries whose
+    // addresses and offsets both continue, whatever their protection, so a run always starts and
+    // ends on view edges (guest pages), never on a page watch's host page.
     private void ResyncLocked()
     {
         var entries = GuestViewTableReader.Snapshot(_header, _entries, _capacity, out var logSequence);
         _startedFromIncompleteTable = (Volatile.Read(ref _header->Flags) & GuestViewTable.IncompleteFlag) != 0;
         _failures = 0;
-        if (!_host.TryUnmapReplicaView(Base + WindowStart, WindowEnd - WindowStart)) _failures++;
+        foreach (var (start, end) in _windows)
+        {
+            if (!_host.TryUnmapReplicaView(Base + start, end - start)) _failures++;
+        }
+
         for (var index = 0; index < entries.Length;)
         {
             var run = entries[index++];

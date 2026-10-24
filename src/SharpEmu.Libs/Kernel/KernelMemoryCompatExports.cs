@@ -327,6 +327,11 @@ public static partial class KernelMemoryCompatExports
 
         var mappedLength = AlignUp(length, 0x1000UL);
         var effectiveAlignment = Math.Max(alignment, 0x1000UL);
+        if (TryAllocateHleDataFromBacking(ctx, mappedLength, effectiveAlignment, out address))
+        {
+            return ZeroHleData(ctx, address, mappedLength);
+        }
+
         lock (_memoryGate)
         {
             var desiredAddress = AlignUp(
@@ -349,9 +354,33 @@ public static partial class KernelMemoryCompatExports
                 Traits: MappingTraits.Host));
         }
 
-        for (ulong offset = 0; offset < mappedLength;)
+        return ZeroHleData(ctx, address, mappedLength);
+    }
+
+    // The two-process split's layout: HLE data the GPU may read (AGC register-default blobs,
+    // AvPlayer frames, the VideoOut label fallback) comes from the guest allocator arena, one view
+    // of the shared backing the GPU process sees, instead of a private mapping of its own. Arena
+    // memory is not part of the guest's VA map, as for every other arena allocation.
+    private static bool TryAllocateHleDataFromBacking(CpuContext ctx, ulong length, ulong alignment, out ulong address)
+    {
+        address = 0;
+        var allocator = ctx.Memory as IGuestMemoryAllocator;
+        if (allocator is null && ctx.Memory is ICpuMemoryWrapper { Inner: IGuestMemoryAllocator inner })
         {
-            var chunkLength = (int)Math.Min((ulong)_zeroChunk.Length, mappedLength - offset);
+            allocator = inner;
+        }
+
+        return allocator is { AllocatesFromBacking: true } &&
+            allocator.TryAllocateGuestMemory(length, alignment, out address) &&
+            address != 0;
+    }
+
+    // HLE data starts zeroed, as a fresh mapping is; arena memory may have been used and freed before.
+    private static bool ZeroHleData(CpuContext ctx, ulong address, ulong length)
+    {
+        for (ulong offset = 0; offset < length;)
+        {
+            var chunkLength = (int)Math.Min((ulong)_zeroChunk.Length, length - offset);
             if (!ctx.Memory.TryWrite(address + offset, _zeroChunk.AsSpan(0, chunkLength)))
             {
                 return false;

@@ -91,17 +91,20 @@ internal static class GuestMirrorProcessWorker
 [SupportedOSPlatform("macos")]
 public sealed class GuestMirrorProcessTests(ITestOutputHelper output)
 {
-    // A small backing, and the full 16.4 GiB guest backing to measure what sharing it costs.
+    // A small backing, the full 16.4 GiB guest backing, and the split layout's 17.9 GiB backing
+    // (SplitBackingLayout: the arena and module images in it too) to measure what sharing it costs.
     [GuestMirrorProcessTheory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
-    public async Task AnotherProcessSharesGuestMemoryThroughItsReplica(bool chunked, bool fullSize)
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    public async Task AnotherProcessSharesGuestMemoryThroughItsReplica(bool chunked, bool fullSize, bool splitLayout)
     {
         Assert.Equal("1", Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_GUEST_MIRROR_PROCESS"));
         const ulong Chunk = GuestMirrorProcessWorker.Chunk;
-        var size = fullSize ? GuestMemoryLayout.BackingBytes : 256 * Chunk;
+        var size = splitLayout ? SplitBackingLayout.Default.End : fullSize ? GuestMemoryLayout.BackingBytes : 256 * Chunk;
         var host = MacOSHost.CreateViewMemory();
         var clock = Stopwatch.StartNew();
         var views = CreateShareable(host, size, chunked);

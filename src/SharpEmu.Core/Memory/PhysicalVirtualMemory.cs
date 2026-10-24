@@ -15,7 +15,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
+public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -34,14 +34,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private long _mappingGeneration;
     private const ulong PageSize = 0x1000;
     private const ulong HostAllocationGranularity = 0x10000;
-    private const ulong GuestAllocationArenaAddress = 0x00006000_0000_0000;
+    private const ulong GuestAllocationArenaAddress = GuestMemoryLayout.AllocatorArenaAddress;
     // Full C++ runtimes can route large numbers of HLE-backed heap allocations
     // through this arena. The original 16 MiB capacity could be exhausted
     // during asset setup, turning a valid allocation request into a null
     // pointer that failed later in unrelated guest code. Keep enough capacity
     // for those workloads. Adapted from foufouadi's allocator-exhaustion
     // investigation.
-    private const ulong GuestAllocationArenaSize = 0x2000_0000;
+    private const ulong GuestAllocationArenaSize = GuestMemoryLayout.AllocatorArenaBytes;
     private const ulong GuestAllocationArenaStartOffset = PageSize;
     private const ulong LargeDataReserveThreshold = 0x4000_0000UL; // 1 GiB
     private const ulong FullCommitRegionLimit = 4UL << 30;
@@ -137,6 +137,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly object _fixedAllocationGate = new();
     private readonly HashSet<ulong> _fixedGranuleReservationBases = new();
     private ulong _guestAllocationArenaBase;
+    private bool _guestAllocationArenaBacked;
     private readonly SortedDictionary<ulong, ulong> _guestAllocationFreeRanges = new();
     private readonly Dictionary<ulong, (ulong Offset, ulong Size)> _guestAllocations = new();
     private static readonly ulong LazyReservePrimeBytes = ResolveLazyReservePrimeBytes();
@@ -145,7 +146,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public PhysicalVirtualMemory(IHostMemory? hostMemory = null, IHostViewMemory? viewHost = null,
         ulong backingBytes = GuestMemoryLayout.BackingBytes, bool preReserveGuestAddressSpace = false,
-        bool adoptStartupAddressReservations = false)
+        bool adoptStartupAddressReservations = false, SplitBackingLayout? splitLayout = null)
     {
         _hostMemory = hostMemory ?? CrossPlatformHostMemory.Instance;
         if (adoptStartupAddressReservations)
@@ -163,6 +164,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 : null;
             _backedSpace = new GuestSpaceOwner(viewHost, backingBytes, preReserveGuestAddressSpace, startupReservation);
             RunBackingSelfTest();
+            _splitLayout = SelectSplitLayout(splitLayout);
         }
     }
 
@@ -1098,21 +1100,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             if (_guestAllocationArenaBase == 0)
             {
-                try
+                // Split layout: one view of the backing, so the GPU process sees the arena.
+                var arenaSize = GuestAllocationArenaSize;
+                var backed = TryMapSplitArena(out _guestAllocationArenaBase, ref arenaSize);
+                if (!backed)
                 {
-                    _guestAllocationArenaBase = AllocateAt(
-                        GuestAllocationArenaAddress,
-                        GuestAllocationArenaSize,
-                        executable: false,
-                        allowAlternative: true);
-                    _guestAllocationFreeRanges.Add(
-                        GuestAllocationArenaStartOffset,
-                        GuestAllocationArenaSize - GuestAllocationArenaStartOffset);
+                    try
+                    {
+                        _guestAllocationArenaBase = AllocateAt(
+                            GuestAllocationArenaAddress,
+                            arenaSize,
+                            executable: false,
+                            allowAlternative: true);
+                    }
+                    catch (Exception)
+                    {
+                        return false;
+                    }
                 }
-                catch (Exception)
-                {
-                    return false;
-                }
+
+                _guestAllocationArenaBacked = backed;
+                _guestAllocationFreeRanges.Add(
+                    GuestAllocationArenaStartOffset,
+                    arenaSize - GuestAllocationArenaStartOffset);
             }
 
             ulong rangeOffset = 0;
@@ -1153,6 +1163,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             address = _guestAllocationArenaBase + alignedOffset;
             _guestAllocations.Add(address, (alignedOffset, size));
+            if (_guestAllocationArenaBacked)
+            {
+                NoteSplitArenaUse(allocationEnd);
+            }
+
             return true;
         }
     }
@@ -2107,8 +2122,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             _guestAllocationArenaBase = 0;
+            _guestAllocationArenaBacked = false;
             _guestAllocationFreeRanges.Clear();
             _guestAllocations.Clear();
+            // Every image view went with the address ranges; the slice starts again from its
+            // beginning, zeroed as it is handed out again.
+            _splitImageNext = 0;
         }
     }
 
@@ -2130,7 +2149,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var existingRegion = FindRegion(mapStart, mapSize);
-            if (existingRegion == null)
+            // A module image in the split layout is private pages and views side by side.
+            var splitImage = existingRegion == null && IsCoveredBySplitImage(mapStart, mapSize);
+            if (existingRegion == null && !splitImage)
             {
                 var isExecutable = (protection & ProgramHeaderFlags.Execute) != 0;
                 AllocateAt(mapStart, mapSize, isExecutable, allowAlternative: false);
@@ -2139,7 +2160,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             // Memory AllocateAt just obtained from the host is already zero (it commits
             // only pages that were free or reserved). Clearing it again touched every page
             // of each guest thread stack and .bss, committing memory the guest may never use.
-            var alreadyZero = existingRegion == null;
+            var alreadyZero = existingRegion == null && !splitImage;
 
             var stageProtection = (protection & ProgramHeaderFlags.Execute) != 0
                 ? ProgramHeaderFlags.Read | ProgramHeaderFlags.Write | ProgramHeaderFlags.Execute
@@ -2238,6 +2259,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         else
         {
             protection = HostPageProtection.ReadOnly;
+        }
+
+        // A split layout's module image: its views of the backing are protected by their owner.
+        if (TrySetSplitImageProtection(address, size, protection, flags))
+        {
+            return;
         }
 
         if (!_hostMemory.Protect(address, size, protection, out _))

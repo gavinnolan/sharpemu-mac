@@ -66,8 +66,11 @@ All records are little-endian blittable structs on the transport rings; sync cal
   `IGuestAddressSpace` over it: `TryResolveBackingAlias` from the view table, `BackingAliasRange` = B's mirror of
   the backing, `TryResolveBackedHostView` = the replica (address + K), `TryProtect` = `ProtectRequest`,
   allocation members unsupported (the GPU side never allocates guest memory).
-- Memory that is not in the backing (module images, the guest allocator arena with the VideoOut labels, HLE data)
-  is moved into the backing by the private-memory work; until then a B read there fails loudly with the address.
+- In split mode, A maps module data pages (`.rodata`, `.data`, `.bss`), the guest allocator arena with the VideoOut
+  labels, and HLE data from the backing (`SplitBackingLayout`, see `split-shared-memory.md`). Code, stacks, TLS and the
+  HLE libc heap stay private to A. B checks a range with `GuestMirrorTranslator.IsFullyBacked`, and a read of private
+  memory fails loudly with its first private address. In A, `SplitPrivateAccess` names any private range the GPU path
+  reads.
 
 ## Teardown and failure
 

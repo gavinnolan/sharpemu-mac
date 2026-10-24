@@ -150,6 +150,7 @@ public sealed class ShaderHeaderRegistry
         // Every draw resolves its shaders again, so an unchanged header hands back the record
         // it made last time instead of a new one. The header is still read and compared above
         // and here, so a guest that rewrites it gets a fresh record as before.
+        RegisteredShader created;
         lock (_recent)
         {
             if (_recent.TryGetValue(codeAddress, out var recent) &&
@@ -183,7 +184,26 @@ public sealed class ShaderHeaderRegistry
             }
 
             _recent[codeAddress] = registered;
-            return registered;
+            created = registered;
+        }
+
+        CheckSplitVisibility(created);
+        return created;
+    }
+
+    // The two-process split's GPU process reads shader code and headers from the shared backing
+    // (module .rodata, direct memory); a new record names any that is not there.
+    private void CheckSplitVisibility(RegisteredShader shader)
+    {
+        if (!SharpEmu.HLE.GuestMemory.SplitPrivateAccess.Enabled)
+        {
+            return;
+        }
+
+        SharpEmu.HLE.GuestMemory.SplitPrivateAccess.CheckGpuRead(_context.Memory, shader.HeaderAddress, (ulong)HeaderReadBytes, "shader-header");
+        foreach (var (address, sizeBytes) in shader.CodeRanges)
+        {
+            SharpEmu.HLE.GuestMemory.SplitPrivateAccess.CheckGpuRead(_context.Memory, address, sizeBytes, "shader-code");
         }
     }
 

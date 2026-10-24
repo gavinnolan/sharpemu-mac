@@ -26,8 +26,9 @@ namespace SharpEmu.HLE.GuestMemory;
 /// A translation is as current as the table was when it was read: an unmap the owner makes right
 /// after it is not seen by the caller, exactly as a host pointer taken before an unmap in one
 /// process. The split orders mapping changes against GPU work at its own sync points.
-/// Addresses the backing does not hold (module images, stacks, HLE allocations: private memory of
-/// the owner) are never in the table.
+/// Addresses the backing does not hold (executable module pages, stacks, TLS, the HLE libc heap:
+/// private memory of the owner) are never in the table; <see cref="IsFullyBacked"/> says whether a
+/// range is wholly in it.
 /// </para>
 /// </summary>
 public sealed unsafe class GuestMirrorTranslator
@@ -108,6 +109,30 @@ public sealed unsafe class GuestMirrorTranslator
         if (!TryGetRange(address, out var range)) return false;
         offset = range.Offset + (address - range.Start);
         contiguousBytes = range.End - address;
+        return true;
+    }
+
+    /// <summary>
+    /// Whether every byte of guest [address, address + size) is a view of the backing, however many
+    /// views it crosses and wherever in the backing they lie. False names the first byte that is not:
+    /// memory private to the owner (module code, stacks, TLS, the HLE libc heap) or unmapped, which
+    /// this process must ask the owner about instead of reading it (docs/macos/split-shared-memory.md).
+    /// Reads the table, not the cache, so it costs one lookup per run of views.
+    /// </summary>
+    public bool IsFullyBacked(ulong address, ulong size, out ulong firstUnbacked)
+    {
+        firstUnbacked = address;
+        if (size == 0 || size > ulong.MaxValue - address) return false;
+        var end = address + size;
+        while (firstUnbacked < end)
+        {
+            if (!GuestViewTableReader.TryFind(_header, _entries, _capacity, firstUnbacked, joinRun: true, out var entry, out _) ||
+                entry.End <= firstUnbacked)
+                return false;
+            firstUnbacked = entry.End;
+        }
+
+        firstUnbacked = 0;
         return true;
     }
 

@@ -179,4 +179,6 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
     {
         return _inner is IGuestMemoryAllocator allocator && allocator.TryFreeGuestMemory(address);
     }
+
+    public bool AllocatesFromBacking => _inner is IGuestMemoryAllocator { AllocatesFromBacking: true };
 }

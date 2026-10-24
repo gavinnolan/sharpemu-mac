@@ -10,6 +10,7 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.HLE.GuestMemory;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.AppContent;
@@ -96,10 +97,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
             DebugHook = options.DebugHook,
         };
+        // The two-process split (SHARPEMU_GPU_PROCESS=1 or SHARPEMU_GUEST_BACKING_SHAREABLE=1) grows the
+        // backing past direct and flexible memory for the guest memory the GPU process must see.
+        var splitLayout = SplitBackingLayout.FromEnvironment();
         var virtualMemory = new PhysicalVirtualMemory(
             viewHost: HostViewMemory.Create(),
+            backingBytes: splitLayout?.End ?? GuestMemoryLayout.BackingBytes,
             preReserveGuestAddressSpace: true,
-            adoptStartupAddressReservations: options.AdoptStartupAddressReservations);
+            adoptStartupAddressReservations: options.AdoptStartupAddressReservations,
+            splitLayout: splitLayout);
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
         // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
