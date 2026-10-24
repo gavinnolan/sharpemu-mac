@@ -51,6 +51,9 @@ public enum GpuSplitNotice : uint
     CancelOutstandingFlips = 1,
     PresentationWindowClosed = 2,
     ReportPresentedFrame = 3,
+
+    /// <summary>The text is the GPU's name, for the window title (<c>SetSelectedGpuName</c>).</summary>
+    SelectedGpuName = 4,
 }
 
 /// <summary>What a <see cref="GpuRemoteSyncOpcode.Query"/> asks.</summary>
@@ -133,6 +136,12 @@ public struct SplitStartMessage
 
     /// <summary>Bytes of the guest memory service name that follow.</summary>
     public uint ServiceNameLength;
+
+    /// <summary>Bytes of the title id that follow the service name (fixed before guest code runs).</summary>
+    public uint TitleIdLength;
+
+    /// <summary>A's <c>IsHdrOutputRequested</c> at the start; flips keep B's copy current.</summary>
+    public uint HdrRequested;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -187,6 +196,16 @@ public struct ShaderHeaderMessage
 {
     public ulong CodeAddress;
     public ulong HeaderAddress;
+}
+
+/// <summary>A fused program registered (all four set) or unregistered (only <see cref="Entry"/> set).</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct FusedProgramMessage
+{
+    public ulong Entry;
+    public ulong EntryHeader;
+    public ulong Continuation;
+    public ulong ContinuationHeader;
 }
 
 [StructLayout(LayoutKind.Sequential)]

@@ -1,0 +1,38 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  The two-process split's wiring (docs/macos/split-protocol.md), both halves:
+
+  - Process A, SharpEmu.CLI (x86-64 under Rosetta): SplitGpuSession starts the GPU host, serves it
+    the guest memory, and stands in for the GPU backend with proxies - RemoteGpuBackend
+    (IGuestGpuBackend), RemoteImageStore (IGuestImageStore) and RemoteGpuQueueRelay
+    (IGpuQueueRelay) - and applies what the GPU host sends back (page protections, interrupts, flip
+    events, input).
+  - Process B, SharpEmu.GpuHost (native arm64): SplitGpuHost connects the guest memory, gives the
+    real backend an address space over it (RemoteGuestAddressSpace) and feeds it what A sends.
+
+  AnyCPU like everything it references, so both processes load it. macOS only: the guest memory
+  crosses over Mach (SharpEmu.Host.MacOS). Nothing here runs without SHARPEMU_GPU_PROCESS=1.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+    <ProjectReference Include="..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+    <ProjectReference Include="..\SharpEmu.GpuRemote\SharpEmu.GpuRemote.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Host.MacOS\SharpEmu.Host.MacOS.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.GpuSplit.Tests" />
+  </ItemGroup>
+
+</Project>

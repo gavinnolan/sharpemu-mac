@@ -212,7 +212,7 @@ public sealed unsafe class SplitTransportTests
     {
         // Explicit fields only: a size change here is a protocol change (bump the version).
         Assert.Equal(48, sizeof(VideoOptionsWire));
-        Assert.Equal(64, sizeof(SplitStartMessage));
+        Assert.Equal(72, sizeof(SplitStartMessage));
         Assert.Equal(32, sizeof(SubmitCommandStreamMessage));
         Assert.Equal(40, sizeof(FlipRequestMessage));
         Assert.Equal(40, sizeof(ProtectRequestMessage));

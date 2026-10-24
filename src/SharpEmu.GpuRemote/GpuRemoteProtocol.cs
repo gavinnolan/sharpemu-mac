@@ -86,6 +86,9 @@ public enum GpuRemoteMessage : uint
 
     /// <summary>B → A: <see cref="InputMessage"/>, the window's keyboard and gamepad state.</summary>
     Input = 23,
+
+    /// <summary>A → B: <see cref="FusedProgramMessage"/>, one change of the fused-program registry.</summary>
+    FusedProgram = 24,
 }
 
 /// <summary>Opcodes of the A → B synchronous call table.</summary>
@@ -149,8 +152,8 @@ public enum GpuRemoteReverseOpcode : uint
     /// <summary><see cref="QueryRequest"/> (a <see cref="GpuSplitText"/>) → that text (UTF-8).</summary>
     QueryString = 8,
 
-    /// <summary>A text (UTF-8) → nothing: the GPU's name for the window title.</summary>
-    SetSelectedGpuName = 9,
+    /// <summary><see cref="FlipEventMessage"/> → nothing: a step of a flip, applied before the call returns.</summary>
+    FlipEvent = 9,
 
     /// <summary><see cref="FlipIdRequest"/> → <see cref="ValueResponse"/> (0 or 1).</summary>
     IsFlipPresentationPending = 10,
