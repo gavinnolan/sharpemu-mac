@@ -73,8 +73,10 @@ internal sealed class WorkerBracket
     public bool WaitParked(TimeSpan timeout) => WaitWhileAlive(_parked, timeout);
 
     /// <summary>
-    /// Runs <paramref name="work"/> on the parked worker and waits for it; false (and nothing
-    /// run) when the bracket is over or the wait gave up.
+    /// Runs <paramref name="work"/> on the parked worker and waits for it. False, with nothing
+    /// handed over, when the bracket is already over (the caller runs the work some other way);
+    /// true once it is handed over, even when the wait gives up (reported: the work still runs
+    /// there, and must not run twice).
     /// </summary>
     public bool TryRun(Action work, TimeSpan timeout)
     {
@@ -105,7 +107,12 @@ internal sealed class WorkerBracket
             Monitor.PulseAll(_gate);
         }
 
-        return WaitWhileAlive(done, timeout);
+        if (!WaitWhileAlive(done, timeout))
+        {
+            Console.Error.WriteLine($"[GPU-SPLIT][WARN] Work in GPU worker bracket {Id} has not finished in {timeout.TotalSeconds:F0} s.");
+        }
+
+        return true;
     }
 
     /// <summary>Ends the bracket: the worker runs <paramref name="atEnd"/> and goes back to its work.</summary>

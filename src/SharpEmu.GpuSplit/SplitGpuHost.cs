@@ -290,6 +290,7 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             _backend = _options.ComposeBackend(new SplitGpuEnvironment(_memory, _space, video));
             _ready = true;
             StartInputPoll();
+            StartReplicaFollower();
             Console.Error.WriteLine(
                 $"[GPU-SPLIT][INFO] GPU process ready: {_backend.BackendName}, title {titleId}, guest memory {serviceName}.");
             SendReady(GpuSplitStatus.Ok, null);
@@ -718,6 +719,37 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
         response = buffer;
         return true;
     }
+
+    // The view log also records every page protection the guest process applies, thousands a
+    // second under page watches, and a replica a whole ring (65,536 records) behind starts again
+    // from the table, remapping its whole window. Submissions sync it often enough while a title
+    // draws; this keeps it close when nothing is submitted (a loading screen, a held prewarm).
+    // Replaying early is safe: unmaps of GPU memory happen inside brackets, with the worker parked.
+    private void StartReplicaFollower()
+    {
+        var replica = _guestMemory!.Replica;
+        new Thread(() =>
+        {
+            while (!_stopping && _channel.IsPeerAlive)
+            {
+                Thread.Sleep(ReplicaFollowMilliseconds);
+                try
+                {
+                    _ = replica.Sync();
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "SharpEmu GPU split replica",
+        }.Start();
+    }
+
+    private const int ReplicaFollowMilliseconds = 100;
 
     private void StartInputPoll()
     {

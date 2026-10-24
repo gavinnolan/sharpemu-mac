@@ -14,14 +14,18 @@ namespace SharpEmu.GpuSplit;
 /// too: <c>GpuProcessHost.SyncRoot</c> in A, <c>GpuProcessClient.OutboundLock</c> in B).
 /// </summary>
 /// <remarks>
-/// A full ring is waited out for at most <see cref="TimeoutNanoseconds"/>; a write that still
-/// does not fit, or whose reader has exited, fails (the reader's death is reported elsewhere, a
-/// stalled reader here, once). <see cref="Written"/> counts the records written, which A's calls
-/// that must come after its earlier records carry as their barrier.
+/// A full ring is waited out for up to <see cref="TimeoutNanoseconds"/>: a stall past
+/// <see cref="StallNanoseconds"/> is reported (the GPU host's ring thread may legitimately wait
+/// that long, for one, while the shader prewarm holds the first submission, as the guest thread
+/// would wait in one process), and a record is dropped only when the whole timeout passes or the
+/// reader has exited (whose death is reported elsewhere). <see cref="Written"/> counts the
+/// records written, which A's calls that must come after its earlier records carry as their
+/// barrier.
 /// </remarks>
 internal sealed class SplitWriter
 {
-    public const long TimeoutNanoseconds = 30_000_000_000;
+    public const long StallNanoseconds = 30_000_000_000;
+    public const long TimeoutNanoseconds = 600_000_000_000;
 
     private readonly RingWriter _ring;
     private readonly GpuRemoteChannel _channel;
@@ -76,13 +80,14 @@ internal sealed class SplitWriter
     /// <summary>Writes with <see cref="Gate"/> already held (a caller that numbers its records under it).</summary>
     public bool WriteLocked(GpuRemoteMessage type, ReadOnlySpan<byte> payload)
     {
-        if (_ring.Write((uint)type, payload, TimeoutNanoseconds))
+        if (_ring.Write((uint)type, payload, StallNanoseconds) ||
+            (_channel.IsPeerAlive && ReportStall(type) && _ring.Write((uint)type, payload, TimeoutNanoseconds - StallNanoseconds)))
         {
             _written++;
             return true;
         }
 
-        if (_channel.IsPeerAlive && Interlocked.Exchange(ref _stallReported, 1) == 0)
+        if (_channel.IsPeerAlive)
         {
             Console.Error.WriteLine(
                 $"[GPU-SPLIT][ERROR] The other process has not read its ring for {TimeoutNanoseconds / 1_000_000_000} s; " +
@@ -90,5 +95,17 @@ internal sealed class SplitWriter
         }
 
         return false;
+    }
+
+    private bool ReportStall(GpuRemoteMessage type)
+    {
+        if (Interlocked.Exchange(ref _stallReported, 1) == 0)
+        {
+            Console.Error.WriteLine(
+                $"[GPU-SPLIT][WARN] The other process has not read its ring for {StallNanoseconds / 1_000_000_000} s; " +
+                $"a {type} record waits for room.");
+        }
+
+        return true;
     }
 }

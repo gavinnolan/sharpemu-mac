@@ -83,7 +83,10 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
             return SendLanded(address, size);
         }
 
-        var request = new CpuWriteRequest { Barrier = _session.Writer.Written, Address = address, Size = size };
+        // No barrier: in one process a submission this thread enqueued before may still wait for
+        // the worker as the write is published, so the GPU caches need nothing more from the ring
+        // here, and a managed write does not wait for a ring thread held by the shader prewarm.
+        var request = new CpuWriteRequest { Barrier = 0, Address = address, Size = size };
         return _session.Call(GpuRemoteSyncOpcode.CpuWrite, request, out HandledResponse response, SplitGpuSession.CallNanoseconds) &&
             response.Handled != 0;
     }

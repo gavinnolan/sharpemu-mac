@@ -57,7 +57,17 @@ internal sealed class RemoteGpuQueueRelay(SplitGpuSession session) : IGpuQueueRe
 
         if (!session.TryBeginBracket(kind, out var bracket))
         {
-            return false;
+            if (!session.IsAlive)
+            {
+                // The memory manager waits for the detach that follows the GPU host's death.
+                return false;
+            }
+
+            // A rejected relay with the GPU host alive would leave the memory manager waiting
+            // for a detach that never comes: the change runs without the worker parked (reported).
+            session.Report($"The GPU process did not park its worker for a {kind}; the change runs without it.");
+            work();
+            return true;
         }
 
         t_bracket = bracket;

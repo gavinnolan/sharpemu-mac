@@ -321,7 +321,11 @@ public sealed class SplitGpuSession : IDisposable
 
     internal bool TryBeginBracket(GpuSplitBracket kind, out ulong bracketId)
     {
-        var request = new BracketBeginRequest { Barrier = Writer.Written, Kind = (uint)kind };
+        // Only an ordered video-out change comes after the accepted command streams; a mapping
+        // change parks the worker at its next safe point, as the relay does in one process, and
+        // does not wait for the GPU host's ring thread (which may sit in the shader prewarm).
+        var barrier = kind == GpuSplitBracket.AfterPendingCommandStreams ? Writer.Written : 0;
+        var request = new BracketBeginRequest { Barrier = barrier, Kind = (uint)kind };
         var begun = Call(GpuRemoteSyncOpcode.BracketBegin, request, out BracketResponse response, LongCallNanoseconds);
         bracketId = begun ? response.BracketId : 0;
         return begun && bracketId != 0;
