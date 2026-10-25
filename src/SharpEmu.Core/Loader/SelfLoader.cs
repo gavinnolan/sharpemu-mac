@@ -360,6 +360,10 @@ public sealed class SelfLoader : ISelfLoader
             ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
         }
 
+        // Before the red-zone pass: it only rewrites immediates in place, and the red-zone pass moves
+        // instructions into trampolines and rewrites vector stores, which would hide its signatures.
+        _ = GuestVaHolePatcher.Patch(virtualMemory, programHeaders, imageBase);
+
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
         {
             // Reserved first: see GuestRedZonePatcher.ReserveSpinNapArena.
@@ -374,8 +378,6 @@ public sealed class SelfLoader : ISelfLoader
                 totalImageSize);
             ApplySpinLoopNap(virtualMemory, patchableMemory, programHeaders, imageBase, totalImageSize, applicationInfo.Title, spinNapArena);
         }
-
-        _ = GuestVaHolePatcher.Patch(virtualMemory, programHeaders, imageBase);
 
         Console.WriteLine($"[LOADER] ELF e_entry: 0x{elfHeader.EntryPoint:X16}");
         Console.WriteLine($"[LOADER] Generation: {(isNextGen ? "Gen5 (PS5)" : "Gen4 (PS4)")}");

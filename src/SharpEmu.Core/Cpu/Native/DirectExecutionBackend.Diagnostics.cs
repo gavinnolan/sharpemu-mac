@@ -20,6 +20,9 @@ public sealed partial class DirectExecutionBackend
 	private static readonly bool _perfHleHistogram =
 		string.Equals(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE"), "1", System.StringComparison.Ordinal);
 	private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _perfHleCounts = new();
+	// SHARPEMU_PERF_HLE_TOP=<n>: how many of the busiest imports the histogram line names (20).
+	private static readonly int _perfHleTop =
+		int.TryParse(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE_TOP"), out var perfHleTop) && perfHleTop > 0 ? perfHleTop : 20;
 	private static long _perfHleTotal;
 	private static long _perfHleDispatchTicks;
 	private static long _perfHleExclusiveTicks;
@@ -241,7 +244,7 @@ public sealed partial class DirectExecutionBackend
 
 			var top = snapshot
 				.OrderByDescending(kvp => kvp.Value)
-				.Take(20)
+				.Take(_perfHleTop)
 				.Select(kvp => $"{kvp.Key}={kvp.Value}");
 			System.Console.Error.WriteLine($"[PERF][HLE] total={total} top: {string.Join(", ", top)}");
 		}
