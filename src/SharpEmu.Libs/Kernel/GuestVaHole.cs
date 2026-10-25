@@ -28,9 +28,13 @@ internal static class GuestVaHole
     public static bool Overlaps(ulong address, ulong length) =>
         length != 0 && address < End && (address > ulong.MaxValue - length || address + length > Start);
 
+    // SHARPEMU_VA_HOLE_VIRTUAL=1 (experimental): the host keeps a fixed request there as a view record
+    // alone (MacHostViews), so it is not refused; only the guest's own CPU accesses still fault.
+    private static readonly bool VirtualViews = Environment.GetEnvironmentVariable("SHARPEMU_VA_HOLE_VIRTUAL") == "1";
+
     public static bool IsFixedRequestBlocked(ulong address, ulong length)
     {
-        if (!BlocksFixed || !Overlaps(address, length))
+        if (!BlocksFixed || !Overlaps(address, length) || (VirtualViews && address >= Start && length <= End - address))
             return false;
         if (Interlocked.Increment(ref _blockedFixedRequests) <= 8)
             Console.Error.WriteLine(

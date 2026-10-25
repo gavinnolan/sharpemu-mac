@@ -1621,14 +1621,15 @@ internal sealed partial class MetalImageCache
     private bool IsMetadataClearedLocked(ulong address, uint slice, out uint fillValue)
     {
         fillValue = 0;
+        // An HTILE tracks every slice of a deep array; other metadata covers 32.
         if (!_surfaceMetadata.TryGetValue(address, out var found) ||
-            found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+            found.Kind == SurfaceMetadataKind.PendingDcc || (slice >= 32 && found.Kind != SurfaceMetadataKind.HTile))
         {
             return false;
         }
 
         fillValue = found.FillValue;
-        return (found.ClearMask & (1u << (int)slice)) != 0;
+        return found.IsSliceClear(slice);
     }
 
     public bool IsMetadataCleared(ulong address, uint slice) => IsMetadataCleared(address, slice, out _);
@@ -1643,20 +1644,12 @@ internal sealed partial class MetalImageCache
     private bool SetMetadataSliceLocked(ulong address, uint slice, bool isClear)
     {
         if (!_surfaceMetadata.TryGetValue(address, out var found) ||
-            found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+            found.Kind == SurfaceMetadataKind.PendingDcc || (slice >= 32 && found.Kind != SurfaceMetadataKind.HTile))
         {
             return false;
         }
 
-        if (isClear)
-        {
-            found.ClearMask |= 1u << (int)slice;
-        }
-        else
-        {
-            found.ClearMask &= ~(1u << (int)slice);
-        }
-
+        found.SetSliceClear(slice, isClear);
         return true;
     }
 
