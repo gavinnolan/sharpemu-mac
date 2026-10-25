@@ -17,6 +17,11 @@
 #
 # Usage:
 #   check-macos-output.sh <directory> [--strip] [--forbid-sdl] [--skip-arch] [--arch <slice>]
+#                         [--arch-exclude <subdirectory>]
+#
+# --arch-exclude leaves a subdirectory (relative to <directory>) out of the
+# architecture check only, for a bundle that carries the GPU host's arm64
+# payload beside its x86_64 one; check that subdirectory on its own with --arch.
 
 set -euo pipefail
 
@@ -25,6 +30,7 @@ strip_forbidden=false
 forbid_sdl=false
 check_arch=true
 required_arch=x86_64
+arch_exclude=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -37,6 +43,14 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             required_arch="$2"
+            shift
+            ;;
+        --arch-exclude)
+            if [ "$#" -lt 2 ]; then
+                echo "check-macos-output.sh: --arch-exclude needs a subdirectory" >&2
+                exit 2
+            fi
+            arch_exclude="$2"
             shift
             ;;
         -*) echo "check-macos-output.sh: unknown option $1" >&2; exit 2 ;;
@@ -143,6 +157,11 @@ if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; the
 fi
 while IFS= read -r candidate; do
     [ -n "${candidate}" ] || continue
+    if [ -n "${arch_exclude}" ]; then
+        case "${candidate}" in
+            "${directory}/${arch_exclude}"/*) continue ;;
+        esac
+    fi
     case "$(file -b "${candidate}")" in
         *Mach-O*) ;;
         *) continue ;;
