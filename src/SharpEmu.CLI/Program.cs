@@ -44,6 +44,10 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+#if SHARPEMU_GPU_METAL
+        // The GPU in its own native process is the default where it can run (SHARPEMU_GPU_PROCESS=0 opts out).
+        SharpEmu.GpuRemote.GpuProcessHost.ApplyDefault();
+#endif
         SharpEmu.Logging.GcPauseLog.StartFromEnvironment();
         // A GUI-launched emulator on macOS: lead a process group and exit with the GUI.
         if (args.Length > 0)

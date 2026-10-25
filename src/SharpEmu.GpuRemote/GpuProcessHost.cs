@@ -78,6 +78,23 @@ public sealed class GpuProcessHost : IDisposable
     public static bool IsRequested =>
         string.Equals(Environment.GetEnvironmentVariable(EnableEnvironment), "1", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Makes the split the default: with <c>SHARPEMU_GPU_PROCESS</c> unset, sets it to 1 when this
+    /// process runs translated on Apple silicon and the GPU host is beside it, so an Intel Mac or a
+    /// build without the host keeps one process and <c>SHARPEMU_GPU_PROCESS=0</c> opts out. Runs first
+    /// in the emulator's Main: the backing layout, the host views and the backend read the switch.
+    /// </summary>
+    public static void ApplyDefault()
+    {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(EnableEnvironment)) || !OperatingSystem.IsMacOS() ||
+            RemoteNative.ProcessTranslated() != 1 || FindExecutable() is null)
+        {
+            return;
+        }
+
+        Environment.SetEnvironmentVariable(EnableEnvironment, "1");
+    }
+
     /// <summary>"ulock" when waits block in the kernel, "poll" for the fallback (see <c>SHARPEMU_GPU_DOORBELL</c>).</summary>
     public static string DoorbellMechanism => RemoteWait.MechanismName;
 
