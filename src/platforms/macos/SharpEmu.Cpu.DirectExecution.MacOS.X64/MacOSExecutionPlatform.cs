@@ -85,6 +85,8 @@ public sealed unsafe class MacOSExecutionPlatform : IDirectExecutionPlatform
     public nuint TrySetThreadAffinity(nint threadHandle, nuint affinityMask) => 1;
 
     public nint OpenThreadForContext(uint threadId) => 0;
+    public bool TryReadThreadRegisters(uint threadId, Span<ulong> registers) =>
+        MacOSThreadRegisters.TryRead(threadId, registers);
     public uint GetThreadId(nint threadHandle) => 0;
     public bool CloseThreadHandle(nint threadHandle) => false;
     public nint CreateNativeWorker(nuint stackReservation, nint entry, out uint threadId)

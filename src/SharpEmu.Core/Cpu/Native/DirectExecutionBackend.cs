@@ -7176,6 +7176,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 			Console.Error.WriteLine("[LOADER][INFO] Calling guest entry...");
 			_mainExecutionThreadHandle = OpenThreadForContext(GetCurrentThreadId());
+			_mainExecutionThreadId = unchecked((int)GetCurrentThreadId());
 			StartStallWatchdog();
 			StartReadyThreadDispatcher();
 			ulong num6 = ulong.MaxValue;
@@ -7755,6 +7756,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 
 			LogMainThreadStallContext();
+			LogSnapshotPeeks();
 			var threads = SnapshotGuestThreads();
 			if (threads.Length != 0)
 			{

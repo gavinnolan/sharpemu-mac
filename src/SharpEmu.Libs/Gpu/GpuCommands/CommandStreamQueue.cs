@@ -394,6 +394,56 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // SHARPEMU_TRACE_QUEUE=<id>: each submission of that queue (0 graphics, compute 0x20 + n is
+    // n + 1) printed as it is admitted, as each slice of it starts and as each slice ends, the
+    // end with its packets (read on the worker: a guest thread may not wait for the GPU here).
+    private static readonly int TraceQueueId =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_QUEUE"), out var traceQueue) ? traceQueue : -1;
+
+    // The type-3 packets of a stream as the trace prints them: how many of each opcode, where
+    // the walk stopped, and the destinations and values of its WRITE_DATA packets.
+    private string DescribePackets(ulong address, uint dwordCount, int depth = 0)
+    {
+        var words = new uint[Math.Min(dwordCount, 1u << 20)];
+        if (!_host.TryReadGuest(address, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan())))
+            return "packets=unreadable";
+        var counts = new SortedDictionary<uint, int>();
+        var writes = new System.Text.StringBuilder();
+        var packets = 0;
+        var index = 0;
+        while (index < words.Length)
+        {
+            var header = words[index];
+            if (header >> 30 != 3)
+            {
+                writes.Append($" stop@{index}:0x{header:X8}");
+                break;
+            }
+
+            var opcode = (header >> 8) & 0xFF;
+            var body = (int)((header >> 16) & 0x3FFF) + 1;
+            counts[opcode] = counts.GetValueOrDefault(opcode) + 1;
+            packets++;
+            if (opcode == 0x37 && index + 4 < words.Length)
+                writes.Append($" wd@{index}=0x{((ulong)words[index + 3] << 32) | words[index + 2]:X}:0x{words[index + 4]:X}");
+            if (opcode == 0x3F && body == 3 && index + 3 < words.Length)
+            {
+                var target = words[index + 1] | ((ulong)(words[index + 2] & 0xFFFF) << 32);
+                var control = words[index + 3];
+                writes.Append($" ib@{index}=0x{target:X}+{control & 0xFFFFF}/ctl=0x{control:X8}");
+                if (depth == 0 && target > 1)
+                    writes.Append($" {{{DescribePackets(target, control & 0xFFFFF, 1)}}}");
+            }
+            if (opcode == 0x10 && ((header >> 2) & 0x3F) == PacketCustomCode.WriteData && index + 4 < words.Length)
+                writes.Append($" wd@{index}=0x{((ulong)words[index + 3] << 32) | words[index + 2]:X}:0x{words[index + 4]:X}");
+            else if (opcode == 0x10 && ((header >> 2) & 0x3F) != 0)
+                writes.Append($" n{(header >> 2) & 0x3F:X}@{index}");
+            index += 1 + body;
+        }
+
+        return $"packets={packets} end={index}/{words.Length} ops=[{string.Join(' ', counts.Select(pair => $"{pair.Key:X2}x{pair.Value}"))}]{writes}";
+    }
+
     private void EnqueueLocked(CommandSubmission submission)
     {
         if (!_accepting)
@@ -407,6 +457,10 @@ public sealed class CommandStreamQueue
         }
 
         submission.AdmissionOrdinal = ++_admissionOrdinal;
+        if (submission.QueueId == TraceQueueId)
+            Console.Error.WriteLine(
+                $"[GPU][QTRACE] admit q={submission.QueueId} sub={submission.SubmissionId} kind={submission.Kind} " +
+                $"addr=0x{submission.Address:X16} dwords={submission.DwordCount} pending={_queues[submission.QueueId].Count}");
         if (GpuClobberDiagnostics.Enabled)
         {
             submission.EnqueuedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1227,6 +1281,10 @@ public sealed class CommandStreamQueue
                 var queue = _queues[selected];
                 submission = queue.First!.Value;
                 queue.RemoveFirst();
+                if (submission.QueueId == TraceQueueId)
+                    Console.Error.WriteLine(
+                        $"[GPU][QTRACE] slice q={submission.QueueId} sub={submission.SubmissionId} started={submission.Started} " +
+                        $"blocked={submission.Blocked} left={queue.Count}");
                 _submissionCount--;
                 _nextQueue = (selected + 1) % QueueCount;
             }
@@ -1392,6 +1450,12 @@ public sealed class CommandStreamQueue
             _processing = false;
             Monitor.PulseAll(_gate);
         }
+
+        if (submission!.QueueId == TraceQueueId)
+            Console.Error.WriteLine(
+                $"[GPU][QTRACE] end q={submission.QueueId} sub={submission.SubmissionId} result={result} " +
+                $"packet=0x{submission.Commands.CurrentPacketAddress:X16} wait={submission.Wait.Kind}@0x{submission.Wait.Address:X} " +
+                DescribePackets(submission.Address, submission.DwordCount));
 
         if (dsSlice)
         {

@@ -18,8 +18,31 @@ public static class CommandProcessorWriteHistory
     private static readonly Entry[] _entries = new Entry[Capacity];
     private static long _next;
 
+    // SHARPEMU_CP_WATCH=<hex>[,<hex>...]: every recorded write overlapping one of these
+    // addresses is also printed as it happens, so a label's whole history survives the ring.
+    private static readonly ulong[] Watched = ParseWatched(Environment.GetEnvironmentVariable("SHARPEMU_CP_WATCH"));
+
+    private static ulong[] ParseWatched(string? text) => string.IsNullOrWhiteSpace(text)
+        ? []
+        : text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(token => ulong.TryParse(
+                token.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? token[2..] : token,
+                System.Globalization.NumberStyles.HexNumber, null, out var address) ? address : 0)
+            .Where(address => address != 0)
+            .ToArray();
+
     public static void Record(int queueId, ulong address, int size, ulong value, string kind, bool deferred)
     {
+        foreach (var watched in Watched)
+        {
+            if (watched >= address && watched < address + (ulong)Math.Max(size, 1))
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][CPWATCH] address=0x{address:X16} size={size} value=0x{value:X} kind={kind} " +
+                    $"queue={queueId} deferred={deferred} thread={Environment.CurrentManagedThreadId}");
+            }
+        }
+
         var slot = Interlocked.Increment(ref _next) - 1;
         _entries[(int)(slot % Capacity)] = new Entry(
             System.Diagnostics.Stopwatch.GetTimestamp(), queueId, address, size, value, kind, deferred);

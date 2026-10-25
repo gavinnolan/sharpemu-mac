@@ -65,6 +65,7 @@ internal sealed partial class MetalRenderHost :
     private nint _previousCommandBuffer;
     private ulong _previousSerial;
     private long _failedSubmissions;
+    private long _reportedFailedSubmissions;
     private double _gpuBusySeconds;
     private long _gpuBusySamples;
     private ulong _submissionSerial;
@@ -796,10 +797,12 @@ internal sealed partial class MetalRenderHost :
         {
             Interlocked.Increment(ref _failedSubmissions);
             var error = MetalNative.Send(buffer, MetalNative.Selector("error"));
-            MetalV2Diagnostics.WarnOnce(
-                "submission-failed",
-                $"A Metal submission failed and will never signal its serial: serial={serial} " +
-                $"{MetalNative.DescribeError(error)}{DescribeEncoderStatus(error)}");
+            // Each one, not the first: a GPU error discards innocent buffers along with the one
+            // that caused it, and the first to be sampled is rarely the cause.
+            if (Interlocked.Increment(ref _reportedFailedSubmissions) <= 32)
+                Console.Error.WriteLine(
+                    $"[METAL-V2][WARN] A Metal submission failed and will never signal its serial: serial={serial} " +
+                    $"completed={CompletedSerial} {MetalNative.DescribeError(error)}{DescribeEncoderStatus(error)}");
             PassProfileResolve(serial, false, 0);
             return;
         }
