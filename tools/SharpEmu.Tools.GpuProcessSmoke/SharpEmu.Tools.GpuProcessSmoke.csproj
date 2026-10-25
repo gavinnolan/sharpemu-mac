@@ -1,0 +1,38 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  Stands in for process A of the two-process split without being the emulator: an osx-x64
+  executable (Directory.Build.props pins the RID) that runs under Rosetta like SharpEmu.CLI,
+  starts the native SharpEmu.GpuHost through GpuProcessHost, and measures the transport across
+  the architecture line. SharpEmu.GpuRemote.Tests drives it; it also runs by hand.
+
+  Self-contained because no x86-64 .NET runtime is installed on an Apple-silicon dev machine;
+  the osx-x64 runtime pack SharpEmu.CLI already restores is enough.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <SelfContained>true</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);GPU_PROCESS_SMOKE</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Sync calls from a signal handler, the shape of the emulator's fault path, under Rosetta. -->
+    <Compile Include="..\..\tests\SharpEmu.GpuRemote.Tests\SignalContextProbe.cs" Link="SignalContextProbe.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpEmu.GpuRemote\SharpEmu.GpuRemote.csproj" />
+    <!-- Build order only: the tool launches the GPU host from its osx-arm64 output folder. -->
+    <ProjectReference Include="..\..\src\SharpEmu.GpuHost\SharpEmu.GpuHost.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

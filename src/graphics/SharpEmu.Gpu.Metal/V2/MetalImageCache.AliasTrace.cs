@@ -28,12 +28,16 @@ internal enum MetalAliasFallbackReason : byte
 internal sealed partial class MetalImageCache
 {
     private const int AliasFallbackReasons = (int)MetalAliasFallbackReason.RetileRefused + 1;
-    private const int AliasTraceLinesPerWindow = 40;
-
     // SHARPEMU_METAL_V2_ALIAS_TRACE=1 logs the first alias declines and publications of
-    // every report window with both image descriptions.
-    private static readonly bool AliasTraceEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_TRACE") == "1";
+    // every report window with both image descriptions; =depth logs only pairs with a depth
+    // image in them, ten times as many, which a frame of other aliases would otherwise crowd out.
+    private static readonly string? AliasTraceMode = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_TRACE");
+    private static readonly bool AliasTraceEnabled = AliasTraceMode is "1" or "depth";
+    private static readonly bool AliasTraceDepthOnly = AliasTraceMode == "depth";
+    private static readonly int AliasTraceLinesPerWindow = AliasTraceDepthOnly ? 400 : 40;
+
+    private static bool AliasTraceSkips(MetalCachedImage image, MetalCachedImage other) =>
+        AliasTraceDepthOnly && !image.Description.IsDepth && !other.Description.IsDepth;
 
     // Write uses first, then read uses, one slot per reason.
     private readonly long[] _aliasFallbacks = new long[2 * AliasFallbackReasons];
@@ -76,7 +80,8 @@ internal sealed partial class MetalImageCache
         bool otherGpuModified, ulong runStart, ulong runEnd)
     {
         _aliasFallbacks[(write ? 0 : AliasFallbackReasons) + (int)reason]++;
-        if (!AliasTraceEnabled || Interlocked.Increment(ref _aliasTraceDeclines) > AliasTraceLinesPerWindow)
+        if (!AliasTraceEnabled || AliasTraceSkips(image, other) ||
+            Interlocked.Increment(ref _aliasTraceDeclines) > AliasTraceLinesPerWindow)
         {
             return;
         }
@@ -92,7 +97,8 @@ internal sealed partial class MetalImageCache
         string kind, MetalCachedImage image, MetalCachedImage other, bool otherGpuModified,
         ulong runStart, ulong runEnd)
     {
-        if (!AliasTraceEnabled || Interlocked.Increment(ref _aliasTracePublications) > AliasTraceLinesPerWindow)
+        if (!AliasTraceEnabled || AliasTraceSkips(image, other) ||
+            Interlocked.Increment(ref _aliasTracePublications) > AliasTraceLinesPerWindow)
         {
             return;
         }
@@ -113,7 +119,7 @@ internal sealed partial class MetalImageCache
         return $"requester={requester} req=<{AliasImageText(in image.Description)}> " +
             $"other=<{AliasImageText(in other.Description)}> " +
             $"run=0x{runStart:X}+0x{(runEnd > runStart ? runEnd - runStart : 0):X} other_dirty={dirty} " +
-            $"gpu_mod={image.IsGpuModified}/{otherGpuModified}";
+            $"gpu_mod={image.IsGpuModified}/{otherGpuModified} seq={image.GpuWriteSequence}/{other.GpuWriteSequence}";
     }
 
     private static string AliasImageText(in ImageDescription description) =>

@@ -230,6 +230,10 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool LeavesOutDrawsWhileCompiling { get; set; }
 
+    public bool LeavesOutDepthWritesWhileCompiling { get; set; }
+
+    public bool LeavesOutMipStatisticsWhileCompiling { get; set; }
+
     // The host's say on the targets: true stands in for targets rebuilt every frame.
     public bool TargetsRebuiltEveryFrame { get; set; } = true;
 
@@ -486,6 +490,14 @@ internal sealed class RecordingRenderHost : IRenderHost
         Calls.Add($"clear_metadata {address:X}");
         return ClearableMetadata.Contains(address);
     }
+
+    public bool NoteHtileWritten(ulong address)
+    {
+        Calls.Add($"htile_written {address:X}");
+        return MetadataAddresses.Contains(address);
+    }
+
+    public void NoteHtileCleared(ulong address) => Calls.Add($"htile_cleared {address:X}");
 
     public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
     {
@@ -780,7 +792,7 @@ internal static class RenderExecutorFixtures
         return banks;
     }
 
-    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool writesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1) =>
+    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool writesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1, uint? constantStore = null) =>
         new()
         {
             Stage = stage,
@@ -794,6 +806,7 @@ internal static class RenderExecutorFixtures
             HasBitwiseExclusiveOr = exclusiveOr,
             VertexOffsetScalarRegister = vertexOffsetScalar,
             InstanceOffsetScalarRegister = instanceOffsetScalar,
+            ConstantStoreValue = constantStore,
         };
 
     public static ShaderStageResources Stage(ShaderProgramInfo program, uint[][]? buffers = null, uint[]? userData = null) =>

@@ -1,0 +1,37 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  Process B of the two-process split: the native arm64 GPU host. SharpEmu.CLI (process A)
+  runs guest code under Rosetta and starts this executable through GpuProcessHost when
+  SHARPEMU_GPU_PROCESS=1; the two talk through SharpEmu.GpuRemote's shared-memory region.
+  It hosts the Metal backend (SharpEmu.Gpu.Metal) over the guest memory A shares, wired by
+  SharpEmu.GpuSplit (docs/macos/split-protocol.md).
+
+  osx-arm64 always (Directory.Build.props pins the RID): running natively is the reason it
+  exists. Self-contained like SharpEmu.CLI, so it needs no installed arm64 runtime - the
+  emulator's own runtime is x86-64 and cannot host it - and lands in
+  artifacts/bin/<Configuration>/net10.0/osx-arm64/, next to the CLI's osx-x64 folder, where
+  GpuProcessHost.FindExecutable looks for it.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <SelfContained>true</SelfContained>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>true</TieredPGO>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.GpuRemote\SharpEmu.GpuRemote.csproj" />
+    <ProjectReference Include="..\SharpEmu.GpuSplit\SharpEmu.GpuSplit.csproj" />
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -5,7 +5,8 @@
 # macOS output policy check. Given a directory (a publish output or an
 # assembled SharpEmu.app), report — and optionally delete — any file that must
 # never ship in a macOS SharpEmu artifact, and verify that every Mach-O binary
-# has an x86_64 slice.
+# has an x86_64 slice (or, with --arch, the slice that artifact runs as: the
+# two-process split's GPU host is osx-arm64).
 #
 # Called from build/platforms/macos/macos.targets after an osx-* publish and
 # again from scripts/macos/build-app.sh on the finished bundle. The matching
@@ -15,7 +16,12 @@
 # policy into a no-op that still looks green.
 #
 # Usage:
-#   check-macos-output.sh <directory> [--strip] [--forbid-sdl] [--skip-arch]
+#   check-macos-output.sh <directory> [--strip] [--forbid-sdl] [--skip-arch] [--arch <slice>]
+#                         [--arch-exclude <subdirectory>]
+#
+# --arch-exclude leaves a subdirectory (relative to <directory>) out of the
+# architecture check only, for a bundle that carries the GPU host's arm64
+# payload beside its x86_64 one; check that subdirectory on its own with --arch.
 
 set -euo pipefail
 
@@ -23,12 +29,30 @@ directory=""
 strip_forbidden=false
 forbid_sdl=false
 check_arch=true
+required_arch=x86_64
+arch_exclude=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strip) strip_forbidden=true ;;
         --forbid-sdl) forbid_sdl=true ;;
         --skip-arch) check_arch=false ;;
+        --arch)
+            if [ "$#" -lt 2 ]; then
+                echo "check-macos-output.sh: --arch needs a slice name" >&2
+                exit 2
+            fi
+            required_arch="$2"
+            shift
+            ;;
+        --arch-exclude)
+            if [ "$#" -lt 2 ]; then
+                echo "check-macos-output.sh: --arch-exclude needs a subdirectory" >&2
+                exit 2
+            fi
+            arch_exclude="$2"
+            shift
+            ;;
         -*) echo "check-macos-output.sh: unknown option $1" >&2; exit 2 ;;
         *)
             if [ -n "${directory}" ]; then
@@ -123,7 +147,7 @@ fi
 # Every Mach-O in the artifact has to be able to run in the x86_64 process the
 # emulator requires. A universal binary with an x86_64 slice is fine; an
 # arm64-only one would fail to load at runtime with a confusing dyld error, so
-# catch it here instead.
+# catch it here instead. The GPU host is the mirror image: --arch arm64.
 arch_failures=""
 # MSBuild may inherit Rosetta's execution architecture while Command Line
 # Tools ship ARM64-only. Inspect x64 payloads using the host's native lipo.
@@ -133,13 +157,18 @@ if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; the
 fi
 while IFS= read -r candidate; do
     [ -n "${candidate}" ] || continue
+    if [ -n "${arch_exclude}" ]; then
+        case "${candidate}" in
+            "${directory}/${arch_exclude}"/*) continue ;;
+        esac
+    fi
     case "$(file -b "${candidate}")" in
         *Mach-O*) ;;
         *) continue ;;
     esac
     slices="$("${lipo_command[@]}" -archs "${candidate}" 2>/dev/null || true)"
     case " ${slices} " in
-        *" x86_64 "*) ;;
+        *" ${required_arch} "*) ;;
         *) arch_failures="${arch_failures}${candidate} [${slices:-unreadable}]"$'\n' ;;
     esac
 done <<EOF
@@ -149,10 +178,14 @@ EOF
 if [ -n "${arch_failures}" ]; then
     echo "macOS architecture policy violation in ${directory}:" >&2
     printf '%s' "${arch_failures}" >&2
-    echo "Every Mach-O binary needs an x86_64 slice: SharpEmu executes guest x86-64" >&2
-    echo "code natively, so the host process is always x86-64 (Rosetta 2 on Apple" >&2
-    echo "Silicon)." >&2
+    if [ "${required_arch}" = x86_64 ]; then
+        echo "Every Mach-O binary needs an x86_64 slice: SharpEmu executes guest x86-64" >&2
+        echo "code natively, so the host process is always x86-64 (Rosetta 2 on Apple" >&2
+        echo "Silicon)." >&2
+    else
+        echo "Every Mach-O binary of this artifact needs a ${required_arch} slice." >&2
+    fi
     exit 1
 fi
 
-echo "macOS output policy: ${directory} is clean (no forbidden assets, all Mach-O binaries have an x86_64 slice)."
+echo "macOS output policy: ${directory} is clean (no forbidden assets, all Mach-O binaries have an ${required_arch} slice)."

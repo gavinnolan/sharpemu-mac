@@ -53,8 +53,14 @@ public sealed record Gen5MslMeshInfo(
     bool NarrowWave64 = false,
     bool DeviceLds = false,
     bool Wave64 = false,
-    uint LdsBytes = 0)
+    uint LdsBytes = 0,
+    bool Amplified = false)
 {
+    /// <summary>Lanes in one guest wave of this program: an amplified wave64 subgroup runs
+    /// its 64-lane waves as two bridged simdgroups each; everything else runs a guest wave
+    /// as one simdgroup (<see cref="WaveLanes"/>).</summary>
+    public uint GuestWaveLanes => Amplified && Wave64 ? 64u : WaveLanes;
+
     /// <summary>The mesh slot the device-memory LDS pool is bound at when
     /// <see cref="DeviceLds"/> is set.</summary>
     public const uint LdsPoolBufferIndex = 5;
@@ -192,4 +198,9 @@ public sealed record Gen5MslShader(
     /// workgroup ID (see <see cref="Ir.Gen5PersistentThreadsAnalysis"/>): any number of groups
     /// computes the same result, so a host may launch only as many as it keeps resident.</summary>
     public bool PersistentThreads { get; init; }
+
+    /// <summary>A tessellated draw's stage (<see cref="Gen5TessellationLaunch"/>): for the domain
+    /// role the source is a post-tessellation vertex function, and the host's pipeline takes its
+    /// partition, winding and maximum factor from here.</summary>
+    public Gen5TessellationLaunch? Tessellation { get; init; }
 }

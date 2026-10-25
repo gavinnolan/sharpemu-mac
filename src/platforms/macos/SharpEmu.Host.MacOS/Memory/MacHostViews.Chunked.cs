@@ -40,7 +40,8 @@ namespace SharpEmu.Host.MacOS;
 /// <para>
 /// Layout: a reservation of the alias size, 64 KiB aligned, with each object mapped over it
 /// (<c>mach_vm_map</c> FIXED|OVERWRITE, read-write, maximum read-write); the entry ports are
-/// dropped at once, the mapping keeps each object alive. A guest view is
+/// dropped at once, the mapping keeps each object alive (a shareable backing keeps them for other
+/// processes, MacHostViews.Sharing.cs). A guest view is
 /// <c>mach_vm_remap(copy=FALSE)</c> of the alias range: the same objects, so it aliases the
 /// alias and every other view exactly as an shm view does, for any page-aligned offset and
 /// size, then <c>mprotect</c> to the view's protection. Execute is dropped exactly as the shm
@@ -114,14 +115,22 @@ internal sealed unsafe partial class MacHostViews
             return false;
         }
 
+        // Shareable (MacHostViews.Sharing.cs): every object's port is kept for other processes.
+        var entries = UseShareableBacking
+            ? new List<GuestBackingEntry>((int)((aliasSize + GuestObjectBytes - 1) / GuestObjectBytes))
+            : null;
         for (ulong offset = 0; offset < aliasSize; offset += GuestObjectBytes)
         {
-            if (!TryMapObject(task, alias + offset, Math.Min(GuestObjectBytes, aliasSize - offset)))
+            var length = Math.Min(GuestObjectBytes, aliasSize - offset);
+            if (!TryMapObject(task, alias + offset, length, entries is not null, out var entry))
             {
                 // Only this new reservation exists; deallocating it drops every chunk made so far.
                 mach_vm_deallocate(task, alias, aliasSize);
+                ReleaseEntries(entries);
                 return false;
             }
+
+            entries?.Add(new GuestBackingEntry(offset, length, entry));
         }
 
         try
@@ -132,12 +141,15 @@ internal sealed unsafe partial class MacHostViews
                 ObjectBytes = GuestObjectBytes,
                 DiscardChunks = DiscardChunks,
                 CreateGpuAlias = ChunkedGpuAlias.TryCreate,
+                Export = entries is null ? null : new GuestBackingExport(GuestBackingExportKind.MemoryEntries, size, aliasSize, -1,
+                    entries, GuestChunkBytes, GuestObjectBytes),
             };
             MacMappedCopyState.Ledger?.RegisterBacking(backing);
         }
         catch (Exception error)
         {
             // No guest view exists yet; the alias is the only owner of the chunks.
+            ReleaseEntries(entries);
             var deallocated = mach_vm_deallocate(task, alias, aliasSize);
             if (deallocated != KERN_SUCCESS)
             {
@@ -154,8 +166,9 @@ internal sealed unsafe partial class MacHostViews
         return true;
     }
 
-    private static bool TryMapObject(uint task, ulong address, ulong length)
+    private static bool TryMapObject(uint task, ulong address, ulong length, bool keepEntry, out uint kept)
     {
+        kept = 0;
         var entrySize = length;
         if (mach_make_memory_entry_64(task, ref entrySize, 0, MAP_MEM_NAMED_CREATE | MAP_MEM_PURGABLE | VM_PROT_READ_WRITE,
                 out var entry, 0) != KERN_SUCCESS)
@@ -167,6 +180,12 @@ internal sealed unsafe partial class MacHostViews
         var mapped = entrySize >= length && mach_vm_map(task, ref target, length, 0,
             VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | GuestChunkTagFlags, entry, 0, 0, VM_PROT_READ_WRITE, VM_PROT_READ_WRITE,
             VM_INHERIT_SHARE) == KERN_SUCCESS && target == address;
+        if (mapped && keepEntry)
+        {
+            kept = entry;
+            return true;
+        }
+
         // The mapping holds the object; the port is not needed again (views remap the alias).
         mach_port_deallocate(task, entry);
         return mapped;

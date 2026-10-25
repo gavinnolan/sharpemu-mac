@@ -239,16 +239,20 @@ public sealed class GraphicsPipelineKey : IEquatable<GraphicsPipelineKey>
     public ulong PixelProgramId { get; set; }
     // The pixel program carries its LOD statistics counters (GraphicsPipelineDescription.LodStatistics).
     public bool LodStatistics { get; set; }
+    // The pixel program's colour outputs moved to other attachments (GraphicsPipelineDescription.ColorRemap).
+    public uint ColorRemap { get; set; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
 
     public bool Equals(GraphicsPipelineKey? other) =>
         other is not null && Rendering.Equals(other.Rendering) && VertexProgramId == other.VertexProgramId && PixelProgramId == other.PixelProgramId &&
-        LodStatistics == other.LodStatistics && VertexInput.Equals(other.VertexInput) && StaticParameters.Equals(other.StaticParameters);
+        LodStatistics == other.LodStatistics && ColorRemap == other.ColorRemap && VertexInput.Equals(other.VertexInput) &&
+        StaticParameters.Equals(other.StaticParameters);
 
     public override bool Equals(object? obj) => Equals(obj as GraphicsPipelineKey);
 
-    public override int GetHashCode() => HashCode.Combine(Rendering, VertexProgramId, PixelProgramId, VertexInput, StaticParameters, LodStatistics);
+    public override int GetHashCode() =>
+        HashCode.Combine(Rendering, VertexProgramId, PixelProgramId, VertexInput, StaticParameters, LodStatistics, ColorRemap);
 }
 
 public readonly record struct ComputePipelineKey(ulong ComputeProgramId);

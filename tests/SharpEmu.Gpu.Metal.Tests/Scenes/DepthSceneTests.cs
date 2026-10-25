@@ -574,6 +574,30 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
         Assert.Equal(Passes(0.6f) ? 0.1f : 0.6f, depths[(32 * Size) + 56]);
     }
 
+    // The bounds test runs with the depth test off (Z_ENABLE clear), as a light or shadow
+    // projection pass bounds its full-screen quads: the DB still reads the stored depth.
+    [Theory]
+    [InlineData(0.5f, 1f)]
+    [InlineData(0.1f, 0.3f)]
+    public void DepthBoundsDiscardPixelsWithTheDepthTestOff(float min, float max)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var d = new DepthRig(rig, Size, Size, zFormat: 3);
+        d.Draw(d.State().DepthControl(true, true, CompareFunc.Always), d.Rect(0.2f, 1, 0, 0, 0, 0, 32, 64));
+        d.Draw(d.State().DepthControl(true, true, CompareFunc.Always), d.Rect(0.6f, 1, 0, 0, 32, 0, 64, 64));
+        var state = d.State().DepthControl(false, false, CompareFunc.Never, bounds: true);
+        state.Context[Cx.DbDepthBoundsMin] = SceneState.F(min);
+        state.Context[Cx.DbDepthBoundsMax] = SceneState.F(max);
+        d.Draw(state, d.Full(0.1f, 0, 1, 0));
+        var colour = d.QueueColorReadback();
+        rig.Submit(d.Pm4);
+        var colours = colour();
+        bool Passes(float stored) => !rig.Host.DepthBoundsTestSupported || (min <= stored && stored <= max);
+        Assert.Equal(Passes(0.2f) ? Green : Red, colours[(32 * Size) + 8]);
+        Assert.Equal(Passes(0.6f) ? Green : Red, colours[(32 * Size) + 56]);
+    }
+
     // 7. Stencil ----------------------------------------------------------------------------------------------
 
     private static byte ApplyStencilOp(uint op, byte stored, byte opValue, byte reference) => op switch

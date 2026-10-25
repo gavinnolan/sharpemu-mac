@@ -44,7 +44,7 @@ public static partial class Gen5MslTranslator
         /// <summary>Opens an exchange on the set the previous one did not use.</summary>
         private static readonly string WaveSetFlip = $"sharpemu_wave_set ^= {WaveSlotSetDwords}u;";
 
-        private const string WaveExchangeBarrier = "threadgroup_barrier(mem_flags::mem_threadgroup);";
+        private string WaveExchangeBarrier => Wave64Barrier;
 
         /// <summary>Slot <paramref name="slot"/> of the current set.</summary>
         private static string WaveSlot(uint slot) => slot == 0
@@ -62,7 +62,7 @@ public static partial class Gen5MslTranslator
         /// <c>WaveSlot(1)</c> hold the low and high halves of the 64-lane mask. simd_ballot
         /// is uniform across a simdgroup, so every lane of a half writes the same value to
         /// that half's slot and no first-lane guard is needed.</summary>
-        private static string[] WaveBallotExchange(string condition) =>
+        private string[] WaveBallotExchange(string condition) =>
         [
             WaveSetFlip,
             $"{WaveHalfBallotSlot} = sharpemu_ballot({condition});",

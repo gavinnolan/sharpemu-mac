@@ -47,4 +47,30 @@ public static class MacOSHost
     /// processes that cannot run guest code.
     /// </summary>
     public static IHostViewMemory CreateViewMemory() => new MacHostViews();
+
+    /// <summary>
+    /// Creates the view backend's guest-memory sharing side, for the two-process split: shared
+    /// regions and mirrors of a backing another process owns. Not gated on the process
+    /// architecture: the process mapping the mirror is native arm64.
+    /// </summary>
+    public static IHostGuestMirrorMemory CreateGuestMirrorMemory() => new MacHostViews();
+
+    /// <summary>
+    /// Serves a shareable backing's export and its view table to other processes, under a Mach
+    /// bootstrap name unique to this call (<paramref name="serviceName"/>), until the result is
+    /// disposed. Both must stay alive until then.
+    /// </summary>
+    public static IDisposable ServeGuestMemory(GuestBackingExport backing, HostSharedRegion viewTable, out string serviceName)
+    {
+        var server = MacGuestMemoryRendezvous.Serve(backing, viewTable);
+        serviceName = server.ServiceName;
+        return server;
+    }
+
+    /// <summary>
+    /// Receives the guest memory another process serves under <paramref name="serviceName"/>,
+    /// waiting up to <paramref name="timeout"/> for it to appear and answer.
+    /// </summary>
+    public static GuestMemoryShare ConnectGuestMemory(string serviceName, TimeSpan timeout) =>
+        MacGuestMemoryRendezvous.Connect(serviceName, timeout);
 }

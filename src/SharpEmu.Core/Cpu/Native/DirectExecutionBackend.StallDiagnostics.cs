@@ -14,6 +14,7 @@ namespace SharpEmu.Core.Cpu.Native;
 public sealed unsafe partial class DirectExecutionBackend
 {
     private SafeWaitHandle? _mainExecutionThreadHandle;
+    private int _mainExecutionThreadId;
 
     // Suspending another thread is an explicit platform capability. Native
     // declarations and export resolution belong to the execution package.
@@ -59,8 +60,31 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private static bool TryCaptureHostThreadContext(int threadId, out HostThreadContextSnapshot snapshot)
     {
+        if (!SupportsThreadContextCapture)
+            return TryReadPlatformThreadRegisters(threadId, out snapshot);
+
         using var threadHandle = OpenThreadForContext(unchecked((uint)threadId));
         return TryCaptureThreadContext(threadHandle, out snapshot);
+    }
+
+    // A host without the context-capture stub (macOS reads them through Mach) hands the
+    // registers over directly.
+    private static bool TryReadPlatformThreadRegisters(int threadId, out HostThreadContextSnapshot snapshot)
+    {
+        snapshot = default;
+        Span<ulong> registers = stackalloc ulong[17];
+        if (threadId == 0 || !ExecutionPlatform.TryReadThreadRegisters(unchecked((uint)threadId), registers))
+            return false;
+
+        // rax rbx rcx rdx rdi rsi rbp rsp r8-r15 rip
+        snapshot = new HostThreadContextSnapshot(
+            unchecked((uint)threadId),
+            Rip: registers[16], Rsp: registers[7], Rbp: registers[6],
+            Rax: registers[0], Rbx: registers[1], Rcx: registers[2], Rdx: registers[3],
+            Rsi: registers[5], Rdi: registers[4],
+            R8: registers[8], R9: registers[9], R10: registers[10], R11: registers[11],
+            R12: registers[12], R13: registers[13], R14: registers[14], R15: registers[15]);
+        return true;
     }
 
     private static bool TryCaptureThreadContext(SafeWaitHandle? threadHandle, out HostThreadContextSnapshot snapshot)
@@ -139,7 +163,9 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private void LogMainThreadStallContext()
     {
-        if (!TryCaptureThreadContext(Volatile.Read(ref _mainExecutionThreadHandle), out var context)) return;
+        if (!(SupportsThreadContextCapture
+                ? TryCaptureThreadContext(Volatile.Read(ref _mainExecutionThreadHandle), out var context)
+                : TryReadPlatformThreadRegisters(Volatile.Read(ref _mainExecutionThreadId), out context))) return;
 
         Console.Error.WriteLine($"[LOADER][ERROR] Live hardware context (main thread {context.ThreadId}):");
         Console.Error.WriteLine($"[LOADER][ERROR]   RIP=0x{context.Rip:X16} RSP=0x{context.Rsp:X16} RBP=0x{context.Rbp:X16}");
@@ -181,6 +207,79 @@ public sealed unsafe partial class DirectExecutionBackend
             if (value != 0)
                 Console.Error.WriteLine($"[LOADER][ERROR]     [rsp+0x{offset:X2}] = 0x{value:X16} ({DescribeAddress(value)})");
         }
+    }
+
+    // SHARPEMU_SNAPSHOT_PEEK=<base>[+<offset>]:<length>[,...]: guest memory each stall snapshot
+    // prints as qwords, the base a hex address or, where the host can capture it, one of the main
+    // thread's live registers (r14+0x20:0x60), so a structure the stuck code holds in a register can
+    // be read without knowing where it lives. "ersp" is the stack pointer the main thread last
+    // entered an import with, which every host has; "ersp-0x2000:0x1000" names a range below it.
+    // A leading '*' reads the pointer stored at the base first: "*0x8031E7FC8+0x40:0x20".
+    private static readonly string? SnapshotPeeks = Environment.GetEnvironmentVariable("SHARPEMU_SNAPSHOT_PEEK");
+
+    private void LogSnapshotPeeks()
+    {
+        if (string.IsNullOrWhiteSpace(SnapshotPeeks) || _cpuContext is not { } cpuContext) return;
+        var live = TryCaptureHostThreadContext(Volatile.Read(ref _mainExecutionThreadId), out var context);
+        if (live)
+            Console.Error.WriteLine(
+                $"[LOADER][ERROR]   peek registers: rip=0x{context.Rip:X16} rsp=0x{context.Rsp:X16} rbp=0x{context.Rbp:X16} " +
+                $"rax=0x{context.Rax:X16} rbx=0x{context.Rbx:X16} rcx=0x{context.Rcx:X16} rdx=0x{context.Rdx:X16} " +
+                $"rsi=0x{context.Rsi:X16} rdi=0x{context.Rdi:X16} r12=0x{context.R12:X16} r13=0x{context.R13:X16} " +
+                $"r14=0x{context.R14:X16} r15=0x{context.R15:X16}");
+
+        foreach (var token in SnapshotPeeks.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var colon = token.LastIndexOf(':');
+            if (colon <= 0 || !TryParseHex(token[(colon + 1)..], out var length)) continue;
+            var location = token[..colon];
+            var dereference = location.StartsWith('*');
+            if (dereference) location = location[1..];
+            var sign = location.IndexOfAny(['+', '-']);
+            var baseText = sign < 0 ? location : location[..sign];
+            ulong offset = 0;
+            if (sign >= 0 && !TryParseHex(location[(sign + 1)..], out offset)) continue;
+            if (sign >= 0 && location[sign] == '-') offset = unchecked(0UL - offset);
+            ulong address;
+            switch (baseText.ToLowerInvariant())
+            {
+                case "ersp": address = cpuContext[SharpEmu.HLE.CpuRegister.Rsp]; break;
+                case "rax" or "rbx" or "rcx" or "rdx" or "rsi" or "rdi" or "rbp" or "rsp" or "r12" or "r13" or "r14" or "r15" when !live:
+                    continue;
+                case "rax": address = context.Rax; break;
+                case "rbx": address = context.Rbx; break;
+                case "rcx": address = context.Rcx; break;
+                case "rdx": address = context.Rdx; break;
+                case "rsi": address = context.Rsi; break;
+                case "rdi": address = context.Rdi; break;
+                case "rbp": address = context.Rbp; break;
+                case "rsp": address = context.Rsp; break;
+                case "r12": address = context.R12; break;
+                case "r13": address = context.R13; break;
+                case "r14": address = context.R14; break;
+                case "r15": address = context.R15; break;
+                default:
+                    if (!TryParseHex(baseText, out address)) continue;
+                    break;
+            }
+
+            if (dereference && !cpuContext.TryReadUInt64(address, out address)) continue;
+            address = unchecked(address + offset);
+            for (ulong at = 0; at < Math.Min(length, 0x1000UL); at += 32)
+            {
+                var line = new System.Text.StringBuilder($"[LOADER][ERROR]   peek {token} 0x{address + at:X16}:");
+                for (ulong word = 0; word < 32 && at + word < length; word += 8)
+                {
+                    line.Append(cpuContext.TryReadUInt64(address + at + word, out var value) ? $" {value:X16}" : " ????????????????");
+                }
+
+                Console.Error.WriteLine(line.ToString());
+            }
+        }
+
+        static bool TryParseHex(string text, out ulong value) => ulong.TryParse(
+            text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text,
+            System.Globalization.NumberStyles.HexNumber, null, out value);
     }
 
 }

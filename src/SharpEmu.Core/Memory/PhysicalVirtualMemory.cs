@@ -15,7 +15,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
+public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace, IGuestMemorySharing
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -34,14 +34,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private long _mappingGeneration;
     private const ulong PageSize = 0x1000;
     private const ulong HostAllocationGranularity = 0x10000;
-    private const ulong GuestAllocationArenaAddress = 0x00006000_0000_0000;
+    private const ulong GuestAllocationArenaAddress = GuestMemoryLayout.AllocatorArenaAddress;
     // Full C++ runtimes can route large numbers of HLE-backed heap allocations
     // through this arena. The original 16 MiB capacity could be exhausted
     // during asset setup, turning a valid allocation request into a null
     // pointer that failed later in unrelated guest code. Keep enough capacity
     // for those workloads. Adapted from foufouadi's allocator-exhaustion
     // investigation.
-    private const ulong GuestAllocationArenaSize = 0x2000_0000;
+    private const ulong GuestAllocationArenaSize = GuestMemoryLayout.AllocatorArenaBytes;
     private const ulong GuestAllocationArenaStartOffset = PageSize;
     private const ulong LargeDataReserveThreshold = 0x4000_0000UL; // 1 GiB
     private const ulong FullCommitRegionLimit = 4UL << 30;
@@ -137,6 +137,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly object _fixedAllocationGate = new();
     private readonly HashSet<ulong> _fixedGranuleReservationBases = new();
     private ulong _guestAllocationArenaBase;
+    private bool _guestAllocationArenaBacked;
     private readonly SortedDictionary<ulong, ulong> _guestAllocationFreeRanges = new();
     private readonly Dictionary<ulong, (ulong Offset, ulong Size)> _guestAllocations = new();
     private static readonly ulong LazyReservePrimeBytes = ResolveLazyReservePrimeBytes();
@@ -145,7 +146,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public PhysicalVirtualMemory(IHostMemory? hostMemory = null, IHostViewMemory? viewHost = null,
         ulong backingBytes = GuestMemoryLayout.BackingBytes, bool preReserveGuestAddressSpace = false,
-        bool adoptStartupAddressReservations = false)
+        bool adoptStartupAddressReservations = false, SplitBackingLayout? splitLayout = null)
     {
         _hostMemory = hostMemory ?? CrossPlatformHostMemory.Instance;
         if (adoptStartupAddressReservations)
@@ -163,6 +164,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 : null;
             _backedSpace = new GuestSpaceOwner(viewHost, backingBytes, preReserveGuestAddressSpace, startupReservation);
             RunBackingSelfTest();
+            _splitLayout = SelectSplitLayout(splitLayout);
         }
     }
 
@@ -1098,21 +1100,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             if (_guestAllocationArenaBase == 0)
             {
-                try
+                // Split layout: one view of the backing, so the GPU process sees the arena.
+                var arenaSize = GuestAllocationArenaSize;
+                var backed = TryMapSplitArena(out _guestAllocationArenaBase, ref arenaSize);
+                if (!backed)
                 {
-                    _guestAllocationArenaBase = AllocateAt(
-                        GuestAllocationArenaAddress,
-                        GuestAllocationArenaSize,
-                        executable: false,
-                        allowAlternative: true);
-                    _guestAllocationFreeRanges.Add(
-                        GuestAllocationArenaStartOffset,
-                        GuestAllocationArenaSize - GuestAllocationArenaStartOffset);
+                    try
+                    {
+                        _guestAllocationArenaBase = AllocateAt(
+                            GuestAllocationArenaAddress,
+                            arenaSize,
+                            executable: false,
+                            allowAlternative: true);
+                    }
+                    catch (Exception)
+                    {
+                        return false;
+                    }
                 }
-                catch (Exception)
-                {
-                    return false;
-                }
+
+                _guestAllocationArenaBacked = backed;
+                _guestAllocationFreeRanges.Add(
+                    GuestAllocationArenaStartOffset,
+                    arenaSize - GuestAllocationArenaStartOffset);
             }
 
             ulong rangeOffset = 0;
@@ -1153,6 +1163,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             address = _guestAllocationArenaBase + alignedOffset;
             _guestAllocations.Add(address, (alignedOffset, size));
+            if (_guestAllocationArenaBacked)
+            {
+                NoteSplitArenaUse(allocationEnd);
+            }
+
             return true;
         }
     }
@@ -1538,6 +1553,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public (ulong Base, ulong Size) BackingAliasRange =>
         !_disposed && _backedSpace is { } backed ? (backed.AliasBase, backed.BackingSize) : (0, 0);
+
+    // The two-process split's view of guest memory (SHARPEMU_GPU_PROCESS=1): what another process
+    // needs to map the backing, and the shared table of guest views into it. Null otherwise.
+    public GuestBackingExport? GuestBackingExport => _backedSpace?.BackingExport;
+
+    public GuestViewTable? GuestViewTable => _backedSpace?.ViewTable;
 
     private bool HasBackingOwner() => !_disposed && _backedSpace != null;
 
@@ -2101,8 +2122,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             _guestAllocationArenaBase = 0;
+            _guestAllocationArenaBacked = false;
             _guestAllocationFreeRanges.Clear();
             _guestAllocations.Clear();
+            // Every image view went with the address ranges; the slice starts again from its
+            // beginning, zeroed as it is handed out again.
+            _splitImageNext = 0;
         }
     }
 
@@ -2124,7 +2149,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var existingRegion = FindRegion(mapStart, mapSize);
-            if (existingRegion == null)
+            // A module image in the split layout is private pages and views side by side.
+            var splitImage = existingRegion == null && IsCoveredBySplitImage(mapStart, mapSize);
+            if (existingRegion == null && !splitImage)
             {
                 var isExecutable = (protection & ProgramHeaderFlags.Execute) != 0;
                 AllocateAt(mapStart, mapSize, isExecutable, allowAlternative: false);
@@ -2133,7 +2160,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             // Memory AllocateAt just obtained from the host is already zero (it commits
             // only pages that were free or reserved). Clearing it again touched every page
             // of each guest thread stack and .bss, committing memory the guest may never use.
-            var alreadyZero = existingRegion == null;
+            var alreadyZero = existingRegion == null && !splitImage;
 
             var stageProtection = (protection & ProgramHeaderFlags.Execute) != 0
                 ? ProgramHeaderFlags.Read | ProgramHeaderFlags.Write | ProgramHeaderFlags.Execute
@@ -2232,6 +2259,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         else
         {
             protection = HostPageProtection.ReadOnly;
+        }
+
+        // A split layout's module image: its views of the backing are protected by their owner.
+        if (TrySetSplitImageProtection(address, size, protection, flags))
+        {
+            return;
         }
 
         if (!_hostMemory.Protect(address, size, protection, out _))
@@ -2350,10 +2383,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             var region = FindRegion(virtualAddress, (ulong)destination.Length);
             if (IsBackedSpan(region, virtualAddress, (ulong)destination.Length))
             {
-                return _backedSpace!.TryReadBacking(virtualAddress, destination);
-            }
+                // A range that starts in a view and runs on into another region (no single
+                // region holds it) is read by parts below.
+                if (_backedSpace!.TryReadBacking(virtualAddress, destination))
+                {
+                    return true;
+                }
 
-            if (region is not null &&
+                if (region is not null)
+                {
+                    return false;
+                }
+            }
+            else if (region is not null &&
                 TryResolveRegionOffset(
                     virtualAddress,
                     (ulong)destination.Length,
@@ -2396,7 +2438,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         if (!requiresExclusiveAccess)
         {
-            return false;
+            return TryReadAcrossRegions(virtualAddress, destination);
         }
 
         var dsWriteLock = DsLock.EnterWrite(_gate, 2);
@@ -2408,6 +2450,79 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             DsLock.ExitWrite(_gate, 2, dsWriteLock);
         }
+    }
+
+    // A range no single region holds - in the split layout a module image is several regions,
+    // views of the backing between private pieces, and a table or string can straddle two - is
+    // read and written as its part in each region, in order. Null unless regions cover the
+    // range without a gap and it has more than one part.
+    private List<(int Offset, int Length)>? SplitAcrossRegions(ulong virtualAddress, int length)
+    {
+        if (length <= 1 || _disposed || virtualAddress > ulong.MaxValue - (ulong)length)
+        {
+            return null;
+        }
+
+        var parts = new List<(int Offset, int Length)>(2);
+        _gate.EnterReadLock();
+        try
+        {
+            var done = 0;
+            while (done < length)
+            {
+                var address = virtualAddress + (ulong)done;
+                if (FindRegion(address, 1) is not { } region)
+                {
+                    return null;
+                }
+
+                var take = (int)Math.Min((ulong)(length - done), region.VirtualAddress + region.Size - address);
+                parts.Add((done, take));
+                done += take;
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+
+        return parts.Count > 1 ? parts : null;
+    }
+
+    private bool TryReadAcrossRegions(ulong virtualAddress, Span<byte> destination)
+    {
+        if (SplitAcrossRegions(virtualAddress, destination.Length) is not { } parts)
+        {
+            return false;
+        }
+
+        foreach (var (offset, length) in parts)
+        {
+            if (!TryRead(virtualAddress + (ulong)offset, destination.Slice(offset, length)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryWriteAcrossRegions(ulong virtualAddress, ReadOnlySpan<byte> source)
+    {
+        if (SplitAcrossRegions(virtualAddress, source.Length) is not { } parts)
+        {
+            return false;
+        }
+
+        foreach (var (offset, length) in parts)
+        {
+            if (!TryWriteCore(virtualAddress + (ulong)offset, source.Slice(offset, length), out _, out _))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public bool TryScanCString(ulong address, byte needle, bool findLast, ulong maxLength, out ulong match)
@@ -2566,7 +2681,21 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         OrdinaryWriteFailure failure = default;
         GuestSpaceOwner? diagnosticSpace = null;
-        try { return TryWriteCore(virtualAddress, source, out failure, out diagnosticSpace); }
+        try
+        {
+            if (TryWriteCore(virtualAddress, source, out failure, out diagnosticSpace))
+            {
+                return true;
+            }
+
+            if (TryWriteAcrossRegions(virtualAddress, source))
+            {
+                failure = default;
+                return true;
+            }
+
+            return false;
+        }
         finally
         {
             // All OUR write/read lock scopes have unwound. Recursive callers

@@ -52,7 +52,39 @@ public static partial class Gen5ShaderTranslator
                 return true;
             }
         }
+
+        public IReadOnlyCollection<KeyValuePair<ulong, FusedShaderParts>> Snapshot() => Volatile.Read(ref _programs);
     }
+
+    /// <summary>
+    /// Told of every fused program registered (entry, entry header, continuation, continuation
+    /// header) or unregistered (entry, zeros). The two-process split's guest process mirrors the
+    /// registry into the GPU process, whose command streams look programs up there.
+    /// </summary>
+    public static Action<ulong, ulong, ulong, ulong>? FusedProgramObserver { get; set; }
+
+    /// <summary>
+    /// The GPU process's side of <see cref="FusedProgramObserver"/>: registers (all four set) or
+    /// unregisters (only the entry) one program over <paramref name="memory"/>, telling no observer.
+    /// </summary>
+    public static void MirrorFusedProgram(ICpuMemory memory, ulong entryAddress, ulong entryHeaderAddress, ulong continuationAddress,
+        ulong continuationHeaderAddress)
+    {
+        var registry = GetFusedPrograms(memory);
+        if (entryHeaderAddress == 0 || continuationAddress == 0 || continuationHeaderAddress == 0)
+        {
+            _ = registry.Remove(entryAddress);
+            return;
+        }
+
+        registry.Set(entryAddress, new FusedShaderParts(entryHeaderAddress, continuationAddress, continuationHeaderAddress));
+    }
+
+    /// <summary>Every fused program registered over <paramref name="memory"/>: entry, entry header, continuation, continuation header.</summary>
+    public static (ulong Entry, ulong EntryHeader, ulong Continuation, ulong ContinuationHeader)[] SnapshotFusedPrograms(ICpuMemory memory) =>
+        GetFusedPrograms(memory).Snapshot()
+            .Select(static pair => (pair.Key, pair.Value.EntryHeaderAddress, pair.Value.ContinuationAddress, pair.Value.ContinuationHeaderAddress))
+            .ToArray();
 
     private sealed record FusedShaderParts(
         ulong EntryHeaderAddress,
@@ -96,11 +128,18 @@ public static partial class Gen5ShaderTranslator
             entryHeaderAddress,
             continuationAddress,
             continuationHeaderAddress));
+        FusedProgramObserver?.Invoke(entryAddress, entryHeaderAddress, continuationAddress, continuationHeaderAddress);
     }
 
     public static bool UnregisterFusedProgram(CpuContext ctx, ulong entryAddress)
     {
-        return GetFusedPrograms(ctx.Memory).Remove(entryAddress);
+        var removed = GetFusedPrograms(ctx.Memory).Remove(entryAddress);
+        if (removed)
+        {
+            FusedProgramObserver?.Invoke(entryAddress, 0, 0, 0);
+        }
+
+        return removed;
     }
 
     // The continuation registered for an entry address, when the guest joined two code objects.

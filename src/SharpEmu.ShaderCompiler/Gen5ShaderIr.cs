@@ -177,6 +177,47 @@ public readonly record struct Gen5PixelOutputBinding(
     }
 }
 
+public enum Gen5TessellationRole : byte
+{
+    // The merged local/hull program: one guest wave64 per threadgroup of PatchesPerGroup patches.
+    Hull,
+    // The domain (export) program: a post-tessellation vertex function over triangle patches.
+    Domain,
+}
+
+// VGT_TF_PARAM.PARTITIONING, in the register's order.
+public enum Gen5TessellationPartition : byte
+{
+    Integer,
+    Pow2,
+    FractionalOdd,
+    FractionalEven,
+}
+
+// A tessellated draw on a host whose hull stage is a compute kernel. The hull program runs as a
+// kernel whose threadgroup is one guest wave of PatchesPerGroup patches (ControlPoints lanes each,
+// one per input and output control point): its local half reads the control points' vertices by the
+// ids the host computed from the index buffer, and its hull half hands each patch to the domain stage
+// through the guest's off-chip buffer, OffchipBlockBytes per threadgroup, and writes its tessellation
+// factors, FactorBytesPerPatch per patch, to the guest's factor ring. The host's tessellator then
+// subdivides every patch by those factors (Partition, triangles wound OutputClockwise, factors up to
+// MaxFactor) and the domain program runs as its post-tessellation vertex function, at each point the
+// tessellator makes. Partition, winding and MaxFactor are pipeline state the domain program carries.
+public sealed record Gen5TessellationLaunch(
+    Gen5TessellationRole Role,
+    uint PatchesPerGroup,
+    uint ControlPoints,
+    uint OffchipBlockBytes,
+    uint FactorBytesPerPatch,
+    Gen5TessellationPartition Partition = Gen5TessellationPartition.Integer,
+    bool OutputClockwise = false,
+    uint MaxFactor = 16)
+{
+    // The hull kernel's launch dwords (patch count, first instance) and the control points' vertex ids.
+    public const int HullLaunchBufferIndex = 2;
+    public const int HullVertexBufferIndex = 3;
+}
+
 public readonly record struct Gen5ComputeSystemRegisters(
     uint? WorkGroupXRegister,
     uint? WorkGroupYRegister,
@@ -221,6 +262,18 @@ public readonly record struct Gen5NggStageInfo(
     /// export takes it (three 10-bit vertex fields) in v0, instead of the GS vertex offsets,
     /// and the program exports that register as it is.</summary>
     public bool Passthrough { get; init; }
+
+    /// <summary>VGT_GS_MAX_VERT_OUT of a merged ES/GS subgroup that amplifies a single input
+    /// vertex (GS_EN, GE_NGG_SUBGRP_CNTL.PRIM_AMP_FACTOR above 1, ES_VERTS_PER_SUBGRP 1):
+    /// how Prospero runs a mesh shader. Every point of a point-list draw launches one
+    /// workgroup, whose first lane's ES vertex index is the point (the workgroup index),
+    /// and the workgroup emits up to this many vertices and PRIM_AMP_FACTOR primitives, one
+    /// per thread. Black Myth: Wukong's Nanite hardware rasterizer is one. Zero otherwise.</summary>
+    public uint AmplifiedVerticesOut { get; init; }
+
+    /// <summary>The most primitives one amplified subgroup emits
+    /// (GE_NGG_SUBGRP_CNTL.PRIM_AMP_FACTOR).</summary>
+    public uint AmplifiedPrimitivesOut => PrimitiveAmplificationFactor & 0x1FFu;
 }
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)

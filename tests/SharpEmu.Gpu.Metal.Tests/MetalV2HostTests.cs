@@ -67,6 +67,28 @@ public sealed class MetalV2HostTests
         Assert.Null(slots.TryGet(ResourceSlotIdentifier.Invalid));
     }
 
+    // The owner-list change count over a range moves whenever an image comes to or leaves one of
+    // its pages and never otherwise: memos of lookups over the range compare it.
+    [Fact]
+    public void PageOwnerVersionsMoveOnlyWhenTheirListsChange()
+    {
+        var owners = new MetalImagePageOwners();
+        const ulong page = 1UL << MetalImagePageOwners.PageBits;
+        var identifier = new ResourceSlotIdentifier(7, 3);
+        Assert.Equal(0, owners.VersionSum(page, page));
+
+        owners.Add(page + 0x1000, 0x1000, identifier);
+        var afterAdd = owners.VersionSum(page, page);
+        Assert.NotEqual(0, afterAdd);
+        Assert.Equal(afterAdd, owners.VersionSum(page, page));
+        // Another page is untouched; a range over both sees the change once.
+        Assert.Equal(0, owners.VersionSum(2 * page, page));
+        Assert.Equal(afterAdd, owners.VersionSum(page, 2 * page));
+
+        owners.Remove(page + 0x1000, 0x1000, identifier);
+        Assert.NotEqual(afterAdd, owners.VersionSum(page, page));
+    }
+
     // The owner count answers for the 64 KiB pages a live image covers and no others,
     // and forgets an image once the last one over a page is gone.
     [Fact]

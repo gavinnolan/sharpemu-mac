@@ -372,7 +372,11 @@ internal static partial class MetalV2Presenter
         }
     }
 
-    private static void Wake() => _host?.CommandStream.Wake();
+    private static void Wake()
+    {
+        _host?.CommandStream.Wake();
+        _host?.WakeWorker();
+    }
 
     // ---- the GPU worker ----
 
@@ -381,7 +385,7 @@ internal static partial class MetalV2Presenter
     // slot, and reserving that flip after the unregister is a fatal InvalidIndex.
     // The relay alone only orders work before the next slice, not behind the queue.
     private static bool TryEnqueueControlBarrier(Action work, Action cancel) =>
-        _host is { } host && host.CommandStream.TryEnqueueControlBarrier(work, cancel);
+        _host is { } host && host.CommandStream.TryEnqueueControlBarrier(() => host.RunControlBarrier(work), cancel);
 
     /// <summary>
     /// One pass of the worker: the relay's commands, a budget of command-stream slices and
@@ -398,14 +402,20 @@ internal static partial class MetalV2Presenter
         host.RunPendingCommands();
         host.RunCommandStreamSlices(64);
         host.ReportCounters();
-        if (host.CommandStream.HasUnblockedPending || relay.HasPendingCommands)
+        if ((host.UsesCommandThread ? host.CommandThreadHasWork : host.CommandStream.HasUnblockedPending) ||
+            relay.HasPendingCommands)
         {
             return false;
         }
 
         // A buffer a coalesced Stream flush left open goes out before the park:
-        // nothing else would commit it until the guest submits again.
-        host.CommitCoalescedFlush();
+        // nothing else would commit it until the guest submits again. With the command thread the
+        // worker parks between its items all the time, and the thread asks for the commit itself.
+        if (!host.UsesCommandThread)
+        {
+            host.CommitCoalescedFlush();
+        }
+
         host.PollGpuCompletions();
         host.KeepQueueWarmIfIdle();
         return true;
@@ -434,7 +444,15 @@ internal static partial class MetalV2Presenter
                     using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Measure(
                         SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.Idle))
                     {
-                        _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
+                        if (host.UsesCommandThread)
+                        {
+                            // The command thread waits on the queue; the worker on what it hands over.
+                            host.WaitForCommandThreadWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
+                        }
+                        else
+                        {
+                            _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
+                        }
                     }
                     var idleEnded = System.Diagnostics.Stopwatch.GetTimestamp();
                     host.NoteIdle(idleEnded - idleStarted);
@@ -483,6 +501,7 @@ internal static partial class MetalV2Presenter
         {
             host.CommandStream.StopAccepting();
             host.CommandStream.DiscardAll();
+            host.StopCommandThread();
         }
         catch (Exception exception)
         {

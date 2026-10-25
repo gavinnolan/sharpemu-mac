@@ -44,6 +44,11 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+#if SHARPEMU_GPU_METAL
+        // The GPU in its own native process is the default where it can run (SHARPEMU_GPU_PROCESS=0 opts out).
+        SharpEmu.GpuRemote.GpuProcessHost.ApplyDefault();
+#endif
+        SharpEmu.Logging.GcPauseLog.StartFromEnvironment();
         // A GUI-launched emulator on macOS: lead a process group and exit with the GUI.
         if (args.Length > 0)
         {
@@ -818,6 +823,12 @@ internal static partial class Program
                 Console.SetOut(new TeeTextWriter(Console.Out, _consoleMirrorFile));
                 Console.SetError(new TeeTextWriter(Console.Error, _consoleMirrorFile));
                 Log.Debug($"Log file: {Path.GetFullPath(path)}");
+                // The split's GPU host (SHARPEMU_GPU_PROCESS=1) inherits the console but not this
+                // mirror: it keeps a log of its own next to this one.
+                if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SHARPEMU_GPU_HOST_LOG")))
+                {
+                    Environment.SetEnvironmentVariable("SHARPEMU_GPU_HOST_LOG", Path.GetFullPath(path) + ".gpuhost.log");
+                }
             }
             catch (Exception ex)
             {

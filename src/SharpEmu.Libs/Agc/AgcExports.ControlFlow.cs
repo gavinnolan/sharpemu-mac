@@ -271,6 +271,12 @@ public static partial class AgcExports
         return (int)ctx[CpuRegister.Rax];
     }
 
+    // sceAgcDcbJump without the mode: the compute queue only chains. The cache policy comes
+    // before the target (verified against Ghost of Tsushima, whose async compute stream
+    // chains into a fresh arena once it outgrows 64 KiB: rsi=0, rdx=the arena, rcx=its
+    // length). Reading the target from rsi wrote a jump to address zero, which the command
+    // processor skips, so everything after the switch -- there, the label the main thread
+    // waits on before each frame -- never ran.
     [SysAbiExport(
         Nid = "e1DFTg+Sd8U",
         ExportName = "sceAgcAcbJump",
@@ -279,15 +285,17 @@ public static partial class AgcExports
     public static int AcbJump(CpuContext ctx)
     {
         var acb = ctx[CpuRegister.Rdi];
-        var target = ctx[CpuRegister.Rsi];
-        var sizeDwords = (uint)ctx[CpuRegister.Rdx];
-        if (acb == 0)
+        var cachePolicy = (uint)ctx[CpuRegister.Rsi];
+        var target = ctx[CpuRegister.Rdx];
+        var sizeDwords = (uint)ctx[CpuRegister.Rcx];
+        if (acb == 0 || cachePolicy > 3)
         {
             return ReturnPointer(ctx, 0);
         }
 
         const uint chainMode = 1;
         var control = 0x0F20_0000u |
+                      (cachePolicy << 28) |
                       (chainMode << 20) |
                       (sizeDwords & 0xFFFFFu);
         if (!TryAllocateCommandDwords(ctx, acb, 4, out var cmd) ||

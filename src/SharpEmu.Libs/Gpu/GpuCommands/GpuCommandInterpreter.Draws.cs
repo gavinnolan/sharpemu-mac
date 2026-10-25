@@ -258,6 +258,7 @@ public sealed partial class GpuCommandInterpreter
         if (_host.ConsumePipelineNotReady())
         {
             SuspendOn(new CommandWaitCondition(CommandWaitKind.Pipeline));
+            PrefetchPipelinesAhead();
         }
     }
 

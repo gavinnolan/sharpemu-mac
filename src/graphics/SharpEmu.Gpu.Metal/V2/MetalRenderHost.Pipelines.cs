@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
@@ -115,6 +116,10 @@ internal sealed partial class MetalRenderHost
         // first time one uses this vertex program.
         public nint RectangleLibrary;
         public nint RectangleFunction;
+
+        // The pixel function with its colour outputs moved (ColorRemap -> library and function),
+        // built the first time a subset join needs that remap of this program.
+        public Dictionary<(uint Remap, bool LodStatistics), (nint Library, nint Function)>? RemappedFunctions;
 
         // The binary archive keys of the library and of the rectangle-list library (zero
         // with no archive): the pipeline made from them stores them under these.
@@ -700,6 +705,7 @@ internal sealed partial class MetalRenderHost
     public PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description)
     {
         Interlocked.Increment(ref _pipelineWaitsBlocking);
+        NoteBlockingBuild();
         RequireDrawableDescription(description);
         // A draw that could be left out may have started this compile; it is waited for
         // rather than built a second time.
@@ -746,6 +752,7 @@ internal sealed partial class MetalRenderHost
         VertexProgramId = description.VertexProgram.Id,
         PixelProgramId = description.PixelInfo is not null ? description.PixelProgram.Id : 0,
         LodStatistics = description.LodStatistics,
+        ColorRemap = description.ColorRemap,
         VertexInput = description.VertexInput,
         StaticParameters = description.StaticParameters,
     };
@@ -919,6 +926,10 @@ internal sealed partial class MetalRenderHost
                     MetalV2Native.SendVoidValue(
                         descriptor, MetalNative.Selector("setTessellationControlPointIndexType:"), controlPointIndexType);
                 }
+                else if (vertexModule.Shader.Tessellation is { Role: Gen5TessellationRole.Domain } tessellation)
+                {
+                    SetTessellatorState(descriptor, tessellation);
+                }
             }
             else
             {
@@ -944,10 +955,15 @@ internal sealed partial class MetalRenderHost
 
             if (pixelModule is not null)
             {
-                MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), PixelFunctionOf(pixelModule, description.LodStatistics));
+                MetalNative.SendVoid(
+                    descriptor,
+                    MetalNative.Selector("setFragmentFunction:"),
+                    description.ColorRemap != 0
+                        ? RequireRemappedPixelFunction(pixelModule, description.ColorRemap, description.LodStatistics)
+                        : PixelFunctionOf(pixelModule, description.LodStatistics));
             }
 
-            if (parameters.AlphaToCoverageEnable)
+            if (parameters.AlphaToCoverageEnable && !MetalV2Diagnostics.IgnoreAlphaToCoverage)
             {
                 MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setAlphaToCoverageEnabled:"), true);
             }
@@ -1016,7 +1032,8 @@ internal sealed partial class MetalRenderHost
                     descriptor, MetalNative.Selector("setStencilAttachmentPixelFormat:"), (nuint)stencilFormat);
             }
 
-            if (mesh is null && description.VertexInput.AttributeCount != 0)
+            // A domain program fetches no vertices: its inputs are the tessellator's coordinates.
+            if (mesh is null && description.VertexInput.AttributeCount != 0 && vertexModule.Shader.Tessellation is null)
             {
                 var vertexDescriptor = CreateVertexDescriptor(description, rectangleList, out vertexLayout);
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexDescriptor:"), vertexDescriptor);
@@ -1368,7 +1385,8 @@ internal sealed partial class MetalRenderHost
 
     public int PipelinesCompiling => _compiler?.InFlight ?? 0;
 
-    public bool SupportsPipelineSuspend => !SynchronousPipelines;
+    // A dispatch the command thread deferred cannot suspend its packet: the worker waits for its compile.
+    public bool SupportsPipelineSuspend => !SynchronousPipelines && !UsesCommandThread;
 
     public void NotePipelineNotReady()
     {
@@ -1403,22 +1421,41 @@ internal sealed partial class MetalRenderHost
         var program = description.Program;
         var hash = description.Stage.Hash;
         // The library compile is waited for on the compiler thread too, not on the worker.
-        if (!Compiler.TryTake(
-                program.Id,
-                () =>
-                {
-                    var module = RequireModule(program, onWorker: false);
-                    return new MetalPipelineCompiler.Result(BuildComputePipelineState(module.Function, hash, module.ArchiveKey));
-                },
-                out var compiled,
-                $"cs=0x{hash:X16}"))
+        Func<MetalPipelineCompiler.Result> build = () =>
         {
+            var module = RequireModule(program, onWorker: false);
+            return new MetalPipelineCompiler.Result(BuildComputePipelineState(module.Function, hash, module.ArchiveKey));
+        };
+        if (_prefetchingPipeline)
+        {
+            // Asked for ahead of its dispatch, from registers that may yet change: a failure only
+            // abandons this compile, and the dispatch, if it asks, compiles it again itself.
+            var speculative = build;
+            build = () => GpuFatal.Speculatively(speculative);
+        }
+
+        MetalPipelineCompiler.Result? compiled;
+        try
+        {
+            if (!Compiler.TryTake(program.Id, build, out compiled, $"cs=0x{hash:X16}"))
+            {
+                return false;
+            }
+        }
+        catch (GpuFatal.AbandonedWorkException) when (!_prefetchingPipeline)
+        {
+            // A compile asked for ahead failed; this dispatch's own compile reports why.
+            _ = Compiler.TryTake(program.Id, build, out _, $"cs=0x{hash:X16}");
             return false;
         }
 
         handle = RegisterComputePipeline(description, LookupModule(program), compiled!.State);
         return true;
     }
+
+    // Set on the worker while it asks for the pipeline of a dispatch it has read ahead to.
+    [ThreadStatic]
+    private static bool _prefetchingPipeline;
 
     // Runs on the compile pool: MTLDevice is thread safe, and nothing here touches
     // the host's own state.
@@ -1568,7 +1605,7 @@ internal sealed partial class MetalRenderHost
     {
         var parameters = entry.StaticParameters;
         var stencilEnabled = state.StencilTestEnabled && entry.HasStencil && parameters is not null &&
-            !MetalV2Diagnostics.IgnoreFragmentTests;
+            !MetalV2Diagnostics.IgnoreStencilTest;
         var key = MixDepthStencilKey(entry, in state, stencilEnabled);
         if (_depthStencilStates.TryGetValue(key, out var found))
         {
@@ -1585,14 +1622,29 @@ internal sealed partial class MetalRenderHost
 
         try
         {
-            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreFragmentTests
-                ? MetalV2Formats.CompareFunction(state.DepthCompare)
+            var loosenEqual = MetalV2Diagnostics.LoosenDepthEqual || MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash);
+            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreDepthTest
+                ? MetalV2Formats.CompareFunction(
+                    loosenEqual && state.DepthCompare == GpuCompareOp.Equal ? MetalV2Diagnostics.LoosenEqualTo : state.DepthCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
             MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setDepthCompareFunction:"), depthCompare);
             MetalNative.SendVoidBool(
                 descriptor,
                 MetalNative.Selector("setDepthWriteEnabled:"),
                 entry.HasDepth && state.DepthWriteEnabled);
+            if (MetalV2Diagnostics.LogsStencilFor(entry.VertexHash))
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][STENCIL] vs=0x{entry.VertexHash:X16} enabled={stencilEnabled} test={state.StencilTestEnabled} " +
+                    $"has={entry.HasStencil} depth={depthCompare} depth_write={state.DepthWriteEnabled} " +
+                    (parameters is null ? "no-static-parameters" :
+                        $"front={parameters.StencilFront.Compare}/{parameters.StencilFront.FailOperation}/{parameters.StencilFront.PassOperation}/" +
+                        $"{parameters.StencilFront.DepthFailOperation} ref={state.FrontStencil.Reference} read=0x{state.FrontStencil.CompareMask:X} " +
+                        $"write=0x{state.FrontStencil.WriteMask:X} back={parameters.StencilBack.Compare}/{parameters.StencilBack.FailOperation}/" +
+                        $"{parameters.StencilBack.PassOperation}/{parameters.StencilBack.DepthFailOperation} ref={state.BackStencil.Reference} " +
+                        $"read=0x{state.BackStencil.CompareMask:X} write=0x{state.BackStencil.WriteMask:X}"));
+            }
+
             if (stencilEnabled)
             {
                 ConfigureStencil(
@@ -1673,6 +1725,7 @@ internal sealed partial class MetalRenderHost
         Mix(state.DepthTestEnabled ? 1UL : 0UL);
         Mix(state.DepthWriteEnabled ? 1UL : 0UL);
         Mix((ulong)state.DepthCompare);
+        Mix(MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash) ? 1UL : 0UL);
         Mix(stencilEnabled ? 1UL : 0UL);
         if (stencilEnabled && entry.StaticParameters is { } parameters)
         {
@@ -1712,6 +1765,11 @@ internal sealed partial class MetalRenderHost
 
     public bool TryReadGuestWord(ulong address, out uint word)
     {
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            return TryReadGuestWordConcurrent(address, out word, assumptions);
+        }
+
         _wordReads++;
         if (_labelOverlay.Count != 0 && TryReadPendingLabelWord(address, out word))
         {
@@ -1738,6 +1796,18 @@ internal sealed partial class MetalRenderHost
     public bool TryReadCleanGuestWord(ulong address, out uint word)
     {
         word = 0;
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            Span<byte> concurrent = stackalloc byte[sizeof(uint)];
+            if (!TryReadResidentGuestBytesConcurrent(address, concurrent, assumptions))
+            {
+                return false;
+            }
+
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(concurrent);
+            return true;
+        }
+
         if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
         {
             return false;
@@ -1760,6 +1830,11 @@ internal sealed partial class MetalRenderHost
         if (destination.IsEmpty)
         {
             return true;
+        }
+
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            return TryReadResidentGuestBytesConcurrent(address, destination, assumptions);
         }
 
         if (_imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length))
@@ -1820,6 +1895,11 @@ internal sealed partial class MetalRenderHost
         if (count == 0)
         {
             return true;
+        }
+
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            return TryCompareResidentGuestBytesConcurrent(addresses, lengths, offsets, recorded, assumptions);
         }
 
         if (lengths.Length != count || offsets.Length != count)
@@ -1920,10 +2000,26 @@ internal sealed partial class MetalRenderHost
     public Func<ulong, bool>? DataWritePending =>
         MetalV2Diagnostics.DataLoadsOnDevice ? _dataWritePending ??= IsDataWordPending : null;
 
-    private bool IsDataWordPending(ulong address) =>
-        _gpuWrites.MayCover(address, sizeof(uint)) &&
-        _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
-        _gpuWrites.LastMatch.Origin != MetalGpuWriteOrigin.Unbounded;
+    // The program resolve thread asks as well as the worker: there the snapshot query reads the
+    // records without retiring any (PendingSerial retires, which a second thread doing corrupted
+    // the bucket dictionary - an IndexOutOfRangeException in Note on the worker, in split runs),
+    // and a read the worker raced teaches nothing, as an unbounded store does.
+    private bool IsDataWordPending(ulong address)
+    {
+        if (!_gpuWrites.MayCover(address, sizeof(uint)))
+        {
+            return false;
+        }
+
+        if (_relay.IsGpuQueueThread)
+        {
+            return _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
+                _gpuWrites.LastMatch.Origin != MetalGpuWriteOrigin.Unbounded;
+        }
+
+        return _gpuWrites.TryPendingSerialSnapshot(address, sizeof(uint), SignaledSerial(), out var pending, includeUnbounded: false) &&
+            pending != 0;
+    }
 
     // Resource tables are read straight from the backing, so a WRITE_DATA that patched one
     // and has yet to land would otherwise be read as the table it replaced.
@@ -2000,6 +2096,8 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendVoid(module.RectangleFunction, SelRelease);
                 ReleaseLibrary(module.RectangleLibrary);
             }
+
+            ReleaseRemappedFunctions(module);
         }
 
         _modules.Clear();

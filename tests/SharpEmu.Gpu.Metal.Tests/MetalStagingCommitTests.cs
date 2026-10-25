@@ -25,6 +25,17 @@ public sealed unsafe class MetalStagingCommitTests(ITestOutputHelper output)
     private const ulong GuestBase = 0x2_0000_0000;
     private const ulong Budget = 1024 * 1024;
 
+    // The default budget is 1/64 of the machine's memory, between 256 MB and 1 GB.
+    [Theory]
+    [InlineData(0UL, 256UL << 20)]
+    [InlineData(8UL << 30, 256UL << 20)]
+    [InlineData(16UL << 30, 256UL << 20)]
+    [InlineData(32UL << 30, 512UL << 20)]
+    [InlineData(64UL << 30, 1024UL << 20)]
+    [InlineData(128UL << 30, 1024UL << 20)]
+    public void TheDefaultBudgetScalesWithTheMachinesMemoryWithinItsBounds(ulong physical, ulong budget) =>
+        Assert.Equal(budget, MetalRenderHost.DefaultTransientCommitBytes(physical));
+
     [Fact]
     public void ATransferBetweenPacketsCommitsTheBufferOnceItsStagingPassesTheBudget()
     {

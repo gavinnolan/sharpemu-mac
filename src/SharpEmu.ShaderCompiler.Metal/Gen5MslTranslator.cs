@@ -146,6 +146,12 @@ public static partial class Gen5MslTranslator
         return true;
     }
 
+    /// <summary>The records a SHARPEMU_MSL_PC_PROBE in log mode keeps per flush.</summary>
+    public const int PcProbeLogRecords = 65536;
+
+    /// <summary>The words of one SHARPEMU_MSL_PC_PROBE log record of a program (probe index, then registers).</summary>
+    public static int PcProbeLogRecordWords(ulong hash) => CompilationContext.ProbeRecordWords(hash);
+
     /// <summary>How the translated shaders in this process came out. A shader whose
     /// control flow no MSL construct expresses falls back to the PC dispatcher, so the
     /// ratio is what says whether the structured emitter is covering a game's shaders;
@@ -227,6 +233,75 @@ public static partial class Gen5MslTranslator
                 ? probeHash
                 : 0;
 
+        // SHARPEMU_MSL_PC_PROBE=<hash>:<pc>:<nth>:<reg>/<reg>/...[:<condition>]: when an active lane of that program
+        // reaches the instruction at pc, it counts itself in the program's step-report word, and the
+        // nth one stores up to seven registers (state before the instruction) into the probe words,
+        // which the host prints as a [METAL-V2][STEP-CAP] line. The optional condition is an MSL
+        // expression over the register names (as_type<float>(v40) <= 0.0f) that a lane must also
+        // meet. With nth = log, every qualifying lane (up to PcProbeLogRecords per flush) stores up
+        // to 24 registers as one record, which the host appends to SHARPEMU_MSL_PC_PROBE_LOG. A
+        // diagnostic: it reads lanes' values without touching the program's results.
+        // Several probes may be given, separated by ';' (one per program): the host keeps a log region
+        // per probed program, so two programs of the same frame (a prepass and its base pass) can be
+        // compared record for record.
+        private static readonly (ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition)[] PcProbes =
+            (Environment.GetEnvironmentVariable("SHARPEMU_MSL_PC_PROBE") ?? string.Empty)
+                .Split(';', StringSplitOptions.RemoveEmptyEntries)
+                .Select(ParsePcProbe)
+                .Where(static probe => probe is not null)
+                .Select(static probe => probe!.Value)
+                .ToArray();
+
+        private static (ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition)? ParsePcProbe(string? value)
+        {
+            var parts = (value ?? string.Empty).Split(':');
+            if (parts.Length is not (4 or 5) ||
+                !ulong.TryParse(parts[0].Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash) ||
+                !uint.TryParse(parts[1].Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var pc) ||
+                !(uint.TryParse(parts[2], out var nth) || parts[2] == "log"))
+            {
+                return null;
+            }
+
+            var log = parts[2] == "log";
+            return (hash, pc, log ? uint.MaxValue : nth,
+                parts[3].Split('/', StringSplitOptions.RemoveEmptyEntries).Take(log ? 24 : 7).ToArray(),
+                parts.Length == 5 ? parts[4] : null);
+        }
+
+        /// <summary>
+        /// The words of one log record of a probed program: the index of the probe that wrote it among
+        /// all the probes given, then the registers, padded to the largest probe of that program (all
+        /// the log probes of a program share its report region, so several PCs of one program stay apart).
+        /// </summary>
+        internal static int ProbeRecordWords(ulong hash) =>
+            1 + PcProbes.Where(probe => probe.Hash == hash && probe.Nth == uint.MaxValue)
+                .Select(static probe => probe.Registers.Length).DefaultIfEmpty(0).Max();
+
+        private string PcProbeCode((ulong Hash, uint Pc, uint Nth, string[] Registers, string? Condition) probe)
+        {
+            var report = $"{ResourcesName}.{Gen5MslArgumentLayout.StepReportName}";
+            var condition = probe.Condition is null ? string.Empty : $" && ({probe.Condition})";
+            var log = probe.Nth == uint.MaxValue;
+            var recordWords = ProbeRecordWords(probe.Hash);
+            var text = new StringBuilder($"if (exec{condition} && {report} != nullptr) {{ uint sharpemu_probe_n = atomic_fetch_add_explicit({report}, 1u, memory_order_relaxed); ");
+            text.Append(log
+                ? $"if (sharpemu_probe_n < {PcProbeLogRecords}u) {{ atomic_store_explicit({report} + 1u + sharpemu_probe_n * {recordWords}u, {Array.IndexOf(PcProbes, probe)}u, memory_order_relaxed);"
+                : $"if (sharpemu_probe_n == {probe.Nth}u) {{");
+            for (var index = 0; index < probe.Registers.Length; index++)
+            {
+                var name = probe.Registers[index];
+                var value = name == "exec" ? "(exec ? 1u : 0u)" : $"as_type<uint>({name})";
+                var word = log ? $"1u + sharpemu_probe_n * {recordWords}u + {index + 1}u" : $"{index + 1}";
+                text.Append($" atomic_store_explicit({report} + {word}, {value}, memory_order_relaxed);");
+            }
+
+            text.Append(" } }");
+            return text.ToString();
+        }
+
         private string StepCapReportCode
         {
             get
@@ -277,22 +352,29 @@ public static partial class Gen5MslTranslator
                 ? watched
                 : -1;
 
-        // Narrows both vertex probes to one program, so what they report is not mixed
-        // with every other vertex shader in the frame.
-        private static readonly ulong DebugVertexHash =
-            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_HASH") is { Length: > 0 } text &&
-            ulong.TryParse(
-                text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text,
-                System.Globalization.NumberStyles.HexNumber,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out var only)
-                ? only
-                : 0;
+        // Narrows the debug switches to these programs (comma-separated), so what they report is not
+        // mixed with every other shader in the frame; unset (or nothing parsable) means every program.
+        private static readonly HashSet<ulong> DebugHashes =
+            (Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_HASH") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(static text => ulong.TryParse(
+                    text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text,
+                    System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var hash) ? hash : 0UL)
+                .Where(static hash => hash != 0)
+                .ToHashSet();
 
-        private bool DebugsThisProgram => DebugVertexHash == 0 || DebugVertexHash == _request.Hash;
+        private bool DebugsThisProgram => DebugHashes.Count == 0 || DebugHashes.Contains(_request.Hash);
 
         private static readonly bool DebugVertexPosition =
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_VS_POSITION") == "1";
+
+        // SHARPEMU_MSL_DEBUG_NO_DISCARD=1 (diagnostic): a pixel program never discards, whatever its valid mask
+        // says (SHARPEMU_MSL_DEBUG_HASH narrows it to one program). Geometry that appears with it was being killed
+        // by its own pixel program; geometry still missing never reached the pixel stage.
+        internal static readonly bool DebugNoDiscard =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_NO_DISCARD") == "1";
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
         private readonly uint[] _pixelInputCntl;
@@ -325,8 +407,29 @@ public static partial class Gen5MslTranslator
         /// them, so a barrier inside one would never be met by the other waves and the
         /// GPU hangs. Larger workgroups run each 32-wide simdgroup as a wave.</summary>
         private bool IsWave64 =>
-            _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
-            (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
+            (_waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
+                (ulong)_localSizeX * _localSizeY * _localSizeZ == 64) ||
+            IsBridgedMeshWave64;
+
+        /// <summary>An amplified wave64 mesh subgroup (Prospero's mesh shader): its threads are
+        /// numbered (merged-wave subgroup id &lt;&lt; 6) + lane and each exports its own vertex and
+        /// primitive, so a guest wave has to be all 64 lanes - two bridged simdgroups, several
+        /// waves per threadgroup. Their exchanges meet at a pair barrier of the wave's two
+        /// simdgroups instead of a threadgroup barrier, since the other waves need not be at
+        /// the same exchange (see <see cref="Wave64Barrier"/>).</summary>
+        private bool IsBridgedMeshWave64 => _stage == Gen5MslStage.Mesh && _meshInfo is { Amplified: true, Wave64: true };
+
+        /// <summary>Where the two halves of a bridged wave64 meet: a threadgroup barrier when
+        /// the wave is the whole threadgroup (compute), else the wave's own pair barrier. The
+        /// pair barrier fences this half's threadgroup writes, counts it in, and waits for the
+        /// other half to count in for the same exchange; both halves run the same sequence of
+        /// exchanges (their scalar state is the same), so each waits only for its partner.</summary>
+        private string Wave64Barrier => IsBridgedMeshWave64
+            ? "{ simdgroup_barrier(mem_flags::mem_threadgroup); sharpemu_wave_gen += 2u; " +
+              "if ((sharpemu_lane & 31u) == 0u) { atomic_fetch_add_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], 1u, memory_order_relaxed); } " +
+              "while (atomic_load_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], memory_order_relaxed) < sharpemu_wave_gen) { } " +
+              "simdgroup_barrier(mem_flags::mem_threadgroup); }"
+            : "threadgroup_barrier(mem_flags::mem_threadgroup);";
 
         /// <summary>A guest wave32 program: VCC is VCC_LO alone, so a mask write (V_CMP,
         /// a carry-out) leaves s107 untouched and VCCZ reads s106 only (EXECZ likewise reads
@@ -530,12 +633,13 @@ public static partial class Gen5MslTranslator
                 {
                     UsesPerVertexInputs = UsesVertexValueInputs,
                     UsesMipStatisticsConstant = UsesMipStatisticsConstant,
-                    ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition
+                    ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition && _request.Tessellation is null
                         ? EvaluateConstantPositions(_request.Program.Instructions, _request.ClipSpace)
                         : null,
                     CannotDiscard = _stage == Gen5MslStage.Pixel && _usesPixelValidMask && !_validMaskFromExec,
                     ColorOutputMask = _stage == Gen5MslStage.Pixel ? ColorOutputLocations(_pixelOutputBindings) : 0,
                     PersistentThreads = IsPersistentThreadsKernel(),
+                    Tessellation = _request.Tessellation,
                 };
                 return true;
             }
@@ -709,6 +813,21 @@ public static partial class Gen5MslTranslator
                 EmitInterpolantOutputMembers(source);
                 source.AppendLine("};");
                 source.AppendLine();
+                if (_request.Tessellation is { Role: Gen5TessellationRole.Domain } tessellator)
+                {
+                    if (_vertexInputsByPc.Count != 0)
+                    {
+                        throw new NotSupportedException("A domain program that fetches vertex attributes is not supported.");
+                    }
+
+                    // The tessellator's state is pipeline state; it is written into the source so
+                    // two domain programs that differ only in it never share a library or a state.
+                    source.AppendLine(
+                        $"// tessellator: partition={tessellator.Partition} " +
+                        $"output={(tessellator.OutputClockwise ? "cw" : "ccw")} max={tessellator.MaxFactor}");
+                    source.AppendLine($"[[patch(triangle, {tessellator.ControlPoints})]]");
+                }
+
                 source.AppendLine($"vertex Gen5VsOut {EntryPointName}(");
                 if (_vertexInputsByPc.Count != 0)
                 {
@@ -779,7 +898,13 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
             }
 
-            if (_stage == Gen5MslStage.Vertex)
+            if (_stage == Gen5MslStage.Vertex && _request.Tessellation is { Role: Gen5TessellationRole.Domain })
+            {
+                source.AppendLine("    uint sharpemu_patch_id [[patch_id]],");
+                source.AppendLine("    float3 sharpemu_patch_position [[position_in_patch]],");
+                source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
+            }
+            else if (_stage == Gen5MslStage.Vertex)
             {
                 source.AppendLine("    uint sharpemu_vertex_id [[vertex_id]],");
                 source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
@@ -799,6 +924,12 @@ public static partial class Gen5MslTranslator
                 // Compute threads and fragments map one-to-one onto guest lanes, so
                 // wave ops address the invocation's real simdgroup lane.
                 source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]],");
+            }
+
+            if (_stage == Gen5MslStage.Compute && _request.Tessellation is { Role: Gen5TessellationRole.Hull })
+            {
+                source.AppendLine($"    constant uint* sharpemu_hull_launch [[buffer({Gen5TessellationLaunch.HullLaunchBufferIndex})]],");
+                source.AppendLine($"    device const uint* sharpemu_hull_vertices [[buffer({Gen5TessellationLaunch.HullVertexBufferIndex})]],");
             }
 
             CloseParameterList(source);
@@ -821,14 +952,18 @@ public static partial class Gen5MslTranslator
                     source.AppendLine("    uint sharpemu_wave_set = 0u;");
                 }
 
-                if (LaneSpillPlan() is { } spills)
-                {
-                    // The per-thread copies of spilled SGPRs (see Ir.Gen5LaneSpillAnalysis).
-                    for (var copy = 0; copy < spills.CopyCount; copy++)
-                    {
-                        source.AppendLine($"    uint sharpemu_spill{copy} = 0u;");
-                    }
-                }
+            }
+            else if (IsBridgedMeshWave64)
+            {
+                // Each guest wave owns both slot sets of its own, at wave * WaveScratchDwords,
+                // and a pair-barrier counter its two halves count into (zeroed by the mesh
+                // declarations' seed block before the program starts).
+                var waves = Mesh.WavesPerThreadgroup;
+                source.AppendLine("    const uint sharpemu_lane = sharpemu_tg_index & 63u;");
+                source.AppendLine($"    threadgroup uint sharpemu_wave_scratch[{WaveScratchDwords * waves}];");
+                source.AppendLine($"    uint sharpemu_wave_set = (sharpemu_tg_index >> 6u) * {WaveScratchDwords}u;");
+                source.AppendLine($"    threadgroup atomic_uint sharpemu_wave_pair[{waves}];");
+                source.AppendLine("    uint sharpemu_wave_gen = 0u;");
             }
             if (!HasRealWaveLanes)
             {
@@ -837,6 +972,15 @@ public static partial class Gen5MslTranslator
                 // translator's no-subgroup fallback. Ballots degrade to bit 0 in the
                 // prelude and shuffle-family selects resolve to the lane's own value.
                 source.AppendLine("    const uint sharpemu_lane = 0u;");
+            }
+
+            if (LaneSpillPlan() is { } spills)
+            {
+                // The per-thread copies of spilled SGPRs (see Ir.Gen5LaneSpillAnalysis).
+                for (var copy = 0; copy < spills.CopyCount; copy++)
+                {
+                    source.AppendLine($"    uint sharpemu_spill{copy} = 0u;");
+                }
             }
             if (_usesLds)
             {
@@ -1027,18 +1171,22 @@ public static partial class Gen5MslTranslator
                 // EXP.VM publishes EXEC as the pixel-valid mask. EXEC can be
                 // restored afterward, so only malformed shaders without VM
                 // fall back to the final EXEC value.
-                source.AppendLine(
-                    _usesPixelValidMask
-                        ? "    if (!pixel_valid_mask_active)"
-                        : "    if (!exec)");
-                source.AppendLine("    {");
-                source.AppendLine("        discard_fragment();");
-                source.AppendLine("    }");
+                if (!(DebugNoDiscard && DebugsThisProgram))
+                {
+                    source.AppendLine(
+                        _usesPixelValidMask
+                            ? "    if (!pixel_valid_mask_active)"
+                            : "    if (!exec)");
+                    source.AppendLine("    {");
+                    source.AppendLine("        discard_fragment();");
+                    source.AppendLine("    }");
+                }
+
                 source.AppendLine("    return sharpemu_out;");
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
-                if (DebugVertexPosition && DebugsThisProgram)
+                if (DebugVertexPosition && DebugsThisProgram && _request.Tessellation is null)
                 {
                     // SHARPEMU_MSL_DEBUG_VS_POSITION=1 throws the program's own clip
                     // position away and puts every triple of vertices across the whole
@@ -1266,7 +1414,11 @@ public static partial class Gen5MslTranslator
                 EmitLayoutInitialState(source);
             }
 
-            if (_stage == Gen5MslStage.Compute)
+            if (_stage == Gen5MslStage.Compute && _request.Tessellation is { Role: Gen5TessellationRole.Hull } hull)
+            {
+                EmitHullLaunchState(source, hull);
+            }
+            else if (_stage == Gen5MslStage.Compute)
             {
                 source.AppendLine("    v[0] = sharpemu_local_id.x;");
                 source.AppendLine("    v[1] = sharpemu_local_id.y;");
@@ -1298,6 +1450,10 @@ public static partial class Gen5MslTranslator
             else if (_stage == Gen5MslStage.Pixel)
             {
                 EmitPixelInputState(source);
+            }
+            else if (_stage == Gen5MslStage.Vertex && _request.Tessellation is { Role: Gen5TessellationRole.Domain } domain)
+            {
+                EmitDomainLaunchState(source, domain);
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
@@ -1333,6 +1489,45 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        // The merged local/hull wave as the hardware's hull stage starts it (Gen5TessellationLaunch):
+        // one wave64 per threadgroup over PatchesPerGroup patches. s2 is the threadgroup's off-chip
+        // offset, s3 the merged wave info (local and hull thread counts, one control point each), s4
+        // its tessellation-factor offset; v0 the patch, v1 the patch within the group and the control
+        // point, v2 the local half's vertex index, v3 its thread within the group (its LDS slot), v5
+        // the instance. s[0:1] and the user data come from the layout like any user data.
+        private static void EmitHullLaunchState(StringBuilder source, Gen5TessellationLaunch hull)
+        {
+            var patches = hull.PatchesPerGroup;
+            var points = hull.ControlPoints;
+            source.AppendLine("    uint sharpemu_hull_lane = sharpemu_tg_index & 63u;");
+            source.AppendLine($"    uint sharpemu_hull_first = sharpemu_group_id.x * {patches}u;");
+            source.AppendLine("    uint sharpemu_hull_patches = sharpemu_hull_launch[0] > sharpemu_hull_first");
+            source.AppendLine($"        ? min({patches}u, sharpemu_hull_launch[0] - sharpemu_hull_first) : 0u;");
+            source.AppendLine($"    uint sharpemu_hull_points = sharpemu_hull_patches * {points}u;");
+            source.AppendLine($"    s[2] = sharpemu_group_id.x * {hull.OffchipBlockBytes}u;");
+            source.AppendLine("    s[3] = sharpemu_hull_points | (sharpemu_hull_points << 8);");
+            source.AppendLine($"    s[4] = sharpemu_hull_first * {hull.FactorBytesPerPatch}u;");
+            source.AppendLine($"    v[0] = sharpemu_hull_first + sharpemu_hull_lane / {points}u;");
+            source.AppendLine($"    v[1] = (sharpemu_hull_lane / {points}u) | ((sharpemu_hull_lane % {points}u) << 8);");
+            source.AppendLine("    v[2] = sharpemu_hull_lane < sharpemu_hull_points");
+            source.AppendLine($"        ? sharpemu_hull_vertices[sharpemu_hull_first * {points}u + sharpemu_hull_lane] : 0u;");
+            source.AppendLine("    v[3] = sharpemu_hull_lane;");
+            source.AppendLine("    v[5] = sharpemu_hull_launch[1];");
+            source.AppendLine("    active = true;");
+        }
+
+        // The domain program at one point the tessellator made: its barycentric u and v in v5/v6, the
+        // patch within its hull threadgroup in v7, the patch in v8 and that group's off-chip offset in s4.
+        private static void EmitDomainLaunchState(StringBuilder source, Gen5TessellationLaunch domain)
+        {
+            var patches = domain.PatchesPerGroup;
+            source.AppendLine("    v[5] = as_type<uint>(sharpemu_patch_position.x);");
+            source.AppendLine("    v[6] = as_type<uint>(sharpemu_patch_position.y);");
+            source.AppendLine($"    v[7] = sharpemu_patch_id % {patches}u;");
+            source.AppendLine("    v[8] = sharpemu_patch_id;");
+            source.AppendLine($"    s[4] = (sharpemu_patch_id / {patches}u) * {domain.OffchipBlockBytes}u;");
+        }
+
         private static void EmitComputeSystemRegister(
             StringBuilder source,
             uint? scalarRegister,
@@ -1361,7 +1556,7 @@ public static partial class Gen5MslTranslator
             // block hands over with no half's LDS access still in flight.
             if (emitted && _ldsPhase != LdsPhase.None && !(terminator.Kind == TerminatorKind.Jump && terminator.TrueTarget == ExitTarget))
             {
-                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                Line(Wave64Barrier);
             }
 
             return emitted;
@@ -1413,17 +1608,33 @@ public static partial class Gen5MslTranslator
         private bool _laneSpillPlanBuilt;
         private Ir.Gen5LaneSpillPlan? _laneSpillPlan;
 
-        /// <summary>The wave64 lane spills whose reloads read a per-thread copy instead of
-        /// the exchange; null when there are none or the option is off.</summary>
+        /// <summary>The lane spills whose reloads read a per-thread copy instead of the lane:
+        /// for a wave64 compute program an optimization (no cross-half exchange), for a stage
+        /// that models a single lane (sharpemu_lane is 0 in every thread) what makes them work
+        /// at all - there a writelane to lane 1 lands nowhere and its reload read lane 0's
+        /// spill (Black Myth: Wukong's hand base pass placed vertices from the wrong scalar).
+        /// Null when there are none, or for wave64 compute when the option is off.</summary>
         private Ir.Gen5LaneSpillPlan? LaneSpillPlan()
         {
             if (!_laneSpillPlanBuilt)
             {
                 _laneSpillPlanBuilt = true;
-                if (_options.LaneSpillCopies && _stage == Gen5MslStage.Compute && IsWave64)
+                if (!HasRealWaveLanes)
                 {
-                    // A compute launch loads the thread IDs into v0..v2.
-                    _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program, firstUndefinedVector: 3);
+                    // Which VGPRs the launch defines differs by stage; treating them all as
+                    // defined only asks that a writelane reach each reload first.
+                    _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program);
+                }
+                else if (_options.LaneSpillCopies)
+                {
+                    // Real lanes too: the parked value is scalar, so the copy is what the lane holds,
+                    // and a lane a partial simdgroup (or the inactive half of a narrow wave64) does
+                    // not have keeps nothing to shuffle from - the hardware's lanes always exist. A
+                    // compute launch loads the thread IDs into v0..v2; any other stage's inputs are
+                    // treated as defined.
+                    _laneSpillPlan = _stage == Gen5MslStage.Compute
+                        ? Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program, firstUndefinedVector: 3)
+                        : Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program);
                 }
             }
 
@@ -1464,6 +1675,14 @@ public static partial class Gen5MslTranslator
                     Line($"// 0x{instruction.Pc:X4} {instruction.Opcode}");
                 }
 
+                foreach (var pcProbe in PcProbes)
+                {
+                    if (pcProbe.Hash == _request.Hash && pcProbe.Pc == instruction.Pc)
+                    {
+                        Line(PcProbeCode(pcProbe));
+                    }
+                }
+
                 if (IsWave64 && _usesLds)
                 {
                     var barriers = LdsBarriersBefore();
@@ -1471,7 +1690,7 @@ public static partial class Gen5MslTranslator
                     {
                         if (barriers.Contains(instruction.Pc))
                         {
-                            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                            Line(Wave64Barrier);
                         }
                     }
                     else
@@ -1489,7 +1708,7 @@ public static partial class Gen5MslTranslator
                         {
                             if (_ldsPhase != LdsPhase.None && _ldsPhase != nextPhase)
                             {
-                                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                                Line(Wave64Barrier);
                             }
 
                             _ldsPhase = nextPhase;

@@ -70,6 +70,10 @@ public sealed class StageCompileOptions
     public ComputeInputInfo? ComputeInfo { get; set; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; set; }
 
+    // The stage of a tessellated draw this program runs as (ShaderCompileRequest.Tessellation):
+    // the hull kernel for a compute lookup, the domain program for a vertex one.
+    public Gen5TessellationLaunch? Tessellation { get; set; }
+
     // A resolver refills one reusable instance for every lookup of a stage instead of
     // allocating one per draw; whatever keeps options past the lookup (a new entry, a
     // compile, the corpus) takes Detached(), which copies a reusable instance.
@@ -214,6 +218,11 @@ internal sealed class ShaderProgramCache
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
     private readonly Dictionary<(ProgramKey Key, string Library), ProgramSourceEntry> _linkedPrograms = new();
 
+    // Programs whose resource plan was refused, with the device data loads it was planned under: planning
+    // one again costs as much as the first time (a scalar graph, its disk cache key, the resource walk)
+    // and refuses it the same way, so its dispatches are skipped at once until those loads change.
+    private readonly Dictionary<ProgramKey, (string Message, int DeviceDataLoads)> _rejectedPlans = new(ProgramKeyComparer.Instance);
+
     // Linking a program with a large hit-group table and planning it takes seconds (about 3 s for a table of 1,381
     // records), and a game that streams callees rebuilds its tables as it plays. With DeferLinking, TryGetProgram
     // links a new layout on a worker and reports the program as not ready, so its dispatches are skipped as they are
@@ -272,8 +281,11 @@ internal sealed class ShaderProgramCache
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
+    // SHARPEMU_RESOURCE_CACHE_KEYS=<n> sets the keys per generation (SHARPEMU_RESOURCE_CACHE_MB the bytes).
     private readonly ResourceMaterializationCache? _materializations =
-        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null : new();
+        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null
+        : int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_KEYS"), out var keys) && keys > 0 ? new(keys)
+        : new();
     private ulong _nextProgramId;
 
     public ResourceMaterializationCache? Materializations => _materializations;
@@ -490,6 +502,12 @@ internal sealed class ShaderProgramCache
             var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
                 source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(_staticState));
             _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
+            if (entry is null && _rejectedPlans.Count != 0 &&
+                _rejectedPlans.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out var rejected) &&
+                rejected.DeviceDataLoads == DeviceDataLoads.CountFor(source.Hash))
+            {
+                throw new ShaderProgramRejectedException(rejected.Message);
+            }
         }
         var sourceWasCached = entry is not null;
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -521,7 +539,17 @@ internal sealed class ShaderProgramCache
             : null;
         if (entry is null)
         {
-            entry = CreateEntry(source, options.Detached());
+            var deviceDataLoads = DeviceDataLoads.CountFor(source.Hash);
+            try
+            {
+                entry = CreateEntry(source, options.Detached());
+            }
+            catch (ShaderProgramRejectedException exception)
+            {
+                _rejectedPlans[BuildProgramKey(source)] = (exception.Message, deviceDataLoads);
+                throw;
+            }
+
             key = BuildProgramKey(source);
             _programs.Add(key, entry);
             ShaderCacheCounters.CountProgram();
@@ -1105,6 +1133,8 @@ internal sealed class ShaderProgramCache
                 {
                     _staticState.Add(options.VertexInterpolants[index]);
                 }
+
+                AddTessellationState(options.Tessellation);
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
@@ -1130,8 +1160,26 @@ internal sealed class ShaderProgramCache
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
+                AddTessellationState(options.Tessellation);
                 break;
         }
+    }
+
+    private void AddTessellationState(Gen5TessellationLaunch? tessellation)
+    {
+        if (tessellation is null)
+        {
+            _staticState.Add(0);
+            return;
+        }
+
+        _staticState.Add(1u + (uint)tessellation.Role);
+        _staticState.Add(tessellation.PatchesPerGroup);
+        _staticState.Add(tessellation.ControlPoints);
+        _staticState.Add(tessellation.OffchipBlockBytes);
+        _staticState.Add(tessellation.FactorBytesPerPatch);
+        _staticState.Add((uint)tessellation.Partition | (tessellation.OutputClockwise ? 0x100u : 0u));
+        _staticState.Add(tessellation.MaxFactor);
     }
 
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
@@ -1602,6 +1650,7 @@ internal sealed class ShaderProgramCache
                     ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     PrimitiveShader = options.PrimitiveShader,
+                    Tessellation = options.Tessellation,
                     MeshPerVertexParameterMask = options.MeshPerVertexParameterMask,
                     VertexInterpolants = options.VertexInterpolants,
                     VertexInputs = entry.VertexInputs,
@@ -1672,7 +1721,7 @@ internal sealed class ShaderProgramCache
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
                     sharedInt64Atomics, _host.ExecGuardElisionEnabled, signedZeroInfNanPreserve, _host.ComputeWave64SubgroupNative,
-                    _host.ComputeRunsOn32LaneSubgroups(options.ComputeInfo!), imageInt64Atomics);
+                    _host.ComputeRunsOn32LaneSubgroups(options.ComputeInfo!), imageInt64Atomics, options.Tessellation);
         }
     }
 
@@ -1718,9 +1767,10 @@ internal sealed class ShaderProgramCache
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
         bool signedZeroInfNanPreserve, bool hostWave64Supported = false, bool hostComputeSubgroup32 = false,
-        bool imageInt64Atomics = false) =>
+        bool imageInt64Atomics = false, Gen5TessellationLaunch? tessellation = null) =>
         new(plan, resources, layout)
         {
+            Tessellation = tessellation,
             WaveSize = info.WaveSize,
             HostWave64Supported = info.WaveSize == 64 && hostWave64Supported,
             HostComputeSubgroup32 = info.WaveSize == 64 && !hostWave64Supported && hostComputeSubgroup32,

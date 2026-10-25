@@ -118,6 +118,10 @@ internal sealed class MetalImagePageOwners
     private readonly List<ResourceSlotIdentifier>?[]?[] _firstLevel =
         new List<ResourceSlotIdentifier>?[]?[1 << FirstLevelBits];
 
+    // How many times each page's owner list changed. A memo of a lookup over a range is stale
+    // once the sum over its pages moved (they only grow, so an equal sum is no change).
+    private readonly long[]?[] _versions = new long[]?[1 << FirstLevelBits];
+
     // Live owners per 64 KiB page. A leaf, once published, is never replaced or freed,
     // so a lock-free reader that finds it may keep reading it.
     private readonly int[]?[] _liveOwners = new int[]?[1 << CountRootBits];
@@ -145,6 +149,7 @@ internal sealed class MetalImagePageOwners
         for (var page = first; page < lastExclusive; page++)
         {
             GetOrCreate(page).Add(imageIdentifier);
+            BumpVersion(page);
         }
     }
 
@@ -162,9 +167,41 @@ internal sealed class MetalImagePageOwners
         for (var page = first; page < lastExclusive; page++)
         {
             Find(page)?.Remove(imageIdentifier);
+            BumpVersion(page);
         }
 
         AdjustLiveOwners(address, size, -1);
+    }
+
+    private void BumpVersion(ulong page)
+    {
+        ref var bucket = ref _versions[page >> SecondLevelBits];
+        bucket ??= new long[BucketEntries];
+        Volatile.Write(ref bucket[page & (BucketEntries - 1)], bucket[page & (BucketEntries - 1)] + 1);
+    }
+
+    /// <summary>
+    /// The sum of the owner-list change counts over the pages of the range: equal sums mean no
+    /// image was added to or removed from any of them in between. Changes happen under the image
+    /// cache lock; a reader without it may see an older sum, never a newer one paired with older lists.
+    /// </summary>
+    public long VersionSum(ulong address, ulong size)
+    {
+        if (!TryGetPageRange(address, size, out var first, out var lastExclusive))
+        {
+            return 0;
+        }
+
+        long sum = 0;
+        for (var page = first; page < lastExclusive; page++)
+        {
+            if (Volatile.Read(ref _versions[page >> SecondLevelBits]) is { } bucket)
+            {
+                sum += Volatile.Read(ref bucket[page & (BucketEntries - 1)]);
+            }
+        }
+
+        return sum;
     }
 
     private List<ResourceSlotIdentifier> GetOrCreate(ulong page)

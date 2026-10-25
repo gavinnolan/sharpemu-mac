@@ -111,7 +111,11 @@ fails if its closure contains Vulkan, MoltenVK, SDL3, Silk.NET, the Windows or
 X11 Avalonia backends, or the Vulkan and SDL adapter assemblies
 (`build/platforms/macos/macos.targets`). The finished output must also contain
 no forbidden native libraries, and every Mach-O file must have an x86-64 slice
-(`build/platforms/macos/check-macos-output.sh`).
+(`build/platforms/macos/check-macos-output.sh`). The one exception is the
+two-process split's native GPU host (`src/SharpEmu.GpuHost`, osx-arm64, used
+when `SHARPEMU_GPU_PROCESS=1`), whose publish output is checked for an arm64
+slice instead. `build-app.sh` bundles it in `Contents/MacOS/gpuhost/`
+(`SHARPEMU_MAC_GPU_HOST=0` leaves it out).
 
 ## Signing and entitlements
 

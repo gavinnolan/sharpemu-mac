@@ -277,8 +277,18 @@ public sealed partial class MetalImageBudgetTests
             Assert.Equal(1, rig.Cache.FencedWritebackCount);
             Assert.False(rig.Pages.Allows(GuestBase, FaultKind.Write));
 
+            // A binding's writeback keeps its completed fence a while, for the next writeback of
+            // the range to take back, and lets it go once that many submissions have passed.
             rig.Harness.Submit();
             rig.Harness.Begin();
+            rig.Cache.Collect();
+            Assert.Equal(1, rig.Cache.FencedWritebackCount);
+            for (var submission = 0; submission < 64; submission++)
+            {
+                rig.Harness.Submit();
+                rig.Harness.Begin();
+            }
+
             rig.Cache.Collect();
             Assert.Equal(0, rig.Cache.FencedWritebackCount);
             Assert.Equal(watches - (long)(ImageSize / TrackerLayout.PageBytes), rig.Pages.LiveWriteWatches);
@@ -287,6 +297,27 @@ public sealed partial class MetalImageBudgetTests
         {
             RestorePageGuardFatals(previous);
         }
+    }
+
+    // A completed fence that stays for the next writeback of its range costs a guest store
+    // into it one fault: the store lands without waiting and the watch is gone after it.
+    [Fact]
+    public void AGuestStoreIntoACompletedRetainedFenceLandsWithoutWaiting()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.WriteGuest(GuestBase, MetalTileOracle.Pattern((int)ImageSize, 0x5A));
+        rig.Acquire(GuestBase, ImageRole.ColorTarget);
+        rig.Cache.FlushGpuWrites(GuestBase, ImageSize, MetalWritebackCause.ImageOverlap);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        rig.Cache.Collect();
+        Assert.Equal(1, rig.Cache.FencedWritebackCount);
+        Assert.False(rig.Pages.Allows(GuestBase, FaultKind.Write));
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + 0x40, 8));
+        Assert.Equal((0L, 0L), rig.Cache.FenceWaitCounts);
+        Assert.Equal(0, rig.Cache.FencedWritebackCount);
     }
 
     // The same range written back in submission after submission the GPU has not reached is one

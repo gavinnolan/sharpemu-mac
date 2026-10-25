@@ -588,15 +588,19 @@ public static partial class Gen5MslTranslator
                 case Gen5MslStage.Pixel:
                     // EXP.VM publishes EXEC as the pixel-valid mask; a program without
                     // VM falls back to the final EXEC value.
-                    AppendIndented(
-                        text,
-                        _usesPixelValidMask
-                            ? "if (!pixel_valid_mask_active)"
-                            : "if (!exec)",
-                        indent);
-                    AppendIndented(text, "{", indent);
-                    AppendIndented(text, "discard_fragment();", indent + 1);
-                    AppendIndented(text, "}", indent);
+                    if (!(DebugNoDiscard && DebugsThisProgram))
+                    {
+                        AppendIndented(
+                            text,
+                            _usesPixelValidMask
+                                ? "if (!pixel_valid_mask_active)"
+                                : "if (!exec)",
+                            indent);
+                        AppendIndented(text, "{", indent);
+                        AppendIndented(text, "discard_fragment();", indent + 1);
+                        AppendIndented(text, "}", indent);
+                    }
+
                     AppendIndented(text, "return sharpemu_out;", indent);
                     return;
                 case Gen5MslStage.Vertex:

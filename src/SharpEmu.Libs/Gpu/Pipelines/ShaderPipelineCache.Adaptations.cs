@@ -17,6 +17,11 @@ internal sealed partial class ShaderPipelineCache
     private const int WorkGroupRegisterOfCopyKernel = 12;
     private const uint MaxCopyKernelSourceBytes = 16 * 1024 * 1024;
 
+    // The program is the masked-copy kernel TrySubmitMaskedDwordCopyKernel may replace.
+    private static bool IsMaskedDwordCopyKernel(Gen5ShaderProgram program) =>
+        program.Instructions.Count == MaskedDwordCopyOpcodes.Length &&
+        HasOpcodes(program.Instructions, MaskedDwordCopyOpcodes);
+
     // Replaces only the exact masked-copy kernel shape; its writes land in command order over the guest range.
     private bool TrySubmitMaskedDwordCopyKernel(
         Gen5ShaderProgram program,

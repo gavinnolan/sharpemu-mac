@@ -503,6 +503,94 @@ internal static class Gen5NggFixtures
         return shader;
     }
 
+    /// <summary>An amplified wave64 subgroup (Prospero's mesh shader): one ES vertex in, up
+    /// to 128 vertices and 128 primitives out, so two 64-lane waves.</summary>
+    public static Gen5NggStageInfo AmplifiedStageInfo { get; } = StageInfo with
+    {
+        VerticesPerSubgroup = 1,
+        PrimitivesPerSubgroup = 0,
+        MaxOutputPerSubgroup = 128,
+        PrimitiveAmplificationFactor = 128,
+        IsWave64 = true,
+        AmplifiedVerticesOut = 128,
+    };
+
+    /// <summary>The thread the amplified fixture's triangle starts at by default: lane 36 of
+    /// the second wave, in the upper half of that wave.</summary>
+    public const uint AmplifiedFirstVertex = 100;
+
+    /// <summary>The shape of Black Myth: Wukong's Nanite rasterizer, reduced. A thread numbers
+    /// itself (merged-wave subgroup id &lt;&lt; 6) + V_MBCNT over both halves, asks for 103 vertices
+    /// and one primitive, and exports its own vertex: x = 0.8 * value - 0.8 and
+    /// y = 1.6 * (value &amp; 1) - 0.8, value = thread - 100 + (workgroup ^ 1) * 64, the workgroup
+    /// being its ES vertex index. Primitive 0 joins threads 100/101/102, so only workgroup 1
+    /// puts its triangle through the screen center, and only if the lanes, the second wave
+    /// and the workgroup index all line up.</summary>
+    /// <para>With <paramref name="readLane"/> every thread also adds
+    /// V_READLANE(lane, readLane) - readLane, which is zero only when the read reaches the
+    /// named lane: for a triangle in the low half of a wave and a lane in its high half,
+    /// that is the bridged exchange between the wave's two simdgroups.</para>
+    public static Gen5ShaderProgram AmplifiedWave64Triangle(uint firstVertex = AmplifiedFirstVertex, uint? readLane = null)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new Gen5ShaderInstruction(
+                pc, encoding, opcode, [word], sources, destinations, control));
+            pc += sizeof(uint);
+        }
+
+        var minusOne = new Gen5Operand(Gen5OperandKind.EncodedConstant, 193);
+        Add("VMbcntLoU32B32", Gen5ShaderEncoding.Vop3, [minusOne, Inline(0)], [Vector(0)]);
+        Add("SBfeU32", Gen5ShaderEncoding.Sop2, [Scalar(3), Literal(0x00040018)], [Scalar(20)]);
+        Add("VMbcntHiU32B32", Gen5ShaderEncoding.Vop3, [minusOne, Vector(0)], [Vector(0)]);
+        Add("VLshlAddU32", Gen5ShaderEncoding.Vop3, [Scalar(20), Inline(6), Vector(0)], [Vector(4)]);
+
+        Add("VXorB32", Gen5ShaderEncoding.Vop2, [Inline(1), Vector(Gen5NggExports.EsVertexIndexRegister)], [Vector(30)]);
+        Add("VLshlrevB32", Gen5ShaderEncoding.Vop2, [Inline(6), Vector(30)], [Vector(30)]);
+        Add("VAddI32", Gen5ShaderEncoding.Vop2, [Literal(unchecked((uint)-(int)firstVertex)), Vector(4)], [Vector(14)]);
+        Add("VAddI32", Gen5ShaderEncoding.Vop2, [Vector(30), Vector(14)], [Vector(14)]);
+        if (readLane is { } lane)
+        {
+            Add("VReadlaneB32", Gen5ShaderEncoding.Vop3, [Vector(0), Literal(lane)], [Scalar(21)]);
+            Add("SAddI32", Gen5ShaderEncoding.Sop2, [Scalar(21), Literal(unchecked((uint)-(int)lane))], [Scalar(21)]);
+            Add("VAddI32", Gen5ShaderEncoding.Vop2, [Scalar(21), Vector(14)], [Vector(14)]);
+        }
+
+        Add("VCvtF32I32", Gen5ShaderEncoding.Vop1, [Vector(14)], [Vector(15)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(0.8f)), Vector(15)], [Vector(16)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(16)], [Vector(16)]);
+        Add("VAndB32", Gen5ShaderEncoding.Vop2, [Inline(1), Vector(14)], [Vector(17)]);
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(17)], [Vector(18)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(1.6f)), Vector(18)], [Vector(19)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(19)], [Vector(19)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Inline(0)], [Vector(20)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(1.0f))], [Vector(21)]);
+
+        Add("SMovB32", Gen5ShaderEncoding.Sop1,
+            [Literal((firstVertex + 3) | (1u << Gen5NggExports.AllocationPrimitiveCountShift))], [Scalar(124)]);
+        Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(16), Vector(19), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(15), Vector(20), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstParameterTarget, 0xF, false, false, false));
+        var connectivity =
+            (firstVertex << (0 * Gen5NggExports.PrimitiveIndexStride)) |
+            ((firstVertex + 1) << (1 * Gen5NggExports.PrimitiveIndexStride)) |
+            ((firstVertex + 2) << (2 * Gen5NggExports.PrimitiveIndexStride));
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(connectivity)], [Vector(22)]);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(22), Vector(22), Vector(22), Vector(22)], [],
+            new Gen5ExportControl(Gen5NggExports.PrimitiveTarget, 0x1, false, true, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 
     private static Gen5Operand Literal(uint value) => new(Gen5OperandKind.LiteralConstant, value);

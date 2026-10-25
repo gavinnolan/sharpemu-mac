@@ -11,6 +11,10 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 
 public sealed partial class RenderExecutor
 {
+    private static readonly bool DropMixedSampleDepth =
+        Environment.GetEnvironmentVariable("SHARPEMU_MIXED_SAMPLES") == "drop-depth";
+    private static int _mixedSampleDepthWarned;
+
     // Every draw resolves its targets against layer zero of the view range.
     private const uint DrawLayerOffset = 0;
 
@@ -357,7 +361,22 @@ public sealed partial class RenderExecutor
             }
             else if (attachmentSamples != target.Samples)
             {
-                throw _host.Fatal($"Mixed color and depth sample counts are not supported: color={attachmentSamples} depth={target.Samples}.");
+                if (!DropMixedSampleDepth)
+                {
+                    throw _host.Fatal($"Mixed color and depth sample counts are not supported: color={attachmentSamples} depth={target.Samples}.");
+                }
+
+                // SHARPEMU_MIXED_SAMPLES=drop-depth (experimental): a pass that tests 1-sample color
+                // against multisampled depth (Ghost of Tsushima's checkerboard) is drawn without its
+                // depth attachment, depth and stencil tests off, instead of stopping the GPU.
+                if (Interlocked.Exchange(ref _mixedSampleDepthWarned, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU][WARN] A pass mixing color and depth sample counts is drawn without its depth: color={attachmentSamples} depth={target.Samples}.");
+                }
+
+                state.Depth = default;
+                goto DepthDone;
             }
 
             var loadState = depth.LoadState;
@@ -385,6 +404,7 @@ public sealed partial class RenderExecutor
                 StencilClear: depth.Target.State.StencilClearEnabled);
         }
 
+    DepthDone:
         if (state.ColorCount == 0 && !state.Depth.HasTarget)
         {
             rendering.Width = _host.Limits.MaxFramebufferWidth;

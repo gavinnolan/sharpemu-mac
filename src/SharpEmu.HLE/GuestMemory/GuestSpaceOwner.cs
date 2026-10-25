@@ -65,6 +65,12 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
 
     public ulong BackingSize => _views.Size;
 
+    /// <summary>What another process needs to map the backing; null unless the host made it shareable.</summary>
+    public GuestBackingExport? BackingExport => _views.BackingExport;
+
+    /// <summary>The shared table of the backing's views; null unless the backing is shareable.</summary>
+    public GuestViewTable? ViewTable => _views.ViewTable;
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(CpuMappedCopyObservation original,
         out CpuMappedReadValidation? validation)
     {
@@ -820,6 +826,8 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
                     ? explicitHost.ChangeDerivedAccess(start, stop - start, originalGuestAccess.Value, protection, ordinaryEnrollment)
                     : _host.ChangeAccess(start, stop - start, protection);
                 if (!changed) return false;
+                // A shareable backing logs it for the process that replicates its views.
+                if (range.Kind == RangeKind.Backed) _views.ViewTable?.Protect(start, stop - start, protection);
             }
             range = _mapped.FindAtOrAbove(range.Address + range.Size);
         }

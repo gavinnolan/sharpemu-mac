@@ -135,6 +135,15 @@ public static partial class Gen5MslTranslator
                     }
 
                     var lane = Temp("uint", $"({RawSource(instruction, 1)}) & 31u");
+                    if (_stage == Gen5MslStage.Pixel && !IsSingleLaneStage)
+                    {
+                        // A fragment that was never launched has no thread to shuffle from
+                        // (undefined in MSL); its guest lane holds the scan value below it.
+                        // Ghost of Tsushima reads a wave minimum from lane 31 and loops until
+                        // it reaches 255, so a stray value there hung the GPU.
+                        lane = Temp("uint", $"sharpemu_present_lane({lane})");
+                    }
+
                     StoreScalar(
                         instruction.Destinations[0].Value,
                         Temp("uint", ShuffleLane(value, lane)));
@@ -1921,6 +1930,17 @@ public static partial class Gen5MslTranslator
             // 0 with it and otherwise leaves the destination lane as it was.
             var sourceActive = Temp("bool", LaneActiveExpression(targetLane));
             var invalid = (control.OperandSelect & 2) != 0 ? "0u" : $"v[{DestinationVector(instruction)}]";
+            if (_stage == Gen5MslStage.Pixel && !IsSingleLaneStage)
+            {
+                // A partner fragment that was never launched is not an EXEC-clear guest lane:
+                // the guest wave has it, and its reductions enable it and give it the identity.
+                // The reading lane's own value stands in for that identity in an idempotent
+                // reduction (min, max, and, or), where BOUND_CTRL's zero made Ghost of
+                // Tsushima's wave minimum 0 forever.
+                var sourcePresent = Temp("bool", $"((sharpemu_ballot(true) >> ({targetLane})) & 1u) != 0u");
+                return Temp("uint", $"{sourceActive} ? {shuffled} : ({sourcePresent} ? {invalid} : {value})");
+            }
+
             return Temp("uint", $"{sourceActive} ? {shuffled} : {invalid}");
         }
 

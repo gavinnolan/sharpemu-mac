@@ -68,10 +68,31 @@ public struct MipLevelLayout
     public uint Height;
 }
 
-[InlineArray(ImageDescription.MaxLevels)]
+// The levels of an image's mip chain. Descriptions are copied by value - several times a draw,
+// in every request, target and attachment state - so the levels are held out of line rather than
+// as sixteen inline entries (384 of an ImageRequest's 616 bytes), in an array nothing changes once
+// a description holds it: a write replaces the array instead of changing it, so the copies that
+// share it never see each other's writes. A level past those written reads as all zeros.
 public struct MipLevelLayouts
 {
-    private MipLevelLayout _first;
+    private MipLevelLayout[]? _levels;
+
+    public MipLevelLayout this[int index]
+    {
+        readonly get => _levels is { } levels && (uint)index < (uint)levels.Length ? levels[index] : default;
+        set
+        {
+            if ((uint)index >= ImageDescription.MaxLevels)
+            {
+                throw new IndexOutOfRangeException($"A mip level is past the chain: level={index}.");
+            }
+
+            var levels = new MipLevelLayout[Math.Max(index + 1, _levels?.Length ?? 0)];
+            _levels?.CopyTo(levels, 0);
+            levels[index] = value;
+            _levels = levels;
+        }
+    }
 }
 
 // Guest geometry, formats and memory placement of one image; copied by value.

@@ -182,7 +182,7 @@ public static partial class AgcExports
             {
                 _pipelines = new ShaderPipelineCache(_context, pipelineHost, GuestGpu.Current, CreateShaderHeaderRegistry(_context));
                 _executor = new RenderExecutor(renderHost, _pipelines);
-                if (host is IConcurrentResolveHost concurrentHost)
+                if (host is IConcurrentResolveHost { ResolvesConcurrently: true } concurrentHost)
                 {
                     _parallel = new ParallelProgramPrefetch(_executor, renderHost, concurrentHost);
                     _executor.Prefetch = _parallel;
@@ -314,11 +314,74 @@ public static partial class AgcExports
         // The resolution worker, so the render thread can order it with the stream's other work.
         public ParallelProgramPrefetch? Prefetch => _parallel;
 
-        private readonly Queue<PendingDraw> _pendingDraws = new();
+        // Host work ordered behind the deferred draws before it (a barrier) rather than draining them.
+        private sealed record PendingAction(Action Run, ulong WriteAddress, ulong WriteSize) : DeferredWork;
+
+        private readonly Queue<DeferredWork> _pendingDraws = new();
 
         public bool HasPendingDraws => _pendingDraws.Count != 0;
 
+        public int PendingDrawCount => _pendingDraws.Count;
+
         private bool _draining;
+
+        // A host call made from inside a draining draw runs there and then, not behind the rest.
+        public bool IsDraining => _draining;
+
+        // Queues host work that only orders GPU commands to run in issue order with the deferred
+        // draws: the draws keep accumulating, so their programs resolve further ahead.
+        public void EnqueuePendingAction(Action run, ulong writeAddress = 0, ulong writeSize = 0) =>
+            _pendingDraws.Enqueue(new PendingAction(run, writeAddress, writeSize));
+
+        // False only when every deferred draw's programs are resolved and none can store to guest
+        // memory, and no queued action (a label) writes these bytes: then nothing queued produces
+        // the operand the stream reads there.
+        public bool PendingWorkMayWrite(ulong address, ulong size)
+        {
+            foreach (var work in _pendingDraws)
+            {
+                if (work is not PendingDraw draw)
+                {
+                    if (work is PendingAction { WriteSize: not 0 } action &&
+                        action.WriteAddress < address + size && address < action.WriteAddress + action.WriteSize)
+                    {
+                        return true;
+                    }
+
+                    continue;
+                }
+
+                if (draw.Job is { State: 1, Programs: { } programs })
+                {
+                    if (RenderExecutor.ProgramsMayWriteMemory(programs))
+                    {
+                        return true;
+                    }
+                }
+                else if (!_storelessPrograms.Contains(StorelessKey(draw.Banks)))
+                {
+                    // Not resolved yet: programs at these addresses resolved before without stores.
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // The program addresses of draws whose resolved programs stored nothing (render thread only).
+        private readonly HashSet<(ulong Export, ulong Legacy, ulong Pixel)> _storelessPrograms = new();
+
+        private static (ulong Export, ulong Legacy, ulong Pixel) StorelessKey(RegisterBanks banks) =>
+            (banks.Shader.Vertex.ExportAddress, banks.Shader.Vertex.LegacyVertexAddress, banks.Shader.Pixel.Address);
+
+        private void LearnStoreless(PendingDraw draw)
+        {
+            if (draw.Job is { State: 1, Programs: { } programs } && !RenderExecutor.ProgramsMayWriteMemory(programs) &&
+                _storelessPrograms.Count < 65536)
+            {
+                _storelessPrograms.Add(StorelessKey(draw.Banks));
+            }
+        }
 
         // Runs every deferred draw in issue order with the banks and snapshots it was issued with.
         // A draw calls back into the host, whose entry points drain too: those calls run inside
@@ -343,8 +406,16 @@ public static partial class AgcExports
 
         private void DrainPendingDrawsCore()
         {
-            while (_pendingDraws.TryDequeue(out var pending))
+            while (_pendingDraws.TryDequeue(out var work))
             {
+                if (work is PendingAction action)
+                {
+                    action.Run();
+                    continue;
+                }
+
+                var pending = (PendingDraw)work;
+                LearnStoreless(pending);
                 var current = _current;
                 var state = pending.State;
                 _current = state;
@@ -597,6 +668,10 @@ public static partial class AgcExports
 
             throw _host.Fatal("The command stream has no render executor.");
         }
+
+        // A dispatch after one suspended on its pipeline, read ahead (ICommandStreamHost.PrefetchDispatchPipeline).
+        public void PrefetchDispatchPipeline(RegisterBanks banks, uint endX, uint endY, uint endZ, uint dispatchInitiator) =>
+            _executor?.PrefetchDispatchPipeline(banks, endX, endY, endZ, dispatchInitiator);
 
         private static void ExecuteDispatch(RenderExecutor executor, ulong submitId, RegisterBanks banks, uint endX, uint endY, uint endZ,
             uint dispatchInitiator, ulong indirectArgumentsAddress)

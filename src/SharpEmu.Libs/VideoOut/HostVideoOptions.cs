@@ -171,7 +171,8 @@ public static class HostVideoHost
 
     internal static bool AutoHdrAllowed => Volatile.Read(ref _autoHdrAllowed);
 
-    internal static bool IsHdrOutputSupported =>
+    // Public for the two-process split's GPU process, which answers the guest process's question with it.
+    public static bool IsHdrOutputSupported =>
         Volatile.Read(ref _videoConfigured) && CurrentOptions.HdrMode != HostHdrMode.Off &&
         _queryHdrOutputSupport();
 

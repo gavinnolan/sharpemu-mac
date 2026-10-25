@@ -25,6 +25,11 @@ public sealed class GraphicsPipelineDescription
     // statistics, MipStatistics.TitleUsesCounters, and the host asked for the split in
     // IShaderPipelineHost.PixelPipelinesFollowLodStatistics). Part of the pipeline key.
     public bool LodStatistics { get; init; }
+
+    // Where the pixel program's colour outputs go: four bits per output n (1 + the attachment
+    // its [[color(n)]] writes), zero for the identity. A host that keeps a draw inside a pass
+    // whose attachments are a superset of its own draws through such a remap. Part of the key.
+    public uint ColorRemap { get; init; }
 }
 
 public sealed class ComputePipelineDescription

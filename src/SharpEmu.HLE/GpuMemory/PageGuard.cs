@@ -121,6 +121,7 @@ public sealed class PageGuard : IDisposable
     }
 
     private readonly IGuestAddressSpace _addressSpace;
+    private readonly IPageWatchObserver? _watchObserver;
     private readonly PageBlock?[] _blocks = new PageBlock?[TrackerLayout.BlockCount];
     private readonly object _blockGate = new();
 
@@ -133,6 +134,7 @@ public sealed class PageGuard : IDisposable
         }
 
         _addressSpace = addressSpace;
+        _watchObserver = addressSpace as IPageWatchObserver;
     }
 
     public GuestPermissionLedger Permissions { get; } = new();
@@ -175,13 +177,29 @@ public sealed class PageGuard : IDisposable
         }
     }
 
-    public void AddWatch(ulong address, ulong size, bool blockReads) => UpdatePages(address, size, true, blockReads);
+    public void AddWatch(ulong address, ulong size, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchAdd);
+        UpdatePages(address, size, true, blockReads);
+    }
 
-    public void RemoveWatch(ulong address, ulong size, bool blockReads) => UpdatePages(address, size, false, blockReads);
+    public void RemoveWatch(ulong address, ulong size, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchRemove);
+        UpdatePages(address, size, false, blockReads);
+    }
 
-    public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads) => UpdateMask(blockBase, pages, true, blockReads);
+    public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchAdd);
+        UpdateMask(blockBase, pages, true, blockReads);
+    }
 
-    public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads) => UpdateMask(blockBase, pages, false, blockReads);
+    public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
+    {
+        SplitCrossingStats.Count(SplitCrossing.WatchRemove);
+        UpdateMask(blockBase, pages, false, blockReads);
+    }
 
     // Watcher state only; the guest's own permissions are the ledger's.
     public bool Allows(ulong address, FaultKind kind)
@@ -199,7 +217,8 @@ public sealed class PageGuard : IDisposable
             : allowedAccess != GuestPageProtection.None;
     }
 
-    internal long GetWriteRestorationVersion(ulong address)
+    // Public for the two-process split: the GPU process answers a guest write fault with it.
+    public long GetWriteRestorationVersion(ulong address)
     {
         var block = FindBlock(address);
         if (block == null) return 0;
@@ -410,7 +429,16 @@ public sealed class PageGuard : IDisposable
             if (address >= guestValidEnd)
                 guest = Permissions.Lookup(address, out guestValidEnd);
             var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
+            var wasWatched = pages[pageIndex].WriteWatchCount != 0 || pages[pageIndex].ReadWatchCount != 0;
             var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address, WriteWatchLimit);
+            // Before the page's protection is applied below: the split's page summary must show a
+            // watch before the watch can let a GPU cache rely on it.
+            if (update && _watchObserver is { } observer &&
+                wasWatched != (pages[pageIndex].WriteWatchCount != 0 || pages[pageIndex].ReadWatchCount != 0))
+            {
+                observer.OnPageWatchChanged(address, !wasWatched);
+            }
+
             if (update && !isRead)
             {
                 writeWatchDelta += track ? 1 : -1;

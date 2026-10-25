@@ -4,32 +4,43 @@
 namespace SharpEmu.Libs.Gpu.GpuCommands.Registers;
 
 // The marker a preceding packet attaches to the next user scalar write.
-public enum UserScalarKind : uint
+// A byte: each stage keeps one per user data register, and the registers are copied on most draws.
+public enum UserScalarKind : byte
 {
     Unknown = 0,
     BufferResource = 1,
     Region = 2,
 }
 
+[System.Runtime.CompilerServices.InlineArray(UserScalarRegisters.Capacity)]
+public struct UserScalarValues
+{
+    private uint _first;
+}
+
+[System.Runtime.CompilerServices.InlineArray(UserScalarRegisters.Capacity)]
+public struct UserScalarKinds
+{
+    private UserScalarKind _first;
+}
+
+// A stage's user data registers. They are copied on the first write after every draw's register
+// snapshot (RegisterBanks.PrepareShaderWrite), so the values are held inline: one copy is one
+// object, not an object and two arrays.
 public sealed class UserScalarRegisters
 {
     public const int Capacity = 32;
 
-    public uint[] Values = new uint[Capacity];
-    public UserScalarKind[] Kinds = new UserScalarKind[Capacity];
+    public UserScalarValues Values;
+    public UserScalarKinds Kinds;
     public uint Count;
 
-    public UserScalarRegisters Copy() => new()
-    {
-        Values = (uint[])Values.Clone(),
-        Kinds = (UserScalarKind[])Kinds.Clone(),
-        Count = Count,
-    };
+    public UserScalarRegisters Copy() => (UserScalarRegisters)MemberwiseClone();
 
     public void Set(uint index, uint value, UserScalarKind kind)
     {
-        Values[index] = value;
-        Kinds[index] = kind;
+        Values[(int)index] = value;
+        Kinds[(int)index] = kind;
         if (index + 1 > Count)
         {
             Count = index + 1;
@@ -182,6 +193,9 @@ public sealed class VertexStageRegisters
     public ulong ExportAddress;
     public ulong LocalAddress;
     public ulong HullAddress;
+    // SPI_SHADER_USER_DATA_ADDR_*_HS: the table a merged local/hull program's hull half reloads
+    // its user data from (s[0:1] at entry), as the export stage's continuation does from the GS one.
+    public ulong HullUserDataAddress;
     public HullResource1 HullResource1;
     public HullResource2 HullResource2;
     public ulong GeometryAddress;

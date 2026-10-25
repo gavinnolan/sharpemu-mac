@@ -130,6 +130,36 @@ public sealed partial class RenderExecutor
         }
     }
 
+    // Whether a draw with these programs may store to guest memory, from the programs alone: any
+    // written buffer (whatever its range), storage image or device address, or a mesh stage.
+    public static bool ProgramsMayWriteMemory(GraphicsPrograms programs) =>
+        programs.Available &&
+        (programs.MeshInput is not null || StageMayWriteMemory(programs.VertexInput.Stage.Program) ||
+            StageMayWriteMemory(programs.PixelInput.Stage.Program));
+
+    private static bool StageMayWriteMemory(ShaderProgramInfo? program)
+    {
+        if (program is null)
+        {
+            return false;
+        }
+
+        if (program.WritesDeviceAddresses || WritesStorageImage(program))
+        {
+            return true;
+        }
+
+        foreach (var buffer in program.Buffers)
+        {
+            if (buffer.Written)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool WritesStorageImage(ShaderProgramInfo program)
     {
         foreach (var image in program.Images)

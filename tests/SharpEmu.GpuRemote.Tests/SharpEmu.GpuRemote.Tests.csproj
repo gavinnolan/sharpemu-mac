@@ -1,0 +1,27 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpEmu.GpuRemote\SharpEmu.GpuRemote.csproj" />
+    <!-- Build order only. The cross-process tests launch the native GPU host from its
+         osx-arm64 output folder, and the cross-architecture ones the osx-x64 smoke tool, which
+         runs under Rosetta and launches the host in turn. -->
+    <ProjectReference Include="..\..\src\SharpEmu.GpuHost\SharpEmu.GpuHost.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\tools\SharpEmu.Tools.GpuProcessSmoke\SharpEmu.Tools.GpuProcessSmoke.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+</Project>

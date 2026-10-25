@@ -120,11 +120,15 @@ internal static class Mtl
     public const nint StepFunctionPerInstance = 2;
     public const nint StepFunctionPerPatchControlPoint = 4;
 
-    // Tessellation, which a rectangle list draws through (see Gen5MslRectangleList):
+    // Tessellation, which a rectangle list (see Gen5MslRectangleList) and a tessellated draw draw through:
     // MTLTessellationFactorStepFunction, MTLTessellationPartitionMode and
     // MTLTessellationControlPointIndexType.
     public const nuint TessellationFactorStepFunctionConstant = 0;
+    public const nuint TessellationFactorStepFunctionPerPatch = 1;
+    public const nuint TessellationPartitionModePow2 = 0;
     public const nuint TessellationPartitionModeInteger = 1;
+    public const nuint TessellationPartitionModeFractionalOdd = 2;
+    public const nuint TessellationPartitionModeFractionalEven = 3;
     public const nuint ControlPointIndexTypeNone = 0;
     public const nuint ControlPointIndexTypeUInt16 = 1;
     public const nuint ControlPointIndexTypeUInt32 = 2;

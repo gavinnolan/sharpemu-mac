@@ -132,7 +132,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // Hazard tracking on a window makes Metal order and fence every command buffer that
     // touches it, which measured at tens of milliseconds per submission because every
     // submission touches a window. Untracked is the design's choice: the guest's own
-    // barriers end the encoder, and encoders on one queue run in order.
+    // barriers end the encoder, and the host orders each encoder after the one before it
+    // (MetalRenderHost.EncoderOrdering) - Metal does not, for untracked resources.
     // SHARPEMU_METAL_V2_TRACKED=1 restores automatic tracking for comparison.
     // An MTLResidencySet would keep the windows mapped for the queue without any
     // per-encoder call — but a set holding the whole 16 GiB backing measured about seventy
@@ -400,6 +401,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     public void BeginSubmission(ulong submissionSerial, ulong completedSerial)
     {
         _submissionSerial = submissionSerial;
+        _submissionClock = RingClock();
         _completedSerial = Math.Max(_completedSerial, completedSerial);
         RecordingBytes = 0;
         TrimIdleRings();
@@ -575,6 +577,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
     /// <summary>Milliseconds, monotonic; tests replace it to age rings.</summary>
     internal Func<long> RingClock { get; set; } = static () => Environment.TickCount64;
+
+    // RingClock as the submission being recorded began: what a ring's last use is stamped with.
+    // The idle rule counts seconds, and reading the clock per allocation - several per draw, for
+    // argument buffers - cost the worker a clock read each.
+    private long _submissionClock;
 
     private void TrimIdleRings()
     {
@@ -1121,6 +1128,45 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         return true;
     }
 
+    /// <summary>
+    /// Ring bytes for the whole of a range no window covers, left unfilled for the GPU to fill
+    /// (MetalStagedStorage.TryEncodeWholeGather); invalid when <see cref="Stage"/> would not
+    /// stage the range whole.
+    /// </summary>
+    public MetalGuestRange ReserveWholeStaging(ulong gpuVa, ulong size)
+    {
+        if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa || size > Math.Min(_maxWindowBytes, MaxWholeStageBytes))
+        {
+            return default;
+        }
+
+        if (size > _maxUploadBytes)
+        {
+            Interlocked.Increment(ref _oversizedStaged);
+        }
+
+        var range = Allocate(size, RingAlignment, out _);
+        MetalGpuReferenceCensus.Mark(gpuVa, size, MetalRefKind.Staged);
+        Interlocked.Add(ref _ringFallbackBytes, (long)size);
+        Interlocked.Increment(ref _ringFallbacks);
+        return range;
+    }
+
+    /// <summary>Fills ring bytes <see cref="ReserveWholeStaging"/> reserved with what the CPU sees now, as <see cref="Stage"/> does.</summary>
+    public unsafe void FillStaging(ulong gpuVa, in MetalGuestRange staging)
+    {
+        foreach (var ring in _rings)
+        {
+            if (ring.Buffer == staging.Buffer && staging.Offset + staging.Size <= ring.Size)
+            {
+                ReadForStaging(gpuVa, new Span<byte>((void*)(ring.Contents + (nint)staging.Offset), checked((int)staging.Size)));
+                return;
+            }
+        }
+
+        throw GpuFatal.Fatal($"A staging range is not in any ring: address=0x{gpuVa:X16} size=0x{staging.Size:X}.");
+    }
+
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
     private MetalGuestRange Upload(ulong gpuVa, ulong size, bool whole)
     {
@@ -1183,6 +1229,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     public void ReadForStaging(ulong gpuVa, Span<byte> span)
     {
         MetalGpuReferenceCensus.Mark(gpuVa, (ulong)span.Length, MetalRefKind.Staged);
+        // A staged range is one no window covers; the two-process split's GPU process has to
+        // find it in the shared backing all the same, so split mode names any that is private.
+        SharpEmu.HLE.GuestMemory.SplitPrivateAccess.CheckGpuRead(_backing, gpuVa, (ulong)span.Length, "metal-staged-read");
         if (_memory.TryRead(gpuVa, span))
         {
             return;
@@ -1244,7 +1293,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         ring.LastUsedSerial = _submissionSerial;
-        ring.LastUsedAt = RingClock();
+        ring.LastUsedAt = _submissionClock != 0 ? _submissionClock : RingClock();
         unsafe
         {
             span = new Span<byte>((void*)(ring.Contents + (nint)offset), checked((int)size));

@@ -49,6 +49,10 @@ public sealed class GraphicsPrograms
     public bool DropUnwrittenColorTargets { get; init; }
 }
 
+// A tessellated draw's programs: the domain and pixel programs it draws with, and the hull kernel
+// that runs before it (ShaderPipelineCache.GetTessellationPrograms).
+public sealed record TessellationPrograms(GraphicsPrograms Graphics, ComputeProgram Hull);
+
 public sealed class ComputeProgram
 {
     public ShaderProgram Program { get; init; }
@@ -156,6 +160,20 @@ public interface IShaderPipelineProvider
         return true;
     }
 
+    // The programs of a tessellated draw run without a tessellator, or null when the provider cannot
+    // build them (the executor then skips the draw, as before).
+    TessellationPrograms? GetTessellationPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        uint controlPoints) => null;
+
     // The dispatch dimensions are groups, or threads when the initiator counts threads.
     ComputeProgram GetComputeProgram(
         ComputeStageRegisters compute,
@@ -177,6 +195,16 @@ public interface IShaderPipelineProvider
         uint dimensionZ,
         Pipelines.ComputeProgramRetry retry) =>
         GetComputeProgram(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+
+    // The program of a dispatch the stream has not reached, prepared as that dispatch will
+    // prepare it but consuming nothing (no adaptation kernel is submitted), so its pipeline can
+    // be asked for early. A provider that cannot prepare ahead says it is not available.
+    ComputeProgram PrepareComputeProgramAhead(
+        ComputeStageRegisters compute,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ) => new() { Available = false };
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 

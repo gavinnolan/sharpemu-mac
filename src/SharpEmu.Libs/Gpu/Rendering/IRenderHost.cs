@@ -145,6 +145,29 @@ public interface IRenderHost
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
 
+    // The host runs a tessellated draw as a hull kernel and a patch draw through its own
+    // tessellator (RenderExecutor.Tessellation.cs): BindHullLaunch, PrepareTessellationFactors
+    // and DrawPatches.
+    bool SupportsTessellationEmulation => false;
+
+    // Binds the hull kernel's launch to the dispatch recorded next: the patch count and first
+    // instance (Gen5TessellationLaunch.HullLaunchBufferIndex) and each control point's vertex
+    // index in patch order (HullVertexBufferIndex).
+    void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance) =>
+        throw new NotSupportedException("The renderer does not run tessellated draws.");
+
+    // After the hull kernel's dispatch: the host's tessellation factors for the next DrawPatches,
+    // from the guest's factor ring at ringAddress (four floats per triangle patch, the edges and
+    // the inside), clamped to the guest's VGT_HOS_MIN/MAX_TESS_LEVEL. A patch with an edge factor
+    // that is not above zero is culled, as the guest's tessellator culls it.
+    void PrepareTessellationFactors(ulong ringAddress, uint patchCount, float minFactor, float maxFactor) =>
+        throw new NotSupportedException("The renderer does not run tessellated draws.");
+
+    // Draws patchCount patches with the factors PrepareTessellationFactors made; the bound
+    // pipeline's vertex function is the domain program's post-tessellation form.
+    void DrawPatches(uint controlPoints, uint patchCount, uint instanceCount, uint firstInstance) =>
+        throw new NotSupportedException("The renderer does not run tessellated draws.");
+
     ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices) =>
         throw new NotSupportedException("The renderer does not support indexed mesh inputs.");
 
@@ -202,6 +225,18 @@ public interface IRenderHost
     // True when a draw whose pipeline is still compiling may be left out of the frame instead
     // of waiting for the compile (RenderExecutor.MayLeaveOutWhileCompiling decides which).
     bool LeavesOutDrawsWhileCompiling => false;
+
+    // True when such a draw may write depth or stencil too: the host's part below then answers
+    // for the depth target as for the colour targets.
+    bool LeavesOutDepthWritesWhileCompiling => false;
+
+    // True when such a draw may write mip statistics (texture-streaming feedback) too.
+    bool LeavesOutMipStatisticsWhileCompiling => false;
+
+    // Why the executor would not leave out the draw it asks about next (diagnostics; a literal).
+    void NoteLeaveOutRefused(string reason)
+    {
+    }
 
     // The host's part of that decision, for the attachments the draw has just acquired: true
     // only for targets it knows are rebuilt from nothing every frame, so that the frame being
@@ -343,6 +378,20 @@ public interface IRenderHost
     bool CoversMetadata(ulong address, ulong size) => IsMetadata(address);
 
     bool ClearMetadata(ulong address);
+
+    // A dispatch that runs and stores into the HTILE registered at the address: the HTILE now
+    // holds what the program wrote, so its depth surface no longer loads as a clear. Whether
+    // a cleared mark was dropped.
+    bool NoteHtileWritten(ulong address) => false;
+
+    /// <summary>Whether the frame being recorded is one a diagnostic dump captures, so the executor can
+    /// describe its work (SHARPEMU_METAL_V2_DUMP_TRIGGER).</summary>
+    bool TraceFrameActive => false;
+
+    // A dispatch that runs and fills the buffer at the address with HTILE clear codes.
+    void NoteHtileCleared(ulong address)
+    {
+    }
 
     bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear);
 

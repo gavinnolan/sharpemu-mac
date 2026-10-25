@@ -44,6 +44,20 @@ internal interface IMetalImageCacheOwner
     // are not settled yet.
     bool HasPendingGpuWrite(ulong address, ulong size);
 
+    // HasPendingGpuWrite for each of pending.Length adjacent slices of sliceSize bytes from
+    // address, marking the ones that are pending; true when any is.
+    bool MarkPendingGpuWrites(ulong address, ulong sliceSize, Span<bool> pending)
+    {
+        var any = false;
+        for (var slice = 0; slice < pending.Length; slice++)
+        {
+            pending[slice] = HasPendingGpuWrite(address + sliceSize * (ulong)slice, sliceSize);
+            any |= pending[slice];
+        }
+
+        return any;
+    }
+
     // Fills a guest byte range with a repeating dword on the GPU.
     void FillGuestRange(ulong address, ulong size, uint value);
 
@@ -330,6 +344,73 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>Changes whenever an image is added to or dropped from the cache.</summary>
     public long ImageSetVersion => Volatile.Read(ref _imageSetVersion);
 
+    // The guest range of the image each of the last ImageSetChangeCount versions added or dropped, so a
+    // memo of lookups (a bindless table's) redoes only the ones a change could answer differently.
+    private const int ImageSetChangeCount = 512;
+    private readonly (long Version, ulong Start, ulong End)[] _imageSetChanges = new (long, ulong, ulong)[ImageSetChangeCount];
+    private readonly Lock _imageSetChangeGate = new();
+
+    private void NoteImageSetChanged(GuestSpan range)
+    {
+        lock (_imageSetChangeGate)
+        {
+            var version = Interlocked.Increment(ref _imageSetVersion);
+            // An image without a guest range is found by no address; it still counts as a change of everything.
+            _imageSetChanges[version % ImageSetChangeCount] = ImageDescription.IsEmptyRange(range)
+                ? (version, 0, ulong.MaxValue)
+                : (version, range.Address, range.Address + range.Size);
+        }
+    }
+
+    /// <summary>
+    /// The guest ranges of the images added or dropped after version <paramref name="since"/> up to
+    /// <paramref name="until"/>, sorted by start and merged; false when they are no longer all known.
+    /// </summary>
+    public bool CollectImageSetChanges(long since, long until, List<(ulong Start, ulong End)> ranges)
+    {
+        ranges.Clear();
+        if (since < 0 || until < since || until - since > ImageSetChangeCount)
+        {
+            return false;
+        }
+
+        lock (_imageSetChangeGate)
+        {
+            for (var version = since + 1; version <= until; version++)
+            {
+                var change = _imageSetChanges[version % ImageSetChangeCount];
+                if (change.Version != version)
+                {
+                    return false;
+                }
+
+                ranges.Add((change.Start, change.End));
+            }
+        }
+
+        // Sorted and merged: a lookup's range meets one of them only if it meets the last that starts before its end.
+        ranges.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+        var merged = 0;
+        for (var index = 1; index < ranges.Count; index++)
+        {
+            if (ranges[index].Start <= ranges[merged].End)
+            {
+                ranges[merged] = (ranges[merged].Start, Math.Max(ranges[merged].End, ranges[index].End));
+            }
+            else
+            {
+                ranges[++merged] = ranges[index];
+            }
+        }
+
+        if (ranges.Count != 0)
+        {
+            ranges.RemoveRange(merged + 1, ranges.Count - merged - 1);
+        }
+
+        return true;
+    }
+
     /// <summary>The counts of the mutations a memo of this cache's state has to see (MetalImageEpochs).</summary>
     public MetalImageEpochs Epochs { get; } = new();
 
@@ -411,6 +492,24 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        // An image found alone over its bytes stays alone until an image comes or goes over them,
+        // which moves the owner-list counts there: a target bound draw after draw is no longer
+        // looked up against every image on its pages each time.
+        var pageVersions = _pageOwners.VersionSum(address, size);
+        if (image.AlonePageVersions == pageVersions)
+        {
+            return;
+        }
+
+        var kind = !takesGpuOwnership ? SyncRead : keepsDepthPlane ? SyncWriteKeepingDepth : SyncWrite;
+        if (AliasSyncSkipEnabled && SyncStillHolds(image, pageVersions, kind))
+        {
+            _aliasSyncsSkipped++;
+            return;
+        }
+
+        var alone = true;
+        _syncedScratch.Clear();
         foreach (var otherIdentifier in FindImagesInRange(address, size, pageOverlap: false))
         {
             if (otherIdentifier == imageIdentifier ||
@@ -418,6 +517,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             {
                 continue;
             }
+
+            alone = false;
+            _syncedScratch.Add(other);
 
             if (takesGpuOwnership && other.IsWindowLinearView)
             {
@@ -474,10 +576,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
+                var reusesBefore = _deviceAliasReuses;
                 if (TryPublishAliasOnDevice(image, other))
                 {
                     _aliasPublishes++;
-                    NoteAliasPublication("on-device", image, other, otherOwedGuestMemory, otherStart, otherEnd);
+                    NoteAliasPublication(
+                        _deviceAliasReuses != reusesBefore ? "on-device-reuse" : "on-device",
+                        image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     // A device copy leaves the source GPU-modified, so a write through this
                     // image still has to take ownership from it, or both would publish.
                     if (takesGpuOwnership)
@@ -578,6 +683,97 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 }
             }
         }
+
+        image.AlonePageVersions = alone ? pageVersions : -1;
+        RecordSync(image, alone, pageVersions, kind);
+    }
+
+    // The kinds of alias sync. A write leaves every other image over the bytes cleared of GPU
+    // ownership and stale over what they share, so nothing is left for a later sync of any kind to
+    // publish or mark; one that keeps the depth plane leaves the others that owed guest memory
+    // nothing as they were, which a full write still has to mark. A read can publish others into
+    // this image again only while it is the image, not they, that wrote last.
+    private const byte SyncRead = 1;
+    private const byte SyncWriteKeepingDepth = 2;
+    private const byte SyncWrite = 3;
+
+    // Past this many images beside it, an image's syncs always run.
+    private const int MaxSyncedOthers = 8;
+
+    // SHARPEMU_METAL_V2_ALIAS_SYNC_SKIP=0 runs every alias sync of an image beside others in full.
+    private static readonly bool AliasSyncSkipEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_SYNC_SKIP") != "0";
+
+    private readonly List<MetalCachedImage> _syncedScratch = [];
+    private long _aliasSyncsSkipped;
+
+    /// <summary>Alias syncs skipped because the last one left nothing to change; reported and reset.</summary>
+    public long TakeAliasSyncsSkipped() => Interlocked.Exchange(ref _aliasSyncsSkipped, 0);
+
+    // Every count here only grows, so the sum moves whenever any of them does.
+    private static long SyncVersion(MetalCachedImage image, MetalCachedImage[] others)
+    {
+        var version = Volatile.Read(ref image.BindingVersion);
+        foreach (var other in others)
+        {
+            version += Volatile.Read(ref other.BindingVersion) + other.ContentVersion;
+        }
+
+        return version;
+    }
+
+    // Whether the last sync of this image left nothing a sync of this kind would change: the same
+    // images over its bytes, none of them (nor this one's binding state) moved since, and a kind
+    // that the last one leaves nothing to do for.
+    private static bool SyncStillHolds(MetalCachedImage image, long pageVersions, byte kind)
+    {
+        if (image.SyncedOthers is not { } others || image.SyncedPageVersions != pageVersions ||
+            SyncVersion(image, others) != image.SyncedVersion)
+        {
+            return false;
+        }
+
+        return image.SyncedKind switch
+        {
+            SyncWrite => true,
+            SyncWriteKeepingDepth => kind != SyncWrite,
+            _ => kind == SyncRead && image.ContentVersion == image.SyncedContent,
+        };
+    }
+
+    // Caller holds the lock, after the sync's loop: the others' versions as it left them.
+    private void RecordSync(MetalCachedImage image, bool alone, long pageVersions, byte kind)
+    {
+        if (alone || !AliasSyncSkipEnabled || _syncedScratch.Count > MaxSyncedOthers)
+        {
+            image.SyncedOthers = null;
+            return;
+        }
+
+        var others = image.SyncedOthers;
+        if (others is null || others.Length != _syncedScratch.Count || !SameImages(others, _syncedScratch))
+        {
+            others = [.. _syncedScratch];
+        }
+
+        image.SyncedOthers = others;
+        image.SyncedPageVersions = pageVersions;
+        image.SyncedVersion = SyncVersion(image, others);
+        image.SyncedContent = image.ContentVersion;
+        image.SyncedKind = kind;
+    }
+
+    private static bool SameImages(MetalCachedImage[] others, List<MetalCachedImage> current)
+    {
+        for (var index = 0; index < others.Length; index++)
+        {
+            if (!ReferenceEquals(others[index], current[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // Depth images with a stencil plane. The page owner index holds an image's depth
@@ -585,6 +781,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // over those bytes - the R8 view a deferred lighting pass samples the stencil through
     // - would never find the depth image that wrote them.
     private readonly HashSet<ResourceSlotIdentifier> _stencilOwners = new();
+
+    // Moves when an image joins or leaves _stencilOwners (texture memo stamps).
+    private long _stencilOwnersVersion;
 
     /// <summary>
     /// The stencil plane counterpart of the alias rules: the stencil a depth target writes
@@ -828,6 +1027,129 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public nint AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
     {
         using var held = _lock.Hold();
+        return AcquireTextureViewLocked(imageIdentifier, in request, out resourceId);
+    }
+
+    /// <summary>
+    /// <see cref="AcquireTextureView(ResourceSlotIdentifier, in ImageRequest, out ulong)"/> for a sampled
+    /// binding the caller memoises: in the same hold, the stamp that says when the view it returns is
+    /// still what an acquire of the same binding would return (<see cref="TryReacquireTextureView"/>).
+    /// <paramref name="requestPagesBefore"/> is <see cref="RequestPageVersions"/> read before the lookup
+    /// that found the image; no stamp when an image came or went over the request since.
+    /// </summary>
+    public nint AcquireTextureViewForMemo(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, long requestPagesBefore,
+        out ulong resourceId, out TextureMemoStamp? stamp)
+    {
+        using var held = _lock.Hold();
+        var view = AcquireTextureViewLocked(imageIdentifier, in request, out resourceId);
+        stamp = TryStampTextureLocked(imageIdentifier, in request, requestPagesBefore);
+        return view;
+    }
+
+    /// <summary>When a memoised sampled binding still holds; see <see cref="TryStampTextureLocked"/>.</summary>
+    internal readonly record struct TextureMemoStamp(
+        MetalCachedImage Image, long ImageVersion, ulong RangeStart, ulong RangeSize, long PageVersions, long StencilOwners,
+        MetalCachedImage[]? Others = null, long OthersVersion = 0);
+
+    // The images over the same bytes a memoised binding can stand beside: past this many the
+    // binding takes the full acquire every time.
+    private const int MaxMemoAliases = 8;
+
+    // SHARPEMU_METAL_V2_ALIAS_MEMO=0 memoises only an image alone over its bytes, as before.
+    private static readonly bool AliasMemoEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_MEMO") != "0";
+
+    // What the acquire of an image beside others depends on: their versions and contents, and the
+    // image's own content (a write to it since makes the newer-writer rule act on the others). Each
+    // count only grows, so the sum moves whenever any of them does.
+    private static long AliasVersion(MetalCachedImage image, MetalCachedImage[] others)
+    {
+        var version = image.ContentVersion;
+        foreach (var other in others)
+        {
+            version += Volatile.Read(ref other.BindingVersion) + other.ContentVersion;
+        }
+
+        return version;
+    }
+
+    /// <summary>The owner-list change counts over a request's bytes, read before its lookup.</summary>
+    public long RequestPageVersions(in ImageRequest request) =>
+        _pageOwners.VersionSum(request.Description.Data.Address, request.Description.Data.Size);
+
+    /// <summary>
+    /// The stamp of a sampled binding just acquired, or null when it may not be memoised. No depth
+    /// image whose stencil plane lies over its bytes and the request's may be there, and no image
+    /// whose acquire reads guest DCC metadata (a DCC request or image), which changes without the
+    /// cache counting it. The stamp then holds while the image's own
+    /// <see cref="MetalCachedImage.BindingVersion"/>, the owner lists over those bytes and the stencil
+    /// owners stay as they are and no deferred refresh waits. Up to MaxMemoAliases other images may
+    /// lie over the bytes too (Black Myth: Wukong's pooled transients: about two thirds of its
+    /// unmemoised bindings): the acquire just made left them and the image agreeing, the lookup
+    /// picks among the same images by their descriptions, and while none of them nor the image's
+    /// contents change (AliasVersion) the next acquire would publish nothing and pick the same image.
+    /// Caller holds the lock.
+    /// </summary>
+    private TextureMemoStamp? TryStampTextureLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, long requestPagesBefore)
+    {
+        ref readonly var data = ref request.Description.Data;
+        if (_deferredRefreshes.Count != 0 || ImageDescription.IsEmptyRange(data) ||
+            request.Description.Metadata.Kind == MetadataKind.Dcc ||
+            _slots.TryGet(imageIdentifier) is not { } image || image.Texture == 0 ||
+            image.Description.Metadata.Kind == MetadataKind.Dcc ||
+            ImageDescription.IsEmptyRange(image.Description.Data) ||
+            _pageOwners.VersionSum(data.Address, data.Size) != requestPagesBefore)
+        {
+            return null;
+        }
+
+        var start = Math.Min(data.Address, image.Description.Data.Address);
+        var end = Math.Max(data.Address + data.Size, image.Description.Data.Address + image.Description.Data.Size);
+        List<MetalCachedImage>? others = null;
+        foreach (var other in FindImagesInRange(start, end - start, pageOverlap: false))
+        {
+            if (other == imageIdentifier)
+            {
+                continue;
+            }
+
+            if (!AliasMemoEnabled || _slots.TryGet(other) is not { } otherImage ||
+                (others ??= new List<MetalCachedImage>(2)).Count == MaxMemoAliases)
+            {
+                return null;
+            }
+
+            others.Add(otherImage);
+        }
+
+        foreach (var ownerIdentifier in _stencilOwners)
+        {
+            if (_slots.TryGet(ownerIdentifier) is { } depth && depth.Description.HasStencil &&
+                GuestRangeOverlap.Bytes(depth.Description.Stencil.Address, depth.Description.Stencil.Size, start, end - start))
+            {
+                return null;
+            }
+        }
+
+        var aliases = others?.ToArray();
+        return new TextureMemoStamp(image, image.BindingVersion, start, end - start,
+            _pageOwners.VersionSum(start, end - start), _stencilOwnersVersion,
+            aliases, aliases is null ? 0 : AliasVersion(image, aliases));
+    }
+
+    /// <summary>
+    /// Whether a stamp still holds, read without the lock: a hint for skipping the lookup, which
+    /// <see cref="TryReacquireTextureView"/> confirms under the lock.
+    /// </summary>
+    public bool TextureStampMayHold(in TextureMemoStamp stamp) =>
+        !HasDeferredRefreshes &&
+        Volatile.Read(ref stamp.Image.BindingVersion) == stamp.ImageVersion &&
+        (stamp.Others is null || AliasVersion(stamp.Image, stamp.Others) == stamp.OthersVersion) &&
+        _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) == stamp.PageVersions;
+
+    private nint AcquireTextureViewLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
+    {
         // An attachment waiting for its pass is not marked written yet; anything bound
         // now must see it the way the acquire left it before the wait existed.
         DrainDeferredRefreshesLocked();
@@ -886,6 +1208,37 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureViewUsageLocked(image, in request.View);
         return image.GetOrCreateView(request.View, out resourceId);
+    }
+
+    /// <summary>
+    /// The per-use part of <see cref="AcquireTextureView(ResourceSlotIdentifier, in ImageRequest, out ulong)"/>
+    /// for a sampled binding memoised with <paramref name="stamp"/>: while the stamp holds nothing can
+    /// have changed which view the binding resolves to or what acquiring it does first, so the view it
+    /// got then still holds. The image still notes the use and fits its resident levels to the
+    /// binding (a reshape moves its version and answers false). False sends the caller to the full
+    /// acquire.
+    /// </summary>
+    public bool TryReacquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, in TextureMemoStamp stamp)
+    {
+        using var held = _lock.Hold();
+        var image = stamp.Image;
+        if (_deferredRefreshes.Count != 0 || !ReferenceEquals(_slots.TryGet(imageIdentifier), image) ||
+            image.BindingVersion != stamp.ImageVersion || _stencilOwnersVersion != stamp.StencilOwners ||
+            (stamp.Others is not null && AliasVersion(image, stamp.Others) != stamp.OthersVersion) ||
+            _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) != stamp.PageVersions)
+        {
+            return false;
+        }
+
+        image.LastAccessTick = _collectionTick;
+        FitResidentLevelsLocked(image, in request.View);
+        if (image.BindingVersion != stamp.ImageVersion)
+        {
+            return false;
+        }
+
+        image.NoteUse(_owner.CurrentSerial);
+        return true;
     }
 
     /// <summary>
@@ -1034,6 +1387,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RegisterDccMetadata(request.Description);
             if (changed)
             {
+                image.BindingVersion++;
                 Epochs.NoteShapeChanged();
             }
         }
@@ -1115,6 +1469,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RegisterHtileMetadata(request.Description);
             if (!MetalImageEpochs.SameMetadata(in before, in image.Description.Metadata))
             {
+                image.BindingVersion++;
                 Epochs.NoteShapeChanged();
             }
         }
@@ -1798,7 +2153,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         image.Epochs = Epochs;
         var imageIdentifier = _slots.Insert(image);
-        Interlocked.Increment(ref _imageSetVersion);
+        NoteImageSetChanged(image.Description.Data);
         Epochs.NoteBindingChanged();
         if (!ImageDescription.IsEmptyRange(description.Data))
         {

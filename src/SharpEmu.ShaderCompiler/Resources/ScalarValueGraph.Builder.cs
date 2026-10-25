@@ -187,6 +187,8 @@ public sealed partial class ScalarValueGraph
             return priorities;
         }
 
+        private const uint SystemRegisterCount = 8;
+
         private RegisterState InitialState()
         {
             var state = new RegisterState(_graph);
@@ -198,6 +200,13 @@ public sealed partial class ScalarValueGraph
                 {
                     state.Scalars[register] = _graph.UserData(register);
                 }
+            }
+
+            // The registers the hardware fills after the user data: workgroup ids, group size, wave offset.
+            for (var register = _graph.UserDataBase + _graph.UserDataCount;
+                 register < Math.Min(_graph.UserDataBase + _graph.UserDataCount + SystemRegisterCount, VccLow); register++)
+            {
+                state.Scalars[register] = _graph.SystemRegister(register);
             }
 
             state.Scalars[VccLow] = _graph.Constant(0u);
@@ -379,7 +388,9 @@ public sealed partial class ScalarValueGraph
         private readonly ScalarValue?[] _mergeUndefined = new ScalarValue?[3];
 
         // Equal incoming values pass through; differing or still unknown ones meet in a
-        // phi owned by this block and register. Any undefined input stays undefined.
+        // phi owned by this block and register. Any undefined input stays undefined: one
+        // undefined value on every edge passes through with its origin (a system register's,
+        // say), any other is a fresh one.
         // The reader takes the slot, so the registers' readers are static and nothing is allocated per slot.
         private ScalarValue MergeSlot(
             int block,
@@ -397,7 +408,9 @@ public sealed partial class ScalarValueGraph
                 var value = ReadSlot(state, kind, index, lane);
                 if (value.IsUndefined)
                 {
-                    return _mergeUndefined[(int)first.Type] ??= _graph.Undefined(first.Type);
+                    return !pending && AllSame(visited, value, kind, index, lane)
+                        ? value
+                        : _mergeUndefined[(int)first.Type] ??= _graph.Undefined(first.Type);
                 }
 
                 same &= ReferenceEquals(value, first);
@@ -431,6 +444,19 @@ public sealed partial class ScalarValueGraph
 
             phi.SetPhiOperands(order, operands);
             return phi;
+        }
+
+        private static bool AllSame(List<(int Block, RegisterState State)> visited, ScalarValue first, SlotKind kind, int index, uint lane)
+        {
+            foreach (var (_, state) in visited)
+            {
+                if (!ReferenceEquals(ReadSlot(state, kind, index, lane), first))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private enum SlotKind { Scalar, Vector, Exec, Vcc, Scc, Lane, Mask }

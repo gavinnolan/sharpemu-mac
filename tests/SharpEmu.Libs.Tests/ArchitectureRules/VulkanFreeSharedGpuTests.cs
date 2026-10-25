@@ -23,12 +23,15 @@ public sealed class VulkanFreeSharedGpuTests
 {
     // Every project in a macOS artifact's closure that must stay free of Vulkan and SDL. The
     // Metal backend and the macOS platform package are in the list for the same reason as the
-    // shared engine: they are what replaced those dependencies.
+    // shared engine: they are what replaced those dependencies. The GPU process transport and
+    // the native GPU host are the two-process split's macOS-only additions.
     private static readonly string[] MacOsClosureProjects =
     [
         "src/SharpEmu.Libs/SharpEmu.Libs.csproj",
         "src/SharpEmu.HLE/SharpEmu.HLE.csproj",
         "src/SharpEmu.Core/SharpEmu.Core.csproj",
+        "src/SharpEmu.GpuRemote/SharpEmu.GpuRemote.csproj",
+        "src/SharpEmu.GpuHost/SharpEmu.GpuHost.csproj",
         "src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj",
         "src/platforms/macos/SharpEmu.Platform.MacOS/SharpEmu.Platform.MacOS.csproj",
         "src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj",
@@ -60,6 +63,8 @@ public sealed class VulkanFreeSharedGpuTests
         "src/SharpEmu.Libs",
         "src/SharpEmu.HLE",
         "src/SharpEmu.Core",
+        "src/SharpEmu.GpuRemote",
+        "src/SharpEmu.GpuHost",
         "src/graphics/SharpEmu.Gpu.Metal",
         "src/platforms/macos/SharpEmu.Platform.MacOS",
         "src/platforms/macos/SharpEmu.Host.MacOS",

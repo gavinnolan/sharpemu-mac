@@ -74,8 +74,11 @@ public sealed partial class RenderExecutor
     // IndirectIndexLimit bounds an indexed draw's count as the bound index range does.
     // TriangleListIndices: nonzero when the draw was converted to an indexed triangle list of
     // that many indices (TriangulateFans), which EmitDraw then draws whatever the guest type.
+    // PatchControlPoints: the draw is that many patches of this many control points through the
+    // host's tessellator, whatever the guest primitive type (RenderExecutor.Tessellation.cs).
     private readonly record struct DrawEmission(bool Indexed, int VertexOffset, uint FirstVertex, uint FirstInstance,
-        ulong IndirectArgumentsAddress = 0, uint IndirectIndexLimit = uint.MaxValue, uint TriangleListIndices = 0);
+        ulong IndirectArgumentsAddress = 0, uint IndirectIndexLimit = uint.MaxValue, uint TriangleListIndices = 0,
+        uint PatchControlPoints = 0);
 
     private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, GpuIndexType Type);
 
@@ -201,6 +204,24 @@ public sealed partial class RenderExecutor
         public static DrawState Create() => new() { PixelActive = true, Programs = null! };
     }
 
+    // The draw being recorded. As a local, the 3.5 KB DrawState pushed the draw methods'
+    // frames past a page, so every draw called the stack-probe helper and zeroed the frame
+    // (~5% of the GPU worker under Rosetta). Only what a draw reads before it writes is
+    // reset; colors past ColorCount are never read. Draws nest only where the outer draw
+    // returns right after the inner one.
+    private DrawState _drawState = DrawState.Create();
+
+    private ref DrawState BeginDrawState()
+    {
+        ref var state = ref _drawState;
+        state.ColorCount = 0;
+        state.Depth = default;
+        state.PixelActive = true;
+        state.Rendering = default;
+        state.Programs = null!;
+        return ref state;
+    }
+
     private static ReadOnlySpan<ColorTargetState> BoundColors(ref DrawState state) =>
         ((ReadOnlySpan<ColorTargetState>)state.Colors)[..(int)state.ColorCount];
 
@@ -211,10 +232,12 @@ public sealed partial class RenderExecutor
         try
         {
             if (arguments.IndirectArgumentsAddress != 0 &&
-                (UsesMeshExecution(banks)
+                (TracesIndirectArguments(banks) ||
+                 (UsesMeshExecution(banks)
                     ? !CanDrawMeshIndirectOnGpu(banks, in arguments)
-                    : !CanDrawIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
+                    : !CanDrawIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig))))
             {
+                NoteCpuIndirectArguments(banks, in arguments);
                 DrawIndexedWithCpuArguments(submitId, banks, in arguments);
                 return;
             }
@@ -267,7 +290,11 @@ public sealed partial class RenderExecutor
         return (ulong)arguments.IndexCount * (index32 ? 4ul : 2ul) <= MaxIndirectIndexBufferBytes;
     }
 
-    private const ulong MaxIndirectIndexBufferBytes = 64ul << 20;
+    // The index range binds where it lies (a window or a guest view of guest memory), so its
+    // size is not a copy. Ghost of Tsushima draws from a 330 MiB shared index pool with the
+    // whole pool as each draw's range; at a 64 MiB cap every such draw read its arguments on
+    // the CPU, which waits for the GPU work that wrote them, ~70 round trips a frame.
+    private const ulong MaxIndirectIndexBufferBytes = 1ul << 30;
 
     private const ulong AutoIndirectArgumentsSize = 16;
 
@@ -290,6 +317,46 @@ public sealed partial class RenderExecutor
             _host.ClampMappedSize(arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) == IndexedIndirectArgumentsSize;
     }
 
+    // SHARPEMU_TRACE_INDIRECT_SHADER=<hex>: the indirect draws of the vertex program at that address
+    // (export or geometry stage) read their arguments on the CPU and print them, so a count the
+    // GPU writes can be followed from frame to frame. A diagnostic: each read waits for the GPU.
+    private static readonly ulong TracedIndirectShader = ulong.TryParse(
+        (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_INDIRECT_SHADER") ?? string.Empty)
+            .Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+        System.Globalization.NumberStyles.HexNumber, null, out var tracedShader) ? tracedShader : 0;
+
+    private long _tracedIndirectDraws;
+
+    private static bool TracesIndirectArguments(RegisterBanks banks) =>
+        TracedIndirectShader != 0 &&
+        (banks.Shader.Vertex.ExportAddress == TracedIndirectShader || banks.Shader.Vertex.GeometryAddress == TracedIndirectShader);
+
+    private void TraceIndirectArguments(RegisterBanks banks, ulong submitId, ulong address, ReadOnlySpan<uint> words)
+    {
+        if (!TracesIndirectArguments(banks) || Interlocked.Increment(ref _tracedIndirectDraws) % 8 != 1)
+            return;
+
+        Console.Error.WriteLine(
+            $"[GPU][INDIRECT] submit={submitId} args=0x{address:X16} words=[{string.Join(' ', words.ToArray().Select(word => word.ToString()))}]");
+    }
+
+    // Each distinct shape of indirect indexed draw whose arguments are read on the CPU, named once:
+    // the read waits for the GPU work that wrote them.
+    private readonly HashSet<(bool Mesh, uint Primitive, uint IndexType, bool Restart, bool Unbounded)> _cpuIndirectShapes = [];
+
+    private void NoteCpuIndirectArguments(RegisterBanks banks, in DrawIndexedArguments arguments)
+    {
+        var shape = (UsesMeshExecution(banks), banks.UserConfig.PrimitiveType, arguments.IndexTypeAndSize,
+            (banks.UserConfig.PrimitiveResetControl & 0x1) != 0, arguments.UnboundedIndexBuffer);
+        if (_cpuIndirectShapes.Count < 32 && _cpuIndirectShapes.Add(shape))
+        {
+            Console.Error.WriteLine(
+                $"[GPU][INFO] An indirect indexed draw reads its arguments on the CPU: mesh={shape.Item1} primitive={shape.Item2} " +
+                $"index_type={shape.Item3} restart={shape.Item4} restart_index=0x{banks.Context.PrimitiveResetIndex:X} " +
+                $"unbounded={shape.Item5} index_count={arguments.IndexCount} mesh_gpu={_host.SupportsIndirectMeshDraw}.");
+        }
+    }
+
     // Reads the indirect arguments now and draws from them, as the interpreter would have.
     private void DrawIndexedWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
@@ -301,6 +368,7 @@ public sealed partial class RenderExecutor
         }
 
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        TraceIndirectArguments(banks, submitId, arguments.IndirectArgumentsAddress, words);
         var elementSize = (GuestIndexType)arguments.IndexTypeAndSize switch
         {
             GuestIndexType.Index16 => 2ul,
@@ -371,6 +439,13 @@ public sealed partial class RenderExecutor
         if (!HasValidVertexShader(shader))
         {
             TraceDisposition("missing-vertex-shader");
+            return;
+        }
+
+        if (IsEmulatedTessellation(banks, out var controlPoints))
+        {
+            DrawTessellated(submitId, banks, in arguments, controlPoints);
+            TraceDisposition("tessellated");
             return;
         }
 
@@ -462,7 +537,7 @@ public sealed partial class RenderExecutor
             expandedIndices,
             expandedIndices is null ? indexSize : (ulong)expandedIndices.Length,
             indexType);
-        var state = DrawState.Create();
+        ref var state = ref BeginDrawState();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
             TraceDisposition("no-targets");
@@ -537,7 +612,8 @@ public sealed partial class RenderExecutor
         try
         {
             if (arguments.IndirectArgumentsAddress != 0 &&
-                (!CanDrawAutoIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
+                (TracesIndirectArguments(banks) ||
+                 !CanDrawAutoIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
             {
                 DrawAutoWithCpuArguments(submitId, banks, in arguments);
                 return;
@@ -590,6 +666,7 @@ public sealed partial class RenderExecutor
         }
 
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        TraceIndirectArguments(banks, submitId, arguments.IndirectArgumentsAddress, words);
         var resolved = arguments with
         {
             VertexCount = words[0],
@@ -660,7 +737,7 @@ public sealed partial class RenderExecutor
 
         ValidateDrawRegisters(banks);
         var draw = new DrawCall("DrawAuto", RecordedOperation.DrawIndexAuto, arguments.VertexCount, arguments.InstanceCount, arguments.FirstInstance);
-        var state = DrawState.Create();
+        ref var state = ref BeginDrawState();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
             TraceDrawTargets(banks, "no-targets");
@@ -1229,8 +1306,19 @@ public sealed partial class RenderExecutor
         }
 
         using var resolveScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSynchronousResolution);
+        var resolveStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         state.Programs = ResolveGraphicsPrograms(banks, in inputs);
+        Interlocked.Add(ref _synchronousResolveTicks, System.Diagnostics.Stopwatch.GetTimestamp() - resolveStarted);
+        Interlocked.Increment(ref _synchronousResolves);
     }
+
+    private static long _synchronousResolveTicks;
+    private static long _synchronousResolves;
+
+    /// <summary>Graphics program resolutions the drawing thread made itself, and their time, since the last call.</summary>
+    public static (long Count, double Milliseconds) TakeSynchronousResolveCounters() =>
+        (Interlocked.Exchange(ref _synchronousResolves, 0),
+            Interlocked.Exchange(ref _synchronousResolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
     private static void TraceDrawState(ulong submitId, RegisterBanks banks, in DrawCall draw, in DrawState state)
     {

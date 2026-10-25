@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -363,6 +364,17 @@ public interface ICommandStreamHost
     // pipeline is still compiling. The packet then suspends and runs again when the
     // backend reports the pipeline ready; nothing is skipped.
     bool ConsumePipelineNotReady() => false;
+
+    // True when the host wants the dispatches after one that suspended on its pipeline read
+    // ahead (GpuCommandInterpreter.PrefetchPipelinesAhead), so their compiles start beside it.
+    bool PrefetchesPipelines => false;
+
+    // One dispatch the packets after a suspended one make, with the shader registers it will
+    // run with on a scratch copy: the host may start compiling its pipeline. Nothing is recorded
+    // and nothing may be consumed; the dispatch itself still runs when the stream reaches it.
+    void PrefetchDispatchPipeline(RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    {
+    }
 
     // True when an indirect dispatch in workgroup units reads its group counts on the
     // GPU, so the interpreter need not wait for the GPU to read them back first.

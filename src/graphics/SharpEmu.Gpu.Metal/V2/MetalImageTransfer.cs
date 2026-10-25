@@ -177,7 +177,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         var blit = _tiler.BeginBlit(context);
         MetalNative.SendVoid(blit, SelCopyWholeTexture, sourceTexture, targetTexture);
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
     }
 
     public bool TryEncodeTextureToTexture(
@@ -272,7 +272,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 size, targetTexture, layer, 0, default, (nuint)writeOption);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         return true;
     }
 
@@ -356,7 +356,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             staging.Buffer, (nuint)staging.Offset, (nuint)rowBytes, (nuint)sliceBytes,
             new MtlSize { Width = width, Height = height, Depth = 1 },
             depthTexture, 0, 0, default, (nuint)MtlBlitOption.StencilFromDepthStencil);
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         return true;
     }
 
@@ -500,7 +500,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 targetSize, targetTexture, layer, 0, default, (nuint)MtlBlitOption.None);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         return true;
     }
 
@@ -719,7 +719,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 new MtlOrigin { X = 0, Y = copy.OriginY, Z = copy.OriginZ }, (nuint)MtlBlitOption.None);
         }
 
-        MetalTiler.EndEncoding(encoder);
+        MetalTiler.EndEncoding(context, encoder);
 
         return true;
     }
@@ -765,7 +765,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
         finally
         {
-            MetalTiler.EndEncoding(blit);
+            // The copies' blit takes its place in the encoder order like every other encoder.
+            MetalTiler.EndEncoding(context, blit);
         }
     }
 
@@ -826,7 +827,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 (nuint)MtlBlitOption.None);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         if (direct)
         {
             return true;
@@ -851,7 +852,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             RepackSubresources(compute, plan, guest, source, toGuest: true);
         }
 
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
 
         return true;
     }
@@ -970,7 +971,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
             else
             {
-                MetalTiler.EndEncoding(compute);
+                MetalTiler.EndEncoding(context, compute);
             }
         }
         finally
@@ -1055,7 +1056,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             linear = swapped;
         }
 
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
         return linear;
     }
 
@@ -1676,6 +1677,9 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return plan;
     }
 
+    private static int _multisampledDepthWarned;
+    private static int _mipmappedDepthWarned;
+
     private static TransferPlan PlanDepth(in ImageDescription description)
     {
         if (!MetalGuestFormats.TryDecodeHostFormat(description.PixelFormat, out var format))
@@ -1684,7 +1688,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         var layers = description.Resources.Layers;
-        if (layers == 0 || description.Data.Size % layers != 0 || description.Resources.Levels != 1 ||
+        if (layers == 0 || description.Data.Size % layers != 0 || description.Resources.Levels == 0 ||
             GuestPixelFormats.BytesPerElement(description.GuestFormat) != description.BytesPerBlock)
         {
             throw GpuFatal.Fatal(
@@ -1711,6 +1715,22 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 $"The depth transfer conversion is not supported: bytesPerBlock={description.BytesPerBlock} transferBytes={plan.TransferBytes}.");
         }
 
+        // A mipmapped depth surface (Ghost of Tsushima's depth pyramid, 9 levels) is not
+        // transferred either: only a single level's tiles are planned here, and its levels are
+        // what the GPU drew into them.
+        if (description.Resources.Levels > 1)
+        {
+            if (Interlocked.Exchange(ref _mipmappedDepthWarned, 1) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][WARN] A mipmapped depth surface is not transferred: levels={description.Resources.Levels} " +
+                    $"extent={description.Extent.Width}x{description.Extent.Height} size=0x{description.Data.Size:x}.");
+            }
+
+            plan.StencilPlane = false;
+            return plan;
+        }
+
         if (plan.Tiled)
         {
             // A depth image is addressed by the block layout of its own tile mode: a
@@ -1725,6 +1745,22 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             {
                 throw GpuFatal.Fatal(
                     $"The depth tile layout is not supported: format={(uint)tilerFormat} tile={(uint)description.TileMode}.");
+            }
+
+            // A multisampled depth surface (Ghost of Tsushima's checkerboard depth, 2 samples at
+            // 1920x2160) holds every sample's plane in its slice; its samples are not transferred, as
+            // a multisampled color image's are not, and the texture keeps what the GPU drew there.
+            if (description.Samples > 1 && plan.SliceSize == surface.BlockSliceSize * description.Samples)
+            {
+                if (Interlocked.Exchange(ref _multisampledDepthWarned, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][WARN] A multisampled depth surface is not transferred: samples={description.Samples} " +
+                        $"slice=0x{plan.SliceSize:x} extent={description.Extent.Width}x{description.Extent.Height}.");
+                }
+
+                plan.StencilPlane = false;
+                return plan;
             }
 
             if (plan.SliceSize != surface.BlockSliceSize)
@@ -1936,7 +1972,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         if (compute != 0)
         {
-            MetalTiler.EndEncoding(compute);
+            MetalTiler.EndEncoding(context, compute);
         }
 
         var blit = _tiler.BeginBlit(context);
@@ -1964,7 +2000,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
     }
 
     // The way out of a tiled depth surface: one compute pass reads the depth texture and
@@ -2004,7 +2040,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                     plan.StencilPitch, (nuint)plan.StencilSliceSize, (nuint)MtlBlitOption.StencilFromDepthStencil);
             }
 
-            MetalTiler.EndEncoding(blit);
+            MetalTiler.EndEncoding(context, blit);
         }
 
         if (plan.BlockKind != TileBlockKind.Depth64KB)
@@ -2024,7 +2060,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 SelectStencilTiles(plan, firstLayer, layerCount));
         }
 
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
     }
 
     // The fused writeback only has Depth64KB offset functions, so any other tile mode
@@ -2051,7 +2087,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                 (nuint)depthRowBytes, (nuint)depthSliceBytes, (nuint)depthOption);
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         var compute = _tiler.BeginCompute(context);
         if (widening)
         {
@@ -2072,7 +2108,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         _tiler.EncodeTile(compute, staging,
             new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece), _tiles);
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
     }
 
     private void EncodeDepthDownload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
@@ -2131,7 +2167,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             }
         }
 
-        MetalTiler.EndEncoding(blit);
+        MetalTiler.EndEncoding(context, blit);
         if (direct)
         {
             return;
@@ -2161,6 +2197,6 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             (ulong)description.Pitch * description.BytesPerBlock,
             (ulong)description.Pitch * description.BytesPerBlock,
             plan.SliceSize, plan.SliceSize);
-        MetalTiler.EndEncoding(compute);
+        MetalTiler.EndEncoding(context, compute);
     }
 }

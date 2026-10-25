@@ -48,15 +48,19 @@ internal sealed class FrameTimeLog : IDisposable
     }
 
     /// <summary>The log named by <see cref="EnvironmentVariable"/>, or null when it is unset or cannot be opened.</summary>
-    public static FrameTimeLog? FromEnvironment()
+    public static FrameTimeLog? FromEnvironment() => FromEnvironment(EnvironmentVariable, "frame-times");
+
+    /// <summary>The log named by <paramref name="variable"/> (same format), or null.</summary>
+    public static FrameTimeLog? FromEnvironment(string variable, string defaultName)
     {
         var path = SharpEmuPaths.ResolveDumpPath(
-            EnvironmentVariable, $"frame-times-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
-        if (path is null)
-        {
-            return null;
-        }
+            variable, $"{defaultName}-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+        return path is null ? null : Open(path, variable);
+    }
 
+    /// <summary>A log written to <paramref name="path"/>, or null when it cannot be opened.</summary>
+    public static FrameTimeLog? Open(string path, string variable)
+    {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -72,7 +76,7 @@ internal sealed class FrameTimeLog : IDisposable
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            Console.Error.WriteLine($"[VIDEOOUT][WARN] {EnvironmentVariable}={path} could not be opened: {exception.Message}");
+            Console.Error.WriteLine($"[VIDEOOUT][WARN] {variable}={path} could not be opened: {exception.Message}");
             return null;
         }
     }
@@ -123,3 +127,47 @@ internal sealed class FrameTimeLog : IDisposable
         }
     }
 }
+
+/// <summary>
+/// SHARPEMU_PRESENT_TIMES=&lt;path&gt;: the same per-frame timestamps as
+/// <see cref="FrameTimeLog"/>, taken where the renderer takes a guest flip off its command
+/// stream instead of where the guest requests it. Under the two-process split the two differ:
+/// the guest can run ahead of a busy GPU process and be held back, so its flip requests come in
+/// bursts while the frames reach the screen at the renderer's own pace.
+/// </summary>
+public static class PresentTimeLog
+{
+    private static readonly bool Enabled = Environment.GetEnvironmentVariable("SHARPEMU_PRESENT_TIMES") is { Length: > 0 };
+
+    /// <summary>Records one presented guest frame; a flag test when the log is off.</summary>
+    public static void Record()
+    {
+        if (Enabled)
+        {
+            Holder.Log?.Record();
+        }
+    }
+
+    // Opened on the first presented frame, by the process that presents: under the split the
+    // guest process compiles the same presentation code without running it, and a log it had
+    // opened (with read-only sharing) would shut the GPU process out of the file.
+    private static class Holder
+    {
+        internal static readonly FrameTimeLog? Log;
+
+        static Holder()
+        {
+            // One file per process (<path>.<pid>): under the split both processes load this code.
+            var path = SharpEmuPaths.ResolveDumpPath("SHARPEMU_PRESENT_TIMES", $"present-times-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+            if (path is null)
+            {
+                return;
+            }
+
+            path = $"{path}.{Environment.ProcessId}";
+            Log = FrameTimeLog.Open(path, "SHARPEMU_PRESENT_TIMES");
+            Console.Error.WriteLine($"[VIDEOOUT] present times -> {path} opened={Log is not null}");
+        }
+    }
+}
+

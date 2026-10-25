@@ -130,6 +130,24 @@ public sealed class RenderExecutorCompilingDrawTests : IDisposable
         Assert.Equal(-1, AwaitedPrograms);
     }
 
+    // A host that leaves out depth writes too answers for the depth target with the colour targets:
+    // the draw is left out when it says the targets are rebuilt every frame, and waits when not.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ADrawThatWritesDepthIsLeftOutWhenTheHostLeavesOutDepthWrites(bool rebuilt)
+    {
+        _host.LeavesOutDepthWritesWhileCompiling = true;
+        _host.TargetsRebuiltEveryFrame = rebuilt;
+        var banks = Banks(withDepth: true);
+        banks.Context.DepthTarget = banks.Context.DepthTarget with { DepthControl = (1u << 1) | (1u << 4) | (1u << 2) };
+        _executor.DrawAuto(1, banks, Auto(3));
+
+        Assert.Contains("may_leave_out", _host.Calls);
+        Assert.Equal(rebuilt, AskedWithoutWaiting);
+        Assert.Equal(!rebuilt, Drawn);
+    }
+
     [Fact]
     public void ADrawWhoseProgramWritesMemoryWaits()
     {
@@ -165,6 +183,34 @@ public sealed class RenderExecutorCompilingDrawTests : IDisposable
     {
         _ = what;
         Assert.Equal(writes, RenderExecutor.WritesOutsideTargets(Stage(program)));
+    }
+
+    // Mip statistics alone do not count when the host leaves those draws out too; any other write still does.
+    [Fact]
+    public void WritesOutsideTargets_LeavesMipStatisticsOutOnlyWhenAllowed()
+    {
+        var statistics = Stage(WithBindings(Program(ShaderStageKind.Pixel), new BindingLayout { MipStatisticsCount = 1 }));
+        Assert.Equal("mip-statistics", RenderExecutor.WriteOutsideTargets(statistics));
+        Assert.Null(RenderExecutor.WriteOutsideTargets(statistics, mipStatisticsAllowed: true));
+
+        var both = Stage(WithBindings(
+            Program(ShaderStageKind.Pixel, buffers: [new BufferResourceInfo(false, true, false, false, false, 16, 0)]),
+            new BindingLayout { MipStatisticsCount = 1 }));
+        Assert.Equal("written-buffer", RenderExecutor.WriteOutsideTargets(both, mipStatisticsAllowed: true));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ADrawThatWritesMipStatisticsIsLeftOutOnlyWhenTheHostLeavesThoseOut(bool allowed)
+    {
+        _host.LeavesOutMipStatisticsWhileCompiling = allowed;
+        var pixel = WithBindings(Program(ShaderStageKind.Pixel), new BindingLayout { MipStatisticsCount = 1 });
+        _pipelines.Graphics = Programs(pixelStage: Stage(pixel));
+        _executor.DrawAuto(1, Banks(), Auto(3));
+
+        Assert.Equal(allowed, AskedWithoutWaiting);
+        Assert.Equal(!allowed, Drawn);
     }
 
     private static ShaderProgramInfo WithBindings(ShaderProgramInfo program, BindingLayout bindings) => new()

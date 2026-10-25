@@ -7176,6 +7176,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 			Console.Error.WriteLine("[LOADER][INFO] Calling guest entry...");
 			_mainExecutionThreadHandle = OpenThreadForContext(GetCurrentThreadId());
+			_mainExecutionThreadId = unchecked((int)GetCurrentThreadId());
 			StartStallWatchdog();
 			StartReadyThreadDispatcher();
 			ulong num6 = ulong.MaxValue;
@@ -7731,9 +7732,31 @@ public sealed unsafe partial class DirectExecutionBackend :
 			if (rsp != 0 && cpuContext.TryReadUInt64(rsp, out var value) && cpuContext.TryReadUInt64(rsp + 8, out var value2))
 			{
 				Console.Error.WriteLine($"[LOADER][ERROR] Stall stack: [rsp]=0x{value:X16} [rsp+8]=0x{value2:X16}");
+				// Two words name the wait, not who waits: the guest image addresses further up the
+				// stack are the caller chain (return-address candidates, so a few are stale).
+				var chain = new System.Text.StringBuilder();
+				for (ulong offset = 0, found = 0; offset < 0x1000 && found < 32; offset += 8)
+				{
+					if (!cpuContext.TryReadUInt64(rsp + offset, out var word))
+					{
+						break;
+					}
+
+					if (word >= GuestImageBase && word < GuestImageLimit)
+					{
+						chain.Append($" +0x{offset:X}=app+0x{word - GuestImageBase:X}");
+						found++;
+					}
+				}
+
+				if (chain.Length != 0)
+				{
+					Console.Error.WriteLine($"[LOADER][ERROR] Stall stack chain:{chain}");
+				}
 			}
 
 			LogMainThreadStallContext();
+			LogSnapshotPeeks();
 			var threads = SnapshotGuestThreads();
 			if (threads.Length != 0)
 			{

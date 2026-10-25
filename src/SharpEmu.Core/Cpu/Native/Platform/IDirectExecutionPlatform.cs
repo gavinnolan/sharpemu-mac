@@ -97,6 +97,13 @@ public unsafe interface IDirectExecutionPlatform
 
     /// <summary>Opens a thread for context capture; 0 when unsupported.</summary>
     nint OpenThreadForContext(uint threadId);
+
+    /// <summary>
+    /// Reads a host thread's x86 general registers (rax, rbx, rcx, rdx, rdi, rsi, rbp, rsp,
+    /// r8-r15, rip: 17 values) for a stall snapshot, on a host that has a way other than the
+    /// context-capture stub; false where it has none.
+    /// </summary>
+    bool TryReadThreadRegisters(uint threadId, Span<ulong> registers) => false;
     uint GetThreadId(nint threadHandle);
     bool CloseThreadHandle(nint threadHandle);
 

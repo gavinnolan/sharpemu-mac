@@ -336,6 +336,11 @@ public static partial class AgcExports
         LibraryName = "libSceAgcDriver")]
     public static int DriverSetTFRing(CpuContext ctx)
     {
+        TessellationRings.TessFactorRing = ctx[CpuRegister.Rdi];
+        TessellationRings.TessFactorRingSize = (uint)ctx[CpuRegister.Rsi];
+        TessellationRings.Observer?.Invoke();
+        Console.Error.WriteLine(
+            $"[AGC][INFO] Tessellation-factor ring: address=0x{ctx[CpuRegister.Rdi]:X16} size=0x{(uint)ctx[CpuRegister.Rsi]:X8}.");
         TraceAgc(
             $"agc.driver_set_tf_ring ring=0x{ctx[CpuRegister.Rdi]:X16} " +
             $"size=0x{(uint)ctx[CpuRegister.Rsi]:X8}");
@@ -349,9 +354,28 @@ public static partial class AgcExports
         LibraryName = "libSceAgcDriver")]
     public static int DriverSetHsOffchipParam(CpuContext ctx)
     {
+        TessellationRings.OffchipBuffer = ctx[CpuRegister.Rdi];
+        TessellationRings.OffchipParameter = (uint)ctx[CpuRegister.Rsi];
+        TessellationRings.Observer?.Invoke();
+        Console.Error.WriteLine(
+            $"[AGC][INFO] Hull-shader off-chip buffer: address=0x{ctx[CpuRegister.Rdi]:X16} param=0x{(uint)ctx[CpuRegister.Rsi]:X8}.");
         TraceAgc(
             $"agc.driver_set_hs_offchip_param buffer=0x{ctx[CpuRegister.Rdi]:X16} " +
             $"param=0x{(uint)ctx[CpuRegister.Rsi]:X8}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
+}
+
+// What the guest driver configured for hardware tessellation: the ring its hull programs write
+// tessellation factors to and the off-chip buffer they hand their patches to the domain stage in.
+public static class TessellationRings
+{
+    public static ulong TessFactorRing;
+    public static uint TessFactorRingSize;
+    public static ulong OffchipBuffer;
+    public static uint OffchipParameter;
+
+    /// <summary>Told after the guest sets either; the two-process split mirrors them into the GPU process,
+    /// which draws the tessellated draws (without them it skips every one).</summary>
+    public static Action? Observer { get; set; }
 }

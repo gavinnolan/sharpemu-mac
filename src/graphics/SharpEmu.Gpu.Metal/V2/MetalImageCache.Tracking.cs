@@ -37,6 +37,7 @@ internal sealed partial class MetalImageCache
         if (image.Description.HasStencil)
         {
             _stencilOwners.Add(imageIdentifier);
+            _stencilOwnersVersion++;
         }
 
         image.Registered = true;
@@ -70,7 +71,10 @@ internal sealed partial class MetalImageCache
         // The watch goes first and the count last, once no lookup can find the image.
         UnwatchImage(imageIdentifier);
         _pageOwners.Remove(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
-        _stencilOwners.Remove(imageIdentifier);
+        if (_stencilOwners.Remove(imageIdentifier))
+        {
+            _stencilOwnersVersion++;
+        }
 
         _totalUsedMemory -= Math.Min(image.CountedBytes, _totalUsedMemory);
         image.CountedBytes = 0;
@@ -87,7 +91,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
-        Interlocked.Increment(ref _imageSetVersion);
+        NoteImageSetChanged(image.Description.Data);
         NoteReleasedForTelemetry(image, cause);
         // Chunks whose guest copy the texture holds get their bytes back before it goes.
         SingleCopy?.OnImageReleased(image, cause);
@@ -109,7 +113,18 @@ internal sealed partial class MetalImageCache
 
         if (image.Description.HasMetadata)
         {
-            _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
+            var metadataAddress = image.Description.Metadata.Range.Address;
+            // A written HTILE outlives the image released over it: transient memory reuse
+            // releases an older depth image that shares the HTILE of the one in use, and that one
+            // registering again must not start cleared - the frame after Black Myth: Wukong moved
+            // its material depth lost every Nanite material this way.
+            if (_surfaceMetadata.TryGetValue(metadataAddress, out var released) &&
+                released.Kind == SurfaceMetadataKind.HTile && released.ClearMask == 0)
+            {
+                NoteUnregisteredHtileStoreLocked(metadataAddress);
+            }
+
+            _surfaceMetadata.Remove(metadataAddress);
         }
 
         ForgetImageBookkeepingLocked(imageIdentifier, image);
@@ -127,6 +142,7 @@ internal sealed partial class MetalImageCache
     private void ForgetImageBookkeepingLocked(ResourceSlotIdentifier imageIdentifier, MetalCachedImage image)
     {
         _unpublishedLinearWrites.Remove(image);
+        ForgetDccRunMarkersLocked(imageIdentifier, 0, ulong.MaxValue);
         if (_materializedDccSlices.Count != 0)
         {
             var removed = _materializedDccSlices.RemoveWhere(entry =>
@@ -989,6 +1005,28 @@ internal sealed partial class MetalImageCache
     internal bool MetadataWatchOverlaps(ulong address, ulong size) =>
         AnySpanOverlaps(Volatile.Read(ref _metadataWatchSnapshot), address, size);
 
+    /// <summary>Whether one of <paramref name="spans"/>, sorted by Begin and disjoint, holds <c>[begin, end)</c> whole.</summary>
+    internal static bool SpanCovers(ReadOnlySpan<MetadataWatchSpan> spans, ulong begin, ulong end)
+    {
+        // The last span that begins at or before the range.
+        int low = 0, high = spans.Length - 1, found = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (spans[middle].Begin <= begin)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return found >= 0 && spans[found].End >= end;
+    }
+
     /// <summary>Whether a range meets any of <paramref name="spans"/>, sorted by Begin and disjoint.</summary>
     internal static bool AnySpanOverlaps(ReadOnlySpan<MetadataWatchSpan> spans, ulong address, ulong size)
     {
@@ -1127,6 +1165,7 @@ internal sealed partial class MetalImageCache
             }
             if (removed != 0)
             {
+                ForgetDccRunMarkersLocked(null, address, size);
                 Epochs.NoteDccChanged();
             }
 
@@ -1161,6 +1200,81 @@ internal sealed partial class MetalImageCache
     // an array does not cost the next layer its clear.
     private readonly Dictionary<(ResourceSlotIdentifier Image, ulong Address), long> _deferredDccSlices = new();
     private long _dccClearsDropped;
+
+    // Runs of slices a settled scan found claimed whole, by image and first slice address, with
+    // each slice's code. A later scan of the run with nothing pending over it whose first bytes
+    // still read those codes would meet the same claimed repeats slice by slice (or a code its
+    // view does not decode as a clear, which does nothing either): one hold and one lookup settle
+    // it instead. Black Myth: Wukong scans its 64-plane volumes some 95,000 slices a second
+    // between clears. A marker goes wherever a claim over it goes (a re-arm of its range, the
+    // image's release) and where a deferral or a recorded fill lands on it, so the full path is
+    // what meets those; each of them also moves _dccRunMarkerGeneration, so a scan that saw one
+    // happen while it ran takes no marker. SHARPEMU_METAL_V2_DCC_RUN_MARKERS=0 turns them off.
+    private readonly Dictionary<(ResourceSlotIdentifier Image, ulong Address), DccRunMarker> _dccRunMarkers = new();
+    private const int MaxDccRunMarkers = 4096;
+    private int _dccRunMarkerCount;
+    private long _dccRunMarkerGeneration;
+    private long _dccRunMarkerHits;
+    internal bool DccRunMarkers { get; set; } = MetalV2Diagnostics.DccRunMarkers;
+
+    /// <summary>DCC scans a run marker settled; reported and reset.</summary>
+    public long TakeDccRunMarkerHits() => Interlocked.Exchange(ref _dccRunMarkerHits, 0);
+
+    private sealed class DccRunMarker(ulong sliceSize, byte[] codes)
+    {
+        public readonly ulong SliceSize = sliceSize;
+        public readonly byte[] Codes = codes;
+    }
+
+    // The markers of this image (or of any, for null) over the range go. Caller holds the lock.
+    private void ForgetDccRunMarkersLocked(ResourceSlotIdentifier? image, ulong address, ulong size)
+    {
+        _dccRunMarkerGeneration++;
+        if (_dccRunMarkers.Count == 0)
+        {
+            return;
+        }
+
+        // In place, not over a copy: removing the current entry leaves the enumeration valid.
+        foreach (var (key, marker) in _dccRunMarkers)
+        {
+            if ((image is null || key.Image == image.Value) &&
+                key.Address < address + size && address < key.Address + marker.SliceSize * (ulong)marker.Codes.Length)
+            {
+                _dccRunMarkers.Remove(key);
+            }
+        }
+
+        Volatile.Write(ref _dccRunMarkerCount, _dccRunMarkers.Count);
+    }
+
+    // Whether the run's marker stands with these codes.
+    private bool DccRunMarkerHolds(ResourceSlotIdentifier image, ulong address, ulong sliceSize, ReadOnlySpan<byte> codes)
+    {
+        using var held = _lock.Hold();
+        return _dccRunMarkers.TryGetValue((image, address), out var marker) &&
+            marker.SliceSize == sliceSize && codes.SequenceEqual(marker.Codes);
+    }
+
+    // A scan found every slice of the run a settled claimed repeat with these codes. Taken only
+    // when nothing that would forget the marker happened since the scan began.
+    private void TakeDccRunMarker(
+        ResourceSlotIdentifier image, ulong address, ulong sliceSize, ReadOnlySpan<byte> codes, long generation)
+    {
+        using var held = _lock.Hold();
+        if (_dccRunMarkerGeneration != generation || _slots.TryGet(image) is null)
+        {
+            return;
+        }
+
+        if (_dccRunMarkers.Count >= MaxDccRunMarkers)
+        {
+            _dccRunMarkers.Clear();
+        }
+
+        _dccRunMarkers[(image, address)] = new DccRunMarker(sliceSize, codes.ToArray());
+        Volatile.Write(ref _dccRunMarkerCount, _dccRunMarkers.Count);
+    }
 
     /// <summary>Deferred DCC clears dropped because the image was drawn to since.</summary>
     public long TakeDccClearsDropped() => Interlocked.Exchange(ref _dccClearsDropped, 0);
@@ -1210,6 +1324,7 @@ internal sealed partial class MetalImageCache
         ForgetRecordedDccFillsLocked(address, size);
         if (record)
         {
+            ForgetDccRunMarkersLocked(null, address, size);
             _recordedDccFills[address] = new RecordedDccFill { Size = size, Code = code, AwaitingOwnWrite = true };
             Epochs.NoteDccChanged();
         }
@@ -1331,6 +1446,14 @@ internal sealed partial class MetalImageCache
 
         var begin = address & ~(Page - 1);
         var end = (address + size + Page - 1) & ~(Page - 1);
+        // Pages the watches already cover, as one watch or several side by side, are watched: a
+        // claim taken again over a slice whose watch stands no longer scans every watch for one
+        // that holds it whole.
+        if (SpanCovers(_metadataWatchSnapshot, begin, end))
+        {
+            return;
+        }
+
         // The snapshot is the union of the watches, republished under the lock at every change:
         // a range it misses meets no watch, and the dictionary is scanned only when it does.
         // The scans collect into a reused list instead of copying the dictionary: a copy per
@@ -1448,16 +1571,18 @@ internal sealed partial class MetalImageCache
             _surfaceMetadata.Add(address, new SurfaceMetadata
             {
                 Kind = SurfaceMetadataKind.HTile,
-                ClearMask = description.HtileClearMask,
+                ClearMask = RegisteredHtileClearMaskLocked(address, in description, "none"),
                 Size = description.Metadata.Range.Size,
             });
             return;
         }
 
-        if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
+        // Transient memory reused: metadata another surface registered here (a colour target's
+        // DCC) is this depth target's HTILE now, and the clear state it carried is not this one's.
+        if (metadata.Kind != SurfaceMetadataKind.HTile)
         {
+            metadata.ClearMask = RegisteredHtileClearMaskLocked(address, in description, metadata.Kind.ToString());
             metadata.Kind = SurfaceMetadataKind.HTile;
-            metadata.ClearMask = description.HtileClearMask;
             metadata.FillValue = 0xffffffff;
             metadata.FillSize = 0;
         }
@@ -1496,14 +1621,15 @@ internal sealed partial class MetalImageCache
     private bool IsMetadataClearedLocked(ulong address, uint slice, out uint fillValue)
     {
         fillValue = 0;
+        // An HTILE tracks every slice of a deep array; other metadata covers 32.
         if (!_surfaceMetadata.TryGetValue(address, out var found) ||
-            found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+            found.Kind == SurfaceMetadataKind.PendingDcc || (slice >= 32 && found.Kind != SurfaceMetadataKind.HTile))
         {
             return false;
         }
 
         fillValue = found.FillValue;
-        return (found.ClearMask & (1u << (int)slice)) != 0;
+        return found.IsSliceClear(slice);
     }
 
     public bool IsMetadataCleared(ulong address, uint slice) => IsMetadataCleared(address, slice, out _);
@@ -1518,20 +1644,12 @@ internal sealed partial class MetalImageCache
     private bool SetMetadataSliceLocked(ulong address, uint slice, bool isClear)
     {
         if (!_surfaceMetadata.TryGetValue(address, out var found) ||
-            found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+            found.Kind == SurfaceMetadataKind.PendingDcc || (slice >= 32 && found.Kind != SurfaceMetadataKind.HTile))
         {
             return false;
         }
 
-        if (isClear)
-        {
-            found.ClearMask |= 1u << (int)slice;
-        }
-        else
-        {
-            found.ClearMask &= ~(1u << (int)slice);
-        }
-
+        found.SetSliceClear(slice, isClear);
         return true;
     }
 
@@ -1551,6 +1669,119 @@ internal sealed partial class MetalImageCache
 
         found.ClearMask = uint.MaxValue;
         return true;
+    }
+
+    /// <summary>
+    /// A dispatch stored into the HTILE registered at the address. Whatever it wrote is
+    /// what the hardware reads, not a clear: UE5's Nanite depth export writes the material
+    /// depth and its HTILE after a memset of that HTILE was taken for a clear, and the
+    /// mark left by the memset loaded the material depth as zero. Every slice drops its
+    /// mark; DCC keeps its own tracking.
+    /// </summary>
+    public bool NoteHtileWritten(ulong address)
+    {
+        using var held = _lock.Hold();
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind != SurfaceMetadataKind.HTile)
+        {
+            // Not an HTILE (yet): a depth target may still name it one before the frame is out.
+            NoteUnregisteredHtileStoreLocked(address);
+            if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile && _everHtileAddresses.Contains(address))
+            {
+                Console.Error.WriteLine($"[METAL-V2][HTILE] store-unregistered htile=0x{address:X16} kind={(found is null ? "none" : found.Kind.ToString())}");
+            }
+
+            return false;
+        }
+
+        if (found.ClearMask == 0)
+        {
+            return false;
+        }
+
+        found.ClearMask = 0;
+        return true;
+    }
+
+    /// <summary>
+    /// A dispatch stored clear codes into the buffer at the address: whatever it held before,
+    /// a surface registered over it now starts cleared, as one registered fresh does.
+    /// </summary>
+    public void NoteHtileCleared(ulong address)
+    {
+        using var held = _lock.Hold();
+        _unregisteredHtileStores.Remove(address);
+        if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile && _everHtileAddresses.Contains(address))
+        {
+            Console.Error.WriteLine($"[METAL-V2][HTILE] clear-codes htile=0x{address:X16}");
+        }
+    }
+
+    // Every address an HTILE was registered at (SHARPEMU_TRACE_HTILE only).
+    private readonly HashSet<ulong> _everHtileAddresses = new();
+
+    // Buffers a running dispatch stored data into before any depth target registered metadata
+    // there, by address, stamped with the order of the stores. UE5's RDG places the material
+    // depth at a new transient address now and then, and its Nanite depth export writes that
+    // depth's HTILE before the material pass registers it: registered as cleared, the frame lost
+    // every Nanite material (Black Myth: Wukong's trunks, rocks and ground blinking out). Only
+    // the last stores count, so one long before cannot vouch for a surface placed there since.
+    private readonly Dictionary<ulong, long> _unregisteredHtileStores = new();
+    private readonly HashSet<ulong> _loggedWrittenHtileRegistrations = new();
+    private long _unregisteredHtileStoreCount;
+    private const long UnregisteredHtileStoreWindow = 8192;
+
+    // The clear state an HTILE starts with when a depth target first names it: cleared, as a
+    // fresh surface is, unless one of the last dispatches stored data there.
+    private uint RegisteredHtileClearMaskLocked(ulong address, in ImageDescription description, string replaced)
+    {
+        if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile)
+        {
+            _everHtileAddresses.Add(address);
+        }
+
+        if (!_unregisteredHtileStores.Remove(address, out var stamp) ||
+            _unregisteredHtileStoreCount - stamp >= UnregisteredHtileStoreWindow)
+        {
+            if (SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile)
+            {
+                Console.Error.WriteLine($"[METAL-V2][HTILE] registered cleared htile=0x{address:X16} replaced={replaced}");
+            }
+
+            return description.HtileClearMask;
+        }
+
+        if (_loggedWrittenHtileRegistrations.Add(address) || SharpEmu.Libs.Gpu.Rendering.RenderExecutor.TraceHtile)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][INFO] An HTILE a dispatch wrote before any depth target named it starts as written: " +
+                $"htile=0x{address:X16} replaced={replaced}.");
+        }
+
+        return 0;
+    }
+
+    private void NoteUnregisteredHtileStoreLocked(ulong address)
+    {
+        var stamp = ++_unregisteredHtileStoreCount;
+        _unregisteredHtileStores[address] = stamp;
+        if (_unregisteredHtileStores.Count <= 2 * UnregisteredHtileStoreWindow)
+        {
+            return;
+        }
+
+        var stale = new List<ulong>();
+        foreach (var (candidate, at) in _unregisteredHtileStores)
+        {
+            if (stamp - at >= UnregisteredHtileStoreWindow)
+            {
+                stale.Add(candidate);
+            }
+        }
+
+        foreach (var candidate in stale)
+        {
+            _unregisteredHtileStores.Remove(candidate);
+        }
     }
 
     public bool OverlapsDccMetadata(ulong address, ulong size)
@@ -1680,6 +1911,7 @@ internal sealed partial class MetalImageCache
         if (!MetalImageEpochs.SameMetadata(in found.Description.Metadata, in description.Metadata))
         {
             found.Description.Metadata = description.Metadata;
+            found.BindingVersion++;
             Epochs.NoteShapeChanged();
         }
         if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
@@ -1760,6 +1992,33 @@ internal sealed partial class MetalImageCache
             }
         }
 
+        // Which slices recorded work may still be writing, in one walk of the pending writes: Black
+        // Myth: Wukong scans thousands of slices a second, and a query per slice walked them all.
+        var runStart = range.Address + sliceSize * first;
+        Span<bool> pendingSlices = count <= StackSlices ? stackalloc bool[StackSlices] : new bool[count];
+        pendingSlices = pendingSlices[..(int)count];
+        var anyPending = _owner.MarkPendingGpuWrites(runStart, sliceSize, pendingSlices);
+
+        // A run a settled scan found claimed whole is settled by its marker while its first bytes
+        // read the same codes (see _dccRunMarkers). The codes read for it serve the scan otherwise.
+        Span<byte> codes = count <= StackSlices ? stackalloc byte[StackSlices] : new byte[count];
+        codes = codes[..(int)count];
+        var markable = DccRunMarkers && !anyPending && !DccClaimFirst && !DccTraceActive;
+        var markerGeneration = markable ? Interlocked.Read(ref _dccRunMarkerGeneration) : 0;
+        var codesRead = false;
+        if (markable && Volatile.Read(ref _dccRunMarkerCount) != 0)
+        {
+            codesRead = ReadDccCodes(runStart, sliceSize, codes);
+            if (codesRead && DccRunMarkerHolds(imageIdentifier, runStart, sliceSize, codes))
+            {
+                Interlocked.Add(ref _dccRepeatsSkipped, count);
+                Interlocked.Increment(ref _dccRunMarkerHits);
+                return;
+            }
+        }
+
+        var claimedSettled = 0u;
+
         // Rented on the first slice that is scanned whole.
         byte[]? buffer = null;
         // Adjacent slices that take the same clear are cleared together, as one pass over
@@ -1783,10 +2042,10 @@ internal sealed partial class MetalImageCache
                 // now reads half-written data, and claiming it would hide the real clear.
                 // The deferral is remembered, so a draw that lands before it settles is not
                 // wiped by applying it later.
-                var pending = _owner.HasPendingGpuWrite(address, sliceSize);
+                var pending = pendingSlices[(int)slice];
                 // Settled metadata says what it holds through its guest bytes; the first one
                 // is read before the lock, which the backing does not need.
-                var readable = !pending && _backing.TryReadBacking(address, firstByte);
+                var readable = !pending && (codesRead || _backing.TryReadBacking(address, firstByte));
                 byte code;
                 var recorded = false;
                 GpuClearColor clear;
@@ -1803,7 +2062,8 @@ internal sealed partial class MetalImageCache
                             continue;
                         }
 
-                        code = firstByte[0];
+                        code = codesRead ? codes[(int)slice] : firstByte[0];
+                        codes[(int)slice] = code;
                     }
                     else if (TryFindRecordedDccFillLocked(address, sliceSize, out code))
                     {
@@ -1813,6 +2073,7 @@ internal sealed partial class MetalImageCache
                     {
                         if (_deferredDccSlices.TryAdd((imageIdentifier, address), imageWriteSequence))
                         {
+                            ForgetDccRunMarkersLocked(imageIdentifier, address, sliceSize);
                             Epochs.NoteDccChanged();
                         }
 
@@ -1861,6 +2122,7 @@ internal sealed partial class MetalImageCache
                             // Read settled and found claimed: from here the claim settles
                             // the slice alone again.
                             StandDccClaimLocked(imageIdentifier, address, code);
+                            claimedSettled++;
                         }
 
                         if (DccTraceActive)
@@ -1870,6 +2132,7 @@ internal sealed partial class MetalImageCache
 
                         continue;
                     }
+
                 }
 
                 if (claimStands)
@@ -1933,6 +2196,11 @@ internal sealed partial class MetalImageCache
             {
                 ClearDccRun(imageIdentifier, in view, in run);
             }
+
+            if (markable && claimedSettled == count)
+            {
+                TakeDccRunMarker(imageIdentifier, runStart, sliceSize, codes, markerGeneration);
+            }
         }
         finally
         {
@@ -1941,6 +2209,20 @@ internal sealed partial class MetalImageCache
                 System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
             }
         }
+    }
+
+    // The first byte of each slice: what a settled scan reads to know the slice's code.
+    private bool ReadDccCodes(ulong address, ulong sliceSize, Span<byte> codes)
+    {
+        for (var slice = 0; slice < codes.Length; slice++)
+        {
+            if (!_backing.TryReadBacking(address + sliceSize * (ulong)slice, codes.Slice(slice, 1)))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // Consecutive slices of one image that a DCC scan decided to clear to one colour.

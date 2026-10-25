@@ -25,9 +25,85 @@ internal static class MetalV2Diagnostics
     // SHARPEMU_METAL_V2_IGNORE_TESTS=1 drops face culling, the depth compare and the
     // stencil test from every draw. A pass whose target never changes either had its
     // fragments thrown away by one of those three or never had a fragment to throw
-    // away, and nothing in a target dump tells the two apart.
-    public static readonly bool IgnoreFragmentTests =
-        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IGNORE_TESTS"), "1", StringComparison.Ordinal);
+    // away, and nothing in a target dump tells the two apart. A comma-separated list of
+    // depth, stencil, cull and bounds drops only those, to tell which one it was.
+    private static readonly string[] IgnoredTests =
+        (Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IGNORE_TESTS") ?? "").Split(',', StringSplitOptions.TrimEntries);
+
+    public static readonly bool IgnoreFragmentTests = IgnoredTests.Contains("1");
+    public static readonly bool IgnoreDepthTest = IgnoreFragmentTests || IgnoredTests.Contains("depth");
+    public static readonly bool IgnoreStencilTest = IgnoreFragmentTests || IgnoredTests.Contains("stencil");
+    public static readonly bool IgnoreCulling = IgnoreFragmentTests || IgnoredTests.Contains("cull");
+    public static readonly bool IgnoreDepthBounds = IgnoreFragmentTests || IgnoredTests.Contains("bounds");
+
+    // equal: a depth compare of EQUAL passes ALWAYS instead - a pass drawn against a prepass's depth
+    // that its own positions do not reproduce bit for bit loses its fragments to EQUAL.
+    public static readonly bool LoosenDepthEqual = IgnoredTests.Contains("equal");
+
+    // SHARPEMU_METAL_V2_LOOSEN_EQUAL_VS=<vertex hash>[,...]: depth EQUAL passes ALWAYS only for draws with these vertex
+    // programs, for finding the draws whose positions miss their depth prepass.
+    private static readonly HashSet<ulong> LoosenEqualVertexHashes = ParseHashes(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOOSEN_EQUAL_VS"));
+
+    // SHARPEMU_METAL_V2_LOOSEN_EQUAL_TO=ge|le: what a loosened EQUAL becomes (default ALWAYS). GREATER-OR-EQUAL
+    // or LESS-OR-EQUAL keeps the prepass depth occluding everything else, and which of the two lets a
+    // draw's fragments through says on which side of its prepass depth its own positions land.
+    public static readonly SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp LoosenEqualTo =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOOSEN_EQUAL_TO") switch
+        {
+            "ge" => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.GreaterOrEqual,
+            "le" => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.LessOrEqual,
+            _ => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.Always,
+        };
+
+    // SHARPEMU_METAL_V2_LOG_STENCIL_VS=<vertex hash>[,...] (or "all"): each depth/stencil state made for draws with
+    // these vertex programs is logged once with its stencil compare, operations, masks and reference.
+    private static readonly string? LogStencilVs = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOG_STENCIL_VS");
+    private static readonly HashSet<ulong> LogStencilVertexHashes = ParseHashes(LogStencilVs);
+
+    public static bool LogsStencilFor(ulong vertexHash) =>
+        LogStencilVs == "all" || (LogStencilVertexHashes.Count != 0 && LogStencilVertexHashes.Contains(vertexHash));
+
+    public static bool LoosensEqualFor(ulong vertexHash) =>
+        LoosenEqualVertexHashes.Count != 0 && LoosenEqualVertexHashes.Contains(vertexHash);
+
+    private static HashSet<ulong> ParseHashes(string? text)
+    {
+        var hashes = new HashSet<ulong>();
+        foreach (var part in (text ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var digits = part.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? part[2..] : part;
+            if (ulong.TryParse(digits, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash))
+            {
+                hashes.Add(hash);
+            }
+        }
+
+        return hashes;
+    }
+
+    // a2c: alpha to coverage stays off - an MRT0 alpha that reads 0 drops every sample of a draw
+    // that never meant its alpha as coverage.
+    public static readonly bool IgnoreAlphaToCoverage = IgnoredTests.Contains("a2c");
+
+    // SHARPEMU_METAL_V2_DRAIN_CALLERS=1 counts which host entry points drain the deferred draws, in the
+    // PERF line's prefetch block (a drain inside a draining draw counts too).
+    public static readonly bool CountDrainCallers =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DRAIN_CALLERS") == "1";
+
+    // SHARPEMU_METAL_V2_DEFER_BARRIERS=1 (experiment): a barrier queues behind the deferred draws instead
+    // of draining them, and an operand or poll read nothing queued can produce leaves them queued
+    // (MetalRenderHost.TryDeferBehindDraws, QueuedWorkLeaves). It cuts the render thread's waits on the
+    // program resolver by about a third in Grand Theft Auto V's street, but its frame rate did not
+    // move (gdab A/B: 14.74/15.25 against 14.95/15.32 median/mean fps).
+    public static readonly bool DeferBarriers =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_BARRIERS") == "1";
+
+    // SHARPEMU_METAL_V2_DEFER_EOP=1 queues end-of-pipe writes behind the deferred draws too. It halves
+    // the render thread's waits on the program resolver but lowered GTA V's frame rate (gdb-4/5): the
+    // labels a title paces its frames on land later.
+    public static readonly bool DeferEndOfPipe =
+        DeferBarriers && Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_EOP") == "1";
 
     // SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT=1 keeps the vertex descriptor each
     // pipeline was built with, for the per-draw report: a stride or an attribute format
@@ -150,6 +226,11 @@ internal static class MetalV2Diagnostics
     public static readonly bool JoinDepthOnlyDraws =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_DEPTH_ONLY"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_JOIN_SUBSETS=0 opens a pass of its own for a draw into some of the open
+    // pass's colour attachments (MetalRenderHost.SubsetJoin.cs).
+    public static readonly bool JoinColorSubsets =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_SUBSETS"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_DCC_CLAIM_FIRST=1 settles a DCC slice whose claim stands from the
     // claim alone (MetalImageCache.Tracking.cs) instead of querying pending writes and reading
     // the slice first. Off by default: with it on, SH renders its dark room and everything
@@ -160,6 +241,13 @@ internal static class MetalV2Diagnostics
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_CLAIM_FIRST"), "1", StringComparison.Ordinal);
 
     public static readonly bool DccClaimFirstVerify = PerfSwitches.Verify("SHARPEMU_METAL_V2_DCC_CLAIM_FIRST_VERIFY");
+
+    // SHARPEMU_METAL_V2_DCC_RUN_MARKERS=0 scans every slice of a DCC run whose slices a settled
+    // scan found claimed whole, instead of settling it from the marker (MetalImageCache.Tracking.cs).
+    // Unlike the claim-first path above it still queries pending writes and reads each slice's
+    // first byte, which is all the full path reads before a claimed repeat.
+    public static readonly bool DccRunMarkers =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_RUN_MARKERS"), "0", StringComparison.Ordinal);
 
     // SHARPEMU_METAL_V2_LOSSY_TEXTURES=1 creates sampled-only textures with Apple GPU lossy
     // compression (about half the memory) where the device and the format allow it

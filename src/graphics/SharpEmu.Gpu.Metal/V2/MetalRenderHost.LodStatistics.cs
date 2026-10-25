@@ -244,6 +244,15 @@ internal sealed partial class MetalRenderHost
 
     bool ICommandStreamHost.TryRecordLodStatistics(ulong destination, uint size, bool resetCounters)
     {
+        if (OnCommandThread)
+        {
+            var recorded = false;
+            RunTagged(() => recorded = ((ICommandStreamHost)this).TryRecordLodStatistics(destination, size, resetCounters));
+            return recorded;
+        }
+
+        // The report counts the draws before it.
+        DrainDraws();
         // A buffer too small for the slots gets the fallback's "no counters" header, and a
         // host that publishes labels as it parses them would publish the guest's fence
         // before the GPU wrote the report.
@@ -307,6 +316,7 @@ internal sealed partial class MetalRenderHost
             throw Fatal("A Metal compute encoder could not be created for a GET_LOD_STATS report.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
         try
         {
             var arguments = new LodStatsArguments { Reset = reset ? 1u : 0u };
@@ -320,6 +330,7 @@ internal sealed partial class MetalRenderHost
         }
         finally
         {
+            UpdateEncoderFence(encoder, render: false);
             MetalNative.SendVoid(encoder, SelLodStatsEndEncoding);
         }
     }

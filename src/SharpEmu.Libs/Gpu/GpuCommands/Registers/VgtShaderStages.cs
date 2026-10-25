@@ -26,6 +26,26 @@ public static class VgtShaderStages
 
     public static bool IsPrimitivePassthrough(uint stages) => (stages & PrimitivePassthroughBit) != 0;
 
+    /// <summary>GS_EN (bit 5): the merged stage runs its GS half, in NGG mode the subgroup
+    /// that emits the output vertices and primitives.</summary>
+    public const uint GeometryEnableBit = 1u << 5;
+
+    // SHARPEMU_NGG_AMPLIFIED=0 (diagnostic): run amplified subgroups the old way, as narrow
+    // primitive shaders, for A/B measurements of what drawing every cluster costs.
+    private static readonly bool AmplifiedSubgroups = Environment.GetEnvironmentVariable("SHARPEMU_NGG_AMPLIFIED") != "0";
+
+    /// <summary>VGT_GS_MAX_VERT_OUT when the draw is an amplified merged ES/GS subgroup of a
+    /// single input vertex - Prospero's mesh shader, see
+    /// <see cref="ShaderCompiler.Gen5NggStageInfo.AmplifiedVerticesOut"/> - else zero. Black
+    /// Myth: Wukong's Nanite rasterizer arrives as 0x00002030 with PRIM_AMP_FACTOR 128,
+    /// ES_VERTS_PER_SUBGRP 1 and VGT_GS_MAX_VERT_OUT 256; GS_FAST_LAUNCH stays clear.</summary>
+    public static uint AmplifiedVerticesOut(uint stages, ShaderInterfaceRegisters shaderInterface) =>
+        AmplifiedSubgroups && (stages & GeometryEnableBit) != 0 &&
+        (shaderInterface.PrimitiveShaderSubgroupControl & 0x1FFu) > 1 &&
+        shaderInterface.ExportVerticesPerSubgroup == 1
+            ? shaderInterface.GeometryMaxVerticesOut
+            : 0;
+
     // Bits 0-1 (LS_EN), 2 (HS_EN) and 6-7 (VS_EN) select stages no primitive shader
     // implements: tessellation and the legacy vertex stage.
     public const uint ForeignStageBits = 0x7u | (0x3u << 6);

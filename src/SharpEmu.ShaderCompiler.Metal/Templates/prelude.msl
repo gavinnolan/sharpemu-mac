@@ -141,6 +141,17 @@ static inline uint sharpemu_ballot(bool value)
     return {{ballot_return}};
 }
 
+// The nearest launched lane at or below lane, else the lowest launched one. A fragment
+// simdgroup has no thread for a fragment that was never launched, where the guest wave has
+// a lane its reductions fill with the identity: an inclusive scan's value there is the one
+// of the launched lane below it.
+static inline uint sharpemu_present_lane(uint lane)
+{
+    uint present = sharpemu_ballot(true);
+    uint below = present & (0xFFFFFFFFu >> (31u - (lane & 31u)));
+    return below != 0u ? 31u - clz(below) : (present != 0u ? ctz(present) : (lane & 31u));
+}
+
 // The guest reciprocal, square-root, log and exp units read an F32 denormal input
 // as a zero of the same sign, so rcp/rsq/sqrt/log/exp flush it before the MSL call
 // rather than letting the denormal through to a finite result.

@@ -52,10 +52,38 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     ICpuMemory ICommandStreamHost.Memory => _memory;
 
-    public void RunPendingCommands() => _relay.RunPendingCommands();
+    public void RunPendingCommands()
+    {
+        // With the stream on its own thread the worker runs them between its items.
+        if (OnCommandThread)
+        {
+            return;
+        }
+
+        if (_relay.HasPendingCommands)
+        {
+            DrainDraws();
+        }
+
+        _relay.RunPendingCommands();
+    }
 
     public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
     {
+        if (OnCommandThread)
+        {
+            // The translation state belongs to the interpreting thread; the command buffer to the worker.
+            _submissionsStarted++;
+            _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
+            _commandThread!.Post(() =>
+            {
+                CommitCoalescedIfOverdue();
+                _ = EnsureCommandBuffer();
+            });
+            return;
+        }
+
+        DrainDraws();
         _submissionsStarted++;
         CommitCoalescedIfOverdue();
         _ = EnsureCommandBuffer();
@@ -64,6 +92,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     void ICommandStreamHost.Flush()
     {
+        if (PostToWorker(() => ((ICommandStreamHost)this).Flush()))
+        {
+            return;
+        }
+
+        DrainDraws();
         _frameBoundaries++;
         FlushStream();
     }
@@ -72,6 +106,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // out now, whatever the coalescing limits say. It is at most one commit a frame.
     void ICommandStreamHost.FlushFrame()
     {
+        // The guest reuses the frame's memory once the boundary returns: the frame is recorded first.
+        if (RunOnWorker(() => ((ICommandStreamHost)this).FlushFrame()))
+        {
+            return;
+        }
+
+        DrainDraws();
         _frameBoundaries++;
         FlushCommandBuffer(MetalFlushCause.Stream);
     }
@@ -166,18 +207,81 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
     }
 
-    void ICommandStreamHost.FlushAndWait() => FlushAndWaitForGpu(MetalWaitReason.CommandProcessor);
+    void ICommandStreamHost.FlushAndWait()
+    {
+        if (RunOnWorker(() => ((ICommandStreamHost)this).FlushAndWait()))
+        {
+            return;
+        }
+
+        DrainDraws();
+        FlushAndWaitForGpu(MetalWaitReason.CommandProcessor);
+    }
 
     public void SynchronizeGpu()
     {
+        if (RunOnWorker(SynchronizeGpu))
+        {
+            return;
+        }
+
+        DrainDraws();
         _imageCache.FlushAllGpuWrites();
         FlushAndWaitForGpu(MetalWaitReason.Synchronize);
     }
 
-    public void RunGarbageCollector() => _imageCache.Collect();
+    public void RunGarbageCollector()
+    {
+        if (PostToWorker(RunGarbageCollector))
+        {
+            return;
+        }
+
+        DrainDraws();
+        _imageCache.Collect();
+    }
+
+    // SHARPEMU_TRACE_GDS=1: the first data share fills and copies, offsets and guest addresses.
+    private static readonly bool TraceGds = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GDS") == "1";
+    private int _tracedGds;
+
+    private void TraceGdsTransfer(string what)
+    {
+        if (TraceGds && Interlocked.Increment(ref _tracedGds) <= 600)
+            Console.Error.WriteLine($"[METAL-V2][GDS] {what}");
+    }
+
+    // SHARPEMU_TRACE_DMA_RANGE=<lo>-<hi> (hex): guest memory fills and copies whose destination
+    // overlaps the range, as the data share trace prints them.
+    private static readonly (ulong Low, ulong High) TraceDmaRange = ParseTraceDmaRange(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DMA_RANGE"));
+
+    private static (ulong, ulong) ParseTraceDmaRange(string? text)
+    {
+        var parts = (text ?? string.Empty).Split('-');
+        return parts.Length == 2 &&
+            ulong.TryParse(parts[0].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var low) &&
+            ulong.TryParse(parts[1].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var high)
+            ? (low, high)
+            : (0, 0);
+    }
+
+    private void TraceDmaTransfer(ulong destination, ulong size, string what)
+    {
+        if (TraceDmaRange.High != 0 && destination < TraceDmaRange.High && TraceDmaRange.Low < destination + size &&
+            Interlocked.Increment(ref _tracedGds) <= 600)
+            Console.Error.WriteLine($"[METAL-V2][DMA] {what}");
+    }
 
     public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
     {
+        if (OnCommandThread)
+        {
+            _commandThread!.PostRange(() => FillBuffer(address, size, value, isGds), address, isGds ? 0 : size);
+            return;
+        }
+
+        DrainDraws();
         if (size == 0)
         {
             return;
@@ -185,9 +289,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         if (isGds)
         {
+            TraceGdsTransfer($"fill gds=0x{address:X} size=0x{size:X} value=0x{value:X}");
             if (address > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - address)
             {
                 throw Fatal($"The GDS fill range is outside the buffer: offset=0x{address:X} size=0x{size:X}.");
+            }
+
+            if (TryFillGdsOnGpu(address, size, value))
+            {
+                return;
             }
 
             // The data share is a shared-storage buffer, so the host fill is visible to
@@ -199,11 +309,20 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        TraceDmaTransfer(address, size, $"fill mem=0x{address:X} size=0x{size:X} value=0x{value:X}");
         FillGuestMemory(address, size, value);
     }
 
     public void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
     {
+        if (OnCommandThread)
+        {
+            _commandThread!.PostRange(
+                () => CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds), destination, destinationIsGds ? 0 : size);
+            return;
+        }
+
+        DrainDraws();
         if (size == 0)
         {
             return;
@@ -216,7 +335,24 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         if (!destinationIsGds && !sourceIsGds)
         {
+            TraceDmaTransfer(destination, size, $"copy mem=0x{source:X} -> mem=0x{destination:X} size=0x{size:X}");
             CopyGuestMemory(destination, source, size);
+            return;
+        }
+
+        TraceGdsTransfer(sourceIsGds
+            ? $"copy gds=0x{source:X} -> mem=0x{destination:X} size=0x{size:X}"
+            : $"copy mem=0x{source:X} -> gds=0x{destination:X} size=0x{size:X}");
+        if (sourceIsGds
+                ? source > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - source
+                : destination > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - destination)
+        {
+            throw Fatal(
+                $"The GDS copy is outside the buffer: destination=0x{destination:X} source=0x{source:X} size=0x{size:X} from_gds={sourceIsGds}.");
+        }
+
+        if (TryCopyGdsOnGpu(destination, source, size, destinationIsGds))
+        {
             return;
         }
 
@@ -224,10 +360,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var gds = _guestMemory.GdsWords();
         if (sourceIsGds)
         {
-            if (source > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - source)
-            {
-                throw Fatal($"The GDS copy source is outside the buffer: offset=0x{source:X} size=0x{size:X}.");
-            }
 
             var watch = _guard?.Begin(destination, size, "gds-copy") ?? -1;
             var wrote = _memory.TryWrite(destination, gds.Slice((int)source, (int)size));
@@ -254,6 +386,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
     {
+        if (OnCommandThread)
+        {
+            var words = new uint[destination.Length];
+            RunTagged(() => ReadGds(words, wordOffset, wordCount));
+            words.CopyTo(destination);
+            return;
+        }
+
+        DrainDraws();
         SynchronizeGpu();
         GlobalDataShare.ReadWords(_guestMemory.GdsWords(), destination, wordOffset, wordCount);
     }
@@ -265,6 +406,41 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // the label whenever the GPU could not write it.
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
+        if (OnCommandThread)
+        {
+            var queued = write;
+            _commandThread!.Post(() =>
+            {
+                if (PendingLabelsVisible && EndOfPipeLabelBytes(queued.Kind) != 0)
+                {
+                    CommandStream.UpdatePendingLabelTick(queued.Destination, SubmissionSerial);
+                }
+
+                RecordEndOfPipe(in queued);
+            });
+            return;
+        }
+
+        // Behind deferred draws the label waits in their queue, as on the command thread: it lands
+        // after their work either way, and the drain records it with the serial it rides.
+        if (MetalV2Diagnostics.DeferEndOfPipe)
+        {
+            var deferred = write;
+            if (TryDeferBehindDraws(() =>
+                {
+                    if (PendingLabelsVisible && EndOfPipeLabelBytes(deferred.Kind) != 0)
+                    {
+                        CommandStream.UpdatePendingLabelTick(deferred.Destination, SubmissionSerial);
+                    }
+
+                    RecordEndOfPipe(in deferred);
+                }, write.Destination, write.Destination == 0 ? 0 : Math.Max(sizeof(ulong), (ulong)EndOfPipeLabelBytes(write.Kind))))
+            {
+                return;
+            }
+        }
+
+        DrainDraws();
         using var endOfPipeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandEndOfPipe);
         _endOfPipeRecords++;
@@ -677,6 +853,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _dsLabelSerial = serial;
         }
 
+        if (sourceIsFinal)
+        {
+            KeepLabelReplays(copies, serial);
+        }
+
         // A command processor polling these bytes suspends until something says they
         // changed, and the only thing that knows is the completion of this submission. The
         // worker reports completions when it next flushes, which is never while every head
@@ -737,6 +918,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
+        if (OnCommandThread)
+        {
+            // Recorded before the stream goes on, so its own reads see the bytes (the overlay).
+            var queued = source.ToArray();
+            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind));
+            return;
+        }
+
+        DrainDraws();
         if (source.IsEmpty)
         {
             return;
@@ -842,6 +1032,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </remarks>
     public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
     {
+        if (RunOnWorker(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind)))
+        {
+            return;
+        }
+
+        DrainDraws();
         if (count <= 0)
         {
             return;
@@ -981,6 +1177,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES")
     {
+        if (OnCommandThread)
+        {
+            var bytes = source.ToArray();
+            var written = false;
+            RunTagged(() => written = TryWriteGuest(address, bytes, kind));
+            return written;
+        }
+
+        DrainDraws();
         _ = kind;
         _cpOverlay.Forget(address, (ulong)source.Length);
         _labelOverlay.Forget(address, (ulong)source.Length);
@@ -1003,6 +1208,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>A DMA fill of guest memory that lands in record order with the labels.</summary>
     public void FillBufferInOrder(ulong address, ulong size, uint value)
     {
+        if (OnCommandThread)
+        {
+            _commandThread!.PostRange(() => FillBufferInOrder(address, size, value), address, size);
+            return;
+        }
+
+        DrainDraws();
         if (size == 0)
         {
             return;
@@ -1023,6 +1235,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>A DMA copy between guest ranges that lands in record order with the labels.</summary>
     public void CopyBufferInOrder(ulong destination, ulong source, ulong size)
     {
+        if (OnCommandThread)
+        {
+            _commandThread!.PostRange(() => CopyBufferInOrder(destination, source, size), destination, size);
+            return;
+        }
+
+        DrainDraws();
         if (size != 0)
         {
             CopyGuestMemory(destination, source, size, allowHost: false);
@@ -1205,6 +1424,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        EncodeEventBarrier(commandBuffer);
+        Interlocked.Increment(ref _labelBarriers);
+    }
+
+    // Work encoded after this point starts only when everything encoded before it in the
+    // command buffer has finished and its stores are visible.
+    private void EncodeEventBarrier(nint commandBuffer)
+    {
         // One event per command buffer. Command buffers overlap on the GPU, and with one event
         // across all of them a later buffer's signal of a lower value could land between an
         // earlier one's signal and its wait, which then waited for a value no one signals
@@ -1221,7 +1448,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _labelBarrierEvent = MetalNative.Send(_device, LabelBarrierShared ? SelNewSharedEvent : SelNewEvent);
             if (_labelBarrierEvent == 0)
             {
-                throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order label copies after their work.");
+                throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order work after the work before it.");
             }
 
             _labelBarrierCommandBuffer = commandBuffer;
@@ -1232,7 +1459,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var value = ++_labelBarrierValue;
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeSignalEvent, _labelBarrierEvent, value);
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeWaitForEvent, _labelBarrierEvent, value);
-        Interlocked.Increment(ref _labelBarriers);
     }
 
     private void ReleaseCompletedLabelBarrierEvents()
@@ -1267,6 +1493,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             throw GpuFatal.Fatal("A Metal blit encoder could not be created for an end-of-pipe label.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
         try
         {
             foreach (ref readonly var copy in copies)
@@ -1283,6 +1510,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
         finally
         {
+            UpdateEncoderFence(encoder, render: false);
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
     }
@@ -1579,7 +1807,10 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     // A deferred label is encoded into the command buffer being recorded, before it is
     // committed, so it has landed once that submission completes.
-    public ulong PendingLabelTick => PendingLabelsVisible ? SubmissionSerial : 0;
+    // On the command thread the buffer the label will ride is not open yet: the worker's serial is a
+    // provisional tick (too early only makes a wait read memory again), and the worker gives the real
+    // one when it records the label (RecordEndOfPipe).
+    public ulong PendingLabelTick => !PendingLabelsVisible ? 0 : OnCommandThread ? Volatile.Read(ref _submissionSerial) : SubmissionSerial;
 
     private static readonly bool PendingLabelsVisible =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PENDING_LABELS") != "0";
@@ -1824,10 +2055,28 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private readonly EndOfPipeEvents _endOfPipeEvents = new();
 
-    public void TriggerInterrupt(int eventId, uint contextId) =>
-        _endOfPipeEvents.TriggerInterrupt(eventId, contextId);
+    public void TriggerInterrupt(int eventId, uint contextId)
+    {
+        if (PostToWorker(() => TriggerInterrupt(eventId, contextId)))
+        {
+            return;
+        }
 
-    public bool HasFlipSlot() => _flipTarget?.HasFlipSlot() ?? true;
+        DrainDraws();
+        _endOfPipeEvents.TriggerInterrupt(eventId, contextId);
+    }
+
+    public bool HasFlipSlot()
+    {
+        if (OnCommandThread)
+        {
+            var hasSlot = false;
+            RunTagged(() => hasSlot = HasFlipSlot());
+            return hasSlot;
+        }
+
+        return _flipTarget?.HasFlipSlot() ?? true;
+    }
 
     // Where each flip this interval ended up. Every flip that reaches CaptureFlip counts
     // as an attempt and then lands in exactly one of the three outcomes, so attempts
@@ -1850,6 +2099,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
     {
+        if (OnCommandThread)
+        {
+            var request = 0UL;
+            RunTagged(() => request = PrepareFlip(handle, index, flipMode, flipArgument));
+            return request;
+        }
+
+        DrainDraws();
         var result = VideoOutBackendServices.TryReserveFlipRequest(
             handle, index, flipMode, flipArgument, gpuQueued: true, out var requestId);
         if (result != 0)
@@ -1878,8 +2135,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public bool IsFlipDone(int handle, int index) => VideoOutBackendServices.IsFlipDone(handle, index);
 
-    public void PrepareCpuFlip(int handle, int index, ulong requestId) =>
+    public void PrepareCpuFlip(int handle, int index, ulong requestId)
+    {
+        if (RunOnWorker(() => PrepareCpuFlip(handle, index, requestId)))
+        {
+            return;
+        }
+
+        DrainDraws();
         CaptureFlip(handle, index, requestId, flipMode: 0, flipArg: 0);
+    }
 
     // The display surface is a cached image like any other; the flip hands its
     // MTLTexture to the presenter, so no pixel ever travels through the CPU.
@@ -1953,6 +2218,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-before-refresh"); }
         _imageCache.RefreshImage(imageIdentifier);
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
+        SampleFlipLuma(image.Texture);
         var texture = PresentationViewOf(imageIdentifier, image, in request);
         var serial = SubmissionSerial;
         FlushCommandBuffer(PassEndCause.Present);
@@ -1992,6 +2258,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // flip is this host's frame boundary, so SHARPEMU_PROFILE_RENDER=1 reports the
         // same breakdown here without any Metal-specific instrumentation.
         SharpEmu.Libs.VideoOut.RenderPhaseProfile.RecordFrame();
+        SharpEmu.Libs.VideoOut.PresentTimeLog.Record();
     }
 
     // What the flip actually resolved to. A title whose frames come out black has either
@@ -2067,16 +2334,62 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         uint groupsY,
         uint groupsZ,
         uint dispatchInitiator,
-        ulong indirectArgumentsAddress = 0) =>
+        ulong indirectArgumentsAddress = 0)
+    {
+        DrainDraws();
         _translation!.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+    }
+
+    // The dispatches after one that waits on its pipeline compile beside it (GpuCommandInterpreter.PrefetchPipelinesAhead).
+    public bool PrefetchesPipelines => SupportsPipelineSuspend;
+
+    public void PrefetchDispatchPipeline(
+        SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks,
+        uint groupsX,
+        uint groupsY,
+        uint groupsZ,
+        uint dispatchInitiator)
+    {
+        _prefetchingPipeline = true;
+        try
+        {
+            _translation?.PrefetchDispatchPipeline(banks, groupsX, groupsY, groupsZ, dispatchInitiator);
+        }
+        finally
+        {
+            _prefetchingPipeline = false;
+        }
+    }
 
     public bool ResolvesIndirectDispatchOnGpu => true;
 
     public bool ResolvesIndirectDrawOnGpu => true;
 
-    public void OnQueueReset(int queueId) => _translation!.QueueReset(queueId);
+    public void OnQueueReset(int queueId)
+    {
+        // The translation state belongs to the interpreting thread.
+        DrainDraws();
+        _translation!.QueueReset(queueId);
+    }
 
-    public void ReleaseShaderWrites() => _translation?.ReleaseShaderWrites();
+    public void ReleaseShaderWrites()
+    {
+        // Ordered behind the draws before it, and nothing the stream waits for: queued, not waited on.
+        if (PostToWorker(ReleaseShaderWrites))
+        {
+            return;
+        }
+
+        if (TryDeferBehindDraws(_releaseOrderedShaderWrites ??= () => _translation?.ReleaseShaderWrites()))
+        {
+            return;
+        }
+
+        DrainDraws();
+        _translation?.ReleaseShaderWrites();
+    }
+
+    private Action? _releaseOrderedShaderWrites;
 
     /// <summary>
     /// Runs interpreter slices until nothing is runnable or the budget ends; blocked
@@ -2084,6 +2397,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public void RunCommandStreamSlices(int maxSlices)
     {
+        if (UsesCommandThread)
+        {
+            RunCommandThreadBatch();
+            return;
+        }
+
         var stream = CommandStream;
         // A title stuck before its first flip never reaches the frame boundary below, and
         // that is the title whose breakdown is wanted: the report is driven from here too.
@@ -2106,6 +2425,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             using var sliceScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.Measure(
                 SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandStream);
             var result = stream.ProcessOne();
+            // A slice that ends suspended or between submissions leaves no draw unrecorded.
+            DrainDraws();
             switch (result)
             {
                 case SliceResult.NoWork:
@@ -2115,6 +2436,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 case SliceResult.AllBlocked:
                     RetryBlockedIfDue();
                     CommitCoalescedFlush();
+                    CommitRecordedWhileBlocked();
                     FlushPendingLabelWrites();
                     return;
                 case SliceResult.BlockedWithoutProgress:
@@ -2122,6 +2444,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                     {
                         RetryBlockedIfDue();
                         CommitCoalescedFlush();
+                        CommitRecordedWhileBlocked();
                         FlushPendingLabelWrites();
                         return;
                     }
@@ -2165,6 +2488,19 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_commandStream is { } stream)
         {
             stream.NotifyCompletedGpuTick(completedSerial);
+        }
+    }
+
+    // Every head waits, and what they wait for may be work this buffer already holds: a
+    // dispatch on one queue whose shader stores the flag another queue's WAIT_REG_MEM reads.
+    // Only a completion re-checks such a wait, so a buffer left open here is never run and
+    // the waits pass only when something else commits it (Ghost of Tsushima's title screen:
+    // one frame every few seconds, every queue parked on another's flag).
+    private void CommitRecordedWhileBlocked()
+    {
+        if (_commandBuffer != 0 && _encodersInBuffer != 0)
+        {
+            FlushCommandBuffer(MetalFlushCause.WaitUncommitted);
         }
     }
 

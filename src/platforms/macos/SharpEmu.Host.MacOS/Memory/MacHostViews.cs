@@ -236,7 +236,12 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
 
             try
             {
-                backing = new HostBackingObject((ulong)alias, size, PageSize, ReleaseOwnedBackingObject) { Descriptor = descriptor };
+                backing = new HostBackingObject((ulong)alias, size, PageSize, ReleaseOwnedBackingObject)
+                {
+                    Descriptor = descriptor,
+                    // Shareable (MacHostViews.Sharing.cs): the descriptor is all another process needs.
+                    Export = UseShareableBacking ? SharedObjectExport(descriptor, size) : null,
+                };
                 MacMappedCopyState.Ledger?.RegisterBacking(backing);
             }
             catch (Exception error)
@@ -272,10 +277,29 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         }
     }
 
+    // SHARPEMU_VA_HOLE_VIRTUAL=1 (experimental): macOS 27 keeps [0x10_0000_0000, 0x70_0000_0000) as
+    // its GPU carveout, where no process can map anything. A guest view there is kept as a record
+    // alone: reserving, mapping, unmapping and protecting it change only the bookkeeping, and the
+    // emulator reaches its bytes through the backing (HLE reads and writes, the GPU's windows) - the
+    // guest's own CPU code still cannot. Ghost of Tsushima streams its textures into fixed pages there.
+    internal static readonly bool CarveoutVirtual =
+        Environment.GetEnvironmentVariable("SHARPEMU_VA_HOLE_VIRTUAL") == "1";
+    private const ulong CarveoutStart = 0x10_0000_0000UL;
+    private const ulong CarveoutEnd = 0x70_0000_0000UL;
+
+    private static bool InVirtualCarveout(ulong address, ulong size) =>
+        CarveoutVirtual && size != 0 && address >= CarveoutStart && address < CarveoutEnd && size <= CarveoutEnd - address;
+
     public ulong ReserveHole(ulong address, ulong size)
     {
         lock (HostViewRegions.Gate)
         {
+            if (InVirtualCarveout(address, size) && address % Granularity == 0)
+            {
+                HostViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+                return address;
+            }
+
             var result = ReserveHoleCore(address, size);
             if (result != 0)
                 HostViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
@@ -456,6 +480,13 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             { failure = HostViewFailure.OffsetOutOfBounds; return false; }
             lock (HostViewRegions.Gate)
             {
+                if (InVirtualCarveout(address, size))
+                {
+                    HostViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, HostViewRegions.RawProtection(protection));
+                    failure = HostViewFailure.None;
+                    return true;
+                }
+
                 failure = HostViewFailure.WrongHostAddress;
                 var ledger = MacMappedCopyState.Ledger;
                 var prepared = ledger?.PrepareView(backing, address, size, offset, protection);
@@ -540,6 +571,12 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
     {
         lock (HostViewRegions.Gate)
         {
+            if (InVirtualCarveout(address, size))
+            {
+                HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(protection));
+                return true;
+            }
+
             var ledger = MacMappedCopyState.Ledger;
             var prepared = ledger?.PrepareProtectionChange(address, size, protection);
             if (ledger is not null && !ledger.BeginProtectionChange(prepared, address, size)) return false;
@@ -569,6 +606,13 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         if (!HostMappedCopyLedger.IsValidDerivedProtection(guestAccess, derivedHostAccess)) return false;
         lock (HostViewRegions.Gate)
         {
+            if (InVirtualCarveout(address, size))
+            {
+                HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(derivedHostAccess));
+                nativeResult = 0;
+                return true;
+            }
+
             var ledger = MacMappedCopyState.Ledger;
             HostMappedCopyLedger.ProtectionChange? prepared = null;
             HostMappedCopyLedger.DerivedProtectionReceipt receipt = default;
@@ -625,6 +669,12 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
     {
         lock (HostViewRegions.Gate)
         {
+            if (InVirtualCarveout(address, size))
+            {
+                HostViewRegions.Replace(address, size, HostMemory.MEM_FREE_STATE, HostMemory.PAGE_NOACCESS);
+                return true;
+            }
+
             if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
             if (munmap((nint)address, (nuint)size) != 0) return false;
             HostViewRegions.Replace(address, size, HostMemory.MEM_FREE_STATE, HostMemory.PAGE_NOACCESS);
@@ -636,6 +686,12 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
     {
         lock (HostViewRegions.Gate)
         {
+            if (InVirtualCarveout(address, size))
+            {
+                HostViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+                return true;
+            }
+
             if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
             var ptr = mmap((nint)address, (nuint)size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
             if (ptr == MAP_FAILED || (ulong)ptr != address) return false;
@@ -675,6 +731,8 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             // the descriptor while alias ownership remains uncertain.
             return new(HostBackingReleaseStatus.AliasOutcomeUnknown, error);
         }
+        // A shareable chunked backing kept its entry ports for other processes; they go with it.
+        if (backing.Export is { Kind: GuestBackingExportKind.MemoryEntries } export) ReleaseEntries(export.Entries);
         // A chunked backing has no descriptor: its chunks die with their last mapping.
         if (backing.Descriptor >= 0 && close(backing.Descriptor) != 0)
         {

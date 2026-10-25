@@ -135,6 +135,15 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public bool HasPendingGpuWrite(ulong address, ulong size)
     {
+        if (OnCommandThread)
+        {
+            var pending = false;
+            RunTagged(() => pending = HasPendingGpuWrite(address, size));
+            return pending;
+        }
+
+        // A deferred draw may be what writes the bytes.
+        DrainDraws();
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.PendingGpuWriteQuery);
         if (size == 0 || (!_gpuWrites.MayCover(address, size) && !_imageCache.MayOwn(address, size)))
         {
@@ -332,6 +341,8 @@ internal sealed partial class MetalRenderHost
             throw Fatal("A Metal compute encoder could not be created for an indirect launch.");
         }
 
+        WaitForPreviousEncoder(encoder, render: false);
+
         MetalNative.SendVoid(encoder, SelSetComputePipelineState, IndirectLaunchPipeline());
         // Every record of the batch is in this buffer (CanWriteLaunchAhead), at its own offset.
         MetalNative.SendSetBuffer(encoder, SelSetComputeBuffer, (nint)key.Buffer, 0, 0);
@@ -343,6 +354,7 @@ internal sealed partial class MetalRenderHost
             new MtlSize { Width = (nuint)batch.Count, Height = 1, Depth = 1 });
         // The slots live in an untracked ring: the pass that draws from them waits on this.
         MetalNative.SendVoid(encoder, SelUpdateFence, IndirectLaunchFence());
+        UpdateEncoderFence(encoder, render: false);
         MetalNative.SendVoid(encoder, SelEndEncoding);
         NoteRecordedWork();
         if (PassProfileEnabled)

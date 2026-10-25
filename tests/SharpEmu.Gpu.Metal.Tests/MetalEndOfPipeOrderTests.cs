@@ -217,6 +217,41 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0x77u, rig.Backing.Read32(filled));
     }
 
+    // The guest windows are untracked, so nothing but an ordering keeps the next encoder of the
+    // command buffer from starting while this one still writes: a compute encoder that ends
+    // leaves one behind it, as a fence update (the default, which also chains the fill's own
+    // encoder) or an event barrier, and the opt-out leaves none. The fill lands either way.
+    [Theory]
+    [InlineData("Fence", 1L)]
+    [InlineData("Event", 1L)]
+    [InlineData("None", 0L)]
+    public void AnEndingComputeEncoderIsOrderedBeforeTheNextEncoder(string mode, long expected)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        const ulong filled = GuestBase + 0x10000;
+        host.EncoderOrdering = Enum.Parse<MetalRenderHost.EncoderOrderingMode>(mode);
+        _ = host.TakeEncoderBarriers();
+
+        _ = host.EnsureComputeEncoder();
+        host.FillBufferInOrder(filled, 0x1000, 0x11);
+        host.FlushCommandBuffer();
+        Assert.False(host.ComputeEncoderOpen);
+        var ordered = host.TakeEncoderBarriers();
+        if (expected == 0)
+            Assert.Equal(0L, ordered);
+        else
+            Assert.True(ordered >= expected);
+
+        _ = host.EnsureComputeEncoder();
+        host.FillBufferInOrder(filled, 0x1000, 0x22);
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x22u, rig.Backing.Read32(filled));
+    }
+
     // A copy waiting for the open compute encoder to end lands after every dispatch recorded
     // into it. A dispatch binding its bytes - GTA V's bounds pass over the table its
     // WRITE_DATA has just initialised - ends the encoder first so the copy lands before it;

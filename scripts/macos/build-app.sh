@@ -26,6 +26,7 @@
 #   SHARPEMU_MAC_GET_TASK_ALLOW   "1" adds get-task-allow (measurement builds: memstat needs task_for_pid)
 #   SHARPEMU_MAC_KEEP_UNIVERSAL   pass "1" to keep arm64 slices in fat dylibs
 #   SHARPEMU_MAC_R2R              "true" (default) publishes ReadyToRun; "false" to bisect
+#   SHARPEMU_MAC_GPU_HOST         "1" (default) bundles the split's arm64 GPU host; "0" leaves it out
 #   SHARPEMU_MAC_DMG              pass "1" to also produce a .dmg
 #   SHARPEMU_OUTPUT_DIR           where SharpEmu.app is written
 #                                 (default artifacts/macos)
@@ -113,6 +114,24 @@ if [ ! -x "${publish_dir}/${executable_name}" ]; then
     exit 1
 fi
 
+# The two-process split's GPU host (SHARPEMU_GPU_PROCESS=1) is a second, native
+# osx-arm64 executable with its own self-contained runtime. It lands in
+# Contents/MacOS/gpuhost/, the first place GpuProcessHost.FindExecutable looks.
+gpu_host_dir="gpuhost"
+gpu_host_publish_dir="${output_dir}/publish-osx-arm64-gpuhost"
+bundle_gpu_host="${SHARPEMU_MAC_GPU_HOST:-1}"
+if [ "${bundle_gpu_host}" = "1" ]; then
+    rm -rf "${gpu_host_publish_dir}"
+    MSBUILDDISABLENODEREUSE=1 dotnet publish "${repo_root}/src/SharpEmu.GpuHost/SharpEmu.GpuHost.csproj" \
+        -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=false \
+        -p:PublishReadyToRun="${SHARPEMU_MAC_R2R:-true}" -p:PublishDir="${gpu_host_publish_dir}/" \
+        -m:"${build_workers}" -nr:false -p:UseSharedCompilation=false -p:SharpEmuBuildProfile=macos-bundle
+    if [ ! -x "${gpu_host_publish_dir}/SharpEmu.GpuHost" ]; then
+        echo "build-app.sh: expected ${gpu_host_publish_dir}/SharpEmu.GpuHost to exist after publish." >&2
+        exit 1
+    fi
+fi
+
 # --------------------------------------------------------------- assemble ----
 
 # Contents/MacOS holds the whole payload, not just the apphost. The managed
@@ -123,6 +142,9 @@ fi
 # lookups work with no @rpath edits and no code change.
 mkdir -p "${app_dir}/Contents/MacOS" "${app_dir}/Contents/Resources"
 ditto "${publish_dir}" "${app_dir}/Contents/MacOS"
+if [ "${bundle_gpu_host}" = "1" ]; then
+    ditto "${gpu_host_publish_dir}" "${app_dir}/Contents/MacOS/${gpu_host_dir}"
+fi
 python3 "${script_dir}/build-metadata.py" embed \
     --repo "${repo_root}" --snapshot "${source_snapshot}" --sdk "${sdk_version}" \
     --output "${app_dir}/Contents/Resources/build-info.json"
@@ -153,7 +175,8 @@ printf 'APPL????' > "${app_dir}/Contents/PkgInfo"
 # Several NuGet natives (libSkiaSharp, libHarfBuzzSharp) ship universal
 # x86_64+arm64. Only the x86_64 slice can ever load into this process, so the
 # arm64 half is dead weight inside the bundle. Thinning also makes the
-# architecture check below exact rather than "contains x86_64".
+# architecture check below exact rather than "contains x86_64". The GPU host's
+# payload is the mirror image and keeps only its arm64 slices.
 if [ "${SHARPEMU_MAC_KEEP_UNIVERSAL:-0}" != "1" ]; then
     thinned=0
     while IFS= read -r binary; do
@@ -162,24 +185,34 @@ if [ "${SHARPEMU_MAC_KEEP_UNIVERSAL:-0}" != "1" ]; then
             *"universal binary"*) ;;
             *) continue ;;
         esac
+        case "${binary}" in
+            "${app_dir}/Contents/MacOS/${gpu_host_dir}"/*) slice=arm64 ;;
+            *) slice=x86_64 ;;
+        esac
         case " $(lipo -archs "${binary}" 2>/dev/null || true) " in
-            *" x86_64 "*) ;;
+            *" ${slice} "*) ;;
             *) continue ;;
         esac
-        lipo -thin x86_64 "${binary}" -output "${binary}.x86_64"
-        mv "${binary}.x86_64" "${binary}"
+        lipo -thin "${slice}" "${binary}" -output "${binary}.${slice}"
+        mv "${binary}.${slice}" "${binary}"
         thinned=$((thinned + 1))
     done <<EOF
 $(find "${app_dir}" -type f '(' -name '*.dylib' -o -perm -u+x ')')
 EOF
-    echo "==> Thinned ${thinned} universal binaries to x86_64"
+    echo "==> Thinned ${thinned} universal binaries to their process's slice"
 fi
 
 # --------------------------------------------------------------- policy ------
 
 check_args=("${app_dir}")
+gpu_host_check_args=("${app_dir}/Contents/MacOS/${gpu_host_dir}" --arch arm64)
 if [ "${SHARPEMU_MAC_FORBID_SDL:-1}" = "1" ]; then
     check_args+=(--forbid-sdl)
+    gpu_host_check_args+=(--forbid-sdl)
+fi
+if [ "${bundle_gpu_host}" = "1" ]; then
+    "${platform_dir}/check-macos-output.sh" "${gpu_host_check_args[@]}"
+    check_args+=(--arch-exclude "Contents/MacOS/${gpu_host_dir}")
 fi
 "${platform_dir}/check-macos-output.sh" "${check_args[@]}"
 

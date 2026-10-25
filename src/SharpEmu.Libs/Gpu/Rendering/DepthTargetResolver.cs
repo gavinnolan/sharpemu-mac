@@ -226,6 +226,26 @@ public static class DepthTargetResolver
     private static StencilOperations ConvertFace(byte fail, byte pass, byte depthFail, GpuCompareOp compare,
         byte operationValue, ref StencilMasks masks, Func<string, Exception> fatal)
     {
+        // Vulkan has one reference per face, shared by the comparison and every Replace. An equal
+        // test fixes every written bit of a passing sample to the reference, so a replacement by
+        // a different operation value is the same as toggling the bits that differ: Invert over
+        // those bits keeps the comparison reference intact.
+        if (masks.WriteMask != 0 && compare == GpuCompareOp.Equal &&
+            (masks.WriteMask & ~masks.CompareMask) == 0 && fail == 0 &&
+            (pass == 0 || pass == ReplaceWithOperationValue) &&
+            (depthFail == 0 || depthFail == ReplaceWithOperationValue) &&
+            (pass == ReplaceWithOperationValue || depthFail == ReplaceWithOperationValue) &&
+            ((masks.Reference ^ operationValue) & masks.WriteMask) != 0)
+        {
+            var invertMask = masks.WriteMask & (masks.Reference ^ operationValue);
+            masks = masks with { WriteMask = invertMask };
+            return new StencilOperations(
+                GpuStencilOp.Keep,
+                pass == ReplaceWithOperationValue ? GpuStencilOp.Invert : GpuStencilOp.Keep,
+                depthFail == ReplaceWithOperationValue ? GpuStencilOp.Invert : GpuStencilOp.Keep,
+                compare);
+        }
+
         ReadOnlySpan<byte> operations = [fail, pass, depthFail];
         Span<GpuStencilOp> converted = stackalloc GpuStencilOp[3];
         var reference = masks.Reference;

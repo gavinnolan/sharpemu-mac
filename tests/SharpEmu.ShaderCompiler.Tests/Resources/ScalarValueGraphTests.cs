@@ -156,8 +156,11 @@ public sealed class ScalarValueGraphTests
         Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(invariant, invariant.Info.Buffers[0].Source, Inputs([]), out var result));
         Assert.Equal(7u, result.Dwords[0]);
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(PhiProgram(7, 9)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        // Divergent: no single binding, so the access reads the chosen V# from its SGPRs on the device.
+        var divergent = Extract(PhiProgram(7, 9));
+        Assert.Empty(divergent.Info.Buffers);
+        Assert.True(divergent.Memory.Find(28)!.DeviceDescriptor);
+        Assert.True(divergent.Info.UsesDeviceAddresses);
     }
 
     [Fact]

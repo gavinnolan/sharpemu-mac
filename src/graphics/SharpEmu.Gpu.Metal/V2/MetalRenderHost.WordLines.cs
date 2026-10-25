@@ -45,6 +45,12 @@ internal sealed partial class MetalRenderHost
 
     public void BeginGuestWordReads()
     {
+        // The word lines belong to the worker; a resolution on another thread reads each word.
+        if (_concurrentAssumptions is not null)
+        {
+            return;
+        }
+
         InvalidateWordLines();
         _wordLineGpuVersion = _gpuWrites.Version;
         _wordLineOverlayVersion = _cpOverlay.Version;
@@ -54,6 +60,11 @@ internal sealed partial class MetalRenderHost
 
     public void EndGuestWordReads()
     {
+        if (_concurrentAssumptions is not null)
+        {
+            return;
+        }
+
         _wordLineThread = 0;
         InvalidateWordLines();
     }

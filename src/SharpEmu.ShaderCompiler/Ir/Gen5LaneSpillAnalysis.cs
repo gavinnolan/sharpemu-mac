@@ -214,8 +214,12 @@ public static class Gen5LaneSpillAnalysis
     }
 
     /// <summary>How many consecutive VGPRs a destination operand may cover, erring wide: a
-    /// memory return gets one dword more than its components for a TFE status word, a
-    /// 64-bit ALU result 2, a quad SAD 4, and a memory op this does not model 16.</summary>
+    /// memory return its components, with one dword more when TFE or LWE asks for a status
+    /// word after them, a 64-bit ALU result 2, a quad SAD 4, and a memory op this does not
+    /// model 16. The status word is there only when asked for: counting it always made a
+    /// one-component sample into v15 drop the spills parked in v16, and a Ghost of Tsushima
+    /// pixel shader then rebuilt a buffer descriptor from a lane its partial simdgroup did not
+    /// have, read past a list's end marker and spun until the GPU watchdog fired.</summary>
     private static uint VectorWriteWidth(Gen5ShaderInstruction instruction)
     {
         var opcode = instruction.Opcode;
@@ -229,12 +233,12 @@ public static class Gen5LaneSpillAnalysis
                     components = 4;
                 }
 
-                return Math.Max(components, 1u) + 1;
+                return Math.Max(components, 1u) + (image.Tfe || image.Lwe ? 1u : 0u);
             }
             case Gen5BufferMemoryControl buffer:
-                return Math.Max(buffer.DwordCount, 1u) + 1;
+                return Math.Max(buffer.DwordCount, 1u) + (buffer.Tfe ? 1u : 0u);
             case Gen5GlobalMemoryControl global:
-                return Math.Max(global.DwordCount, 1u) + 1;
+                return Math.Max(global.DwordCount, 1u);
             case Gen5DataShareControl:
             {
                 var width = opcode.Contains("128", StringComparison.Ordinal) ? 4u

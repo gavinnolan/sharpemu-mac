@@ -56,6 +56,8 @@ public static class UninitializedProbe
             return OperatingSystem.IsMacOS() ? MacBackingLifecycleWorker.Run(args[0]["--mac-backing-lifecycle=".Length..]) : 81;
         if (args.Length == 1 && args[0].StartsWith("--mac-owned-native=", StringComparison.Ordinal))
             return OperatingSystem.IsMacOS() ? MacOwnedNativeWorker.Run(args[0]["--mac-owned-native=".Length..]) : 81;
+        if (args.Length == 1 && args[0].StartsWith("--guest-mirror-child=", StringComparison.Ordinal))
+            return OperatingSystem.IsMacOS() ? GuestMirrorProcessWorker.Run(args[0]["--guest-mirror-child=".Length..]) : 81;
 #endif
         if (args.Length != 1) return 2;
         if (args[0] == "--mismatched-platform-factory")

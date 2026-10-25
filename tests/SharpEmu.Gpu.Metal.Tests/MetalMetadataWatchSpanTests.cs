@@ -60,4 +60,23 @@ public sealed class MetalMetadataWatchSpanTests
         Assert.True(MetalImageCache.AnySpanOverlaps(one, 0x4FFF, 1));
         Assert.False(MetalImageCache.AnySpanOverlaps(one, 0x5000, 1));
     }
+
+    // A metadata watch is added only for pages one published span does not already hold whole;
+    // a range over two spans that merely touch is not taken as covered, which only costs the
+    // full scan the watch would have made anyway.
+    [Theory]
+    [InlineData(0x1000UL, 0x2000UL, true)] // a whole span
+    [InlineData(0x1400UL, 0x1800UL, true)] // inside one
+    [InlineData(0x8000UL, 0xA000UL, true)]
+    [InlineData(0x1800UL, 0x2800UL, false)] // across two touching spans
+    [InlineData(0x0800UL, 0x1800UL, false)] // starts before the first
+    [InlineData(0x2800UL, 0x3800UL, false)] // runs past the adjacent pair
+    [InlineData(0x4000UL, 0x5000UL, false)] // in the gap
+    [InlineData(0x9000UL, 0xB000UL, false)] // runs past the last
+    public void Range_IsCoveredOnlyWhenOneSpanHoldsIt(ulong begin, ulong end, bool covered) =>
+        Assert.Equal(covered, MetalImageCache.SpanCovers(Spans, begin, end));
+
+    [Fact]
+    public void NoSpans_CoverNothing() =>
+        Assert.False(MetalImageCache.SpanCovers([], 0x1000, 0x2000));
 }

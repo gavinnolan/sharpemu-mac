@@ -454,7 +454,7 @@ public sealed class StaticShaderPlanner : IDisposable
         var primitive = options.PrimitiveShader;
         var text = new StringBuilder()
             .Append(options.VertexInfo!.ClipSpace).Append('|')
-            .Append(primitive is not { } shader ? "-" : $"{shader.OutputPrimitiveType},{shader.IsWave64},{shader.Passthrough}")
+            .Append(primitive is not { } shader ? "-" : $"{shader.OutputPrimitiveType},{shader.IsWave64},{shader.Passthrough},{shader.AmplifiedVerticesOut}")
             .Append('|').Append(HostKey(record.Host));
         return XxHash3.HashToUInt64(MemoryMarshal.AsBytes(text.ToString().AsSpan()));
     }

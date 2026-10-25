@@ -48,6 +48,14 @@ internal sealed partial class MetalRenderHost
         public ResourceSlotIdentifier[] Images = [];
         public ImageRequest[] Requests = [];
         public bool[] IsStorage = [];
+
+        // Per image: the memo entry a sampled binding was found in while its stamp held, or null;
+        // and for one resolved in full, whether it may be memoised, its key, and the owner-list
+        // counts over the request read before its lookup.
+        public TextureMemoEntry?[] MemoHits = [];
+        public bool[] MemoWanted = [];
+        public TextureMemoKey[] MemoKeys = [];
+        public long[] MemoPages = [];
         public MetalGuestRange[] Buffers = [];
         public uint[] BufferLengths = [];
         public uint[] ShaderData = [];
@@ -75,6 +83,10 @@ internal sealed partial class MetalRenderHost
                 Images = new ResourceSlotIdentifier[images];
                 Requests = new ImageRequest[images];
                 IsStorage = new bool[images];
+                MemoHits = new TextureMemoEntry?[images];
+                MemoWanted = new bool[images];
+                MemoKeys = new TextureMemoKey[images];
+                MemoPages = new long[images];
             }
 
             if (Samplers.Length < samplers)
@@ -136,6 +148,10 @@ internal sealed partial class MetalRenderHost
     }
 
     private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentLayouts = new();
+
+    // The same plans by layout instance: a program keeps its layout, so a draw finds its plan by
+    // reference instead of comparing the layout field by field (BindingLayout.Equals).
+    private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentPlansByInstance = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<(uint, uint, uint, uint, bool), (nint Handle, ulong ResourceId)> _samplers = new();
     private readonly nint[] _stageArgumentBuffers = new nint[StageCount];
     private readonly ulong[] _stageArgumentOffsets = new ulong[StageCount];
@@ -267,6 +283,88 @@ internal sealed partial class MetalRenderHost
         Atomic: image.Atomic,
         Atomic64: image.Atomic64);
 
+    // A sampled binding whose T# and shape were resolved before takes the image, request and view it
+    // got then while the stamp the image cache gave it holds (MetalImageCache.TryStampTextureLocked),
+    // instead of looking them up and acquiring them again. SHARPEMU_METAL_V2_TEXTURE_MEMO=0 turns it off.
+    private static readonly bool TextureMemoEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TEXTURE_MEMO") != "0";
+
+    private const int TextureMemoLimit = 16384;
+
+    internal readonly record struct TextureMemoKey(
+        uint W0, uint W1, uint W2, uint W3, uint W4, uint W5, uint W6, uint W7, ShaderImageShape Shape);
+
+    internal sealed class TextureMemoEntry
+    {
+        public TextureMemoKey Key;
+        public ResourceSlotIdentifier Image;
+        public ImageRequest Request;
+        public nint Texture;
+        public ulong ResourceId;
+        public MetalImageCache.TextureMemoStamp Stamp;
+    }
+
+    private readonly Dictionary<TextureMemoKey, TextureMemoEntry> _textureMemo = new();
+    private long _textureMemoHits, _textureMemoLate, _textureMemoMisses, _textureMemoStores;
+
+    internal string TakeTextureMemoCounters()
+    {
+        var text = $"hits={_textureMemoHits} late={_textureMemoLate} misses={_textureMemoMisses} stores={_textureMemoStores} entries={_textureMemo.Count}";
+        _textureMemoHits = _textureMemoLate = _textureMemoMisses = _textureMemoStores = 0;
+        return text;
+    }
+
+    // A sampled binding found in the memo with a stamp that still holds; otherwise notes the key for
+    // the full resolution, which reads the owner-list counts over the request before its lookup.
+    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index)
+    {
+        prepared.MemoHits[index] = null;
+        prepared.MemoWanted[index] = false;
+        if (!TextureMemoEnabled || image.ResourceClass == MslImageResourceClass.Storage || words.Length < 8)
+        {
+            return false;
+        }
+
+        var key = new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
+        if (_textureMemo.TryGetValue(key, out var entry) && _imageCache.TextureStampMayHold(in entry.Stamp))
+        {
+            prepared.Images[index] = entry.Image;
+            prepared.Requests[index] = entry.Request;
+            prepared.IsStorage[index] = false;
+            prepared.Textures[index] = 0;
+            prepared.MemoHits[index] = entry;
+            return true;
+        }
+
+        _textureMemoMisses++;
+        prepared.MemoWanted[index] = true;
+        prepared.MemoKeys[index] = key;
+        return false;
+    }
+
+    private void RememberTexture(MetalStageBindings stage, int index, ResourceSlotIdentifier identifier, in ImageRequest request,
+        in MetalImageCache.TextureMemoStamp stamp)
+    {
+        var key = stage.MemoKeys[index];
+        if (!_textureMemo.TryGetValue(key, out var entry))
+        {
+            if (_textureMemo.Count >= TextureMemoLimit)
+            {
+                _textureMemo.Clear();
+            }
+
+            entry = new TextureMemoEntry { Key = key };
+            _textureMemo[key] = entry;
+        }
+
+        entry.Image = identifier;
+        entry.Request = request;
+        entry.Texture = stage.Textures[index];
+        entry.ResourceId = stage.TextureIds[index];
+        entry.Stamp = stamp;
+        _textureMemoStores++;
+    }
+
     public IPreparedBindings PrepareBindings(ShaderStageResources stage)
     {
         var program = RequireProgram(stage);
@@ -299,6 +397,11 @@ internal sealed partial class MetalRenderHost
             if (index == movie.Luma || index == movie.Chroma)
             {
                 PrepareHostMovieBinding(prepared, info.Images[index], snapshot.Images[index], index);
+                continue;
+            }
+
+            if (TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index))
+            {
                 continue;
             }
 
@@ -369,6 +472,11 @@ internal sealed partial class MetalRenderHost
         var storage = image.ResourceClass == MslImageResourceClass.Storage;
         var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
         var request = resolution.Request;
+        if (prepared.MemoWanted[index])
+        {
+            prepared.MemoPages[index] = _imageCache.RequestPageVersions(in request);
+        }
+
         var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
         resolution = resolution with { Request = request };
         var found = _imageCache.GetImage(imageIdentifier);
@@ -580,6 +688,28 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            if (stage.MemoHits[index] is { } hit)
+            {
+                if (_imageCache.TryReacquireTextureView(hit.Image, in hit.Request, in hit.Stamp))
+                {
+                    stage.Textures[index] = hit.Texture;
+                    stage.TextureIds[index] = hit.ResourceId;
+                    NotePendingInputDump(hit.Texture, hit.Image, index, ImageRole.Texture);
+                    stage.MipTextures[index] = null;
+                    stage.MipTextureIds[index] = null;
+                    _textureMemoHits++;
+                    continue;
+                }
+
+                // The stamp stopped holding after the preparation found it: the image and request
+                // it gave are looked up again, then acquired and memoised as on a miss.
+                stage.MemoHits[index] = null;
+                stage.MemoWanted[index] = true;
+                stage.MemoKeys[index] = hit.Key;
+                ResolveImageBinding(stage, info.Images[index], snapshot.Images[index], index);
+                _textureMemoLate++;
+            }
+
             var request = stage.Requests[index];
             var identifier = stage.Images[index];
             using (var resolveScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingImageResolve))
@@ -601,8 +731,21 @@ internal sealed partial class MetalRenderHost
 
             using (var acquireScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingTextureAcquire))
             {
-                stage.Textures[index] = _imageCache.AcquireTextureView(
-                    identifier, request with { Role = role }, out stage.TextureIds[index]);
+                if (stage.MemoWanted[index] && !stage.IsStorage[index])
+                {
+                    stage.Textures[index] = _imageCache.AcquireTextureViewForMemo(
+                        identifier, request with { Role = role }, stage.MemoPages[index], out stage.TextureIds[index], out var stamp);
+                    if (stamp is { } held)
+                    {
+                        RememberTexture(stage, index, identifier, in request, in held);
+                    }
+                }
+                else
+                {
+                    stage.Textures[index] = _imageCache.AcquireTextureView(
+                        identifier, request with { Role = role }, out stage.TextureIds[index]);
+                }
+
                 NotePendingInputDump(stage.Textures[index], identifier, index, role);
                 BindStorageMipViews(stage, info.Images[index], identifier, request with { Role = role }, index);
             }
@@ -628,10 +771,15 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            // A range mapped whole - nearly every binding - is answered by one query; ClampMappedSize
+            // asks again from its first byte only for a range that runs past its mapping.
             bool readable;
+            bool mappedWhole;
             using (var checkScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingBufferCheck))
             {
-                readable = requested <= ulong.MaxValue - descriptor.Address && _memory.CanRead(descriptor.Address, 1);
+                var inRange = requested <= ulong.MaxValue - descriptor.Address;
+                mappedWhole = inRange && _memory.CanRead(descriptor.Address, requested);
+                readable = mappedWhole || (inRange && _memory.CanRead(descriptor.Address, 1));
             }
 
             if (!readable)
@@ -645,7 +793,7 @@ internal sealed partial class MetalRenderHost
                     $"user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}].");
             }
 
-            var size = ClampMappedSize(descriptor.Address, requested);
+            var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
@@ -794,9 +942,17 @@ internal sealed partial class MetalRenderHost
             ? (bytes + 3) & ~3
             : 32;
 
-    private static HashSet<ulong> ParseDumpBufferHashes()
+    // SHARPEMU_METAL_V2_DUMP_BUFFER_BIN=<dir>: also writes each reported binding whole (up to
+    // 64 MiB, as the CPU sees guest memory) to <dir>/<hash>-buf<index>-<n>.bin.
+    private static readonly string? _dumpBufferBinDirectory =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFER_BIN");
+
+    private static HashSet<ulong> ParseDumpBufferHashes() => ParseDumpBufferHashesFrom("SHARPEMU_METAL_V2_DUMP_BUFFERS");
+
+    // A comma-separated list of program hashes (hex, 0x optional) from an environment variable.
+    private static HashSet<ulong> ParseDumpBufferHashesFrom(string variable)
     {
-        var value = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFERS");
+        var value = Environment.GetEnvironmentVariable(variable);
         var hashes = new HashSet<ulong>();
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -843,6 +999,12 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        // Under a dump trigger, the bindings of the dumped frame, beside its snapshots.
+        if (_dumpTriggerPath is not null && !_dumpThisFlip)
+        {
+            return;
+        }
+
         var key = (hash, index);
         _dumpedBufferCounts.TryGetValue(key, out var seen);
         if (seen >= MaxBufferDumpsPerBinding)
@@ -851,6 +1013,16 @@ internal sealed partial class MetalRenderHost
         }
 
         _dumpedBufferCounts[key] = seen + 1;
+        if (_dumpBufferBinDirectory is not null)
+        {
+            var whole = new byte[(int)Math.Min(size, 64UL << 20)];
+            if (_guestMemory.TryPeek(descriptor.Address, whole))
+            {
+                Directory.CreateDirectory(_dumpBufferBinDirectory);
+                File.WriteAllBytes(Path.Combine(_dumpBufferBinDirectory, $"{hash:X16}-buf{index}-{seen}.bin"), whole);
+            }
+        }
+
         var count = (int)Math.Min((ulong)_dumpBufferBytes, Math.Max(size, 4));
         var host = new byte[count];
         var read = _guestMemory.TryPeek(descriptor.Address, host);
@@ -1277,10 +1449,27 @@ internal sealed partial class MetalRenderHost
         return range.GpuAddress;
     }
 
+    private void RememberPlanInstance(BindingLayout layout, ArgumentPlan plan)
+    {
+        // Bounded: layouts of programs since evicted would otherwise stay reachable.
+        if (_argumentPlansByInstance.Count >= 8192)
+        {
+            _argumentPlansByInstance.Clear();
+        }
+
+        _argumentPlansByInstance[layout] = plan;
+    }
+
     private ArgumentPlan ArgumentPlanOf(BindingLayout layout)
     {
+        if (_argumentPlansByInstance.TryGetValue(layout, out var known))
+        {
+            return known;
+        }
+
         if (_argumentLayouts.TryGetValue(layout, out var found))
         {
+            RememberPlanInstance(layout, found);
             return found;
         }
 
@@ -1316,6 +1505,7 @@ internal sealed partial class MetalRenderHost
 
         var plan = new ArgumentPlan(built, fieldResources, fieldMips);
         _argumentLayouts[layout] = plan;
+        RememberPlanInstance(layout, plan);
         return plan;
     }
 

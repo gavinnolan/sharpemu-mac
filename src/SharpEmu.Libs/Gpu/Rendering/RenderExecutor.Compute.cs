@@ -26,6 +26,29 @@ public sealed partial class RenderExecutor
     private const uint ImageClearStride = 16;
     private const uint ImageClearUserDataCount = 8;
 
+    // The pipeline of a dispatch the stream has not reached, asked for while an earlier dispatch
+    // waits on its own compile (GpuCommandInterpreter.PrefetchPipelinesAhead): the program is
+    // prepared as the dispatch will prepare it, and a pipeline the cache does not hold starts
+    // compiling beside the one waited for. Nothing is recorded. Pipelines take from the counted
+    // ones the dispatch's own request would.
+    public void PrefetchDispatchPipeline(RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    {
+        var compute = banks.Shader.Compute;
+        if (!_host.SupportsPipelineSuspend || compute.Address == 0 || groupsX == 0 || groupsY == 0 || groupsZ == 0)
+        {
+            return;
+        }
+
+        var computeProgram = _pipelines.PrepareComputeProgramAhead(compute, dispatchInitiator, groupsX, groupsY, groupsZ);
+        if (!computeProgram.Available || computeProgram.Consumed || !computeProgram.Program.IsValid ||
+            computeProgram.Input.Stage.Program is null)
+        {
+            return;
+        }
+
+        _ = _pipelines.TryCreateComputePipeline(computeProgram.Input, computeProgram.Program, out _);
+    }
+
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
         if (!_host.IsRecording)
@@ -61,6 +84,7 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
             }
 
+            TraceFrameDispatch("zero-sized", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             return;
         }
 
@@ -81,6 +105,7 @@ public sealed partial class RenderExecutor
 
         if (computeProgram.Consumed)
         {
+            TraceFrameDispatch("consumed", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             return;
         }
 
@@ -91,6 +116,7 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Skipping a dispatch without a program: shader=0x{compute.Address:X16} groups={groupsX}x{groupsY}x{groupsZ}");
             }
 
+            TraceFrameDispatch("no-program", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             return;
         }
 
@@ -115,33 +141,40 @@ public sealed partial class RenderExecutor
             (ulong)groupsX * groupsY * groupsZ >= MetadataClearMinimumGroups &&
             TryConsumeMetadataClear(input))
         {
+            TraceFrameDispatch("metadata-clear", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
         {
+            TraceFrameDispatch("constant-fill", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
+            TraceFrameDispatch("bounded-fill", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
+            TraceFrameDispatch("bounded-copy", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
 
         if (!retried && indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
+            TraceFrameDispatch("image-clear", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             _host.ResetBindings();
             return;
         }
+
+        NoteHtileStores(input);
 
         if (useThreadDimensions)
         {
@@ -200,6 +233,7 @@ public sealed partial class RenderExecutor
                 {
                     KeepSuspendedDispatch(submitId, compute.Address, indirectArgumentsAddress, retry);
                     _host.NotePipelineNotReady();
+                    TraceFrameDispatch("suspended", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
                     return;
                 }
             }
@@ -256,6 +290,8 @@ public sealed partial class RenderExecutor
                 physicalGroups[axisOrder[logical]] = logicalGroups[logical];
             }
 
+            TraceFrameDispatch(hasStorageWrites ? "dispatched-writes" : "dispatched", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            TraceRangeWriters(input.Stage, program.Hash, groupsX, groupsY, groupsZ);
             var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
@@ -266,6 +302,61 @@ public sealed partial class RenderExecutor
         }
 
         _host.ResetBindings();
+    }
+
+    // SHARPEMU_TRACE_WRITERS=<lo>-<hi> (hex): every dispatch with a written buffer binding over the
+    // range, and every dispatch that stores through device addresses (whose targets are not
+    // known here), so the shader that writes a value can be named.
+    private static readonly (ulong Low, ulong High) TracedWriterRange = ParseTracedWriterRange(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITERS"));
+
+    private static (ulong, ulong) ParseTracedWriterRange(string? text)
+    {
+        var parts = (text ?? string.Empty).Split('-');
+        return parts.Length == 2 &&
+            ulong.TryParse(parts[0].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var low) &&
+            ulong.TryParse(parts[1].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var high)
+            ? (low, high)
+            : (0, 0);
+    }
+
+    private int _tracedWriters;
+
+    private void TraceRangeWriters(ShaderStageResources stage, ulong hash, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        if (TracedWriterRange.High == 0 || stage.Program is not { } program || _tracedWriters > 4000)
+            return;
+
+        var hits = new System.Text.StringBuilder();
+        var descriptors = stage.Resources.Buffers;
+        for (var i = 0; i < program.Buffers.Length && i < descriptors.Length; i++)
+        {
+            if (!program.Buffers[i].Written || descriptors[i].Length < 4)
+                continue;
+            var descriptor = BufferDescriptorWords.From(descriptors[i]);
+            if (descriptor.Footprint() is not { } footprint || descriptor.Address == 0)
+                continue;
+            if (descriptor.Address < TracedWriterRange.High && TracedWriterRange.Low < descriptor.Address + footprint)
+                hits.Append($" buf{i}=0x{descriptor.Address:X}+0x{footprint:X}");
+        }
+
+        if (hits.Length == 0 && !program.WritesDeviceAddresses)
+            return;
+
+        _tracedWriters++;
+        Console.Error.WriteLine(
+            $"[GPU][WRITERS] hash=0x{hash:X16} groups={groupsX}x{groupsY}x{groupsZ} device_stores={program.WritesDeviceAddresses}{hits}");
+    }
+
+    // Under a dump-triggered frame, what became of each dispatch: a pass that never ran leaves
+    // no snapshot behind, so the list of dispositions is the only record of it.
+    private void TraceFrameDispatch(string disposition, ulong shader, ulong hash, uint groupsX, uint groupsY, uint groupsZ, ulong indirect)
+    {
+        if (_host.TraceFrameActive)
+        {
+            Console.Error.WriteLine(
+                $"[FRAME-DISPATCH] {disposition} hash=0x{hash:X16} shader=0x{shader:X} groups={groupsX}x{groupsY}x{groupsZ} indirect=0x{indirect:X}");
+        }
     }
 
     // The dispatches suspended on their pipeline, by submission: a submission runs its packets
@@ -358,6 +449,12 @@ public sealed partial class RenderExecutor
     // transient surface's HTILE was registered, and taken for a clear it never ran.
     private const ulong MetadataClearMinimumGroups = 2;
 
+    // Each program and surface it was taken to clear, reported once.
+    private readonly HashSet<(ulong Hash, ulong Address)> _loggedMetadataClears = new();
+
+    // SHARPEMU_TRACE_HTILE=1 reports every metadata clear and HTILE store, not the first of each.
+    public static readonly bool TraceHtile = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_HTILE") == "1";
+
     private bool TryConsumeMetadataClear(ComputeInputInfo input)
     {
         var program = input.Stage.Program!;
@@ -418,12 +515,71 @@ public sealed partial class RenderExecutor
             var descriptor = DecodeBufferDescriptor(resources, i);
             if (_host.ClearMetadata(descriptor.Address))
             {
+                if (_loggedMetadataClears.Add((program.Hash, descriptor.Address)) || TraceHtile)
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU][INFO] A compute dispatch is taken as a metadata clear: hash=0x{program.Hash:X16} " +
+                        $"metadata=0x{descriptor.Address:X16} records={descriptor.RecordCount} stride={descriptor.Stride} " +
+                        $"constant=0x{program.ConstantStoreValue ?? 0:X8}.");
+                }
+
                 return true;
             }
         }
 
         return false;
     }
+
+    // A dispatch that runs and stores into registered HTILE leaves it holding what it wrote,
+    // so a cleared mark from before (a memset taken for a clear, or a surface's first
+    // registration) no longer stands: UE5's Nanite depth export writes the material depth and
+    // the HTILE that describes it, and the mark loaded that depth as zero, so every Nanite
+    // material draw failed its depth-equal test (Black Myth: Wukong's tree trunks).
+    private void NoteHtileStores(ComputeInputInfo input)
+    {
+        var program = input.Stage.Program!;
+        var resources = input.Stage.Resources;
+        if (resources.Buffers.Length != program.Buffers.Length)
+        {
+            return;
+        }
+
+        // A fill of one constant whose ZMask (bits 0-3) is zero stores clear codes, not data:
+        // the memset before UE5's export, when it covers only part of the surface or the
+        // surface is not registered yet. It unmakes no tracked clear, and a surface registered
+        // over it later starts cleared whatever was stored there before.
+        var clearCodes = program.ConstantStoreValue is { } fill && (fill & 0xF) == 0;
+        for (var i = 0; i < program.Buffers.Length; i++)
+        {
+            if (!program.Buffers[i].Written)
+            {
+                continue;
+            }
+
+            var descriptor = DecodeBufferDescriptor(resources, i);
+            if (clearCodes)
+            {
+                _host.NoteHtileCleared(descriptor.Address);
+                continue;
+            }
+
+            var dropped = _host.NoteHtileWritten(descriptor.Address);
+            if (TraceHtile && dropped)
+            {
+                Console.Error.WriteLine($"[GPU][HTILE] store hash=0x{program.Hash:X16} buffer=0x{descriptor.Address:X16} dropped_clear={dropped}");
+            }
+
+            if (dropped && _loggedHtileStores.Add((program.Hash, descriptor.Address)))
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][INFO] A compute dispatch stores into HTILE, so its depth surface no longer loads as a clear: " +
+                    $"hash=0x{program.Hash:X16} htile=0x{descriptor.Address:X16} images={program.Images.Length}.");
+            }
+        }
+    }
+
+    // Each program and HTILE surface reported by the above, once.
+    private readonly HashSet<(ulong Hash, ulong Address)> _loggedHtileStores = new();
 
     // Recognizes a dispatch that fills one formatted buffer with a single value over every record.
     public ComputeImageClear? TryDecodeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator) =>

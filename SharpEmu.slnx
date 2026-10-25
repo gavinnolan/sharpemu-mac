@@ -12,6 +12,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/SharpEmu.Core/SharpEmu.Core.csproj" />
     <Project Path="src/SharpEmu.DebugClient/SharpEmu.DebugClient.csproj" />
     <Project Path="src/SharpEmu.Debugger/SharpEmu.Debugger.csproj" />
+    <Project Path="src/SharpEmu.GpuHost/SharpEmu.GpuHost.csproj" />
+    <Project Path="src/SharpEmu.GpuRemote/SharpEmu.GpuRemote.csproj" />
+    <Project Path="src/SharpEmu.GpuSplit/SharpEmu.GpuSplit.csproj" />
     <Project Path="src/SharpEmu.GUI/SharpEmu.GUI.csproj" />
     <Project Path="src/SharpEmu.HLE/SharpEmu.HLE.csproj" />
     <Project Path="src/SharpEmu.Libs/SharpEmu.Libs.csproj" />
@@ -45,6 +48,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="tests/SharpEmu.Fonts.Tests/SharpEmu.Fonts.Tests.csproj" />
     <Project Path="tests/SharpEmu.Gpu.Metal.LeakTests/SharpEmu.Gpu.Metal.LeakTests.csproj" />
     <Project Path="tests/SharpEmu.Gpu.Metal.Tests/SharpEmu.Gpu.Metal.Tests.csproj" />
+    <Project Path="tests/SharpEmu.GpuRemote.Tests/SharpEmu.GpuRemote.Tests.csproj" />
+    <Project Path="tests/SharpEmu.GpuSplit.Tests/SharpEmu.GpuSplit.Tests.csproj" />
     <Project Path="tests/SharpEmu.Host.Memory.Tests/SharpEmu.Host.Memory.Tests.csproj" />
     <Project Path="tests/SharpEmu.Core.Memory.Tests/SharpEmu.Core.Memory.Tests.csproj" />
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
