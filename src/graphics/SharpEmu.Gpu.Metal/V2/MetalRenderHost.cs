@@ -1063,6 +1063,16 @@ internal sealed partial class MetalRenderHost :
         Interlocked.Add(ref _gpuWaitTicks, finished - started);
         _waitsByReason[(int)reason]++;
         _waitTicksByReason[(int)reason] += finished - started;
+        if (WaitOrigins && reason == MetalWaitReason.ReadRange)
+        {
+            var match = _gpuWrites.LastMatch;
+            var key = match.Origin == MetalGpuWriteOrigin.Unbounded
+                ? $"Unbounded(0x{_unboundedProducer:X16})"
+                : match.Origin.ToString();
+            key += $"<-0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}";
+            _waitOrigins[key] = _waitOrigins.GetValueOrDefault(key) + 1;
+        }
+
         var frequency = System.Diagnostics.Stopwatch.Frequency;
         if (finished - started <= frequency / 50 || _slowWaitReports >= 4)
         {
@@ -1223,6 +1233,15 @@ internal sealed partial class MetalRenderHost :
         var sequence = _gpuWrites.Note(address, size, serial, origin);
         NotePendingCopyDestination(address, size, origin, serial, sequence);
     }
+
+    // SHARPEMU_METAL_V2_WAIT_ORIGINS=1: every host read that waited, counted by the write record
+    // it waited for (an unbounded one by the program that made it) and the program whose
+    // resources were being read (0: a command-processor read), printed with each PERF window.
+    private static readonly bool WaitOrigins =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_ORIGINS") == "1";
+
+    private readonly Dictionary<string, int> _waitOrigins = new(StringComparer.Ordinal);
+    private ulong _unboundedProducer;
 
     /// <summary>
     /// Recorded work stores into guest memory without a known destination. Only the
@@ -2404,6 +2423,12 @@ internal sealed partial class MetalRenderHost :
             (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
+        if (WaitOrigins && _waitOrigins.Count != 0)
+        {
+            Console.Error.WriteLine("[METAL-V2][WAIT-ORIGINS] " + string.Join(' ',
+                _waitOrigins.OrderByDescending(static pair => pair.Value).Take(12).Select(static pair => $"{pair.Key}={pair.Value}")));
+            _waitOrigins.Clear();
+        }
         var reasons = new System.Text.StringBuilder();
         for (var index = 0; index < MetalWaitReasons.Count; index++)
         {

@@ -912,13 +912,17 @@ internal sealed partial class MetalRenderHost
         // The program stores through the page table and no evaluated range says where.
         // Conservative is the only correct answer: every later read of any guest address
         // waits for this submission.
+        _unboundedProducer = stage.Program.Hash;
         NoteUnboundedGuestMemoryWrite();
         _deviceAddressWrites++;
         MetalV2Diagnostics.WarnOnce(
-            "device-address-unbounded",
+            $"device-address-unbounded-{stage.Program.Hash:X16}",
             $"A shader stores through the device-address page table with no evaluated range, so every " +
             $"later guest read waits for its submission: hash=0x{stage.Program.Hash:X16} " +
-            $"unplanned={unplanned} ranges={snapshot.DeviceAddressRanges.Length}.");
+            $"unplanned={unplanned} ranges={snapshot.DeviceAddressRanges.Length} [" +
+            string.Join(", ", snapshot.DeviceAddressRanges.Select(static range =>
+                $"h{range.Handle} {(range.Planned ? "planned" : "unplanned")} {(range.Written ? "written" : "read")} " +
+                $"0x{range.Base:X}+0x{range.Size:X}")) + "].");
     }
 
     // SHARPEMU_METAL_V2_DUMP_BUFFERS=<hash>[,<hash>...]: what one program's scalar and

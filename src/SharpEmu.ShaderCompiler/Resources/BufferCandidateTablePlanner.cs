@@ -188,14 +188,17 @@ internal static class BufferCandidateTablePlanner
 
     // A canonical unsigned induction: the value is a phi with a constant initial and an
     // add-recurrence, and a branch guarded by an unsigned comparison against the phi
-    // lives at the loop header or one of its predecessors.
-    private static bool TryProveInductionBound(
+    // lives at the loop header or one of its predecessors. With exitGuards, a header whose
+    // branch leaves the loop when the comparison fails (a top-tested loop: s_cmp_lt_u32 then
+    // s_cbranch_scc0 past the latch) bounds it as well.
+    internal static bool TryProveInductionBound(
         ShaderResourcePlan plan,
         ScalarValue index,
         out ScalarValue initial,
         out uint step,
         out ScalarValue? limit,
-        out bool inclusive)
+        out bool inclusive,
+        bool exitGuards = false)
     {
         initial = null!;
         step = 0;
@@ -244,6 +247,14 @@ internal static class BufferCandidateTablePlanner
         foreach (var pair in plan.Graph.BranchConditions)
         {
             var condition = pair.Value;
+            var exitGuard = false;
+            if (exitGuards && condition is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.LogicalNot } &&
+                condition.Operands[0].Kind == ScalarValueKind.Operation)
+            {
+                condition = condition.Operands[0];
+                exitGuard = true;
+            }
+
             if (condition.Kind != ScalarValueKind.Operation)
             {
                 continue;
@@ -285,9 +296,11 @@ internal static class BufferCandidateTablePlanner
             }
 
             // The guard must live at the loop header that owns the phi or one of the
-            // blocks feeding it, so it really controls the recurrence.
+            // blocks feeding it, so it really controls the recurrence. An exit guard runs
+            // before every iteration, so only at the header.
             var header = index.PhiBlock;
-            if (block != header && !flow.Predecessors[header].Contains(block))
+            if (exitGuard ? block != header || !BranchLeavesLoop(flow, block, header)
+                : block != header && !flow.Predecessors[header].Contains(block))
             {
                 continue;
             }
@@ -303,6 +316,27 @@ internal static class BufferCandidateTablePlanner
         }
 
         return limit is not null && guardBlock is not null;
+    }
+
+    // The block's taken branch leaves the loop the header heads (past its last latch) and its
+    // fall-through stays in it, so the loop runs only while the branch is not taken.
+    private static bool BranchLeavesLoop(Ir.IrControlFlowGraph flow, int block, int header)
+    {
+        var latch = -1;
+        foreach (var predecessor in flow.Predecessors[header])
+        {
+            latch = Math.Max(latch, predecessor >= header ? predecessor : -1);
+        }
+
+        var successors = flow.Successors[block];
+        if (latch < 0 || successors.Count != 2 ||
+            !flow.BlockByStartPc.TryGetValue(flow.Blocks[block].EndPc, out var fallThrough))
+        {
+            return false;
+        }
+
+        var taken = successors[0] == fallThrough ? successors[1] : successors[1] == fallThrough ? successors[0] : -1;
+        return taken >= 0 && (taken > latch || taken < header) && fallThrough >= header && fallThrough <= latch;
     }
 
     // The guard compares either the induction value itself or its next value; both bound

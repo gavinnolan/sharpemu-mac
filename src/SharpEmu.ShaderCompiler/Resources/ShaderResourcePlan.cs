@@ -251,6 +251,7 @@ public sealed class ShaderResourcePlan
         plan.CleanFlatSlots = cleanSlots;
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
         plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
+        (plan.DeviceDescriptorTables, plan.UnplannedDeviceDescriptorWrites) = DeviceAddressRangePlanner.PlanDescriptorTables(plan);
         plan.CallRecordCallees = CallRecordPlanner.Plan(plan);
 
         // Each written handle owns three flattened slots after the table reads: base
@@ -300,6 +301,13 @@ public sealed class ShaderResourcePlan
         {
             Push(range.BaseLow);
             Push(range.BaseHigh);
+        }
+
+        foreach (var table in DeviceDescriptorTables)
+        {
+            Push(table.TableLow);
+            Push(table.TableHigh);
+            Push(table.Limit);
         }
 
         foreach (var branch in ResourceBranches) Push(branch.Condition);
@@ -356,6 +364,11 @@ public sealed class ShaderResourcePlan
 
     // Planned after tracking; optional, and never a reason for the plan to fail.
     public IReadOnlyList<DeviceAddressRangePlan> DeviceAddressRanges { get; private set; } = [];
+
+    // Stores through V#s a counted loop selects from a table (DeviceAddressRangePlanner.PlanDescriptorTables),
+    // bounded for each draw; and whether some other device-loaded-descriptor store was left unplanned.
+    public IReadOnlyList<DeviceDescriptorTablePlan> DeviceDescriptorTables { get; private set; } = [];
+    public bool UnplannedDeviceDescriptorWrites { get; private set; }
 
     public IReadOnlyDictionary<uint, uint> WrittenRangeSlotByHandle { get; private set; } = new Dictionary<uint, uint>();
 
