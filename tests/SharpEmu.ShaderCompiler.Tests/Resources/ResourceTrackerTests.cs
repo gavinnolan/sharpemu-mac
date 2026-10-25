@@ -790,8 +790,10 @@ public sealed class ResourceTrackerTests
             BufferLoad(32, 8),
             EndProgram(36));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
-        Assert.Contains("not a valid runtime value", error.Message);
+        // The record count is picked by the branch: the access reads its V# from its SGPRs on the device.
+        var plan = Extract(program);
+        Assert.True(plan.Memory.Find(32)!.DeviceDescriptor);
+        Assert.True(plan.Info.UsesDeviceAddresses);
     }
 
     [Fact]

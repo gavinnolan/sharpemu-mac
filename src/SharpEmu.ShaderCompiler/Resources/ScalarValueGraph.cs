@@ -148,6 +148,19 @@ public sealed partial class ScalarValueGraph
 
     internal ScalarValue UserData(uint register) => Intern(ScalarValueKind.UserData, ScalarValueType.U32, register);
 
+    /// <summary>Opcode recorded as the origin of a system SGPR's value (see <see cref="SystemRegister"/>).</summary>
+    internal const string SystemRegisterOrigin = "SystemRegister";
+
+    // An SGPR the hardware fills after the user data at wave launch (a compute shader's workgroup id,
+    // say). It differs between the waves of one dispatch, so the host cannot name it; it is undefined,
+    // but with an origin of its own, so a descriptor built from it is known to vary per workgroup.
+    internal ScalarValue SystemRegister(uint register)
+    {
+        var value = Intern(ScalarValueKind.Undefined, ScalarValueType.U32, identity: (2ul << 32) | register);
+        _undefinedOrigins.TryAdd(value, (register, SystemRegisterOrigin));
+        return value;
+    }
+
     internal ScalarValue ShaderBase() => Intern(ScalarValueKind.ShaderBase, ScalarValueType.U64);
 
     // Keep the finite result range even when the input cannot be resolved on the host.

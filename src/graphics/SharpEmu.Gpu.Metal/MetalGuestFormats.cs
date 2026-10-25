@@ -300,6 +300,11 @@ internal static class MetalGuestFormats
             (20, 0, _) => MtlPixelFormat.R32Uint,
             (29, 0, _) or (4, 0, _) => MtlPixelFormat.R32Float,
             (1, 0, _) or (36, 0, _) => MtlPixelFormat.R8Unorm,
+            // Narrow sRGB targets are their UNORM stand-ins, the format the image cache gives
+            // their textures (GuestPixelFormats: Bits8Srgb and Bits8_8Srgb), so the pipeline's
+            // attachment format is the texture's.
+            (1, 6 or 9, _) => MtlPixelFormat.R8Unorm,
+            (3, 6 or 9, _) => MtlPixelFormat.Rg8Unorm,
             (1, 4, _) or (49, 0, _) => MtlPixelFormat.R8Uint,
             (1, 1, _) => MtlPixelFormat.R8Snorm,
             (3, 0, _) => MtlPixelFormat.Rg8Unorm,

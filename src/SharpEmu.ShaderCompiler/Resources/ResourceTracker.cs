@@ -638,6 +638,11 @@ public sealed partial class ResourceTracker
             // validation failure still hard-fail, since those aren't safe to silently zero.
             var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
                 (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
+                 // A descriptor read at an offset built from a workgroup id (a tiled light list's
+                 // per-tile records), or from one lane's index picked by v_readlane (a loop over the
+                 // lights a wave's lanes touch), differs between the dispatch's waves.
+                 HasUndefinedOrigin(source.Dwords[badDword], ScalarValueGraph.SystemRegisterOrigin) ||
+                 HasUndefinedOrigin(source.Dwords[badDword], "VReadlaneB32") ||
                  (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))) ||
                  (expected == ScalarValueKind.ImageHandle && _plan.Stage != ShaderStage.Compute &&
                   source.Dwords.Any(HasLaneChosenValue)) ||
@@ -1153,6 +1158,22 @@ public sealed partial class ResourceTracker
             if ((memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle)) ||
                 (memory.Kind == MemoryResourceKind.Buffer &&
                     (IsDeviceLoadedBufferHandle(access.Handle) || HasDeviceRecordCount(access.Handle))))
+            {
+                memory.DeviceDescriptor = true;
+                NoteDeviceAddresses(memory);
+                return;
+            }
+
+            // A V# the control flow picks among descriptors the draw holds (a phi of resource table
+            // words, one per path) names no single binding, but its SGPRs hold the chosen one when the
+            // access runs: it is read there and addressed through the device-address table, as past
+            // the binding budget. That path has no typed or formatted store lowering.
+            if (memory.Kind == MemoryResourceKind.Buffer &&
+                access.Handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } chosenHandle &&
+                !memory.Opcode.StartsWith("TBuffer", StringComparison.Ordinal) &&
+                !(memory.Formatted && memory.Access != MemoryAccess.Read) &&
+                !ValidateSource(MakeSource(chosenHandle, 4, false, false, memory.Pc), out _, out var chosenByControlFlow) &&
+                chosenByControlFlow)
             {
                 memory.DeviceDescriptor = true;
                 NoteDeviceAddresses(memory);
