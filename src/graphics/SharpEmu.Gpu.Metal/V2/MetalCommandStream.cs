@@ -2393,6 +2393,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 case SliceResult.AllBlocked:
                     RetryBlockedIfDue();
                     CommitCoalescedFlush();
+                    CommitRecordedWhileBlocked();
                     FlushPendingLabelWrites();
                     return;
                 case SliceResult.BlockedWithoutProgress:
@@ -2400,6 +2401,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                     {
                         RetryBlockedIfDue();
                         CommitCoalescedFlush();
+                        CommitRecordedWhileBlocked();
                         FlushPendingLabelWrites();
                         return;
                     }
@@ -2443,6 +2445,19 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_commandStream is { } stream)
         {
             stream.NotifyCompletedGpuTick(completedSerial);
+        }
+    }
+
+    // Every head waits, and what they wait for may be work this buffer already holds: a
+    // dispatch on one queue whose shader stores the flag another queue's WAIT_REG_MEM reads.
+    // Only a completion re-checks such a wait, so a buffer left open here is never run and
+    // the waits pass only when something else commits it (Ghost of Tsushima's title screen:
+    // one frame every few seconds, every queue parked on another's flag).
+    private void CommitRecordedWhileBlocked()
+    {
+        if (_commandBuffer != 0 && _encodersInBuffer != 0)
+        {
+            FlushCommandBuffer(MetalFlushCause.WaitUncommitted);
         }
     }
 

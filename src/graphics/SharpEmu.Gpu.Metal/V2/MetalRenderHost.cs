@@ -2556,6 +2556,10 @@ internal sealed partial class MetalRenderHost :
         }
 
         ReportStalledHeads();
+        if (QueueHeadsLogged)
+        {
+            Console.Error.WriteLine($"[METAL-V2][HEADS]{CommandStream.DescribeHeads()}");
+        }
 
         if (!MetalV2Diagnostics.Verbose)
         {
@@ -2582,6 +2586,9 @@ internal sealed partial class MetalRenderHost :
         _imageCache.AppendReleaseCauses(builder);
         return builder.ToString();
     }
+
+    // Diagnostic: SHARPEMU_QUEUE_HEADS=1 prints every queue's head with the periodic report.
+    private static readonly bool QueueHeadsLogged = Environment.GetEnvironmentVariable("SHARPEMU_QUEUE_HEADS") == "1";
 
     // A head parked on one packet for seconds is a deadlock in the making; name the packet
     // and what it waits for once, with the words it compares, so the log says why.

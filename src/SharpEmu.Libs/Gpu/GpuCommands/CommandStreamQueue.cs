@@ -1658,6 +1658,32 @@ public sealed class CommandStreamQueue
         return (IReadOnlyList<(int, ulong, CommandSubmissionKind, ulong, CommandWaitCondition, double)>?)stalls ?? [];
     }
 
+    // Diagnostics: every non-empty queue's length and head, with what a blocked head waits for.
+    public string DescribeHeads()
+    {
+        var builder = new System.Text.StringBuilder();
+        lock (_gate)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (var queueId = 0; queueId < QueueCount; queueId++)
+            {
+                if (_queues[queueId].First is not { } node)
+                {
+                    continue;
+                }
+
+                var head = node.Value;
+                var stalledMs = head.StalledSinceTicks == 0 ? 0 : (now - head.StalledSinceTicks) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+                builder.Append($" q{queueId}:n={_queues[queueId].Count},sub={head.SubmissionId},{head.Kind},started={head.Started}," +
+                    $"blocked={head.Blocked},wait={head.Wait.Kind}@0x{head.Wait.Address:X},packet=0x{head.BlockedPacketAddress:X},ms={stalledMs}");
+            }
+
+            builder.Append($" boundaries={_pendingBoundaries}/{_boundariesInFlight} frame={_doneCount}");
+        }
+
+        return builder.ToString();
+    }
+
     // A diagnostic view of the blocked heads: their count, the oldest age and one sample.
     public BlockedSnapshot SnapshotBlocked()
     {
