@@ -241,6 +241,38 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _imageCache.Collect();
     }
 
+    // SHARPEMU_TRACE_GDS=1: the first data share fills and copies, offsets and guest addresses.
+    private static readonly bool TraceGds = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GDS") == "1";
+    private int _tracedGds;
+
+    private void TraceGdsTransfer(string what)
+    {
+        if (TraceGds && Interlocked.Increment(ref _tracedGds) <= 600)
+            Console.Error.WriteLine($"[METAL-V2][GDS] {what}");
+    }
+
+    // SHARPEMU_TRACE_DMA_RANGE=<lo>-<hi> (hex): guest memory fills and copies whose destination
+    // overlaps the range, as the data share trace prints them.
+    private static readonly (ulong Low, ulong High) TraceDmaRange = ParseTraceDmaRange(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DMA_RANGE"));
+
+    private static (ulong, ulong) ParseTraceDmaRange(string? text)
+    {
+        var parts = (text ?? string.Empty).Split('-');
+        return parts.Length == 2 &&
+            ulong.TryParse(parts[0].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var low) &&
+            ulong.TryParse(parts[1].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var high)
+            ? (low, high)
+            : (0, 0);
+    }
+
+    private void TraceDmaTransfer(ulong destination, ulong size, string what)
+    {
+        if (TraceDmaRange.High != 0 && destination < TraceDmaRange.High && TraceDmaRange.Low < destination + size &&
+            Interlocked.Increment(ref _tracedGds) <= 600)
+            Console.Error.WriteLine($"[METAL-V2][DMA] {what}");
+    }
+
     public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
     {
         if (OnCommandThread)
@@ -257,6 +289,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         if (isGds)
         {
+            TraceGdsTransfer($"fill gds=0x{address:X} size=0x{size:X} value=0x{value:X}");
             if (address > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - address)
             {
                 throw Fatal($"The GDS fill range is outside the buffer: offset=0x{address:X} size=0x{size:X}.");
@@ -276,6 +309,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        TraceDmaTransfer(address, size, $"fill mem=0x{address:X} size=0x{size:X} value=0x{value:X}");
         FillGuestMemory(address, size, value);
     }
 
@@ -301,10 +335,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         if (!destinationIsGds && !sourceIsGds)
         {
+            TraceDmaTransfer(destination, size, $"copy mem=0x{source:X} -> mem=0x{destination:X} size=0x{size:X}");
             CopyGuestMemory(destination, source, size);
             return;
         }
 
+        TraceGdsTransfer(sourceIsGds
+            ? $"copy gds=0x{source:X} -> mem=0x{destination:X} size=0x{size:X}"
+            : $"copy mem=0x{source:X} -> gds=0x{destination:X} size=0x{size:X}");
         if (sourceIsGds
                 ? source > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - source
                 : destination > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - destination)

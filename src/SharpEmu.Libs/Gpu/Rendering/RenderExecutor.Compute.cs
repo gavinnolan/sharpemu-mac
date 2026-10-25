@@ -291,6 +291,7 @@ public sealed partial class RenderExecutor
             }
 
             TraceFrameDispatch(hasStorageWrites ? "dispatched-writes" : "dispatched", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            TraceRangeWriters(input.Stage, program.Hash, groupsX, groupsY, groupsZ);
             var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
@@ -301,6 +302,50 @@ public sealed partial class RenderExecutor
         }
 
         _host.ResetBindings();
+    }
+
+    // SHARPEMU_TRACE_WRITERS=<lo>-<hi> (hex): every dispatch with a written buffer binding over the
+    // range, and every dispatch that stores through device addresses (whose targets are not
+    // known here), so the shader that writes a value can be named.
+    private static readonly (ulong Low, ulong High) TracedWriterRange = ParseTracedWriterRange(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITERS"));
+
+    private static (ulong, ulong) ParseTracedWriterRange(string? text)
+    {
+        var parts = (text ?? string.Empty).Split('-');
+        return parts.Length == 2 &&
+            ulong.TryParse(parts[0].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var low) &&
+            ulong.TryParse(parts[1].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var high)
+            ? (low, high)
+            : (0, 0);
+    }
+
+    private int _tracedWriters;
+
+    private void TraceRangeWriters(ShaderStageResources stage, ulong hash, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        if (TracedWriterRange.High == 0 || stage.Program is not { } program || _tracedWriters > 4000)
+            return;
+
+        var hits = new System.Text.StringBuilder();
+        var descriptors = stage.Resources.Buffers;
+        for (var i = 0; i < program.Buffers.Length && i < descriptors.Length; i++)
+        {
+            if (!program.Buffers[i].Written || descriptors[i].Length < 4)
+                continue;
+            var descriptor = BufferDescriptorWords.From(descriptors[i]);
+            if (descriptor.Footprint() is not { } footprint || descriptor.Address == 0)
+                continue;
+            if (descriptor.Address < TracedWriterRange.High && TracedWriterRange.Low < descriptor.Address + footprint)
+                hits.Append($" buf{i}=0x{descriptor.Address:X}+0x{footprint:X}");
+        }
+
+        if (hits.Length == 0 && !program.WritesDeviceAddresses)
+            return;
+
+        _tracedWriters++;
+        Console.Error.WriteLine(
+            $"[GPU][WRITERS] hash=0x{hash:X16} groups={groupsX}x{groupsY}x{groupsZ} device_stores={program.WritesDeviceAddresses}{hits}");
     }
 
     // Under a dump-triggered frame, what became of each dispatch: a pass that never ran leaves

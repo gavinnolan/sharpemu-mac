@@ -232,9 +232,10 @@ public sealed partial class RenderExecutor
         try
         {
             if (arguments.IndirectArgumentsAddress != 0 &&
-                (UsesMeshExecution(banks)
+                (TracesIndirectArguments(banks) ||
+                 (UsesMeshExecution(banks)
                     ? !CanDrawMeshIndirectOnGpu(banks, in arguments)
-                    : !CanDrawIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
+                    : !CanDrawIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig))))
             {
                 NoteCpuIndirectArguments(banks, in arguments);
                 DrawIndexedWithCpuArguments(submitId, banks, in arguments);
@@ -316,6 +317,29 @@ public sealed partial class RenderExecutor
             _host.ClampMappedSize(arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) == IndexedIndirectArgumentsSize;
     }
 
+    // SHARPEMU_TRACE_INDIRECT_SHADER=<hex>: the indirect draws of the vertex program at that address
+    // (export or geometry stage) read their arguments on the CPU and print them, so a count the
+    // GPU writes can be followed from frame to frame. A diagnostic: each read waits for the GPU.
+    private static readonly ulong TracedIndirectShader = ulong.TryParse(
+        (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_INDIRECT_SHADER") ?? string.Empty)
+            .Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+        System.Globalization.NumberStyles.HexNumber, null, out var tracedShader) ? tracedShader : 0;
+
+    private long _tracedIndirectDraws;
+
+    private static bool TracesIndirectArguments(RegisterBanks banks) =>
+        TracedIndirectShader != 0 &&
+        (banks.Shader.Vertex.ExportAddress == TracedIndirectShader || banks.Shader.Vertex.GeometryAddress == TracedIndirectShader);
+
+    private void TraceIndirectArguments(RegisterBanks banks, ulong submitId, ulong address, ReadOnlySpan<uint> words)
+    {
+        if (!TracesIndirectArguments(banks) || Interlocked.Increment(ref _tracedIndirectDraws) % 8 != 1)
+            return;
+
+        Console.Error.WriteLine(
+            $"[GPU][INDIRECT] submit={submitId} args=0x{address:X16} words=[{string.Join(' ', words.ToArray().Select(word => word.ToString()))}]");
+    }
+
     // Each distinct shape of indirect indexed draw whose arguments are read on the CPU, named once:
     // the read waits for the GPU work that wrote them.
     private readonly HashSet<(bool Mesh, uint Primitive, uint IndexType, bool Restart, bool Unbounded)> _cpuIndirectShapes = [];
@@ -344,6 +368,7 @@ public sealed partial class RenderExecutor
         }
 
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        TraceIndirectArguments(banks, submitId, arguments.IndirectArgumentsAddress, words);
         var elementSize = (GuestIndexType)arguments.IndexTypeAndSize switch
         {
             GuestIndexType.Index16 => 2ul,
@@ -587,7 +612,8 @@ public sealed partial class RenderExecutor
         try
         {
             if (arguments.IndirectArgumentsAddress != 0 &&
-                (!CanDrawAutoIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
+                (TracesIndirectArguments(banks) ||
+                 !CanDrawAutoIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
             {
                 DrawAutoWithCpuArguments(submitId, banks, in arguments);
                 return;
@@ -640,6 +666,7 @@ public sealed partial class RenderExecutor
         }
 
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        TraceIndirectArguments(banks, submitId, arguments.IndirectArgumentsAddress, words);
         var resolved = arguments with
         {
             VertexCount = words[0],
