@@ -423,13 +423,21 @@ public static partial class Gen5MslTranslator
         /// the wave is the whole threadgroup (compute), else the wave's own pair barrier. The
         /// pair barrier fences this half's threadgroup writes, counts it in, and waits for the
         /// other half to count in for the same exchange; both halves run the same sequence of
-        /// exchanges (their scalar state is the same), so each waits only for its partner.</summary>
+        /// exchanges (their scalar state is the same), so each waits only for its partner.
+        /// The wait gives up after <see cref="PairBarrierSpinLimit"/> polls and reports a step
+        /// cap: a half whose partner never comes then runs on with stale exchanges instead of
+        /// spinning until the GPU watchdog discards the whole command buffer.</summary>
         private string Wave64Barrier => IsBridgedMeshWave64
             ? "{ simdgroup_barrier(mem_flags::mem_threadgroup); sharpemu_wave_gen += 2u; " +
               "if ((sharpemu_lane & 31u) == 0u) { atomic_fetch_add_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], 1u, memory_order_relaxed); } " +
-              "while (atomic_load_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], memory_order_relaxed) < sharpemu_wave_gen) { } " +
+              "for (uint sharpemu_pair_spins = 0u; atomic_load_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], memory_order_relaxed) < sharpemu_wave_gen;) " +
+              $"{{ if (++sharpemu_pair_spins == {PairBarrierSpinLimit}u) {{ {StepCapReportCall} break; }} }} " +
               "simdgroup_barrier(mem_flags::mem_threadgroup); }"
             : "threadgroup_barrier(mem_flags::mem_threadgroup);";
+
+        // Polls of the partner's count before a pair barrier gives up: milliseconds, where a
+        // partner that is coming arrives within one block of guest code.
+        private const uint PairBarrierSpinLimit = 1u << 20;
 
         /// <summary>A guest wave32 program: VCC is VCC_LO alone, so a mask write (V_CMP,
         /// a carry-out) leaves s107 untouched and VCCZ reads s106 only (EXECZ likewise reads
