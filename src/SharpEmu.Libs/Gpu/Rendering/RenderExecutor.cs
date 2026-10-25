@@ -289,7 +289,11 @@ public sealed partial class RenderExecutor
         return (ulong)arguments.IndexCount * (index32 ? 4ul : 2ul) <= MaxIndirectIndexBufferBytes;
     }
 
-    private const ulong MaxIndirectIndexBufferBytes = 64ul << 20;
+    // The index range binds where it lies (a window or a guest view of guest memory), so its
+    // size is not a copy. Ghost of Tsushima draws from a 330 MiB shared index pool with the
+    // whole pool as each draw's range; at a 64 MiB cap every such draw read its arguments on
+    // the CPU, which waits for the GPU work that wrote them, ~70 round trips a frame.
+    private const ulong MaxIndirectIndexBufferBytes = 1ul << 30;
 
     private const ulong AutoIndirectArgumentsSize = 16;
 
