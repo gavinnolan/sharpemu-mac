@@ -440,10 +440,11 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    const uint sharpemu_mesh_wave = sharpemu_tg_index / {mesh.GuestWaveLanes}u;");
             source.AppendLine("    const uint sharpemu_mesh_subgroup = sharpemu_group_id.x;");
             source.AppendLine("    const uint sharpemu_mesh_instance = sharpemu_group_id.y;");
-            source.AppendLine("    threadgroup atomic_uint sharpemu_mesh_live;");
-            source.AppendLine("    threadgroup atomic_uint sharpemu_mesh_parked;");
+            source.AppendLine("    threadgroup atomic_uint sharpemu_mesh_live[2];");
+            source.AppendLine("    threadgroup atomic_uint sharpemu_mesh_parked[2];");
             source.AppendLine("    threadgroup uint sharpemu_mesh_alloc[2];");
             source.AppendLine("    bool sharpemu_mesh_wait = false;");
+            source.AppendLine("    uint sharpemu_mesh_round = 0u;");
             source.AppendLine($"    {MeshVertexStructName} sharpemu_out = {{}};");
 
             // A primitive no lane exported stays culled; a degenerate index triple is how
@@ -493,6 +494,12 @@ public static partial class Gen5MslTranslator
 
             source.AppendLine("    if (sharpemu_tg_index == 0u)");
             source.AppendLine("    {");
+            for (var set = 0; set < 2; set++)
+            {
+                source.AppendLine($"        atomic_store_explicit(&sharpemu_mesh_live[{set}], 0u, memory_order_relaxed);");
+                source.AppendLine($"        atomic_store_explicit(&sharpemu_mesh_parked[{set}], 0u, memory_order_relaxed);");
+            }
+
             if (mesh.HasGeometryHalf)
             {
                 var list = (uint)Gen5MslMeshInputTopology.TriangleList;
@@ -855,35 +862,46 @@ public static partial class Gen5MslTranslator
             // one convergent point in the program. A parked wave resumes only once every
             // thread that is still running has parked too, and a thread that has ended
             // stops being counted, which is how S_BARRIER behaves in hardware.
+            //
+            // The counts alternate between two sets, and a round clears the other set only
+            // after its first barrier, which every thread reaches after reading the previous
+            // round's counts. Clearing them before that barrier raced: a wave that resumed
+            // first could run to its next S_BARRIER and zero the counts while a slower wave
+            // had yet to read them, and that wave then stayed parked (or left the loop) while
+            // the rest ran on - with a bridged wave64, its other half spun in the pair
+            // barrier until the GPU watchdog discarded the command buffer.
+            source.AppendLine($"        {MeshWorkgroupBarrier}");
+            source.AppendLine("        const uint sharpemu_mesh_set = sharpemu_mesh_round & 1u;");
             source.AppendLine("        if (sharpemu_tg_index == 0u)");
             source.AppendLine("        {");
-            source.AppendLine("            atomic_store_explicit(&sharpemu_mesh_live, 0u, memory_order_relaxed);");
-            source.AppendLine("            atomic_store_explicit(&sharpemu_mesh_parked, 0u, memory_order_relaxed);");
+            source.AppendLine("            atomic_store_explicit(&sharpemu_mesh_live[sharpemu_mesh_set ^ 1u], 0u, memory_order_relaxed);");
+            source.AppendLine("            atomic_store_explicit(&sharpemu_mesh_parked[sharpemu_mesh_set ^ 1u], 0u, memory_order_relaxed);");
             source.AppendLine("        }");
             source.AppendLine();
-            source.AppendLine($"        {MeshWorkgroupBarrier}");
             source.AppendLine("        if (active)");
             source.AppendLine("        {");
-            source.AppendLine("            atomic_fetch_add_explicit(&sharpemu_mesh_live, 1u, memory_order_relaxed);");
+            source.AppendLine("            atomic_fetch_add_explicit(&sharpemu_mesh_live[sharpemu_mesh_set], 1u, memory_order_relaxed);");
             source.AppendLine("            if (sharpemu_mesh_wait)");
             source.AppendLine("            {");
-            source.AppendLine("                atomic_fetch_add_explicit(&sharpemu_mesh_parked, 1u, memory_order_relaxed);");
+            source.AppendLine("                atomic_fetch_add_explicit(&sharpemu_mesh_parked[sharpemu_mesh_set], 1u, memory_order_relaxed);");
             source.AppendLine("            }");
             source.AppendLine("        }");
             source.AppendLine();
             source.AppendLine("        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);");
             source.AppendLine(
-                "        const uint sharpemu_mesh_live_count = atomic_load_explicit(&sharpemu_mesh_live, memory_order_relaxed);");
+                "        const uint sharpemu_mesh_live_count = atomic_load_explicit(&sharpemu_mesh_live[sharpemu_mesh_set], memory_order_relaxed);");
             source.AppendLine("        if (sharpemu_mesh_live_count == 0u)");
             source.AppendLine("        {");
             source.AppendLine("            break;");
             source.AppendLine("        }");
             source.AppendLine();
             source.AppendLine(
-                "        if (atomic_load_explicit(&sharpemu_mesh_parked, memory_order_relaxed) == sharpemu_mesh_live_count)");
+                "        if (atomic_load_explicit(&sharpemu_mesh_parked[sharpemu_mesh_set], memory_order_relaxed) == sharpemu_mesh_live_count)");
             source.AppendLine("        {");
             source.AppendLine("            sharpemu_mesh_wait = false;");
             source.AppendLine("        }");
+            source.AppendLine();
+            source.AppendLine("        sharpemu_mesh_round++;");
             source.AppendLine("    }");
         }
 

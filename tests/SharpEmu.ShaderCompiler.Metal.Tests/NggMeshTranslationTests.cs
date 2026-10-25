@@ -121,6 +121,28 @@ public sealed class NggMeshTranslationTests
     }
 
     [Fact]
+    public void RendezvousClearsTheOtherCountsOnlyAfterItsFirstBarrier()
+    {
+        var request = Gen5NggFixtures.Request(Gen5NggFixtures.CullingTriangle());
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request, out var shader, out var error, new Gen5MslCodegenOptions(StructuredControlFlow: false)),
+            error);
+
+        // A wave that resumes first must not zero the counts a slower wave has yet to read:
+        // each round counts into one set and clears the other once every thread has passed
+        // the round's first barrier.
+        var source = shader.Source;
+        var loop = source.IndexOf("while (active && !sharpemu_mesh_wait)", StringComparison.Ordinal);
+        var clear = source.IndexOf("atomic_store_explicit(&sharpemu_mesh_live[sharpemu_mesh_set ^ 1u], 0u", StringComparison.Ordinal);
+        var count = source.IndexOf("atomic_fetch_add_explicit(&sharpemu_mesh_live[sharpemu_mesh_set], 1u", StringComparison.Ordinal);
+        Assert.True(loop >= 0 && clear > loop && count > clear);
+        Assert.Contains("threadgroup_barrier(", source[loop..clear], StringComparison.Ordinal);
+        Assert.Contains("atomic_load_explicit(&sharpemu_mesh_parked[sharpemu_mesh_set]", source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_round++;", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AllocationRequestDrivesThePrimitiveCount()
     {
         var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
