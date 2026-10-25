@@ -1677,6 +1677,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return plan;
     }
 
+    private static int _multisampledDepthWarned;
+
     private static TransferPlan PlanDepth(in ImageDescription description)
     {
         if (!MetalGuestFormats.TryDecodeHostFormat(description.PixelFormat, out var format))
@@ -1726,6 +1728,22 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             {
                 throw GpuFatal.Fatal(
                     $"The depth tile layout is not supported: format={(uint)tilerFormat} tile={(uint)description.TileMode}.");
+            }
+
+            // A multisampled depth surface (Ghost of Tsushima's checkerboard depth, 2 samples at
+            // 1920x2160) holds every sample's plane in its slice; its samples are not transferred, as
+            // a multisampled color image's are not, and the texture keeps what the GPU drew there.
+            if (description.Samples > 1 && plan.SliceSize == surface.BlockSliceSize * description.Samples)
+            {
+                if (Interlocked.Exchange(ref _multisampledDepthWarned, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][WARN] A multisampled depth surface is not transferred: samples={description.Samples} " +
+                        $"slice=0x{plan.SliceSize:x} extent={description.Extent.Width}x{description.Extent.Height}.");
+                }
+
+                plan.StencilPlane = false;
+                return plan;
             }
 
             if (plan.SliceSize != surface.BlockSliceSize)

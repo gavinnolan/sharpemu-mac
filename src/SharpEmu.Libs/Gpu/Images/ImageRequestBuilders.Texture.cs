@@ -321,11 +321,13 @@ public static partial class ImageRequestBuilders
         {
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
-        // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
-        // A 64-bit atomic keeps its 32_32_UINT texels whole: MSL types it ulong over RG32Uint.
+        // Atomic storage images are declared as UINT, including float atomics, and a raw 32-bit
+        // sint store is compiled as uint; other sint storage keeps its *_SINT view. A 64-bit atomic
+        // keeps its 32_32_UINT texels whole: MSL types it ulong over RG32Uint.
+        var rawSint32 = format == GuestPixelFormat.Bits32SInt && shape.NumericClass != TextureNumericClass.Sint;
         var storageViewFormat = storage && shape.Atomic64
             ? shape.NativeInt64Atomics ? GpuFormat.R64Uint : GpuFormat.R32G32Uint
-            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? GpuFormat.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+            : storage && (shape.Atomic || rawSint32) ? GpuFormat.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != GpuFormat.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
