@@ -98,6 +98,9 @@ public static partial class AgcExports
         }
     }
 
+    // Payloads up to this many dwords are read and written with the packet's head in one write.
+    private const uint InlinePayloadDwords = 64;
+
     [SysAbiExport(
         Nid = "n2fD4A+pb+g",
         ExportName = "sceAgcCbSetShRegisterRangeDirect",
@@ -120,16 +123,26 @@ public static partial class AgcExports
         }
 
         ulong commandAddress;
+        var payloadWritten = false;
         using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.PacketSetup))
         {
             // With the room for both, the marker NOP and the packet are one allocation and their four
-            // leading dwords one write: each guest write and cursor update is a backing admission, and
-            // this runs once per draw on GTA V's render threads.
+            // leading dwords one write - with a small payload, read first, in it too: each guest write
+            // and cursor update is a backing admission, and this runs once per draw on GTA V's render
+            // threads.
             if (TryAllocateCommandDwordsInPlace(ctx, commandBufferAddress, 2 + packetDwords, out var markerAddress))
             {
                 commandAddress = markerAddress + 2 * sizeof(uint);
-                if (!TryWriteCommandDwords(ctx, markerAddress,
-                        Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker, Pm4(packetDwords, ItSetShReg, 0), offset))
+                Span<uint> packet = stackalloc uint[4 + (int)Math.Min(valueCount, InlinePayloadDwords)];
+                packet[0] = Pm4(2, ItNop, RZero);
+                packet[1] = CbSetShRegisterRangeMarker;
+                packet[2] = Pm4(packetDwords, ItSetShReg, 0);
+                packet[3] = offset;
+                payloadWritten = valuesAddress != 0 && valueCount <= InlinePayloadDwords &&
+                    (valuesAddress >= markerAddress + (2 + (ulong)packetDwords) * sizeof(uint) ||
+                     valuesAddress + (ulong)valueCount * sizeof(uint) <= markerAddress) &&
+                    ctx.Memory.TryRead(valuesAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(packet[4..]));
+                if (!TryWriteCommandDwords(ctx, markerAddress, payloadWritten ? packet : packet[..4]))
                 {
                     AgcRegisterPacketProfile.RecordResult(false);
                     return ReturnPointer(ctx, 0);
@@ -150,8 +163,8 @@ public static partial class AgcExports
             payloadAddress <= ulong.MaxValue - payloadSize;
         var separateRanges = validRanges &&
             (valuesAddress + payloadSize <= payloadAddress || payloadAddress + payloadSize <= valuesAddress);
-        var copied = false;
-        if (valuesAddress != 0 && separateRanges)
+        var copied = payloadWritten;
+        if (valuesAddress != 0 && separateRanges && !payloadWritten)
         {
             using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.BulkCopy))
                 copied = ctx.Memory.TryCopy(payloadAddress, valuesAddress, payloadSize);
@@ -159,7 +172,7 @@ public static partial class AgcExports
                 ? AgcRegisterPacketProfile.PayloadPath.BulkCopied
                 : AgcRegisterPacketProfile.PayloadPath.BulkDeclined, valueCount);
         }
-        else
+        else if (!payloadWritten)
         {
             AgcRegisterPacketProfile.RecordPath(valuesAddress == 0
                 ? AgcRegisterPacketProfile.PayloadPath.NullSource

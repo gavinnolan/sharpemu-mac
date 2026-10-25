@@ -89,11 +89,16 @@ public sealed class AgcSetShRegisterRangeTests
         Assert.Equal(0, AgcExports.CbSetShRegisterRangeDirect(context));
 
         Assert.Equal(PacketAddress + 8, context[CpuRegister.Rax]);
-        Assert.Equal(1, memory.CopyCalls);
-        Assert.Equal((PacketAddress + 16, sourceAddress, (ulong)valueCount * 4), memory.LastCopy);
-        // With the room for both, one allocation for the marker and the packet: one state read, the cursor and the four leading dwords.
-        Assert.Equal(1, memory.ReadCalls);
+        // With the room for both, one allocation for the marker and the packet, written with the cursor
+        // and one write of their head; a small payload is read and goes in that write, a large one is copied.
+        var inline = valueCount <= 64;
+        Assert.Equal(inline ? 0 : 1, memory.CopyCalls);
+        if (!inline)
+            Assert.Equal((PacketAddress + 16, sourceAddress, (ulong)valueCount * 4), memory.LastCopy);
+        Assert.Equal(inline ? 2 : 1, memory.ReadCalls);
         Assert.Equal(2, memory.WriteCalls);
+        for (var index = 0; index < values.Length; index++)
+            Assert.Equal(values[index], ReadUInt32(memory, PacketAddress + 16 + (ulong)index * 4));
         Assert.Equal(0xC0001000u, ReadUInt32(memory, PacketAddress));
         Assert.Equal(0x6875000Du, ReadUInt32(memory, PacketAddress + 4));
         Assert.Equal(0xC0007600u | (valueCount << 16), ReadUInt32(memory, PacketAddress + 8));
@@ -107,7 +112,8 @@ public sealed class AgcSetShRegisterRangeTests
     public void Emit_UsesScalarCopyWhenBackendDeclinesBulkCopy()
     {
         var memory = new CopyRecordingMemory { SupportsCopy = false };
-        var context = CreateEmitterContext(memory, ValuesAddress, 2);
+        // Past the payloads written with the packet's head, which take no copy.
+        var context = CreateEmitterContext(memory, ValuesAddress, 65);
         WriteUInt32(memory, ValuesAddress, 17);
         WriteUInt32(memory, ValuesAddress + 4, 29);
 
@@ -176,7 +182,8 @@ public sealed class AgcSetShRegisterRangeTests
     public void Emit_FailedMemoryAccessPreservesScalarFailureBehavior(bool failRead)
     {
         var memory = new CopyRecordingMemory();
-        var context = CreateEmitterContext(memory, ValuesAddress, 3);
+        // Past the payloads written with the packet's head, which take no copy.
+        var context = CreateEmitterContext(memory, ValuesAddress, 65);
         WriteUInt32(memory, ValuesAddress, 17);
         WriteUInt32(memory, ValuesAddress + 4, 29);
         if (failRead) memory.FailedReadAddress = ValuesAddress + 4;
@@ -188,7 +195,7 @@ public sealed class AgcSetShRegisterRangeTests
         Assert.Equal(1, memory.CopyCalls);
         Assert.Equal(17u, ReadUInt32(memory, PacketAddress + 16));
         Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 20));
-        Assert.Equal(PacketAddress + 28, ReadUInt64(memory, CommandBufferAddress + 0x10));
+        Assert.Equal(PacketAddress + (4 + 65) * 4, ReadUInt64(memory, CommandBufferAddress + 0x10));
     }
 
     [Theory]
