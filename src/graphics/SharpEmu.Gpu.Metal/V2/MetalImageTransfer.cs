@@ -1678,6 +1678,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
     }
 
     private static int _multisampledDepthWarned;
+    private static int _mipmappedDepthWarned;
 
     private static TransferPlan PlanDepth(in ImageDescription description)
     {
@@ -1687,7 +1688,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         var layers = description.Resources.Layers;
-        if (layers == 0 || description.Data.Size % layers != 0 || description.Resources.Levels != 1 ||
+        if (layers == 0 || description.Data.Size % layers != 0 || description.Resources.Levels == 0 ||
             GuestPixelFormats.BytesPerElement(description.GuestFormat) != description.BytesPerBlock)
         {
             throw GpuFatal.Fatal(
@@ -1712,6 +1713,22 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         {
             throw GpuFatal.Fatal(
                 $"The depth transfer conversion is not supported: bytesPerBlock={description.BytesPerBlock} transferBytes={plan.TransferBytes}.");
+        }
+
+        // A mipmapped depth surface (Ghost of Tsushima's depth pyramid, 9 levels) is not
+        // transferred either: only a single level's tiles are planned here, and its levels are
+        // what the GPU drew into them.
+        if (description.Resources.Levels > 1)
+        {
+            if (Interlocked.Exchange(ref _mipmappedDepthWarned, 1) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][WARN] A mipmapped depth surface is not transferred: levels={description.Resources.Levels} " +
+                    $"extent={description.Extent.Width}x{description.Extent.Height} size=0x{description.Data.Size:x}.");
+            }
+
+            plan.StencilPlane = false;
+            return plan;
         }
 
         if (plan.Tiled)

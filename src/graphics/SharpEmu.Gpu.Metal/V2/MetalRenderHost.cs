@@ -285,7 +285,7 @@ internal sealed partial class MetalRenderHost :
             return _commandBuffer;
         }
 
-        _commandBuffer = MetalNative.Send(_queue, SelCommandBuffer);
+        _commandBuffer = NewCommandBuffer();
         MetalMemoryTelemetry.CommandBuffers.Add();
         if (_commandBuffer == 0)
         {
@@ -799,7 +799,7 @@ internal sealed partial class MetalRenderHost :
             MetalV2Diagnostics.WarnOnce(
                 "submission-failed",
                 $"A Metal submission failed and will never signal its serial: serial={serial} " +
-                $"{MetalNative.DescribeError(error)}");
+                $"{MetalNative.DescribeError(error)}{DescribeEncoderStatus(error)}");
             PassProfileResolve(serial, false, 0);
             return;
         }
@@ -1166,7 +1166,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _lastCommitTimestamp = now;
-        var buffer = MetalNative.Send(_queue, SelCommandBuffer);
+        var buffer = NewCommandBuffer();
         if (buffer == 0)
         {
             return;

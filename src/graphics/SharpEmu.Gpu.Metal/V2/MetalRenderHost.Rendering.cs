@@ -1136,6 +1136,7 @@ internal sealed partial class MetalRenderHost
 
             _renderEncoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
             MetalMemoryTelemetry.RenderEncoders.Add();
+            LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
             if (_renderEncoder == 0)
             {
                 throw Fatal(
@@ -1365,6 +1366,7 @@ internal sealed partial class MetalRenderHost
         }
 
         RetainEncoder(_computeEncoder);
+        LabelEncoder(_computeEncoder, "compute");
 
         if (_computeEncoder == 0)
         {
@@ -1386,6 +1388,7 @@ internal sealed partial class MetalRenderHost
         {
             MetalNative.SendVoid(encoder, SelSetComputePipelineState, entry.State);
             _boundComputePipeline = entry.State;
+            SignpostPipeline(encoder, entry);
         }
     }
 
@@ -1467,6 +1470,7 @@ internal sealed partial class MetalRenderHost
             UsePipelineState(entry);
             MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
             _boundRenderState = entry.State;
+            SignpostPipeline(_renderEncoder, entry);
             MetalV2Native.SendVoidValue(
                 _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreCulling ? Mtl.CullModeNone : entry.CullMode));
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetFrontFacingWinding, (nuint)entry.Winding);
