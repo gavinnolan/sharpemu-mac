@@ -260,6 +260,12 @@ public interface IRenderHost
     // Whether a texture bound for the draw being prepared reads the depth attachment's subresources.
     bool SamplesDepthAttachment(in DepthAttachmentState depth) => true;
 
+    /// <summary>
+    /// Whether a pass may attach a depth target with more samples than its colour targets: the
+    /// host then draws the pass at the colour's sample count against a stand-in for the depth.
+    /// </summary>
+    bool SupportsMixedDepthSamples => false;
+
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }
 

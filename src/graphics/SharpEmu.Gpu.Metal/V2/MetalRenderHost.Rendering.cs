@@ -1009,6 +1009,16 @@ internal sealed partial class MetalRenderHost
         ChooseElidedLoads(in state, upcoming, upcomingVertexCount, upcomingFirstVertex);
         ResolveDeferredRefreshes(in state);
         var commandBuffer = EnsureCommandBuffer();
+        // A depth target with more samples than the pass rasterises with is drawn through a
+        // one-sample proxy (MetalRenderHost.MixedSampleDepth), filled before the pass begins.
+        var depthLevel = _depthAttachmentLevel;
+        var depthSlice = _depthAttachmentSlice;
+        ref readonly var attachedDepth = ref state.DepthStencilAttachment;
+        var depthTexture = attachedDepth.View.Handle != 0 && (attachedDepth.HasDepth || attachedDepth.HasStencil)
+            ? AttachDepthTexture(commandBuffer, (nint)attachedDepth.View.Handle, state.Samples,
+                attachedDepth.HasDepth && attachedDepth.DepthClear, attachedDepth.HasStencil && attachedDepth.StencilClear,
+                ref depthLevel, ref depthSlice)
+            : 0;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
@@ -1069,9 +1079,9 @@ internal sealed partial class MetalRenderHost
             {
                 attached = true;
                 var depth = MetalNative.Send(descriptor, SelDepthAttachment);
-                MetalNative.SendVoid(depth, SelSetTexture, (nint)depthStencil.View.Handle);
-                MetalV2Native.SendVoidValue(depth, SelSetLevel, _depthAttachmentLevel);
-                MetalV2Native.SendVoidValue(depth, SelSetSlice, _depthAttachmentSlice);
+                MetalNative.SendVoid(depth, SelSetTexture, depthTexture);
+                MetalV2Native.SendVoidValue(depth, SelSetLevel, depthLevel);
+                MetalV2Native.SendVoidValue(depth, SelSetSlice, depthSlice);
                 MetalV2Native.SendVoidValue(
                     depth, SelSetLoadAction, depthStencil.DepthClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
                 MetalV2Native.SendVoidValue(depth, SelSetStoreAction, PendingStoreAction);
@@ -1086,9 +1096,9 @@ internal sealed partial class MetalRenderHost
             {
                 attached = true;
                 var stencil = MetalNative.Send(descriptor, SelStencilAttachment);
-                MetalNative.SendVoid(stencil, SelSetTexture, (nint)depthStencil.View.Handle);
-                MetalV2Native.SendVoidValue(stencil, SelSetLevel, _depthAttachmentLevel);
-                MetalV2Native.SendVoidValue(stencil, SelSetSlice, _depthAttachmentSlice);
+                MetalNative.SendVoid(stencil, SelSetTexture, depthTexture);
+                MetalV2Native.SendVoidValue(stencil, SelSetLevel, depthLevel);
+                MetalV2Native.SendVoidValue(stencil, SelSetSlice, depthSlice);
                 MetalV2Native.SendVoidValue(
                     stencil, SelSetLoadAction, depthStencil.StencilClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
                 MetalV2Native.SendVoidValue(stencil, SelSetStoreAction, PendingStoreAction);
@@ -1272,6 +1282,7 @@ internal sealed partial class MetalRenderHost
             PassProfileClose();
         }
 
+        FinishMixedDepth();
         _renderingActive = false;
         _renderingState = default;
         _renderPassSerial++;
