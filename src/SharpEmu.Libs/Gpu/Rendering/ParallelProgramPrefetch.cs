@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using WorkerScratch = SharpEmu.ShaderCompiler.WorkerScratch;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -28,6 +29,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private readonly RenderExecutor _executor;
     private readonly IRenderHost _host;
+    private readonly Func<string, Exception> _fatal;
     private readonly IConcurrentResolveHost _concurrent;
     private readonly object _lock = new();
     private readonly Queue<Job> _queue = new();
@@ -47,6 +49,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     {
         _executor = executor;
         _host = host;
+        _fatal = host.Fatal;
         _concurrent = concurrent;
         _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu program resolve" };
         _thread.Start();
@@ -279,7 +282,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         _concurrent.BeginConcurrentResolve();
         try
         {
-            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, _host.Fatal, job.Indexed);
+            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
             job.Assumptions = _concurrent.EndConcurrentResolve();
             job.State = 1;
