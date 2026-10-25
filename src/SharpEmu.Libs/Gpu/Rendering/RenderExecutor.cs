@@ -236,6 +236,7 @@ public sealed partial class RenderExecutor
                     ? !CanDrawMeshIndirectOnGpu(banks, in arguments)
                     : !CanDrawIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
             {
+                NoteCpuIndirectArguments(banks, in arguments);
                 DrawIndexedWithCpuArguments(submitId, banks, in arguments);
                 return;
             }
@@ -309,6 +310,23 @@ public sealed partial class RenderExecutor
             return false;
         return _host.ClampMappedSize(start, size) == size &&
             _host.ClampMappedSize(arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) == IndexedIndirectArgumentsSize;
+    }
+
+    // Each distinct shape of indirect indexed draw whose arguments are read on the CPU, named once:
+    // the read waits for the GPU work that wrote them.
+    private readonly HashSet<(bool Mesh, uint Primitive, uint IndexType, bool Restart, bool Unbounded)> _cpuIndirectShapes = [];
+
+    private void NoteCpuIndirectArguments(RegisterBanks banks, in DrawIndexedArguments arguments)
+    {
+        var shape = (UsesMeshExecution(banks), banks.UserConfig.PrimitiveType, arguments.IndexTypeAndSize,
+            (banks.UserConfig.PrimitiveResetControl & 0x1) != 0, arguments.UnboundedIndexBuffer);
+        if (_cpuIndirectShapes.Count < 32 && _cpuIndirectShapes.Add(shape))
+        {
+            Console.Error.WriteLine(
+                $"[GPU][INFO] An indirect indexed draw reads its arguments on the CPU: mesh={shape.Item1} primitive={shape.Item2} " +
+                $"index_type={shape.Item3} restart={shape.Item4} restart_index=0x{banks.Context.PrimitiveResetIndex:X} " +
+                $"unbounded={shape.Item5} index_count={arguments.IndexCount} mesh_gpu={_host.SupportsIndirectMeshDraw}.");
+        }
     }
 
     // Reads the indirect arguments now and draws from them, as the interpreter would have.
