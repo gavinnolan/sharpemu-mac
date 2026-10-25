@@ -853,6 +853,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _dsLabelSerial = serial;
         }
 
+        if (sourceIsFinal)
+        {
+            KeepLabelReplays(copies, serial);
+        }
+
         // A command processor polling these bytes suspends until something says they
         // changed, and the only thing that knows is the completion of this submission. The
         // worker reports completions when it next flushes, which is never while every head

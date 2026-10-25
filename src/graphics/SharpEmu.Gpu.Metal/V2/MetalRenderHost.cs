@@ -793,6 +793,7 @@ internal sealed partial class MetalRenderHost :
             MetalNative.SendVoid(buffer, SelWaitUntilCompleted);
             status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
         }
+        SettleLabelReplays(serial, failed: status == CommandBufferStatusError);
         if (status == CommandBufferStatusError)
         {
             Interlocked.Increment(ref _failedSubmissions);
