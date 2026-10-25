@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using WorkerScratch = SharpEmu.ShaderCompiler.WorkerScratch;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -350,7 +351,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         _concurrent.BeginConcurrentResolve();
         try
         {
-            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, _fatal, job.Indexed);
+            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
             job.Assumptions = _concurrent.EndConcurrentResolve();
             Interlocked.Increment(ref _resolvedCount);
