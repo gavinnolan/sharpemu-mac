@@ -309,7 +309,10 @@ public static partial class ImageRequestBuilders
             size = TileGeometry.TextureTotalSize(format, width, height, volume ? depth : imageLayers, levels, tile, volume);
         }
 
-        if (size.Size == 0 || size.Align == 0 || (address & (size.Align - 1UL)) != 0)
+        // A T# encodes its byte address in 256-byte units. The layout alignment describes a new surface
+        // allocation, not an addressed view inside one, and tiled offsets are relative to this base
+        // (from sharpemu/sharpemu#1097).
+        if (size.Size == 0 || size.Align == 0 || (address & 0xFFUL) != 0)
         {
             throw InvalidDescriptor(
                 $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.");
