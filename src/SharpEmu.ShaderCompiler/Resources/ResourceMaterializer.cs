@@ -68,7 +68,31 @@ public static partial class ResourceMaterializer
         public int[] Entries = [];
         // Entries read as null before classification, by reason.
         public Dictionary<string, int> Nulls = [];
+        // The memo of the table these entries came from, when its words were all read.
+        public BindlessTableMemo? Memo;
     }
+
+    // The last bindless table read at an address, kept while its guest words stay the same. Sorting
+    // tens of thousands of descriptors into distinct ones and classes costs tens of milliseconds a
+    // draw, and the host reuses a table's device handles only for the same BindlessImageTable object.
+    private sealed class BindlessTableMemo
+    {
+        public required uint[] Words;
+        public required List<uint[]> Descriptors;
+        public required int[] Entries;
+        public required Dictionary<string, int> Nulls;
+        // The classifications of the accesses that read the table, by what each read of its access besides the
+        // words: the resource, dimension and swizzle. A few shaders often share one table.
+        public readonly List<((uint Resource, ImageDimension Dimension, uint Swizzle) Access, BindlessClassification Classification)> Classes = [];
+    }
+
+    // Diagnostics: bindless table memo hits, words that changed, keys not kept, and tables not wholly read.
+    public static long BindlessMemoHits, BindlessMemoChanged, BindlessMemoAbsent, BindlessMemoUnread, BindlessMemoClassHits;
+
+    private const int BindlessMemoMinEntries = 256;
+    private const int BindlessMemoCapacity = 32;
+    private static readonly Dictionary<(ulong Address, ulong Entries, bool R128, uint DynamicOffsetBase), BindlessTableMemo> BindlessMemos = [];
+    private static readonly Lock BindlessMemoGate = new();
 
     // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
     // and the run-time offset -> candidate mapping the emitter searches.
@@ -920,6 +944,28 @@ public static partial class ResourceMaterializer
             }
         }
 
+        var memoKey = (tableAddress, entries, r128, indirect.DynamicOffsetBase);
+        var memoized = unreadable is null && entries >= BindlessMemoMinEntries;
+        if (unreadable is not null && entries >= BindlessMemoMinEntries) BindlessMemoUnread++;
+        if (memoized)
+        {
+            lock (BindlessMemoGate)
+            {
+                var kept = BindlessMemos.TryGetValue(memoKey, out var memo);
+                if (!kept) BindlessMemoAbsent++;
+                else if (!memo!.Words.AsSpan().SequenceEqual(table)) BindlessMemoChanged++;
+                else BindlessMemoHits++;
+                if (kept && memo!.Words.AsSpan().SequenceEqual(table))
+                {
+                    result.Descriptors = memo.Descriptors;
+                    result.Entries = memo.Entries;
+                    result.Nulls = new Dictionary<string, int>(memo.Nulls);
+                    result.Memo = memo;
+                    return true;
+                }
+            }
+        }
+
         var distinct = new Dictionary<ImageDescriptorKey, int>();
         var unreadableEntries = 0;
         result.Entries = new int[entries];
@@ -952,6 +998,25 @@ public static partial class ResourceMaterializer
 
         if (unreadableEntries != 0)
             result.Nulls["could not be read from guest memory"] = unreadableEntries;
+        if (memoized)
+        {
+            var memo = new BindlessTableMemo
+            {
+                Words = table,
+                Descriptors = result.Descriptors,
+                Entries = result.Entries,
+                Nulls = new Dictionary<string, int>(result.Nulls),
+            };
+            lock (BindlessMemoGate)
+            {
+                if (BindlessMemos.Count >= BindlessMemoCapacity && !BindlessMemos.ContainsKey(memoKey))
+                    BindlessMemos.Remove(BindlessMemos.Keys.First());
+                BindlessMemos[memoKey] = memo;
+            }
+
+            result.Memo = memo;
+        }
+
         return true;
     }
 
@@ -1408,15 +1473,37 @@ public static partial class ResourceMaterializer
                 snapshot.Images[imageCursor++] = new uint[8];
             }
 
-            bindlessOutputs[slot] = new BindlessImageTable
+            // The same table again is the same object, so the host keeps its device handles.
+            BindlessImageTable? output = null;
+            if (classified.Memoized)
             {
-                Slot = (uint)slot,
-                VariantImages = variantImages,
-                Descriptors = classified.Descriptors,
-                DescriptorVariants = classified.DescriptorVariants,
-                Entries = classified.Entries,
-                Address = classified.Address,
-            };
+                lock (BindlessMemoGate)
+                {
+                    if (classified.Output is { } previous && previous.Slot == (uint)slot &&
+                        ReferenceEquals(previous.Descriptors, classified.Descriptors) &&
+                        previous.VariantImages.AsSpan().SequenceEqual(variantImages))
+                        output = previous;
+                }
+            }
+
+            if (output is null)
+            {
+                output = new BindlessImageTable
+                {
+                    Slot = (uint)slot,
+                    VariantImages = variantImages,
+                    Descriptors = classified.Descriptors,
+                    DescriptorVariants = classified.DescriptorVariants,
+                    Entries = classified.Entries,
+                    Address = classified.Address,
+                };
+                if (classified.Memoized)
+                {
+                    lock (BindlessMemoGate) classified.Output = output;
+                }
+            }
+
+            bindlessOutputs[slot] = output;
         }
 
         snapshot.BindlessTables = bindlessOutputs;
@@ -1841,6 +1928,10 @@ public static partial class ResourceMaterializer
         public uint[][] Descriptors = [];
         public byte[] DescriptorVariants = [];
         public int[] Entries = [];
+        // A memoized classification is shared by every draw that reads the same table words the same way;
+        // its last output table is reused when a draw places it the same.
+        public bool Memoized;
+        public BindlessImageTable? Output;
     }
 
     private static readonly HashSet<(ulong Plan, uint Resource, string Reason)> ReportedBindlessNulls = [];
@@ -1866,6 +1957,45 @@ public static partial class ResourceMaterializer
     // shape, or one needing a different sampler) and classes past the variant limit become
     // null entries, said so once per program.
     private static BindlessClassification ClassifyBindlessImages(
+        ShaderResourcePlan plan, MaterializedSnapshot snapshot, BindlessImageEntries table)
+    {
+        var info = plan.Info;
+        var root = (int)table.Resource;
+        var baseImage = info.Images[root];
+        // A depth-compare access also classifies by this draw's sampler; anything else only by the plan and the words.
+        var memo = baseImage.DepthCompare ? null : table.Memo;
+        var access = (table.Resource, baseImage.Dimension, baseImage.ShaderSwizzle);
+        if (memo is not null)
+        {
+            lock (BindlessMemoGate)
+            {
+                foreach (var known in memo.Classes)
+                {
+                    if (known.Access == access)
+                    {
+                        BindlessMemoClassHits++;
+                        return known.Classification;
+                    }
+                }
+            }
+        }
+
+        var classification = ClassifyBindlessImagesCore(plan, snapshot, table);
+        if (memo is not null)
+        {
+            classification.Memoized = true;
+            lock (BindlessMemoGate)
+            {
+                if (memo.Classes.Count >= 4)
+                    memo.Classes.RemoveAt(0);
+                memo.Classes.Add((access, classification));
+            }
+        }
+
+        return classification;
+    }
+
+    private static BindlessClassification ClassifyBindlessImagesCore(
         ShaderResourcePlan plan, MaterializedSnapshot snapshot, BindlessImageEntries table)
     {
         var info = plan.Info;

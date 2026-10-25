@@ -262,6 +262,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 throw Fatal($"The GDS fill range is outside the buffer: offset=0x{address:X} size=0x{size:X}.");
             }
 
+            if (TryFillGdsOnGpu(address, size, value))
+            {
+                return;
+            }
+
             // The data share is a shared-storage buffer, so the host fill is visible to
             // the GPU without a transfer; a shader write to it is ordered by Metal.
             SynchronizeGpu();
@@ -300,14 +305,23 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        if (sourceIsGds
+                ? source > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - source
+                : destination > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - destination)
+        {
+            throw Fatal(
+                $"The GDS copy is outside the buffer: destination=0x{destination:X} source=0x{source:X} size=0x{size:X} from_gds={sourceIsGds}.");
+        }
+
+        if (TryCopyGdsOnGpu(destination, source, size, destinationIsGds))
+        {
+            return;
+        }
+
         SynchronizeGpu();
         var gds = _guestMemory.GdsWords();
         if (sourceIsGds)
         {
-            if (source > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - source)
-            {
-                throw Fatal($"The GDS copy source is outside the buffer: offset=0x{source:X} size=0x{size:X}.");
-            }
 
             var watch = _guard?.Begin(destination, size, "gds-copy") ?? -1;
             var wrote = _memory.TryWrite(destination, gds.Slice((int)source, (int)size));

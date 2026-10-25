@@ -2430,6 +2430,7 @@ internal sealed partial class MetalRenderHost :
         var clocks = TakeClockLabelCounters();
         reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
+            .Append(" gpu_gds=").Append(TakeGpuGdsTransfers())
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
             .Append(TakeCopyReadCounters())
@@ -2465,6 +2466,19 @@ internal sealed partial class MetalRenderHost :
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count);
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
+        var bindless = TakeBindlessCost();
+        if (bindless.Tables != 0)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][BINDLESS] ms={bindless.Elapsed.TotalMilliseconds:F1} tables={bindless.Tables} " +
+                $"descriptors={bindless.Descriptors} lookups={bindless.Lookups} image_set={_imageCache.ImageSetVersion} " +
+                $"new_tables={BindlessNewTables} full={BindlessFullResolves} partial={BindlessPartialResolves} " +
+                $"wide={BindlessWideChanges} invalid={BindlessInvalidEntries} declared={BindlessDeclaredTextures} resident={BindlessResidentTextures} " +
+                $"memo_hits={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoHits} memo_changed={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoChanged} " +
+                $"memo_absent={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoAbsent} memo_unread={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoUnread} " +
+                $"memo_class={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoClassHits}");
+        }
+
         WriteCopyReadTraces();
         var causes = _imageCache.TakeTransferCauses();
         var subRange = _imageCache.TakePartialTransfers();

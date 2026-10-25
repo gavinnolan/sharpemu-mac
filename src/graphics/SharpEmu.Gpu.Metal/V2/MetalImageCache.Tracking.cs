@@ -91,7 +91,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
-        Interlocked.Increment(ref _imageSetVersion);
+        NoteImageSetChanged(image.Description.Data);
         NoteReleasedForTelemetry(image, cause);
         // Chunks whose guest copy the texture holds get their bytes back before it goes.
         SingleCopy?.OnImageReleased(image, cause);

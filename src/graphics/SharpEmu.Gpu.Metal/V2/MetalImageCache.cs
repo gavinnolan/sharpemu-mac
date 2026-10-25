@@ -344,6 +344,73 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>Changes whenever an image is added to or dropped from the cache.</summary>
     public long ImageSetVersion => Volatile.Read(ref _imageSetVersion);
 
+    // The guest range of the image each of the last ImageSetChangeCount versions added or dropped, so a
+    // memo of lookups (a bindless table's) redoes only the ones a change could answer differently.
+    private const int ImageSetChangeCount = 512;
+    private readonly (long Version, ulong Start, ulong End)[] _imageSetChanges = new (long, ulong, ulong)[ImageSetChangeCount];
+    private readonly Lock _imageSetChangeGate = new();
+
+    private void NoteImageSetChanged(GuestSpan range)
+    {
+        lock (_imageSetChangeGate)
+        {
+            var version = Interlocked.Increment(ref _imageSetVersion);
+            // An image without a guest range is found by no address; it still counts as a change of everything.
+            _imageSetChanges[version % ImageSetChangeCount] = ImageDescription.IsEmptyRange(range)
+                ? (version, 0, ulong.MaxValue)
+                : (version, range.Address, range.Address + range.Size);
+        }
+    }
+
+    /// <summary>
+    /// The guest ranges of the images added or dropped after version <paramref name="since"/> up to
+    /// <paramref name="until"/>, sorted by start and merged; false when they are no longer all known.
+    /// </summary>
+    public bool CollectImageSetChanges(long since, long until, List<(ulong Start, ulong End)> ranges)
+    {
+        ranges.Clear();
+        if (since < 0 || until < since || until - since > ImageSetChangeCount)
+        {
+            return false;
+        }
+
+        lock (_imageSetChangeGate)
+        {
+            for (var version = since + 1; version <= until; version++)
+            {
+                var change = _imageSetChanges[version % ImageSetChangeCount];
+                if (change.Version != version)
+                {
+                    return false;
+                }
+
+                ranges.Add((change.Start, change.End));
+            }
+        }
+
+        // Sorted and merged: a lookup's range meets one of them only if it meets the last that starts before its end.
+        ranges.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+        var merged = 0;
+        for (var index = 1; index < ranges.Count; index++)
+        {
+            if (ranges[index].Start <= ranges[merged].End)
+            {
+                ranges[merged] = (ranges[merged].Start, Math.Max(ranges[merged].End, ranges[index].End));
+            }
+            else
+            {
+                ranges[++merged] = ranges[index];
+            }
+        }
+
+        if (ranges.Count != 0)
+        {
+            ranges.RemoveRange(merged + 1, ranges.Count - merged - 1);
+        }
+
+        return true;
+    }
+
     /// <summary>The counts of the mutations a memo of this cache's state has to see (MetalImageEpochs).</summary>
     public MetalImageEpochs Epochs { get; } = new();
 
@@ -2086,7 +2153,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         image.Epochs = Epochs;
         var imageIdentifier = _slots.Insert(image);
-        Interlocked.Increment(ref _imageSetVersion);
+        NoteImageSetChanged(image.Description.Data);
         Epochs.NoteBindingChanged();
         if (!ImageDescription.IsEmptyRange(description.Data))
         {

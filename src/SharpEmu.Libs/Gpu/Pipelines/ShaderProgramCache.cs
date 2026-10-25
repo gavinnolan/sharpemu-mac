@@ -218,6 +218,11 @@ internal sealed class ShaderProgramCache
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
     private readonly Dictionary<(ProgramKey Key, string Library), ProgramSourceEntry> _linkedPrograms = new();
 
+    // Programs whose resource plan was refused, with the device data loads it was planned under: planning
+    // one again costs as much as the first time (a scalar graph, its disk cache key, the resource walk)
+    // and refuses it the same way, so its dispatches are skipped at once until those loads change.
+    private readonly Dictionary<ProgramKey, (string Message, int DeviceDataLoads)> _rejectedPlans = new(ProgramKeyComparer.Instance);
+
     // Linking a program with a large hit-group table and planning it takes seconds (about 3 s for a table of 1,381
     // records), and a game that streams callees rebuilds its tables as it plays. With DeferLinking, TryGetProgram
     // links a new layout on a worker and reports the program as not ready, so its dispatches are skipped as they are
@@ -497,6 +502,12 @@ internal sealed class ShaderProgramCache
             var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
                 source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(_staticState));
             _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
+            if (entry is null && _rejectedPlans.Count != 0 &&
+                _rejectedPlans.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out var rejected) &&
+                rejected.DeviceDataLoads == DeviceDataLoads.CountFor(source.Hash))
+            {
+                throw new ShaderProgramRejectedException(rejected.Message);
+            }
         }
         var sourceWasCached = entry is not null;
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -528,7 +539,17 @@ internal sealed class ShaderProgramCache
             : null;
         if (entry is null)
         {
-            entry = CreateEntry(source, options.Detached());
+            var deviceDataLoads = DeviceDataLoads.CountFor(source.Hash);
+            try
+            {
+                entry = CreateEntry(source, options.Detached());
+            }
+            catch (ShaderProgramRejectedException exception)
+            {
+                _rejectedPlans[BuildProgramKey(source)] = (exception.Message, deviceDataLoads);
+                throw;
+            }
+
             key = BuildProgramKey(source);
             _programs.Add(key, entry);
             ShaderCacheCounters.CountProgram();

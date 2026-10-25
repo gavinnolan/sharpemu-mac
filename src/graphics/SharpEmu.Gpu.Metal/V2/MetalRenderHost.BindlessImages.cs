@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Diagnostics;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler.Metal;
@@ -21,10 +22,14 @@ namespace SharpEmu.Gpu.Metal.V2;
 // table size would be a new pipeline, and the shader could not read one entry as another
 // texture type. Here the table is plain memory the shader reinterprets per variant.
 //
-// The textures are declared to each encoder that reads them with one useResources:count:
-// message per table rather than a residency set: a residency set makes memory resident but
-// takes no part in hazard tracking, and the tables hold render targets the same frame
-// writes, which the reading pass has to be ordered after (and any later writer after it).
+// The textures some pass writes (render targets, storage images, anything the GPU modified)
+// are declared to each encoder that reads them with one useResources:count: message per
+// table: a residency set makes memory resident but takes no part in hazard tracking, and the
+// reading pass has to be ordered after their writers (and any later writer after it). The
+// rest only have to be resident, and a residency set on the queue does that once: declaring
+// every texture of a 27,000-entry table to each encoder held each command buffer about 105 ms
+// between its commit and the kernel taking it, with the GPU idle (Ghost of Tsushima's menu,
+// 3 fps; 5.5 with the set). Without residency sets (before macOS 15) every texture is declared.
 internal sealed partial class MetalRenderHost
 {
     private static readonly nint SelUseResourcesUsage = MetalNative.Selector("useResources:count:usage:");
@@ -49,6 +54,9 @@ internal sealed partial class MetalRenderHost
         public nint[] Textures = [];
         public ulong[] ResourceIds = [];
         public long DeclaredEncoder = -1;
+        // The textures declared to each encoder: those some pass writes, or all without a residency set.
+        public readonly List<nint> Declared = [];
+        public ulong DeclaredSignature;
 
         // Each descriptor's image and request as the last full resolve found them, reused
         // while the image cache has neither added nor dropped an image since (Invalid for
@@ -68,6 +76,9 @@ internal sealed partial class MetalRenderHost
     private long _bindlessResolves;
     private long _bindlessDescriptors;
     private long _bindlessLookups;
+    internal long BindlessDeclaredTextures;
+    internal int BindlessResidentTextures => _bindlessResidency?.Count ?? -1;
+    internal long BindlessNewTables, BindlessFullResolves, BindlessPartialResolves, BindlessInvalidEntries, BindlessWideChanges;
 
     /// <summary>
     /// The host time spent turning bindless tables into device tables, how many tables and
@@ -110,21 +121,39 @@ internal sealed partial class MetalRenderHost
 
             var device = DeviceTableOf(table);
             var count = table.Descriptors.Length;
+            var residency = BindlessResidency;
+            device.Declared.Clear();
+            var declaredSignature = 0UL;
             // A lookup finds what it found last time unless an image came or went since: the
-            // descriptors are fixed per table, and only the cache's image set can change.
+            // descriptors are fixed per table, and only the cache's image set can change. An
+            // image added or dropped changes only the lookups over its guest bytes.
             var imageSet = _imageCache.ImageSetVersion;
             var reuse = device.ResolvedImageSet == imageSet;
+            var changes = !reuse && _imageCache.CollectImageSetChanges(device.ResolvedImageSet, imageSet, _bindlessImageSetChanges)
+                ? _bindlessImageSetChanges
+                : null;
+            if (!reuse)
+            {
+                if (changes is null) BindlessFullResolves++;
+                else
+                {
+                    BindlessPartialResolves++;
+                    if (changes.Count != 0 && changes[^1].End == ulong.MaxValue) BindlessWideChanges++;
+                }
+            }
             for (var index = 0; index < count; index++)
             {
                 ResourceSlotIdentifier identifier;
                 ImageRequest request;
-                if (reuse && device.Images[index].IsValid)
+                if (device.Images[index].IsValid &&
+                    (reuse || (changes is not null && !OverlapsAny(changes, device.Requests[index].Description.Data))))
                 {
                     identifier = device.Images[index];
                     request = device.Requests[index];
                 }
                 else
                 {
+                    if (!device.Images[index].IsValid) BindlessInvalidEntries++;
                     var variant = table.DescriptorVariants[index];
                     if (variant >= table.VariantImages.Length || table.VariantImages[variant] >= (uint)info.Images.Count)
                     {
@@ -150,16 +179,32 @@ internal sealed partial class MetalRenderHost
 
                 var texture = _imageCache.AcquireTextureView(
                     identifier, request with { Role = ImageRole.Texture }, out device.ResourceIds[index]);
-                if (device.Textures[index] != texture)
+                device.Textures[index] = texture;
+                // A texture a pass can write (an attachment or a storage image, or one the GPU has written) is a hazard.
+                var cached = residency is null ? null : _imageCache.GetImage(identifier);
+                if (cached is null || cached.IsGpuModified ||
+                    (cached.Shape.Usage & (Mtl.TextureUsageRenderTarget | Mtl.TextureUsageShaderWrite)) != 0)
                 {
-                    // The encoder has not been told about this one yet.
-                    device.Textures[index] = texture;
-                    device.DeclaredEncoder = -1;
+                    device.Declared.Add(texture);
+                    declaredSignature = (declaredSignature ^ (ulong)texture) * 0x100000001B3UL;
+                }
+                else
+                {
+                    residency!.Add(texture);
                 }
             }
 
-            // Only a pass that saw the image set hold still is one to reuse.
-            device.ResolvedImageSet = _imageCache.ImageSetVersion == imageSet ? imageSet : -1;
+            residency?.Commit();
+            BindlessDeclaredTextures += device.Declared.Count;
+            if (device.DeclaredSignature != declaredSignature)
+            {
+                // The encoder has not been told about these yet.
+                device.DeclaredSignature = declaredSignature;
+                device.DeclaredEncoder = -1;
+            }
+
+            // Images this pass added or dropped are changes after the version it started from.
+            device.ResolvedImageSet = imageSet;
 
             // A null or past-the-end entry reads the root's null texture, of variant 0's class.
             var root = (int)table.VariantImages[0];
@@ -177,7 +222,202 @@ internal sealed partial class MetalRenderHost
             _bindlessDescriptors += count;
         }
 
+        BindlessResidency?.PruneIfDue(_bindlessTables.Values, SubmissionSerial, CompletedSerial);
         _bindlessResolveTicks += Stopwatch.GetTimestamp() - started;
+    }
+
+    // The residency set of bindless textures no pass writes, on the render queue; null when residency sets are unavailable.
+    private BindlessTextureResidency? _bindlessResidency;
+    private bool _bindlessResidencyTried;
+
+    private BindlessTextureResidency? BindlessResidency
+    {
+        get
+        {
+            if (!_bindlessResidencyTried)
+            {
+                _bindlessResidencyTried = true;
+                _bindlessResidency = BindlessDeclareAll ? null : BindlessTextureResidency.TryCreate(_device, _queue);
+            }
+
+            return _bindlessResidency;
+        }
+    }
+
+    // SHARPEMU_METAL_V2_BINDLESS_DECLARE_ALL=1 declares every bindless texture to each encoder, as before residency sets.
+    private static readonly bool BindlessDeclareAll =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS_DECLARE_ALL") == "1";
+
+    private sealed class BindlessTextureResidency
+    {
+        private static readonly nint SelAddAllocation = MetalNative.Selector("addAllocation:");
+        private static readonly nint SelRemoveAllocation = MetalNative.Selector("removeAllocation:");
+        private static readonly nint SelCommit = MetalNative.Selector("commit");
+        private static readonly nint SelRetainObject = MetalNative.Selector("retain");
+        private static readonly nint SelReleaseObject = MetalNative.Selector("release");
+        private static readonly long PruneIntervalTicks = Stopwatch.Frequency * 2;
+
+        private readonly nint _set;
+        // Each member is retained here until it leaves the set, whatever the set itself keeps.
+        private readonly HashSet<nint> _members = [];
+        // Members no table names any more, with the serial they were last possibly read by; they leave
+        // the set once that submission has completed.
+        private readonly List<(nint Texture, ulong Serial)> _leaving = [];
+        private bool _dirty;
+        private long _lastPrune = Stopwatch.GetTimestamp();
+
+        private BindlessTextureResidency(nint set) => _set = set;
+
+        public int Count => _members.Count;
+
+        public static BindlessTextureResidency? TryCreate(nint device, nint queue)
+        {
+            var create = MetalNative.Selector("newResidencySetWithDescriptor:error:");
+            var attach = MetalNative.Selector("addResidencySet:");
+            var respondsTo = MetalNative.Selector("respondsToSelector:");
+            if (device == 0 || queue == 0 || !MetalNative.SendBool(device, respondsTo, create) ||
+                !MetalNative.SendBool(queue, respondsTo, attach))
+            {
+                return null;
+            }
+
+            var pool = MetalNative.objc_autoreleasePoolPush();
+            try
+            {
+                var descriptor = MetalNative.Send(MetalNative.Class("MTLResidencySetDescriptor"), MetalNative.Selector("new"));
+                MetalNative.SendVoid(descriptor, MetalNative.Selector("setLabel:"), MetalNative.NsString("SharpEmu bindless textures"));
+                nint error = 0;
+                var set = MetalNative.Send(device, create, descriptor, ref error);
+                MetalNative.SendVoid(descriptor, SelReleaseObject);
+                if (set == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][WARN] The bindless texture residency set could not be made ({MetalNative.DescribeError(error)}); every bindless texture is declared to its encoders.");
+                    return null;
+                }
+
+                MetalNative.SendVoid(queue, attach, set);
+                return new BindlessTextureResidency(set);
+            }
+            finally
+            {
+                MetalNative.objc_autoreleasePoolPop(pool);
+            }
+        }
+
+        public void Add(nint texture)
+        {
+            if (texture == 0 || !_members.Add(texture))
+            {
+                return;
+            }
+
+            MetalNative.Send(texture, SelRetainObject);
+            MetalNative.SendVoid(_set, SelAddAllocation, texture);
+            _dirty = true;
+        }
+
+        public void Commit()
+        {
+            if (!_dirty)
+            {
+                return;
+            }
+
+            MetalNative.SendVoid(_set, SelCommit);
+            _dirty = false;
+        }
+
+        // Every couple of seconds: members no device table names start leaving, and those whose last
+        // possible reader has completed leave.
+        public void PruneIfDue(IEnumerable<BindlessDeviceTable> tables, ulong serial, ulong completed)
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (now - _lastPrune < PruneIntervalTicks)
+            {
+                return;
+            }
+
+            _lastPrune = now;
+            for (var index = _leaving.Count - 1; index >= 0; index--)
+            {
+                var (texture, lastSerial) = _leaving[index];
+                if (lastSerial > completed)
+                {
+                    continue;
+                }
+
+                _leaving.RemoveAt(index);
+                if (_members.Remove(texture))
+                {
+                    MetalNative.SendVoid(_set, SelRemoveAllocation, texture);
+                    MetalNative.SendVoid(texture, SelReleaseObject);
+                    _dirty = true;
+                }
+            }
+
+            var named = new HashSet<nint>();
+            foreach (var table in tables)
+            {
+                foreach (var texture in table.Textures)
+                {
+                    named.Add(texture);
+                }
+            }
+
+            var alreadyLeaving = _leaving.Select(static leaving => leaving.Texture).ToHashSet();
+            foreach (var member in _members)
+            {
+                if (!named.Contains(member) && !alreadyLeaving.Contains(member))
+                {
+                    _leaving.Add((member, serial));
+                }
+            }
+
+            Commit();
+        }
+
+        // Shutdown only, once every submission has drained.
+        public void Dispose()
+        {
+            foreach (var member in _members)
+            {
+                MetalNative.SendVoid(_set, SelRemoveAllocation, member);
+                MetalNative.SendVoid(member, SelReleaseObject);
+            }
+
+            _members.Clear();
+            _leaving.Clear();
+            MetalNative.SendVoid(_set, SelCommit);
+            MetalNative.SendVoid(_set, SelReleaseObject);
+        }
+    }
+
+    private readonly List<(ulong Start, ulong End)> _bindlessImageSetChanges = [];
+
+    // Whether the guest range meets one of the ranges, which are sorted by start and do not overlap.
+    private static bool OverlapsAny(List<(ulong Start, ulong End)> ranges, GuestSpan range)
+    {
+        if (ranges.Count == 0)
+        {
+            return false;
+        }
+
+        if (range.Size == 0)
+        {
+            return true;
+        }
+
+        var end = range.Address + range.Size;
+        int low = 0, high = ranges.Count;
+        while (low < high)
+        {
+            var middle = (low + high) >>> 1;
+            if (ranges[middle].Start < end) low = middle + 1;
+            else high = middle;
+        }
+
+        return low != 0 && ranges[low - 1].End > range.Address;
     }
 
     private BindlessDeviceTable DeviceTableOf(BindlessImageTable table)
@@ -186,6 +426,7 @@ internal sealed partial class MetalRenderHost
         {
             ReleaseIdleBindlessTables();
             device = new BindlessDeviceTable { Source = table };
+            BindlessNewTables++;
             _bindlessTables.Add(table, device);
         }
 
@@ -331,23 +572,29 @@ internal sealed partial class MetalRenderHost
     {
         foreach (var device in _bindlessDeclarations)
         {
-            if (device.DeclaredEncoder == _encoderEpoch || device.Textures.Length == 0)
+            if (device.DeclaredEncoder == _encoderEpoch || device.Declared.Count == 0)
             {
                 continue;
             }
 
             device.DeclaredEncoder = _encoderEpoch;
-            fixed (nint* textures = device.Textures)
+            var declared = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(device.Declared);
+            if (declared.Length == 0)
+            {
+                continue;
+            }
+
+            fixed (nint* textures = declared)
             {
                 if (graphics)
                 {
                     MetalNative.SendUseResourcesStages(
-                        encoder, SelUseResourcesStages, textures, (nuint)device.Textures.Length, Mtl.ResourceUsageRead, stages);
+                        encoder, SelUseResourcesStages, textures, (nuint)declared.Length, Mtl.ResourceUsageRead, stages);
                 }
                 else
                 {
                     MetalNative.SendUseResources(
-                        encoder, SelUseResourcesUsage, textures, (nuint)device.Textures.Length, Mtl.ResourceUsageRead);
+                        encoder, SelUseResourcesUsage, textures, (nuint)declared.Length, Mtl.ResourceUsageRead);
                 }
             }
         }
@@ -371,5 +618,7 @@ internal sealed partial class MetalRenderHost
         }
 
         _retiredBindlessBuffers.Clear();
+        _bindlessResidency?.Dispose();
+        _bindlessResidency = null;
     }
 }
