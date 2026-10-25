@@ -2000,10 +2000,26 @@ internal sealed partial class MetalRenderHost
     public Func<ulong, bool>? DataWritePending =>
         MetalV2Diagnostics.DataLoadsOnDevice ? _dataWritePending ??= IsDataWordPending : null;
 
-    private bool IsDataWordPending(ulong address) =>
-        _gpuWrites.MayCover(address, sizeof(uint)) &&
-        _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
-        _gpuWrites.LastMatch.Origin != MetalGpuWriteOrigin.Unbounded;
+    // The program resolve thread asks as well as the worker: there the snapshot query reads the
+    // records without retiring any (PendingSerial retires, which a second thread doing corrupted
+    // the bucket dictionary - an IndexOutOfRangeException in Note on the worker, in split runs),
+    // and a read the worker raced teaches nothing, as an unbounded store does.
+    private bool IsDataWordPending(ulong address)
+    {
+        if (!_gpuWrites.MayCover(address, sizeof(uint)))
+        {
+            return false;
+        }
+
+        if (_relay.IsGpuQueueThread)
+        {
+            return _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
+                _gpuWrites.LastMatch.Origin != MetalGpuWriteOrigin.Unbounded;
+        }
+
+        return _gpuWrites.TryPendingSerialSnapshot(address, sizeof(uint), SignaledSerial(), out var pending, includeUnbounded: false) &&
+            pending != 0;
+    }
 
     // Resource tables are read straight from the backing, so a WRITE_DATA that patched one
     // and has yet to land would otherwise be read as the table it replaced.

@@ -423,7 +423,34 @@ internal sealed class MetalGpuWriteRanges
     // worker) scans them only between two equal even values, so it never trusts a torn view.
     private int _mutation;
 
-    private void BeginMutation() => Volatile.Write(ref _mutation, _mutation + 1);
+    private void BeginMutation()
+    {
+        NoteMutatingThread();
+        Volatile.Write(ref _mutation, _mutation + 1);
+    }
+
+    // The records have one writer, the GPU worker; a second thread changing them corrupts the
+    // bucket dictionary (an IndexOutOfRangeException in Note, seen in split runs). The first
+    // mutating thread is the owner, and a mutation from another prints its stack once.
+    private int _mutatingThread;
+    private int _foreignMutationReports;
+
+    private void NoteMutatingThread()
+    {
+        var thread = Environment.CurrentManagedThreadId;
+        if (_mutatingThread == 0)
+        {
+            _mutatingThread = thread;
+            return;
+        }
+
+        if (thread != _mutatingThread && Interlocked.Increment(ref _foreignMutationReports) <= 4)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][WARN] GPU write ranges changed off their owner thread: owner={_mutatingThread} " +
+                $"thread={thread} name='{Thread.CurrentThread.Name}'{Environment.NewLine}{Environment.StackTrace}");
+        }
+    }
 
     private void EndMutation() => Volatile.Write(ref _mutation, _mutation + 1);
 
@@ -431,7 +458,8 @@ internal sealed class MetalGpuWriteRanges
     /// <see cref="PendingSerial"/> for a thread other than the worker: nothing is retired, and false
     /// when the worker changed the records meanwhile, so the caller treats the bytes as pending.
     /// </summary>
-    public bool TryPendingSerialSnapshot(ulong address, ulong size, ulong completed, out ulong pending)
+    public bool TryPendingSerialSnapshot(
+        ulong address, ulong size, ulong completed, out ulong pending, bool includeUnbounded = true)
     {
         pending = 0;
         var before = Volatile.Read(ref _mutation);
@@ -443,7 +471,7 @@ internal sealed class MetalGpuWriteRanges
         try
         {
             var end = address + size;
-            var found = _unboundedSerial > completed ? _unboundedSerial : 0;
+            var found = includeUnbounded && _unboundedSerial > completed ? _unboundedSerial : 0;
             var records = _records;
             // The hashed counts let a query no record or label can reach skip the walks; they
             // change only inside a mutation, which the check below rejects the read over.
