@@ -2270,14 +2270,14 @@ public static partial class Gen5MslTranslator
                     return TryEmitGlobalWaveSync(instruction, control, out error);
                 case "DsWriteB32":
                 {
-                    var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
+                    var index = Temp("uint", GlobalDataShareIndex(GlobalDataShareAddress(instruction), control.SingleOffsetBytes));
                     StoreGlobalDataShareWord(index, RawSource(instruction, 1));
                     return true;
                 }
 
                 case "DsWriteB64":
                 {
-                    var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
+                    var index = Temp("uint", GlobalDataShareIndex(GlobalDataShareAddress(instruction), control.SingleOffsetBytes));
                     StoreGlobalDataShareWord(index, RawSource(instruction, 1));
                     StoreGlobalDataShareWord($"({index} + 1u)", RawSource(instruction, 2));
                     return true;
@@ -2288,7 +2288,7 @@ public static partial class Gen5MslTranslator
                     return TryEmitDataShareWritePair64(instruction, control, out error);
                 case "DsWrite2B32":
                 {
-                    var address = Temp("uint", RawSource(instruction, 0));
+                    var address = Temp("uint", GlobalDataShareAddress(instruction));
                     var first = Temp("uint", GlobalDataShareIndex(address, control.Offset0 * sizeof(uint)));
                     var second = Temp("uint", GlobalDataShareIndex(address, control.Offset1 * sizeof(uint)));
                     StoreGlobalDataShareWord(first, RawSource(instruction, 1));
@@ -2298,7 +2298,7 @@ public static partial class Gen5MslTranslator
 
                 case "DsReadB32":
                 {
-                    var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
+                    var index = Temp("uint", GlobalDataShareIndex(GlobalDataShareAddress(instruction), control.SingleOffsetBytes));
                     StoreVector(instruction.Destinations[0].Value, LoadGlobalDataShareWord(index));
                     return true;
                 }
@@ -2308,7 +2308,7 @@ public static partial class Gen5MslTranslator
                 {
                     // The byte the low two bits of the offset address select,
                     // sign- or zero-extended out of the word that holds it.
-                    var address = Temp("uint", RawSource(instruction, 0));
+                    var address = Temp("uint", GlobalDataShareAddress(instruction));
                     var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
                     var word = Temp("uint", LoadGlobalDataShareWord(
                         Temp("uint", GlobalDataShareIndex(address, control.SingleOffsetBytes))));
@@ -2321,7 +2321,7 @@ public static partial class Gen5MslTranslator
 
                 case "DsReadB64":
                 {
-                    var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
+                    var index = Temp("uint", GlobalDataShareIndex(GlobalDataShareAddress(instruction), control.SingleOffsetBytes));
                     StoreVector(instruction.Destinations[0].Value, LoadGlobalDataShareWord(index));
                     StoreVector(instruction.Destinations[1].Value, LoadGlobalDataShareWord($"({index} + 1u)"));
                     return true;
@@ -2331,7 +2331,7 @@ public static partial class Gen5MslTranslator
                     return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 {
-                    var address = Temp("uint", RawSource(instruction, 0));
+                    var address = Temp("uint", GlobalDataShareAddress(instruction));
                     var first = Temp("uint", GlobalDataShareIndex(address, control.Offset0 * sizeof(uint)));
                     var second = Temp("uint", GlobalDataShareIndex(address, control.Offset1 * sizeof(uint)));
                     StoreVector(instruction.Destinations[0].Value, LoadGlobalDataShareWord(first));
@@ -2361,7 +2361,7 @@ public static partial class Gen5MslTranslator
             }
 
             BeginExecGuard();
-            var address = Temp("uint", RawSource(instruction, 0));
+            var address = Temp("uint", control.Gds ? GlobalDataShareAddress(instruction) : RawSource(instruction, 0));
             // Equal offsets select only the first source pair.
             var componentCount = control.Offset0 == control.Offset1 ? 2 : 4;
             for (var component = 0; component < componentCount; component++)
@@ -2388,7 +2388,7 @@ public static partial class Gen5MslTranslator
             }
 
             BeginExecGuard();
-            var address = Temp("uint", RawSource(instruction, 0));
+            var address = Temp("uint", control.Gds ? GlobalDataShareAddress(instruction) : RawSource(instruction, 0));
             var values = new string[4];
             // Capture both values before an overlapping destination changes the address.
             for (var component = 0; component < values.Length; component++)
@@ -2405,6 +2405,14 @@ public static partial class Gen5MslTranslator
             EndExecGuard();
             return true;
         }
+
+        // A GDS access addresses the data share from M0's base (bits 31:16, the size below it),
+        // as append and consume do: the ADDR VGPR and the offset are relative to it. Without it
+        // every per-slot counter read the slot at the start of the share - Ghost of Tsushima's
+        // grass draws took their instance count from a word that is never reset, and drew more
+        // instances each frame until the frame took seconds.
+        private string GlobalDataShareAddress(Gen5ShaderInstruction instruction) =>
+            $"(({RawSource(instruction, 0)}) + ({ScalarExpression(M0Register)} >> 16u))";
 
         private static string GlobalDataShareIndex(string address, uint offsetBytes) =>
             offsetBytes == 0 ? $"({address}) >> 2u" : $"(({address}) + {offsetBytes}u) >> 2u";
@@ -2456,7 +2464,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
+            var index = Temp("uint", GlobalDataShareIndex(GlobalDataShareAddress(instruction), control.SingleOffsetBytes));
             Line($"if ({ExecCondition($"{index} < {GlobalDataShareWordsName}")})");
             Line("{");
             _indent++;

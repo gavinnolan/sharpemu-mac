@@ -221,6 +221,45 @@ public sealed class Gen5MslDataShareQwordTests(ITestOutputHelper output)
         Assert.Equal(Enumerable.Range(0, 256).Select(index => initial + (ulong)index * step), seen);
     }
 
+    // A GDS write and read address the share from M0's base (bits 31:16): with base 0x20 the
+    // write lands in dword 8 and the read at offset 4 returns dword 9, not dwords 0 and 1.
+    [Fact]
+    public void GdsReadsAndWritesStartAtMZeroBase()
+    {
+        var fixture = new Gen5ComputeFixture("gds-m0-base",
+        [
+            0xBEFC03FF, 0x00200040,             // s_mov_b32 m0, 0x200040      base 0x20, size 0x40
+            0x7E020280,                         // v_mov_b32 v1, 0
+            0x7E0402FF, 0x00001234,             // v_mov_b32 v2, 0x1234
+            0xD8360000, 0x00000201,             // ds_write_b32 v1, v2 gds
+            0xBF8CC07F,                         // s_waitcnt lgkmcnt(0)
+            0xD8DA0004, 0x03000001,             // ds_read_b32 v3, v1 offset:4 gds
+            0xBF8CC07F,                         // s_waitcnt lgkmcnt(0)
+            0x340A0082,                         // v_lshlrev_b32 v5, 2, v0
+            0xE0701000, 0x80020305,             // buffer_store_dword v3, v5, s[8:11], 0 offen
+            0xBF810000,                         // s_endpgm
+        ], 8, Lanes * 4);
+        var shader = Compile(fixture, Lanes);
+        Assert.Contains("(s124 >> 16u)", shader.Source, StringComparison.Ordinal);
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        var initial = new byte[256];
+        BinaryPrimitives.WriteUInt32LittleEndian(initial.AsSpan(0x24), 0x5678);
+        var gds = MetalNative.CreateTable(DescriptorBindingKind.GlobalDataShare, initial, 64);
+        var result = Execute(shader, new byte[Lanes * 4], Lanes, 1, out _, [gds]);
+        for (var lane = 0; lane < Lanes; lane++)
+        {
+            Assert.Equal(0x5678u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(lane * 4)));
+        }
+
+        var words = MetalNative.ReadWords(gds.Buffer, 10);
+        Assert.Equal(0u, words[0]);
+        Assert.Equal(0x1234u, words[8]);
+    }
+
     // 64 workgroups of one wave each add 32 to GDS dword 1 with DS_ORDERED_COUNT; every lane
     // stores base + lane at that index. The waves' ranges must tile [0, 2048) exactly.
     [Fact]
