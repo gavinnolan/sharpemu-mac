@@ -290,7 +290,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             (GpuFormat.D32Sfloat or GpuFormat.D32SfloatS8Uint, GpuFormat.R32Sfloat) or
             (GpuFormat.D16Unorm, GpuFormat.R16Unorm);
         if (_disposed || !pairs || !depthDescription.IsDepth || colorDescription.IsDepth ||
-            !SameTransferGrid(depthDescription, colorDescription) ||
+            !SameSampledGrid(depthDescription, colorDescription) ||
             depthDescription.TileMode != colorDescription.TileMode ||
             depthDescription.Pitch != colorDescription.Pitch ||
             depthDescription.Data.Size != colorDescription.Data.Size ||
@@ -506,6 +506,20 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
     // The two surfaces cover the same texel grid, so a copy between them is a copy and
     // not a resample.
+    // The grid a sampled twin shares with its depth image: the transfer grid, at any sample count
+    // both have. A multisampled depth texture binds to a texture2d_ms<float> argument as a
+    // one-sample one binds to texture2d<float> (MetalDepthTwinTests): Ghost of Tsushima's lighting
+    // reads its two-sample checkerboard depth through a two-sample R32 view, which nothing else
+    // could fill - multisampled textures have no blit to or from a buffer - so it read zero, the
+    // far plane, and lit only sky.
+    private static bool SameSampledGrid(in ImageDescription left, in ImageDescription right) =>
+        left.Extent.Width == right.Extent.Width &&
+        left.Extent.Height == right.Extent.Height &&
+        left.Extent.Depth == right.Extent.Depth &&
+        left.TransferLayers == right.TransferLayers &&
+        left.Samples == right.Samples &&
+        !left.IsVolume && !right.IsVolume;
+
     private static bool SameTransferGrid(in ImageDescription left, in ImageDescription right) =>
         left.Extent.Width == right.Extent.Width &&
         left.Extent.Height == right.Extent.Height &&
