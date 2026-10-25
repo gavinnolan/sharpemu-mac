@@ -66,6 +66,37 @@ internal sealed partial class MetalRenderHost
         public long ResolvedImageSet = -1;
     }
 
+    // Each descriptor's request as its words and the program's image shape build it, which
+    // neither the image set nor a bind changes, shared by every table: an entry whose lookup
+    // repeats on every bind (a DCC surface) repeats only the lookup, and a table the title
+    // rewrites (a new table object, with nothing resolved) finds its unchanged descriptors
+    // here. Building them again was a third of the GPU worker in Ghost of Tsushima's world.
+    private const int BindlessResolutionLimit = 1 << 18;
+
+    private readonly Dictionary<TextureMemoKey, TextureRequestResolution> _bindlessResolutions = new();
+
+    private TextureRequestResolution ResolveBindlessTexture(uint[] words, in ShaderImageShape shape)
+    {
+        if (words.Length < 8)
+        {
+            return ImageRequestBuilders.Texture(words, shape);
+        }
+
+        var key = new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], shape);
+        if (!_bindlessResolutions.TryGetValue(key, out var resolution))
+        {
+            resolution = ImageRequestBuilders.Texture(words, shape);
+            if (_bindlessResolutions.Count >= BindlessResolutionLimit)
+            {
+                _bindlessResolutions.Clear();
+            }
+
+            _bindlessResolutions[key] = resolution;
+        }
+
+        return resolution;
+    }
+
     private readonly Dictionary<BindlessImageTable, BindlessDeviceTable> _bindlessTables =
         new(ReferenceEqualityComparer.Instance);
     private readonly List<(nint Buffer, ulong Capacity, ulong RetireSerial)> _retiredBindlessBuffers = [];
@@ -163,7 +194,7 @@ internal sealed partial class MetalRenderHost
                     }
 
                     var image = info.Images[(int)table.VariantImages[variant]];
-                    var resolution = ImageRequestBuilders.Texture(table.Descriptors[index], ShapeOf(image));
+                    var resolution = ResolveBindlessTexture(table.Descriptors[index], ShapeOf(image));
                     request = resolution.Request;
                     identifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
                     _bindlessLookups++;
