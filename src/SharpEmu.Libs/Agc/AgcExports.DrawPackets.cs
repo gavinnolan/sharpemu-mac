@@ -131,17 +131,26 @@ public static partial class AgcExports
             ? 0u
             : ((uint)modifier >> 3) & 0x20u;
 
-        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var baseCommand, Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount))
-        {
-            return ReturnPointer(ctx, 0);
-        }
-
         // DRAW_INDEX_2 is six dwords: header, maximum index count, the
         // 64-bit index-buffer base, the draw count and the initiator.  The
         // former five-dword packet omitted both the real base and the count
         // field, so every call made by Unity looked like a zero-count draw to
         // the submitted-command parser and the complete scene was discarded.
-        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var drawCommand, Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator))
+        // With the room for all of them, the index base, buffer size and draw are one allocation and
+        // one write; otherwise each packet is allocated on its own, as the buffer's callback expects.
+        ulong baseCommand, drawCommand;
+        if (TryAllocateCommandDwordsInPlace(ctx, commandBufferAddress, 11, out baseCommand))
+        {
+            drawCommand = baseCommand + 5 * sizeof(uint);
+            if (!TryWriteCommandDwords(ctx, baseCommand,
+                    Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount,
+                    Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator))
+            {
+                return ReturnPointer(ctx, 0);
+            }
+        }
+        else if (!TryEmitCommandDwords(ctx, commandBufferAddress, out baseCommand, Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount) ||
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out drawCommand, Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator))
         {
             return ReturnPointer(ctx, 0);
         }

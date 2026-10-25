@@ -91,8 +91,9 @@ public sealed class AgcSetShRegisterRangeTests
         Assert.Equal(PacketAddress + 8, context[CpuRegister.Rax]);
         Assert.Equal(1, memory.CopyCalls);
         Assert.Equal((PacketAddress + 16, sourceAddress, (ulong)valueCount * 4), memory.LastCopy);
-        Assert.Equal(2, memory.ReadCalls);
-        Assert.Equal(4, memory.WriteCalls);
+        // With the room for both, one allocation for the marker and the packet: one state read, the cursor and the four leading dwords.
+        Assert.Equal(1, memory.ReadCalls);
+        Assert.Equal(2, memory.WriteCalls);
         Assert.Equal(0xC0001000u, ReadUInt32(memory, PacketAddress));
         Assert.Equal(0x6875000Du, ReadUInt32(memory, PacketAddress + 4));
         Assert.Equal(0xC0007600u | (valueCount << 16), ReadUInt32(memory, PacketAddress + 8));
@@ -136,8 +137,9 @@ public sealed class AgcSetShRegisterRangeTests
 
         Assert.Equal(PacketAddress + 8, context[CpuRegister.Rax]);
         Assert.Equal(0, memory.CopyCalls);
-        Assert.Equal(2, memory.ReadCalls);
-        Assert.Equal(4, memory.WriteCalls);
+        // With the room for both, one allocation for the marker and the packet: one state read, the cursor and the four leading dwords.
+        Assert.Equal(1, memory.ReadCalls);
+        Assert.Equal(2, memory.WriteCalls);
         Assert.Equal(0xC0001000u, ReadUInt32(memory, PacketAddress));
         Assert.Equal(0x6875000Du, ReadUInt32(memory, PacketAddress + 4));
         Assert.Equal(0xC0007600u | (valueCount << 16), ReadUInt32(memory, PacketAddress + 8));

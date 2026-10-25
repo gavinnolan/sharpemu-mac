@@ -122,7 +122,20 @@ public static partial class AgcExports
         ulong commandAddress;
         using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.PacketSetup))
         {
-            if (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
+            // With the room for both, the marker NOP and the packet are one allocation and their four
+            // leading dwords one write: each guest write and cursor update is a backing admission, and
+            // this runs once per draw on GTA V's render threads.
+            if (TryAllocateCommandDwordsInPlace(ctx, commandBufferAddress, 2 + packetDwords, out var markerAddress))
+            {
+                commandAddress = markerAddress + 2 * sizeof(uint);
+                if (!TryWriteCommandDwords(ctx, markerAddress,
+                        Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker, Pm4(packetDwords, ItSetShReg, 0), offset))
+                {
+                    AgcRegisterPacketProfile.RecordResult(false);
+                    return ReturnPointer(ctx, 0);
+                }
+            }
+            else if (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
                 !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out commandAddress) ||
                 !TryWriteCommandDwords(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0), offset))
             {

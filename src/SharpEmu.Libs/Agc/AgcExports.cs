@@ -493,6 +493,24 @@ public static partial class AgcExports
     private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
         => TryPrepareCommandDwords(ctx, commandBufferAddress, sizeDwords, true, out commandAddress);
 
+    // Allocates only when the buffer already has the room, never calling its full callback: a caller
+    // that emits several packets takes them in one allocation then, and packet by packet otherwise, so
+    // each packet still reaches the callback with the size it asks for alone.
+    private static bool TryAllocateCommandDwordsInPlace(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
+    {
+        commandAddress = 0;
+        if (sizeDwords == 0 ||
+            !TryReadCommandBufferState(ctx, commandBufferAddress, out var cursorUp, out var cursorDown, out _, out _, out var reservedDwords) ||
+            sizeDwords > GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords) ||
+            !ctx.TryWriteUInt64(commandBufferAddress + CommandBufferCursorUpOffset, cursorUp + (ulong)sizeDwords * sizeof(uint)))
+        {
+            return false;
+        }
+
+        commandAddress = cursorUp;
+        return true;
+    }
+
     private static bool TryEmitCommandDwords(CpuContext ctx, ulong commandBufferAddress, out ulong commandAddress, params ReadOnlySpan<uint> dwords)
     {
         return TryAllocateCommandDwords(ctx, commandBufferAddress, (uint)dwords.Length, out commandAddress) &&
