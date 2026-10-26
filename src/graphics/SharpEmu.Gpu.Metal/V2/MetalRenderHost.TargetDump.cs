@@ -229,6 +229,21 @@ internal sealed partial class MetalRenderHost
         }
 
         Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} ps_images={fragment.ImageCount}{images}");
+
+        // The attachments, by guest surface: a target the pixel stage writes but the pass never
+        // shows (no host view, or another surface than the guest's) is lost to every later pass.
+        var attachments = new System.Text.StringBuilder();
+        for (var index = 0; index < _renderingState.ColorAttachmentCount; index++)
+        {
+            var view = (nint)_renderingState.ColorAttachments[index].View.Handle;
+            attachments.Append(CultureInfo.InvariantCulture, $" c{index}={_renderingState.ColorAttachments[index].Format}/0x{view:X}");
+            if (_targetDescriptions.TryGetValue(view, out var described))
+            {
+                attachments.Append('[').Append(described).Append(']');
+            }
+        }
+
+        Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} attachments={_renderingState.ColorAttachmentCount}{attachments}");
         if (entry?.VertexLayout is { Length: > 0 } layout)
         {
             Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} layout{layout}");

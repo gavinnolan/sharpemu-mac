@@ -426,6 +426,16 @@ public sealed partial class RenderExecutor
     }
 
     // Binds everything the draw needs inside one preparation scope, then records it.
+    // SHARPEMU_SKIP_PS=<hash>[,<hash>...]: draws whose pixel program is one of these are not made,
+    // to see what a program contributes to a frame by its absence.
+    private static readonly HashSet<ulong> SkippedPixelPrograms =
+        (Environment.GetEnvironmentVariable("SHARPEMU_SKIP_PS") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static text => ulong.TryParse(text.Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash) ? hash : 0)
+            .Where(static hash => hash != 0)
+            .ToHashSet();
+
     private string RecordDraw(
         ulong submitId,
         RegisterBanks banks,
@@ -457,6 +467,11 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
+        if (SkippedPixelPrograms.Count != 0 && state.PixelActive &&
+            SkippedPixelPrograms.Contains(pixelInput.Stage.Program?.Hash ?? 0))
+        {
+            return "skipped-by-request";
+        }
         if (!MayLeaveOutBeforeAcquiring(ref state, vertexInput.Stage, state.PixelActive ? pixelInput.Stage : null,
                 meshInput is not null && emission.IndirectArgumentsAddress != 0))
         {

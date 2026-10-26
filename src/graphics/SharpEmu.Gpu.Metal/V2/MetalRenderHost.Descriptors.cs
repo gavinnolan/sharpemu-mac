@@ -1310,6 +1310,25 @@ internal sealed partial class MetalRenderHost
         imageCursor += (int)field.Count;
     }
 
+    // Under SHARPEMU_METAL_V2_TRACE_INDIRECT_DISPATCH, the scalar words a traced program reads from
+    // its flattened table: what the host evaluated from guest memory when it bound the program.
+    private int _tracedFlattenedTables;
+
+    private void TraceFlattenedTable(MetalStageBindings stage)
+    {
+        if (_traceIndirectDispatchHashes.Count == 0 || stage.Program is not { } program ||
+            !_traceIndirectDispatchHashes.Contains(program.Hash) || _tracedFlattenedTables >= 40)
+        {
+            return;
+        }
+
+        _tracedFlattenedTables++;
+        var words = stage.StageResources.Resources.FlattenedResourceTable;
+        Console.Error.WriteLine(
+            $"[METAL-V2][INDIRECT-DISPATCH] table hash=0x{program.Hash:X16} words={words.Length} " +
+            string.Join(",", words.Take(48).Select(word => word.ToString("X", System.Globalization.CultureInfo.InvariantCulture))));
+    }
+
     private ulong PointerFieldValue(MetalStageBindings stage, DescriptorBindingKind kind)
     {
         switch (kind)
@@ -1325,6 +1344,7 @@ internal sealed partial class MetalRenderHost
                     ? ReachFeedbackAddress()
                     : MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
             case DescriptorBindingKind.FlattenedResourceTable:
+                TraceFlattenedTable(stage);
                 return UploadDwords(stage.StageResources.Resources.FlattenedResourceTable);
             case DescriptorBindingKind.ShaderData:
                 return UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
