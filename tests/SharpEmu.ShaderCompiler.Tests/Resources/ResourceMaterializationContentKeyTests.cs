@@ -100,6 +100,121 @@ public sealed class ResourceMaterializationContentKeyTests
         Assert.Equal(expectedSpecialization, specialization);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ColdScanAdmissionPreservesFreshResultsAndReadmitsRecurringContents(bool sameAddress)
+    {
+        var plan = TablePlan(2, 1);
+        var memory = NewMemory();
+        var cache = new ResourceMaterializationCache(generationCapacity: 2);
+        ResourceSnapshot? first = null;
+        for (var draw = 0; draw < 96; draw++)
+        {
+            var table = MemoryBase + (sameAddress ? 0UL : (ulong)draw * 256);
+            WriteTable(memory, table, draw, 2, 1);
+            Assert.True(Run(cache, plan, memory, Pointer(table), out var snapshot, out var specialization));
+            AssertFullWalk(plan, memory, Pointer(table), snapshot, specialization);
+            first ??= snapshot;
+        }
+        if (Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_ADMISSION") == "0")
+            Assert.Equal(0, cache.ColdBypasses);
+        else
+            Assert.True(cache.ColdBypasses > 0);
+        Assert.Equal(Texture(0x0100_0000u), first!.Images[0]);
+        var last = MemoryBase + (sameAddress ? 0UL : 95UL * 256);
+        Assert.True(Run(cache, plan, memory, Pointer(last), out var repeated, out var repeatedSpecialization));
+        AssertFullWalk(plan, memory, Pointer(last), repeated, repeatedSpecialization);
+        var hits = cache.Hits;
+        Assert.True(Run(cache, plan, memory, Pointer(last), out repeated, out repeatedSpecialization));
+        Assert.Equal(hits + 1, cache.Hits);
+        AssertFullWalk(plan, memory, Pointer(last), repeated, repeatedSpecialization);
+    }
+
+    [Fact]
+    public void ColdBypassOwnsUserDataAfterTheCallerReusesItsArray()
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_ADMISSION") == "0") return;
+        var plan = TablePlan(2, 1);
+        var memory = NewMemory();
+        var cache = new ResourceMaterializationCache(generationCapacity: 2);
+        var userData = Pointer(MemoryBase);
+        ResourceSnapshot snapshot = new();
+        for (var draw = 0; draw < 96; draw++)
+        {
+            WriteTable(memory, MemoryBase, draw, 2, 1);
+            Assert.True(Run(cache, plan, memory, userData, out snapshot, out _));
+            if (cache.ColdBypasses > 0) break;
+        }
+        Assert.True(cache.ColdBypasses > 0);
+        userData[0] += 256;
+        Assert.Equal(Pointer(MemoryBase), snapshot.UserData);
+    }
+
+    [Fact]
+    public void FailedRecordedAdmissionRewalkPreservesCallerOutputs()
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_ADMISSION") == "0") return;
+        var plan = TablePlan(2, 1);
+        var memory = NewMemory();
+        var cache = new ResourceMaterializationCache(generationCapacity: 2);
+        for (var draw = 0; draw < 96; draw++)
+        {
+            WriteTable(memory, MemoryBase, draw, 2, 1);
+            Assert.True(Run(cache, plan, memory, Pointer(MemoryBase), out _, out _));
+        }
+        Assert.True(cache.ColdBypasses > 0);
+
+        var readsPerWalk = 0;
+        bool CountRead(ulong address, out uint word)
+        {
+            readsPerWalk++;
+            return memory.Read(address, out word);
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(Pointer(MemoryBase), CountRead, CountRead),
+            ref snapshot, ref specialization));
+        var originalSnapshot = snapshot;
+        var originalSpecialization = specialization;
+        var reads = 0;
+        bool FailRewalk(ulong address, out uint word)
+        {
+            word = 0;
+            return ++reads <= readsPerWalk && memory.Read(address, out word);
+        }
+        Assert.False(cache.Materialize(plan, Inputs(Pointer(MemoryBase), FailRewalk, FailRewalk),
+            (address, destination, clean) => false, ref snapshot, ref specialization, out _));
+        Assert.True(reads > readsPerWalk);
+        Assert.Same(originalSnapshot, snapshot);
+        Assert.Same(originalSpecialization, specialization);
+    }
+
+    [Fact]
+    public void AWorkingSetWithinTheBudgetIsAdmittedEvenAfterManyDistinctMisses()
+    {
+        var plan = TablePlan(1, 1);
+        var memory = NewMemory();
+        var cache = new ResourceMaterializationCache(generationCapacity: 128);
+        for (var draw = 0; draw < 96; draw++)
+        {
+            var table = MemoryBase + (ulong)draw * 256;
+            WriteTable(memory, table, draw, 1, 1);
+            Assert.True(Run(cache, plan, memory, Pointer(table), out var snapshot, out var specialization));
+            AssertFullWalk(plan, memory, Pointer(table), snapshot, specialization);
+        }
+        Assert.Equal(0, cache.ColdBypasses);
+        var hits = cache.Hits;
+        for (var draw = 0; draw < 96; draw++)
+        {
+            var table = MemoryBase + (ulong)draw * 256;
+            Assert.True(Run(cache, plan, memory, Pointer(table), out var snapshot, out var specialization));
+            AssertFullWalk(plan, memory, Pointer(table), snapshot, specialization);
+        }
+        Assert.Equal(hits + 96, cache.Hits);
+        Assert.Equal(0, cache.ColdBypasses);
+    }
+
     [Fact]
     public void IdenticalDescriptorsAtDifferentTableAddressesHit()
     {
@@ -176,6 +291,84 @@ public sealed class ResourceMaterializationContentKeyTests
         Assert.True(Run(cache, plan, memory, Pointer(tables[2]), out var untouched, out var untouchedSpecialization));
         AssertFullWalk(plan, memory, Pointer(tables[2]), untouched, untouchedSpecialization);
         Assert.Equal(hits + 1, cache.Hits);
+    }
+
+    // A hit through a pointer seen before guesses its key from the print the pointer gave last time.
+    // Descriptors rewritten behind the pointer since then must never hit the entry of the old ones,
+    // and when they now equal another object's, the draw finds that object's entry instead.
+    [Fact]
+    public void ARecalledPrintNeverHitsDescriptorsRewrittenBehindThePointer()
+    {
+        var plan = TablePlan(textures: 4, buffers: 2);
+        var memory = NewMemory();
+        var tables = Enumerable.Range(0, 8).Select(index => MemoryBase + 0x1000 + (ulong)index * 0x300).ToArray();
+        foreach (var table in tables)
+            WriteTable(memory, table, material: 3, textures: 4, buffers: 2);
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 32; draw++)
+            Assert.True(Run(cache, plan, memory, Pointer(tables[draw % tables.Length]), out _, out _));
+        var hits = cache.Hits;
+        var misses = cache.Misses;
+
+        void Draw(ulong table)
+        {
+            Assert.True(Run(cache, plan, memory, Pointer(table), out var snapshot, out var specialization));
+            AssertFullWalk(plan, memory, Pointer(table), snapshot, specialization);
+        }
+
+        // Every descriptor behind tables[5] rewritten: the recalled print points at material 3's entry.
+        WriteTable(memory, tables[5], material: 7, textures: 4, buffers: 2);
+        Draw(tables[5]);
+        Assert.Equal((hits, misses + 1), (cache.Hits, cache.Misses));
+
+        // tables[6] now holds what tables[5] does: its recalled print is stale, its real one finds
+        // the entry tables[5] just built.
+        WriteTable(memory, tables[6], material: 7, textures: 4, buffers: 2);
+        Draw(tables[6]);
+        Assert.Equal((hits + 1, misses + 1), (cache.Hits, cache.Misses));
+
+        // One word rewritten behind a pointer whose print was just read.
+        Write(memory, tables[6] + 32 + 4, [21u << 20]);
+        Draw(tables[6]);
+        Assert.Equal((hits + 1, misses + 2), (cache.Hits, cache.Misses));
+
+        // Pointers left alone keep hitting their own descriptors.
+        Draw(tables[5]);
+        Draw(tables[2]);
+        Assert.Equal((hits + 3, misses + 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
+    public void ARecalledPrintChecksReadabilityAndReplacementMemoryAtTheSameAddress()
+    {
+        var plan = TablePlan(textures: 4, buffers: 2);
+        var memory = NewMemory();
+        var tables = Enumerable.Range(0, 8).Select(index => MemoryBase + 0x1000 + (ulong)index * 0x300).ToArray();
+        foreach (var table in tables)
+            WriteTable(memory, table, material: 3, textures: 4, buffers: 2);
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 32; draw++)
+            Assert.True(Run(cache, plan, memory, Pointer(tables[draw % tables.Length]), out _, out _));
+
+        var hits = cache.Hits;
+        // The table pointer and its last print survive, but a descriptor word is no longer readable.
+        memory.FailAddress = tables[5] + 4;
+        var expected = new ResourceSnapshot();
+        var expectedSpecialization = new ResourceSpecialization();
+        var expectedResult = ResourceMaterializer.Materialize(plan,
+            Inputs(Pointer(tables[5]), memory.Read, memory.Read), ref expected, ref expectedSpecialization);
+        Assert.Equal(expectedResult, Run(cache, plan, memory, Pointer(tables[5]), out _, out _));
+        Assert.Equal(hits, cache.Hits);
+
+        // A new mapping at the same guest address must use its own contents, including buffer bounds.
+        var replacement = NewMemory();
+        foreach (var table in tables)
+            WriteTable(replacement, table, material: 9, textures: 4, buffers: 2);
+        Write(replacement, tables[5] + 4 * 32 + 16 + 8, [1024u]);
+        Assert.True(Run(cache, plan, replacement, Pointer(tables[5]), out var snapshot, out var specialization));
+        AssertFullWalk(plan, replacement, Pointer(tables[5]), snapshot, specialization);
+        Assert.Equal(1024u, snapshot.Buffers[0][2]);
+        Assert.Equal(hits, cache.Hits);
     }
 
     // A hit through a moved pointer gives each pointer its own snapshot; draws that come back to a

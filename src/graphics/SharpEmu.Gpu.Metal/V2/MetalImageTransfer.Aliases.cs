@@ -159,9 +159,10 @@ internal sealed partial class MetalImageTransfer
     private static nint AliasView(nint texture, MtlPixelFormat format, uint bytes, bool writing, uint layers = 1)
     {
         var raw = TextureTileViewFormat(format);
-        var usage = (MtlTextureUsage)(uint)MetalV2Native.SendValue(texture, SelUsage);
+        var info = MetalTileViews.Read(texture);
+        var usage = info.Usage;
         var needed = writing ? MtlTextureUsage.ShaderWrite : MtlTextureUsage.ShaderRead;
-        var type = (MtlTextureType)(uint)MetalV2Native.SendValue(texture, SelTextureType);
+        var type = info.Type;
         if (raw == MtlPixelFormat.Invalid || ViewElementBytes(raw) != bytes ||
             (usage & needed) == 0 || (raw != format && (usage & MtlTextureUsage.PixelFormatView) == 0) ||
             type is not (MtlTextureType.Type2D or MtlTextureType.Type2DArray)) return 0;

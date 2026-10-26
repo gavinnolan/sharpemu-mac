@@ -1367,7 +1367,12 @@ public sealed unsafe partial class DirectExecutionBackend :
 		_activeGuestThreadYieldReason = previousYieldReason;
 	}
 
-	public unsafe DirectExecutionBackend(IModuleManager moduleManager)
+	public DirectExecutionBackend(IModuleManager moduleManager) : this(moduleManager, installFaultHandling: true)
+	{
+	}
+
+	// Fabricated signal-frame tests need initialized recovery state without installing process-wide handlers.
+	internal unsafe DirectExecutionBackend(IModuleManager moduleManager, bool installFaultHandling)
 	{
 		if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
 		{
@@ -1430,9 +1435,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 			Console.Error.WriteLine(
 				"[LOADER][WARN] Worker abort stub unavailable; TBB execute-fault recover will use host_exit");
 		}
-		SetupExceptionHandler();
+		if (installFaultHandling) SetupExceptionHandler();
 		// Cover the Astro TBB spawn storm (often 8–12 concurrent tbb_thead).
-		PrewarmNativeGuestWorkers(Math.Max(NativeWorkerMaxConcurrent, 4));
+		if (installFaultHandling) PrewarmNativeGuestWorkers(Math.Max(NativeWorkerMaxConcurrent, 4));
 	}
 
 	NativeCpuSessionStatistics INativeCpuSessionStatisticsProvider.LastSessionStatistics =>
@@ -5079,8 +5084,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 			var previousLastError = LastError;
 			try
 			{
-				TraceGuestContext(
-					$"continuation-enter reason={reason} managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16} captured_guest=0x{currentGuestThreadHandle:X16} captured_fiber=0x{currentFiberAddress:X16} restore_guest={restoreGuestThread} restore_fiber={restoreFiber}");
+				if (_logGuestContext)
+				{
+					TraceGuestContext(
+						$"continuation-enter reason={reason} managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16} captured_guest=0x{currentGuestThreadHandle:X16} captured_fiber=0x{currentFiberAddress:X16} restore_guest={restoreGuestThread} restore_fiber={restoreFiber}");
+				}
 				LastError = null;
 				exitReason = ExecuteGuestContinuationEntry(
 					context,
@@ -5099,8 +5107,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 			finally
 			{
 				_activeGuestThreadState = previousGuestThreadState;
-				TraceGuestContext(
-					$"continuation-exit reason={reason} managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16} exit={exitReason}");
+				if (_logGuestContext)
+				{
+					TraceGuestContext(
+						$"continuation-exit reason={reason} managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16} exit={exitReason}");
+				}
 				LastError = previousLastError;
 				if (restoreFiber)
 				{
@@ -5136,8 +5147,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 			else if (runner is not null)
 			{
-				TraceGuestContext(
-					$"continuation-inline reason={reason} managed={Environment.CurrentManagedThreadId} guest=0x{currentGuestThreadHandle:X16} fiber=0x{currentFiberAddress:X16}");
+				if (_logGuestContext)
+				{
+					TraceGuestContext(
+						$"continuation-inline reason={reason} managed={Environment.CurrentManagedThreadId} guest=0x{currentGuestThreadHandle:X16} fiber=0x{currentFiberAddress:X16}");
+				}
 				RunContinuation();
 			}
 			else

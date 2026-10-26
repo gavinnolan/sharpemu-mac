@@ -11,8 +11,10 @@ public static class GpuRemoteProtocol
     /// <summary>Bumped on any change to the region layout or a message format.</summary>
     /// <remarks>2: the B → A call table, the application block and the split's messages (GpuSplitMessages.cs).
     /// 3: <see cref="GpuRemoteMessage.TessellationRings"/>.
-    /// 4: <see cref="GpuRemoteMessage.FrameBoundary"/> and <see cref="GpuRemoteSyncOpcode.WaitFrameBoundary"/>.</remarks>
-    public const uint Version = 4;
+    /// 4: frame-boundary messages. 5: input-change and display reservations.
+    /// 6: pending-writeback pages. 7: combined frame, input and writeback layout.</remarks>
+    public const uint Version = 7;
+
 }
 
 /// <summary>Record types on the two rings. 0 is never used; <see cref="SpscRing.PaddingType"/> is reserved.</summary>

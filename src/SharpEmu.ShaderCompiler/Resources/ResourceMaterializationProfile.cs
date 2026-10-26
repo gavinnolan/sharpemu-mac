@@ -26,6 +26,7 @@ public static class ResourceMaterializationProfile
         CacheFind,
         RecorderWrap,
         EntryBuild,
+        RecorderSort,
         // The three parts of the snapshot walk, which is where a miss spends almost all of
         // its time: the branch conditions that decide which descriptor sources are live, the
         // descriptor words themselves, and the flattened table, one graph value per word.
@@ -68,7 +69,7 @@ public static class ResourceMaterializationProfile
     internal enum ReadCounter
     {
         GroupAttempt, GroupIneligible, GroupRefused, GroupSucceeded, GroupWords,
-        ScalarAddress, ScalarBuffer, Count
+        ScalarAddress, ScalarBuffer, OrderedReadLists, MergedReadLists, SortedReadLists, Count
     }
     private static readonly long[] _readCounts = new long[(int)ReadCounter.Count];
 

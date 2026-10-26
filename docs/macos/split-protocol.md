@@ -1,6 +1,6 @@
 # Two-process split: wiring contract (Phase 2)
 
-Status: implemented behind the flag, 2026-10-24 (SharpEmu.GpuSplit; transport protocol 2). Design: `SPLIT-PLAN.md`
+Status: implemented behind the flag, 2026-10-24 (SharpEmu.GpuSplit; transport protocol 7). Design: `SPLIT-PLAN.md`
 (repo-external draft), Phase 0 rates: commit `fc963f02`, shared memory: `docs/macos/split-shared-memory.md`,
 transport: `src/SharpEmu.GpuRemote`.
 
@@ -31,7 +31,11 @@ page watches 100-2600/s (batch); submissions 30 and 200-350/s; SubmitDone/flips 
 
 All records are little-endian blittable structs (`GpuSplitMessages.cs`) on the transport rings; synchronous calls use
 `SyncCallTable` both ways: A → B (`SyncCalls`, signal-safe on the A side) and B → A (`ReverseSyncCalls`, ordinary B
-threads). Add new kinds at the end of the enums; bump `GpuRemoteProtocol.Version` (now 2).
+threads). Add new kinds at the end of the enums; bump `GpuRemoteProtocol.Version` (now 7).
+
+Revision 7 combines frame-boundary messages, input-change/display reservations and
+the pending-writeback page summary. Independent revisions 4, 5 and 6 are rejected
+on attach because their shared layouts differ. Both processes must use revision 7.
 
 ### Start
 
@@ -70,7 +74,7 @@ many, so they come after A's earlier records.
 | `BracketBegin` | kind, barrier (AfterPendingCommandStreams only) | bracket id | `GuestGpuMemory.RunMappingChange` / `Unregister` in A (kind MappingChange: the relay's `TryRunAfterPendingWork`) and `RunAfterPendingCommandStreams` (kind AfterPendingCommandStreams). B parks its GPU worker (`WorkerBracket`: B's own `RunMappingChange` / `RunAfterPendingCommandStreams` hand the worker a park loop); A then runs the work itself, as the GPU queue thread (`RemoteGpuQueueRelay.IsGpuQueueThread`). |
 | `BracketEnd` | bracket id, viewLogSequence | - | B syncs its replica that far on the parked worker and lets it go. |
 | `Fault` | kind, address, size | handled, restoration version | From A's signal handler (`RemoteImageStore.MarkCpuWrite`, allocation-free). B runs its stores' fault path, then waits until A applied every protection B requested so far: the guest retries the access as soon as this answers. Every write fault crosses (the page faulted because B protected it). When no store handled it, B answers its guard's write-restoration version of the page: a watch removed before the fault reached the store. A retries the store once per version when the page is writable (one process's `TryRetryReleasedWrite`, from B's guard). |
-| `CpuWrite` | address, size | handled | A managed write before it lands, when the summary marks it: B's `MarkCpuWrite` (the cache publishes a GPU-written image before the write lands over it). From A's reverse-call threads and from inside a bracket it is sent as a `CpuWrite` record instead (there B's worker cannot take the writeback: the in-process cache's rule for a store from the worker). No barrier. |
+| `CpuWrite` | address, size | handled | A managed write before it lands, when both the interest and pending-writeback summaries mark it (all interested pages count as pending until B publishes the pending summary live): B's `MarkCpuWrite` (the cache publishes a GPU-written image before the write lands over it). From A's reverse-call threads and from inside a bracket it is sent as a `CpuWrite` record instead (there B's worker cannot take the writeback: the in-process cache's rule for a store from the worker). No barrier. |
 | `SpanRegister` / `SpanProtect` / `SpanUnregister` | address, size, protection, bracket id | (handled) | B's `GuestGpuMemory` follows A's spans and permission ledger (`IGuestSpanObserver`, `RemoteImageStore.Unregister`). B's page guard owns the host protections of every span: A's `Register` / `NoteProtected` apply none of their own when the call succeeds (A's watch-less guard would hand back, for a moment, rights B's watches took); on a failed call A applies the plain guest protection. An unregistration inside a bracket runs on B's parked worker. B waits for the protections it requested before it answers, so they land before A unmaps, remaps or lets the guest go on. |
 | `Query` | which | value | Performance counters, HDR output support, mesh pipelines. |
 
