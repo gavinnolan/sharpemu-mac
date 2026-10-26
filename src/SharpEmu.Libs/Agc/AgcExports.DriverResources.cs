@@ -83,8 +83,7 @@ public static partial class AgcExports
         var flags = (uint)ctx[CpuRegister.R9];
 
         TraceAgc(
-            $"agc.driver_register_resource resource=0x{resourceAddress:X16} owner={owner} " +
-            $"name=0x{nameAddress:X16} type={type} flags={flags}");
+            $"agc.driver_register_resource resource=0x{resourceAddress:X16} owner={owner} name=0x{nameAddress:X16} type={type} flags={flags}");
 
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
@@ -122,8 +121,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.driver_query_resource_registration_memory resources={resourceCount} " +
-            $"owners={ownerCount} bytes=0x{requiredSize:X}");
+            $"agc.driver_query_resource_registration_memory resources={resourceCount} owners={ownerCount} bytes=0x{requiredSize:X}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -157,8 +155,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.driver_init_resource_registration memory=0x{memoryAddress:X16} " +
-            $"bytes=0x{memorySize:X} owners={ownerCount}");
+            $"agc.driver_init_resource_registration memory=0x{memoryAddress:X16} bytes=0x{memorySize:X} owners={ownerCount}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -235,8 +232,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.driver_register_owner out=0x{ownerAddress:X16} owner={owner} " +
-            $"name={System.Text.Encoding.UTF8.GetString(nameBytes)}");
+            $"agc.driver_register_owner out=0x{ownerAddress:X16} owner={owner} name={System.Text.Encoding.UTF8.GetString(nameBytes)}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -342,8 +338,7 @@ public static partial class AgcExports
         Console.Error.WriteLine(
             $"[AGC][INFO] Tessellation-factor ring: address=0x{ctx[CpuRegister.Rdi]:X16} size=0x{(uint)ctx[CpuRegister.Rsi]:X8}.");
         TraceAgc(
-            $"agc.driver_set_tf_ring ring=0x{ctx[CpuRegister.Rdi]:X16} " +
-            $"size=0x{(uint)ctx[CpuRegister.Rsi]:X8}");
+            $"agc.driver_set_tf_ring ring=0x{ctx[CpuRegister.Rdi]:X16} size=0x{(uint)ctx[CpuRegister.Rsi]:X8}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -360,8 +355,7 @@ public static partial class AgcExports
         Console.Error.WriteLine(
             $"[AGC][INFO] Hull-shader off-chip buffer: address=0x{ctx[CpuRegister.Rdi]:X16} param=0x{(uint)ctx[CpuRegister.Rsi]:X8}.");
         TraceAgc(
-            $"agc.driver_set_hs_offchip_param buffer=0x{ctx[CpuRegister.Rdi]:X16} " +
-            $"param=0x{(uint)ctx[CpuRegister.Rsi]:X8}");
+            $"agc.driver_set_hs_offchip_param buffer=0x{ctx[CpuRegister.Rdi]:X16} param=0x{(uint)ctx[CpuRegister.Rsi]:X8}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 }

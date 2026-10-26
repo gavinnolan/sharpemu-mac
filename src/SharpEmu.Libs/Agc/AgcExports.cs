@@ -552,6 +552,13 @@ public static partial class AgcExports
         var remainingDwords = GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords);
         if (sizeDwords > remainingDwords)
         {
+            // A leaf dispatch cannot run the buffer's callback, which is guest code: it backs out
+            // before anything is written and the call is made again through the full import path.
+            if (TryDeclineLeaf(ctx))
+            {
+                return false;
+            }
+
             TraceAgc($"agc.cmd_alloc_full buf=0x{commandBufferAddress:X16} need={sizeDwords} remaining={remainingDwords} callback=0x{callback:X16}");
             var scheduler = GuestThreadExecution.Scheduler;
             ulong callbackResult = 0;
@@ -571,15 +578,12 @@ public static partial class AgcExports
                     out callbackError))
             {
                 TraceAgc(
-                    $"agc.cmd_alloc_callback_failed buf=0x{commandBufferAddress:X16} " +
-                    $"callback=0x{callback:X16} result=0x{callbackResult:X16} " +
-                    $"error={callbackError ?? "none"}");
+                    $"agc.cmd_alloc_callback_failed buf=0x{commandBufferAddress:X16} callback=0x{callback:X16} result=0x{callbackResult:X16} error={callbackError ?? "none"}");
                 return false;
             }
 
             TraceAgc(
-                $"agc.cmd_alloc_callback_complete buf=0x{commandBufferAddress:X16} " +
-                $"callback=0x{callback:X16} result=0x{callbackResult:X16}");
+                $"agc.cmd_alloc_callback_complete buf=0x{commandBufferAddress:X16} callback=0x{callback:X16} result=0x{callbackResult:X16}");
 
             if (!TryReadUInt64(ctx, commandBufferAddress + CommandBufferCursorUpOffset, out cursorUp) ||
                 !TryReadUInt64(ctx, commandBufferAddress + CommandBufferCursorDownOffset, out cursorDown) ||
@@ -598,6 +602,22 @@ public static partial class AgcExports
         }
 
         commandAddress = cursorUp;
+        return true;
+    }
+
+    /// <summary>
+    /// True when the call is running as a leaf, which cannot call back into the guest. The caller
+    /// must return at once, with no command-buffer state changed; the dispatcher then repeats the
+    /// call on the full import path.
+    /// </summary>
+    private static bool TryDeclineLeaf(CpuContext ctx)
+    {
+        if (!ctx.DeclineGuestCallbacks)
+        {
+            return false;
+        }
+
+        ctx.GuestCallbackDeclined = true;
         return true;
     }
 

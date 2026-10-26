@@ -29,6 +29,15 @@ public static partial class KernelMemoryCompatExports
     private const int WideCharSize = sizeof(ushort);
     private const int MemsetChunkSize = 16 * 1024;
     private static readonly byte[] _zeroChunk = new byte[MemsetChunkSize];
+    private const ulong InPlaceMemsetThreshold = 64 * 1024;
+    // SHARPEMU_MEMSET_INPLACE=0 sends every memset through the staged chunk loop again.
+    private static readonly bool InPlaceMemsetEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MEMSET_INPLACE"), "0", StringComparison.Ordinal);
+    private static readonly GuestSpanFill<byte> FillWithByte = static (value, destination) =>
+    {
+        destination.Fill(value);
+        return destination.Length;
+    };
     private const int O_WRONLY = 0x1;
     private const int O_RDWR = 0x2;
     private const int O_APPEND = 0x8;
@@ -451,6 +460,19 @@ public static partial class KernelMemoryCompatExports
             Console.WriteLine($"Called from RIP: 0x{ctx.Rip:X}");
             Console.WriteLine($"dst=0x{destination:X} val=0x{value:X2} len=0x{length:X}");
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        // A large fill into a single backed view is written in place with a vectorised span fill:
+        // no staging chunk to read back, no per-16-KiB write transaction (10 GB/s staged, memory
+        // bandwidth in place). Anything the memory cannot hand out in place, a range that crosses
+        // views, or an armed write watch declines and takes the staged loop below, which also
+        // keeps the clamp-to-mapped-range behaviour.
+        if (length >= InPlaceMemsetThreshold && length <= int.MaxValue && InPlaceMemsetEnabled &&
+            ctx.Memory.TryFillInPlace(destination, (int)length, value, FillWithByte, out var filledInPlace) &&
+            (ulong)filledInPlace == length)
+        {
+            ctx[CpuRegister.Rax] = destination;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         // Rent may hand back a larger array than requested; only the first chunkLength

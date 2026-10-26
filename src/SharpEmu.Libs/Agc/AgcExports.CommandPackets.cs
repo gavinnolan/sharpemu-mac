@@ -70,8 +70,7 @@ public static partial class AgcExports
         if (ShouldTraceHotPath(ref _packetPayloadTraceCount))
         {
             TraceAgc(
-                $"agc.get_packet_payload out=0x{outputAddress:X16} cmd=0x{commandAddress:X16} " +
-                $"type={type} payload=0x{payloadAddress:X16}");
+                $"agc.get_packet_payload out=0x{outputAddress:X16} cmd=0x{commandAddress:X16} type={type} payload=0x{payloadAddress:X16}");
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -271,29 +270,20 @@ public static partial class AgcExports
 
         var packetDwords = size == 0 ? 7u : 9u;
         var packetRegister = size == 0 ? RWaitMem32 : RWaitMem64;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, packetRegister)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, (uint)address & (size == 0 ? ~0x3u : ~0x7u)) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)(address >> 32) & 0x3FFFFu) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)mask))
-        {
-            return ReturnPointer(ctx, 0);
-        }
-
-        if (size == 0)
-        {
-            if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)reference) ||
-                !TryWriteUInt32(ctx, commandAddress + 20, EncodeWaitRegMem32Control(compareFunction, 0, cachePolicy)) ||
-                !TryWriteUInt32(ctx, commandAddress + 24, EncodeWaitRegMemPoll(pollCycles)))
-            {
-                return ReturnPointer(ctx, 0);
-            }
-        }
-        else if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)(mask >> 32)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 20, (uint)reference) ||
-                 !TryWriteUInt32(ctx, commandAddress + 24, (uint)(reference >> 32)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 28, EncodeWaitRegMem64Control(compareFunction, 0, cachePolicy)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 32, EncodeWaitRegMemPoll(pollCycles)))
+        var header = Pm4(packetDwords, ItNop, packetRegister);
+        var addressLow = (uint)address & (size == 0 ? ~0x3u : ~0x7u);
+        var addressHigh = (uint)(address >> 32) & 0x3FFFFu;
+        // One write for the whole packet, as DcbWaitRegMem does.
+        var emitted = size == 0
+            ? TryEmitCommandDwords(
+                ctx, commandBufferAddress, out var commandAddress,
+                header, addressLow, addressHigh, (uint)mask, (uint)reference,
+                EncodeWaitRegMem32Control(compareFunction, 0, cachePolicy), EncodeWaitRegMemPoll(pollCycles))
+            : TryEmitCommandDwords(
+                ctx, commandBufferAddress, out commandAddress,
+                header, addressLow, addressHigh, (uint)mask, (uint)(mask >> 32), (uint)reference, (uint)(reference >> 32),
+                EncodeWaitRegMem64Control(compareFunction, 0, cachePolicy), EncodeWaitRegMemPoll(pollCycles));
+        if (!emitted)
         {
             return ReturnPointer(ctx, 0);
         }
@@ -381,8 +371,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.cb_release_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
-            $"action=0x{action:X2} gcr=0x{gcrControl:X4} dst=0x{destinationAddress:X16} data_sel={dataSelection} data=0x{data:X16}");
+            $"agc.cb_release_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} action=0x{action:X2} gcr=0x{gcrControl:X4} dst=0x{destinationAddress:X16} data_sel={dataSelection} data=0x{data:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -458,8 +447,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_get_lod_stats buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
-            $"dst=0x{destinationAddress:X16} control=0x{control:X8} counters=0x{counterMask:X2}");
+            $"agc.dcb_get_lod_stats buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} dst=0x{destinationAddress:X16} control=0x{control:X8} counters=0x{counterMask:X2}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -494,8 +482,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_acquire_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
-            $"engine={engine} cbdb=0x{cbDbOp:X8} gcr=0x{gcrControl:X8} base=0x{baseAddress:X16} size=0x{sizeBytes:X16}");
+            $"agc.dcb_acquire_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} engine={engine} cbdb=0x{cbDbOp:X8} gcr=0x{gcrControl:X8} base=0x{baseAddress:X16} size=0x{sizeBytes:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -580,9 +567,7 @@ public static partial class AgcExports
         if (ShouldTraceHotPath(ref _dcbWriteDataTraceCount))
         {
             TraceAgc(
-                $"agc.dcb_write_data buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
-                $"dst={destination} cache={cachePolicy} addr=0x{destinationAddress:X16} count={dwordCount} " +
-                $"increment={increment} confirm={writeConfirm}");
+                $"agc.dcb_write_data buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} dst={destination} cache={cachePolicy} addr=0x{destinationAddress:X16} count={dwordCount} increment={increment} confirm={writeConfirm}");
         }
 
         return ReturnPointer(ctx, commandAddress);
@@ -635,11 +620,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.cb_cond_write buf=0x{commandBufferAddress:X16} " +
-            $"cmd=0x{commandAddress:X16} compare={compareFunction} " +
-            $"space={writeSpace} read=0x{readAddress:X16} " +
-            $"ref=0x{reference:X8} mask=0x{mask:X8} " +
-            $"write=0x{writeAddress:X16} data=0x{writeValue:X8}");
+            $"agc.cb_cond_write buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} compare={compareFunction} space={writeSpace} read=0x{readAddress:X16} ref=0x{reference:X8} mask=0x{mask:X8} write=0x{writeAddress:X16} data=0x{writeValue:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -696,9 +677,7 @@ public static partial class AgcExports
         if (ShouldTraceHotPath(ref _dcbWaitRegMemTraceCount))
         {
             TraceAgc(
-                $"agc.dcb_wait_reg_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
-                $"size={size} compare={compareFunction} op={operation} cache={cachePolicy} " +
-                $"addr=0x{address:X16} ref=0x{reference:X16} mask=0x{mask:X16} poll={pollCycles}");
+                $"agc.dcb_wait_reg_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} size={size} compare={compareFunction} op={operation} cache={cachePolicy} addr=0x{address:X16} ref=0x{reference:X16} mask=0x{mask:X16} poll={pollCycles}");
         }
 
         return ReturnPointer(ctx, commandAddress);
@@ -742,8 +721,7 @@ public static partial class AgcExports
         // hardware command processor to stall. Keep a well-formed no-op in the DCB
         // so packet addresses and the command-buffer cursor remain coherent.
         TraceAgc(
-            $"agc.dcb_stall_parser buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
-            $"size={size} addr=0x{address:X16} reference=0x{reference:X16}");
+            $"agc.dcb_stall_parser buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} size={size} addr=0x{address:X16} reference=0x{reference:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
 

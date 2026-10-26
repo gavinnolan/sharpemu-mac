@@ -118,6 +118,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 		// stack; DispatchImport runs them without the full import bookkeeping.
 		public bool IsTrivialLeaf { get; }
 
+		// A sceAgc command-buffer builder that DispatchBuilderLeaf may run without the
+		// import-boundary bookkeeping; it declines (and the full path runs) when it would
+		// have to call back into the guest.
+		public bool IsBuilderLeaf { get; }
+
 		public bool SuppressStrlenTrace { get; }
 
 		public bool IsLoopGuardBoundary { get; }
@@ -152,6 +157,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			IsLeaf = isLeaf;
 			IsNoBlockLeaf = isNoBlockLeaf;
 			IsTrivialLeaf = export is not null && IsTrivialLeafImport(nid);
+			IsBuilderLeaf = export is not null && IsAgcBuilderLeafImport(nid);
 			SuppressStrlenTrace = suppressStrlenTrace;
 			IsLoopGuardBoundary = isLoopGuardBoundary;
 			NidHash = nidHash;
@@ -444,15 +450,6 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	[ThreadStatic]
 	private static GuestThreadState? _activeGuestThreadState;
-
-	[ThreadStatic]
-	private static DirectExecutionBackend? _importCounterOwner;
-
-	[ThreadStatic]
-	private static long _nextImportDispatchIndex;
-
-	[ThreadStatic]
-	private static long _importDispatchBlockEnd;
 
 	private ImportStubEntry[] _importEntries = Array.Empty<ImportStubEntry>();
 	private readonly object _runtimeModuleGate = new object();

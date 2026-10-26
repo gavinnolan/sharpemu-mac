@@ -160,6 +160,37 @@ public sealed unsafe class GuestFastPathStubTests
     }
 
     [Fact]
+    public void SelfStub_AnswersAHostThreadOnceItsHandleIsPublished()
+    {
+        if (!CanRunStubs())
+        {
+            return;
+        }
+
+        // scePthreadSelf publishes the handle after registering the thread's context, so the
+        // primary thread's later calls are answered without the managed crossing.
+        using var harness = new StubHarness(DirectExecutionBackend.GuestFastPathStub.PthreadSelf);
+        var handle = NewHandle();
+        harness.Bind(0);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+
+        GuestFastPath.PublishHostSelf(handle);
+        Assert.Equal(handle, harness.Call(0));
+
+        // A guest thread binding over it replaces the handle; unbinding sends the call back.
+        var guest = NewHandle();
+        harness.Bind(guest);
+        Assert.Equal(guest, harness.Call(0));
+        harness.Bind(0);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+
+        // An already-published handle is not overwritten by a second publish.
+        GuestFastPath.PublishHostSelf(handle);
+        GuestFastPath.PublishHostSelf(NewHandle());
+        Assert.Equal(handle, harness.Call(0));
+    }
+
+    [Fact]
     public void GetspecificStub_ReadsTheThreadCurrentlyBound()
     {
         if (!CanRunStubs())

@@ -332,8 +332,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.get_fused_shader_size front=0x{frontAddress:X16} back=0x{backAddress:X16} " +
-            $"types={frontType}/{backType} registers={registerCount}");
+            $"agc.get_fused_shader_size front=0x{frontAddress:X16} back=0x{backAddress:X16} types={frontType}/{backType} registers={registerCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -494,10 +493,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.fuse_shader_halves fused=0x{fusedAddress:X16} front=0x{frontAddress:X16} " +
-            $"back=0x{backAddress:X16} scratch=0x{scratchAddress:X16} types={frontType}/{backType} " +
-            $"registers={registerCount} entry=0x{frontCodeAddress:X16} " +
-            $"continuation=0x{backCodeAddress:X16}");
+            $"agc.fuse_shader_halves fused=0x{fusedAddress:X16} front=0x{frontAddress:X16} back=0x{backAddress:X16} scratch=0x{scratchAddress:X16} types={frontType}/{backType} registers={registerCount} entry=0x{frontCodeAddress:X16} continuation=0x{backCodeAddress:X16}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -667,8 +663,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} " +
-            $"hull=0x{hullShaderAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
+            $"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} hull=0x{hullShaderAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -751,8 +746,7 @@ public static partial class AgcExports
             }
 
             TraceAgc(
-                $"agc.create_interpolant_mapping2 regs=0x{registersAddress:X16} " +
-                $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs=0");
+                $"agc.create_interpolant_mapping2 regs=0x{registersAddress:X16} gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs=0");
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -806,9 +800,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.create_interpolant_mapping2 regs=0x{registersAddress:X16} " +
-            $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} " +
-            $"inputs={inputSemanticsCount} outputs={outputSemanticsCount}");
+            $"agc.create_interpolant_mapping2 regs=0x{registersAddress:X16} gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs={inputSemanticsCount} outputs={outputSemanticsCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1007,8 +999,7 @@ public static partial class AgcExports
             }
 
             TraceAgc(
-                $"agc.create_interpolant_mapping regs=0x{registersAddress:X16} " +
-                $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs=0");
+                $"agc.create_interpolant_mapping regs=0x{registersAddress:X16} gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs=0");
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -1063,9 +1054,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.create_interpolant_mapping regs=0x{registersAddress:X16} " +
-            $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} " +
-            $"inputs={inputSemanticsCount} outputs={outputSemanticsCount}");
+            $"agc.create_interpolant_mapping regs=0x{registersAddress:X16} gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs={inputSemanticsCount} outputs={outputSemanticsCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

@@ -31,6 +31,20 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
     /// </summary>
     public int ActiveImportIndex { get; set; } = -1;
 
+    /// <summary>
+    /// Set by a leaf dispatcher for the duration of one export call: the export must not run guest
+    /// code (a command buffer's "full" callback, say) and instead sets <see cref="GuestCallbackDeclined"/>
+    /// and returns before it has changed any state, so the dispatcher can run the call again through
+    /// the full import path, which can.
+    /// </summary>
+    public bool DeclineGuestCallbacks { get; set; }
+
+    /// <summary>
+    /// Set by an export that declined to call into the guest under <see cref="DeclineGuestCallbacks"/>.
+    /// The dispatcher clears it and discards the call's result.
+    /// </summary>
+    public bool GuestCallbackDeclined { get; set; }
+
     public ulong Rflags { get; set; }
 
     public ulong FsBase { get; set; }

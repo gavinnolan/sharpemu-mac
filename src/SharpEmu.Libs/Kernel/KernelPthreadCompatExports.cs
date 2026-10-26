@@ -297,6 +297,8 @@ public static class KernelPthreadCompatExports
         if (GuestThreadExecution.CurrentGuestThreadHandle != currentThreadHandle)
         {
             GuestThreadExecution.Scheduler?.RegisterGuestThreadContext(currentThreadHandle, ctx);
+            // Registered: later calls on this host thread can be answered by the native stub.
+            GuestFastPath.PublishHostSelf(currentThreadHandle);
         }
         ctx[CpuRegister.Rax] = currentThreadHandle;
         TracePthreadSelf(ctx, currentThreadHandle);

@@ -148,6 +148,12 @@ public static partial class AgcExports
                     return ReturnPointer(ctx, 0);
                 }
             }
+            else if (TryDeclineLeaf(ctx))
+            {
+                // The marker and the packet would be allocated one after the other: a leaf backs out
+                // before either is written.
+                return ReturnPointer(ctx, 0);
+            }
             else if (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
                 !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out commandAddress) ||
                 !TryWriteCommandDwords(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0), offset))
@@ -362,9 +368,7 @@ public static partial class AgcExports
             Span<byte> tableSnapshot = stackalloc byte[(int)Math.Min(registerCount & 0x3FFFu, 16u) * 8];
             var tableAddress = registersAddress & ~3UL;
             var captured = ctx.Memory.TryRead(tableAddress, tableSnapshot);
-            TraceAgc($"agc.register_table_created cmd=0x{commandAddress:X16} bank={registerSpace} " +
-                $"table=0x{tableAddress:X16} count={registerCount & 0x3FFFu} captured={captured} " +
-                $"bytes={(captured ? Convert.ToHexString(tableSnapshot) : string.Empty)}");
+            TraceAgc($"agc.register_table_created cmd=0x{commandAddress:X16} bank={registerSpace} table=0x{tableAddress:X16} count={registerCount & 0x3FFFu} captured={captured} bytes={(captured ? Convert.ToHexString(tableSnapshot) : string.Empty)}");
         }
         return ReturnPointer(ctx, commandAddress);
     }
@@ -381,18 +385,15 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
+        // The three dwords are one allocation and one guest write, like the other fixed-size builders.
         const uint packetDwords = 3;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, op, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, registerOffset & 0xFFFFu) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, registerValue))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(packetDwords, op, 0), registerOffset & 0xFFFFu, registerValue))
         {
             return ReturnPointer(ctx, 0);
         }
 
         TraceAgc(
-            $"agc.dcb_set_{registerSpace}_direct buf=0x{commandBufferAddress:X16} " +
-            $"cmd=0x{commandAddress:X16} offset=0x{registerOffset:X4} value=0x{registerValue:X8}");
+            $"agc.dcb_set_{registerSpace}_direct buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset=0x{registerOffset:X4} value=0x{registerValue:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -426,31 +427,49 @@ public static partial class AgcExports
         }
 
         var packetDwords = valueCount + 2;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, op, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, offset & 0xFFFFu))
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        for (uint i = 0; i < valueCount; i++)
+        // The header, the offset and the payload are one guest write: read the values first (a null
+        // source reserves the payload as zeros), then write the whole packet.
+        uint[]? rented = null;
+        try
         {
-            var value = 0u;
-            if (valuesAddress != 0 &&
-                !TryReadUInt32(ctx, valuesAddress + (i * sizeof(uint)), out value))
+            Span<uint> packet = packetDwords <= 2 + InlinePayloadDwords
+                ? stackalloc uint[(int)packetDwords]
+                : (rented = System.Buffers.ArrayPool<uint>.Shared.Rent((int)packetDwords)).AsSpan(0, (int)packetDwords);
+            packet[0] = Pm4(packetDwords, op, 0);
+            packet[1] = offset & 0xFFFFu;
+            var payload = packet[2..];
+            if (valuesAddress != 0)
             {
-                return ReturnPointer(ctx, 0);
+                if (!ctx.Memory.TryRead(valuesAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(payload)))
+                {
+                    return ReturnPointer(ctx, 0);
+                }
+            }
+            else
+            {
+                payload.Clear();
             }
 
-            if (!TryWriteUInt32(ctx, commandAddress + 8 + (i * sizeof(uint)), value))
+            if (!TryWriteCommandDwords(ctx, commandAddress, packet))
             {
                 return ReturnPointer(ctx, 0);
             }
         }
+        finally
+        {
+            if (rented is not null)
+            {
+                System.Buffers.ArrayPool<uint>.Shared.Return(rented);
+            }
+        }
 
         TraceAgc(
-            $"agc.dcb_set_{registerSpace}_range buf=0x{commandBufferAddress:X16} " +
-            $"cmd=0x{commandAddress:X16} offset=0x{offset:X4} count={valueCount}");
+            $"agc.dcb_set_{registerSpace}_range buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset=0x{offset:X4} count={valueCount}");
         return ReturnPointer(ctx, commandAddress);
     }
 }
