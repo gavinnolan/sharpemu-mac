@@ -665,6 +665,32 @@ public static partial class ResourceMaterializer
         }
     }
 
+    // Whether a compare access reads a mipmapped image, and so compares in the shader (see BuildSpecialization).
+    // SHARPEMU_TRACE_MIPMAPPED_COMPARE=1 names each such program and image once.
+    private static readonly bool TracesMipmappedCompare = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_MIPMAPPED_COMPARE") == "1";
+    private static readonly HashSet<(ulong, int)> TracedMipmappedCompares = new();
+
+    private static bool MipmappedCompare(ulong hash, int image, ReadOnlySpan<uint> descriptor)
+    {
+        if (!GuestImageFormat.IsMipmapped(descriptor))
+        {
+            return false;
+        }
+
+        if (TracesMipmappedCompare)
+        {
+            lock (TracedMipmappedCompares)
+            {
+                if (TracedMipmappedCompares.Add((hash, image)))
+                {
+                    Console.Error.WriteLine($"[SHADER][MIPMAPPED-COMPARE] hash=0x{hash:X16} image={image} words={string.Join(",", descriptor.ToArray().Select(word => $"{word:X8}"))}");
+                }
+            }
+        }
+
+        return true;
+    }
+
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>
         descriptor[0] == 0 && (descriptor[1] & 0xFF) == 0;
 
@@ -1922,10 +1948,15 @@ public static partial class ResourceMaterializer
                 ConversionFormat = conversionFormat,
                 ShaderSwizzle = shaderSwizzle,
                 NumericClass = numericClass,
-                // Only 2D, 2D-array and cube views of a depth-equivalent format get a host depth
-                // binding; every other compare access tests texels with the S# function in the shader.
+                // Only 2D, 2D-array and cube views of a single-level depth-equivalent format get a host
+                // depth binding; every other compare access tests texels with the S# function in the shader.
+                // A depth target is one level, so a mipmapped surface's levels were written as colour, and
+                // a host depth twin of it never holds them (a mipmapped depth surface is not transferred):
+                // Ghost of Tsushima's terrain culler compare-gathers its R32F depth pyramid at the level of
+                // each triangle's size, and every test past level 0 read empty and culled the triangle.
                 EmulatedCompareFunction = !storage && baseImage.DepthCompare &&
-                    (!GuestImageFormat.HasDepthEquivalent(format) || dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
+                    (!GuestImageFormat.HasDepthEquivalent(format) || MipmappedCompare(plan.Hash, index, descriptor) ||
+                     dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
                     ? SamplerCompareFunction(info, snapshot, baseIndex)
                     : -1,
                 PackedFormat = baseImage.Packed ? format : DescriptorConstants.InvalidFormat,
@@ -2285,7 +2316,8 @@ public static partial class ResourceMaterializer
                 ConversionFormat = conversionFormat,
                 ShaderSwizzle = conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : baseImage.ShaderSwizzle,
                 Cube = cube,
-                EmulatedCompareFunction = baseImage.DepthCompare && !GuestImageFormat.HasDepthEquivalent(format)
+                EmulatedCompareFunction = baseImage.DepthCompare &&
+                    (!GuestImageFormat.HasDepthEquivalent(format) || GuestImageFormat.IsMipmapped(descriptor))
                     ? SamplerCompareFunction(info, snapshot, (uint)root)
                     : -1,
             };

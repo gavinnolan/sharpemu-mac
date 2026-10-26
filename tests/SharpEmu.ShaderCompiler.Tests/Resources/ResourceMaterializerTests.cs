@@ -327,6 +327,35 @@ public sealed class ResourceMaterializerTests
         Assert.Equal([true, false], applied.Info.Samplers.Select(sampler => sampler.ForceDegamma).ToArray());
     }
 
+    // A compare sample of a depth-equivalent format gets a host depth binding only for a single-level image. A mipmapped one
+    // (Ghost of Tsushima's R32F depth pyramid, MAX_MIP 8) was written as colour, so the shader compares on its colour view with
+    // the S# function (LESS here) and the host keeps a plain sampler.
+    [Theory]
+    [InlineData(0u, -1)]
+    [InlineData(8u, 1)]
+    public void ACompareSampleOfAMipmappedDepthFormatComparesInTheShader(uint maxMip, int expectedFunction)
+    {
+        uint[] words = [0x1000, Format32Float << 20, 3 | (3 << 14), 0xFAC | (maxMip << 16) | (ImageType2D << 28), 0, maxMip << 4, 0, 0];
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        for (uint dword = 0; dword < 8; dword++, pc += 8)
+        {
+            instructions.Add(MoveScalar(pc, 16 + dword, words[dword]));
+        }
+
+        instructions.AddRange(SamplerWords(ref pc, 32, 1u << 12));
+        instructions.Add(Image(pc, "ImageSampleC", 16, 32));
+        instructions.Add(EndProgram(pc + 8));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        Assert.Equal(expectedFunction, Assert.Single(specialization.Images).EmulatedCompareFunction);
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(expectedFunction < 0, Assert.Single(applied.Info.Images).DepthCompare);
+    }
+
     [Fact]
     public void MixedSampler_DuplicatesTheCorrectSnapshot()
     {
