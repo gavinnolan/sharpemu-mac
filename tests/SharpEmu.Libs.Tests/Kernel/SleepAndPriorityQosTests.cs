@@ -45,7 +45,11 @@ public sealed class SleepAndPriorityQosTests
             {
                 napped++;
                 var tookUs = (Stopwatch.GetTimestamp() - before) * 1_000_000 / Stopwatch.Frequency;
-                Assert.True(tookUs >= KernelRuntimeCompatExports.UsleepNapMicroseconds / 2, $"nap took {tookUs} us");
+                // The first nap of a streak is the floor (the ceiling under the legacy switch).
+                var shortestNap = KernelRuntimeCompatExports.UsleepNapLegacy
+                    ? KernelRuntimeCompatExports.UsleepNapMicroseconds
+                    : KernelRuntimeCompatExports.UsleepNapFloorMicroseconds;
+                Assert.True(tookUs >= shortestNap / 2, $"nap took {tookUs} us");
             }
         }
 
@@ -80,6 +84,57 @@ public sealed class SleepAndPriorityQosTests
 
     private static bool KernelRuntimeCompatExports_YieldNap(ref long start, ref long last, long now, long gap, long after) =>
         KernelPthreadCompatExports.YieldNapPolicy(ref start, ref last, now, gap, after);
+
+    // Policy tunables pinned to the defaults: 250 us ceiling, 50 us floor, 4 ms ramp, nap after 500 us.
+    private static long Policy(long ageUs, long requestedUs, bool legacy, out bool napped) =>
+        KernelRuntimeCompatExports.NapPolicyMicroseconds(
+            ageUs * System.Diagnostics.Stopwatch.Frequency / 1_000_000, requestedUs,
+            napMicroseconds: 250, floorMicroseconds: 50, rampMicroseconds: 4000,
+            afterTicks: 500 * System.Diagnostics.Stopwatch.Frequency / 1_000_000, legacy, out napped);
+
+    [Fact]
+    public void NapPolicyHonoursRequestsAtOrAboveTheFloorEvenInALongStreak()
+    {
+        Assert.Equal(100, Policy(ageUs: 60_000, requestedUs: 100, legacy: false, out var napped));
+        Assert.False(napped);
+        Assert.Equal(50, Policy(ageUs: 60_000, requestedUs: 50, legacy: false, out napped));
+        Assert.False(napped);
+        // The legacy policy stretches the same request to the ceiling (the measured 285 us).
+        Assert.Equal(250, Policy(ageUs: 60_000, requestedUs: 100, legacy: true, out napped));
+        Assert.True(napped);
+    }
+
+    [Fact]
+    public void NapPolicyEscalatesTinyRequestsAndYieldsFromFloorToCeiling()
+    {
+        // Before the streak window nothing naps.
+        Assert.Equal(1, Policy(ageUs: 400, requestedUs: 1, legacy: false, out var napped));
+        Assert.False(napped);
+
+        // At the window the nap starts at the floor, not the ceiling.
+        Assert.Equal(50, Policy(ageUs: 500, requestedUs: 1, legacy: false, out napped));
+        Assert.True(napped);
+        Assert.Equal(50, Policy(ageUs: 500, requestedUs: 0, legacy: false, out _));
+
+        // It rises monotonically over the ramp and then stays at the ceiling.
+        var halfway = Policy(ageUs: 500 + 2000, requestedUs: 1, legacy: false, out _);
+        Assert.InRange(halfway, 140, 160);
+        Assert.Equal(250, Policy(ageUs: 500 + 4000, requestedUs: 1, legacy: false, out _));
+        Assert.Equal(250, Policy(ageUs: 1_000_000, requestedUs: 0, legacy: false, out _));
+
+        // Legacy: straight to the ceiling.
+        Assert.Equal(250, Policy(ageUs: 500, requestedUs: 1, legacy: true, out _));
+    }
+
+    [Fact]
+    public void NapPolicyIsOffWhenTheCeilingIsZero()
+    {
+        var micros = KernelRuntimeCompatExports.NapPolicyMicroseconds(
+            streakAgeTicks: 1_000_000_000, requestedMicroseconds: 7, napMicroseconds: 0, floorMicroseconds: 0, rampMicroseconds: 4000,
+            afterTicks: 1, legacy: false, out var napped);
+        Assert.Equal(7, micros);
+        Assert.False(napped);
+    }
 
     [Fact]
     public void ShortUsleepNeverReturnsBeforeTheRequestedTime()

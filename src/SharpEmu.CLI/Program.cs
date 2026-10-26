@@ -139,17 +139,8 @@ internal static partial class Program
             // event ownership. Emulation remains on a worker thread.
             var exitCode = 0;
             HostMainThread.Enable();
-            var emulation = new Thread(() =>
+            void RunEmulation()
             {
-                // This thread runs the guest's main thread: it drives the ELF
-                // entry point and everything the title does before it spawns a
-                // pthread of its own. Frame deadlines live here, so it asks for
-                // the same QoS class as the presenter. Guest pthreads inherit
-                // their class from whoever creates them and are deliberately
-                // left alone — a title with thirty worker threads must not have
-                // all of them outranking the presenter.
-                SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
-                    SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
                 try
                 {
                     exitCode = RunEmulator(args, isMitigatedChild);
@@ -158,13 +149,39 @@ internal static partial class Program
                 {
                     HostMainThread.Shutdown();
                 }
-            }, 32 * 1024 * 1024)
+            }
+
+            // This thread runs the guest's main thread: it drives the ELF entry point and
+            // everything the title does before it spawns a pthread of its own. Frame deadlines
+            // live here, so it takes the same QoS class as the presenter. Darwin refuses
+            // pthread_set_qos_class_self_np on a thread CoreCLR created (EPERM, measured), so
+            // the class goes into the attributes of a natively created thread instead.
+            // Guest pthreads are managed threads and do not inherit it (measured: a managed
+            // child of a user-interactive thread reports no class), which is what keeps a
+            // title with thirty worker threads from outranking the presenter.
+            var emulationQos = SharpEmu.HLE.Host.HostQosThread.TryStart(
+                "SharpEmu Emulation", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 32 * 1024 * 1024,
+                RunEmulation, out _);
+            Thread? emulation = null;
+            if (emulationQos is null)
             {
-                Name = "SharpEmu Emulation",
-            };
-            emulation.Start();
+                emulation = new Thread(RunEmulation, 32 * 1024 * 1024)
+                {
+                    Name = "SharpEmu Emulation",
+                };
+                emulation.Start();
+            }
+
             HostMainThread.Pump();
-            emulation.Join();
+            if (emulationQos is not null)
+            {
+                emulationQos.Join(Timeout.Infinite);
+            }
+            else
+            {
+                emulation!.Join();
+            }
+
             return exitCode;
         }
 
