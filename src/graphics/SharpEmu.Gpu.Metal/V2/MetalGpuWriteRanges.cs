@@ -89,6 +89,10 @@ internal sealed class MetalGpuWriteRanges
         // here: which of two overlapping writes in one submission lands last.
         public ulong Sequence;
         public MetalGpuWriteOrigin Origin;
+
+        // The write-fence value signalled after every write this record covers, or zero when
+        // only the end of its command buffer says it landed (MetalRenderHost.WriteFences).
+        public ulong Fence;
     }
 
     private Record[] _records = new Record[64];
@@ -177,6 +181,8 @@ internal sealed class MetalGpuWriteRanges
                 }
 
                 candidate.Sequence = sequence;
+                // The new write is not behind the fence the record had.
+                candidate.Fence = 0;
                 return sequence;
             }
 
@@ -590,6 +596,76 @@ internal sealed class MetalGpuWriteRanges
     }
 
     /// <summary>
+    /// A write fence with this value is encoded after every write recorded so far in
+    /// <paramref name="serial"/>: each of its records without a fence takes this one. Labels and
+    /// unbounded writes keep waiting for the serial.
+    /// </summary>
+    public void StampFence(ulong serial, ulong fence)
+    {
+        BeginMutation();
+        try
+        {
+            for (var index = 0; index < _count; index++)
+            {
+                ref var record = ref _records[index];
+                if (record.Serial == serial && record.Fence == 0)
+                {
+                    record.Fence = fence;
+                }
+            }
+        }
+        finally
+        {
+            EndMutation();
+        }
+    }
+
+    /// <summary>
+    /// The write fence after which every write over the range recorded in <paramref name="serial"/>
+    /// (the newest pending serial over it, as <see cref="PendingSerial"/> returned) has landed, or
+    /// zero when one of them has no fence: a label, an unbounded write, or a record noted since.
+    /// Writes of older serials are not covered; the caller waits for those serials.
+    /// </summary>
+    public ulong WriteFence(ulong address, ulong size, ulong serial)
+    {
+        if (size == 0 || serial == 0 || address > ulong.MaxValue - size || _unboundedSerial >= serial)
+        {
+            return 0;
+        }
+
+        var end = address + size;
+        var fence = 0UL;
+        var records = RecordsMayCover(address, end) ? _count : 0;
+        for (var index = 0; index < records; index++)
+        {
+            ref var record = ref _records[index];
+            if (record.Serial < serial || record.End <= address || record.Start >= end)
+            {
+                continue;
+            }
+
+            if (record.Serial > serial || record.Fence == 0)
+            {
+                return 0;
+            }
+
+            fence = Math.Max(fence, record.Fence);
+        }
+
+        var labels = LabelPagesMayCover(address, end) ? _labelCount : 0;
+        for (var index = 0; index < labels; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.Serial >= serial && label.End > address && label.Start < end)
+            {
+                return 0;
+            }
+        }
+
+        return fence;
+    }
+
+    /// <summary>
     /// <see cref="PendingSerial"/> for each of <c>pending.Length</c> adjacent slices of
     /// <paramref name="sliceSize"/> bytes from <paramref name="address"/>, as whether it is
     /// non-zero, in one pass over the records: a slice is marked when it would wait. True
@@ -978,6 +1054,7 @@ internal sealed class MetalGpuWriteRanges
                 }
 
                 last.Sequence = Math.Max(last.Sequence, current.Sequence);
+                last.Fence = 0;
 
                 last.End = Math.Max(last.End, current.End);
                 folded[^1] = last;

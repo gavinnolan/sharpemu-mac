@@ -1222,6 +1222,7 @@ internal sealed partial class MetalRenderHost :
         var serial = SubmissionSerial;
         var sequence = _gpuWrites.Note(address, size, serial, origin);
         NotePendingCopyDestination(address, size, origin, serial, sequence);
+        NoteFencedWrite(address, size);
     }
 
     /// <summary>
@@ -1810,6 +1811,12 @@ internal sealed partial class MetalRenderHost :
             if (size <= SmallReadWaitBytes)
             {
                 ReportSmallReadWaitSite(address, size);
+            }
+
+            NoteObservedRead(address, size);
+            if (TryWaitForWriteFence(address, size, pending))
+            {
+                return;
             }
 
             if (_commandBuffer != 0 && pending >= _submissionSerial)
@@ -2468,7 +2475,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
             .Append(" data_replans=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Replans)
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
-            .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count);
+            .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count)
+            .Append(TakeWriteFenceCounters());
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
         var bindless = TakeBindlessCost();
         if (bindless.Tables != 0)
@@ -2694,6 +2702,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _completions.Dispose();
+        DisposeWriteFences();
         DisposeHostMovie();
         DisposeBindlessImages();
         DisposePipelines();

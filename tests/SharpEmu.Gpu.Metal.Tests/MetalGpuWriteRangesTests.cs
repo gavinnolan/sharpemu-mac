@@ -402,6 +402,45 @@ public sealed class MetalGpuWriteRangesTests
         }
     }
 
+
+    // A write fence covers a read only when every write over its bytes in the serial it waits
+    // for was stamped: a write noted after the stamp, a merge into a stamped record, a label, an
+    // unbounded write or a newer serial over the bytes each sends the read back to the serial.
+    [Fact]
+    public void AWriteFenceCoversOnlyWritesStampedBeforeIt()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        ranges.Note(0x1_0000, 0x100, serial: 4);
+        ranges.Note(0x10_0000, 0x100, serial: 5);
+        ranges.Note(0x20_0000, 0x100, serial: 5);
+        Assert.Equal(0UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+
+        ranges.StampFence(serial: 5, fence: 1);
+        Assert.Equal(1UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+        // The older serial's record is the caller's to wait for, not the fence's.
+        Assert.Equal(1UL, ranges.WriteFence(0x1_0000, 0x10_0000, serial: 5));
+        Assert.Equal(0UL, ranges.WriteFence(0x1_0000, 4, serial: 4));
+
+        // A later write into a stamped record makes it wait for the next fence.
+        ranges.Note(0x20_0000, 0x200, serial: 5);
+        Assert.Equal(0UL, ranges.WriteFence(0x20_0000, 4, serial: 5));
+        Assert.Equal(1UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+        ranges.StampFence(serial: 5, fence: 2);
+        Assert.Equal(2UL, ranges.WriteFence(0x20_0000, 4, serial: 5));
+        Assert.Equal(2UL, ranges.WriteFence(0x10_0000, 0x10_0100, serial: 5));
+        Assert.Equal(1UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+
+        // A newer serial over the bytes, or a label, is not behind the fence.
+        ranges.Note(0x10_0080, 4, serial: 6);
+        Assert.Equal(0UL, ranges.WriteFence(0x10_0000, 0x100, serial: 5));
+        ranges.Note(0x20_0100, 8, serial: 5, MetalGpuWriteOrigin.EndOfPipeLabel);
+        ranges.StampFence(serial: 5, fence: 3);
+        Assert.Equal(0UL, ranges.WriteFence(0x20_0100, 8, serial: 5));
+
+        ranges.NoteUnbounded(serial: 5);
+        Assert.Equal(0UL, ranges.WriteFence(0x20_0000, 4, serial: 5));
+    }
+
     // The indexes over the records and labels (the bucket dictionary PendingSerial uses, the hashed
     // counts the snapshot another thread reads) only let a query skip what cannot reach it: both
     // answer what the unindexed walk of every record and label answers, over narrow and wide writes,

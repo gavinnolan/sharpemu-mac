@@ -491,6 +491,50 @@ internal sealed class MetalCompletionQueue : IDisposable
     }
 
     /// <summary>
+    /// Blocks until <paramref name="done"/> holds or the timeout passes, woken by every command-buffer
+    /// completion and every shared-event notification that runs the completion block. False on timeout.
+    /// </summary>
+    public bool WaitUntil(Func<bool> done, int timeoutMilliseconds)
+    {
+        var frequency = System.Diagnostics.Stopwatch.Frequency;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var spinDeadline = started + (frequency / 20000);
+        var deadline = started + (frequency * timeoutMilliseconds / 1000);
+        while (!done())
+        {
+            if (_stopping)
+            {
+                return true;
+            }
+
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (now >= deadline)
+            {
+                return false;
+            }
+
+            if (now < spinDeadline)
+            {
+                Thread.SpinWait(32);
+                continue;
+            }
+
+            lock (_wakeGate)
+            {
+                // Inside the lock a wakeup cannot fall between the test and the wait.
+                if (done() || _stopping)
+                {
+                    return true;
+                }
+
+                _ = Monitor.Wait(_wakeGate, _handlerBound ? HandlerWaitMilliseconds : 1);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Blocks any thread until the GPU has signalled the serial or the timeout passes. Only
     /// the signal: unlike <see cref="WaitFor"/> it does not wait for the completions to run,
     /// so it never waits on the completion thread.
