@@ -1144,7 +1144,9 @@ internal sealed partial class MetalRenderHost
                 PassProfileAttachRender(descriptor);
             }
 
+            AttachOcclusionBuffer(descriptor);
             _renderEncoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
+            _encoderOcclusionSlot = -1;
             MetalMemoryTelemetry.RenderEncoders.Add();
             LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
             if (_renderEncoder == 0)
@@ -1474,6 +1476,7 @@ internal sealed partial class MetalRenderHost
 
         var entry = _pendingGraphicsPipeline ??
             throw Fatal("A draw has no bound Metal render pipeline state.");
+        ApplyOcclusionCounting();
         if (!ReferenceEquals(_boundGraphicsPipeline, entry))
         {
             // Every later draw of this encoder with the entry (its rectangle states too) is

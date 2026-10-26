@@ -1802,8 +1802,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public bool DefersEndOfPipeLabels => !PublishLabelsWhenParsed;
 
-    // Metal has no occlusion counter: the dumps keep the synthetic always-visible pairs.
-    public bool PublishesSyntheticOcclusionDumps => true;
+    // Without device counting (MetalRenderHost.Occlusion.cs) the dumps keep the synthetic always-visible pairs.
+    public bool PublishesSyntheticOcclusionDumps => !DeviceOcclusionQueries;
 
     // A deferred label is encoded into the command buffer being recorded, before it is
     // committed, so it has landed once that submission completes.
