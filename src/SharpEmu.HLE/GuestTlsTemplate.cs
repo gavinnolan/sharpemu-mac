@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using System.Numerics;
 
 namespace SharpEmu.HLE;
 
@@ -24,6 +25,23 @@ public static class GuestTlsTemplate
     private static ulong _staticTlsSize;
     private static ulong _maximumAlignment = 1;
     private static ulong _generation;
+
+    // Bumped under _gate by every change that can move or drop a resolved TLS address (module
+    // registration, initialization image change, thread block seeding, reset). A per-host-thread
+    // cache of resolved module blocks is valid while its epoch matches, so __tls_get_addr does not
+    // take _gate once a thread has resolved a module.
+    private static long _resolveEpoch;
+
+    [ThreadStatic]
+    private static ResolveCache? _resolveCache;
+
+    private sealed class ResolveCache
+    {
+        public ulong ThreadPointer;
+        public long Epoch;
+        public ulong[] Addresses = new ulong[8];
+        public ulong[] Sizes = new ulong[8];
+    }
 
     static GuestTlsTemplate()
     {
@@ -189,6 +207,7 @@ public static class GuestTlsTemplate
             _staticTlsSize = staticOffset;
             _maximumAlignment = Math.Max(_maximumAlignment, normalizedAlignment);
             _generation++;
+            Interlocked.Increment(ref _resolveEpoch);
             return staticOffset;
         }
     }
@@ -206,6 +225,7 @@ public static class GuestTlsTemplate
                 throw new InvalidOperationException("Cannot change TLS initialization after a thread uses the module.");
 
             module.InitImage = initializationImage.ToArray();
+            Interlocked.Increment(ref _resolveEpoch);
         }
     }
 
@@ -240,6 +260,7 @@ public static class GuestTlsTemplate
             _staticTlsSize = 0;
             _maximumAlignment = 1;
             _generation++;
+            Interlocked.Increment(ref _resolveEpoch);
         }
     }
 
@@ -257,6 +278,7 @@ public static class GuestTlsTemplate
 
         lock (_gate)
         {
+            Interlocked.Increment(ref _resolveEpoch);
             if (_threadDtvs.Remove(threadPointer, out var oldDtv))
             {
                 FreeDynamicEntries(oldDtv);
@@ -282,6 +304,17 @@ public static class GuestTlsTemplate
         if (context.FsBase == 0 || moduleId == 0)
         {
             return 0;
+        }
+
+        var cache = _resolveCache;
+        if (cache is not null &&
+            cache.ThreadPointer == context.FsBase &&
+            cache.Epoch == Volatile.Read(ref _resolveEpoch) &&
+            moduleId < (ulong)cache.Addresses.Length &&
+            cache.Addresses[moduleId] != 0 &&
+            offset < cache.Sizes[moduleId])
+        {
+            return cache.Addresses[moduleId] + offset;
         }
 
         lock (_gate)
@@ -318,8 +351,37 @@ public static class GuestTlsTemplate
                 RebuildGuestDtv(context, context.FsBase, dtv);
             }
 
+            RememberResolvedBlock(context.FsBase, moduleId, entry.Address, module.MemorySize);
             return checked(entry.Address + offset);
         }
+    }
+
+    // Caller holds _gate, so the epoch read here orders after every change it has seen.
+    private static void RememberResolvedBlock(ulong threadPointer, ulong moduleId, ulong address, ulong size)
+    {
+        if (moduleId > 4096)
+        {
+            return;
+        }
+
+        var cache = _resolveCache ??= new ResolveCache();
+        var epoch = Volatile.Read(ref _resolveEpoch);
+        if (cache.ThreadPointer != threadPointer || cache.Epoch != epoch)
+        {
+            Array.Clear(cache.Addresses);
+            Array.Clear(cache.Sizes);
+            cache.ThreadPointer = threadPointer;
+            cache.Epoch = epoch;
+        }
+        if (moduleId >= (ulong)cache.Addresses.Length)
+        {
+            var length = (int)BitOperations.RoundUpToPowerOf2((uint)moduleId + 1);
+            Array.Resize(ref cache.Addresses, length);
+            Array.Resize(ref cache.Sizes, length);
+        }
+
+        cache.Addresses[moduleId] = address;
+        cache.Sizes[moduleId] = size;
     }
 
     private static DtvEntry CreateStaticOrDynamicEntry(
