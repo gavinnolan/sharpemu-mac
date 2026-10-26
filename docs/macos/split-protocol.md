@@ -130,9 +130,13 @@ bridge refuses (and reports) a call from the ring thread.
 - **Protection acknowledgement** (offset 0, a `SharedCounter`): A raises it to a `ProtectRequest`'s sequence once that
   request and every one before it is applied; B waits on it. (The first contract had a `ProtectAck` ring record; a
   shared counter means B's waits never depend on A's ring writers, which may be blocked on a full ring.)
-- **GPU-interest summary** (offset 4096, 2 MiB): one bit per 64 KiB below 1 TiB, set while any page in it carries a
-  `PageGuard` watch in B (`IPageWatchObserver`, under the guard's block lock; one word per 4 MiB block). B sets a bit
-  before the watch's protection is requested, with a full barrier; A filters managed writes with it.
+- **GPU-interest summary** (offset 4096, 32 MiB of address space, touched only where watches are): one bit per 4 KiB
+  page below 1 TiB, set while the page carries a `PageGuard` watch in B (`IPageWatchObserver`, under the guard's block
+  lock; 16 words per 4 MiB block). B sets a bit before the watch's protection is requested, with a full barrier; A
+  filters managed writes with it, so a write next to a watched page (command buffers sit beside the images they draw
+  to) does not block. `SHARPEMU_SPLIT_STATS=1` adds `ManagedWriteInterest` (writes that hit a set bit),
+  `ManagedWriteCall` (the blocking `CpuWrite` calls, with their average time) and `ProtectWait` (confirmation waits,
+  average time) to the `[SPLIT-X]` line.
 
 ## Teardown and failure
 
@@ -148,15 +152,22 @@ bridge refuses (and reports) a call from the ring thread.
 - B's console is A's console (inherited); B tees it into `SHARPEMU_GPU_HOST_LOG`, which the CLI sets to
   `<log>.gpuhost.log` when it runs with `--log-file`.
 
+## Watch protections wait once
+
+A watch change (`AddWatch`, `AddWatchMask` and their removals) sends every protection it needs and waits for A's
+acknowledgement once, after the page guard released its block locks (`IProtectionBatchSpace`; the shared counter is
+cumulative, so the last request's number covers the rest). A change that found its pages already watched by another
+thread, whose protection that thread has not confirmed yet, waits for that thread's number too. Protections made
+outside a watch change (ledger changes, `TryProtect`) still wait where they are made. `SHARPEMU_SPLIT_BATCH_PROTECT=0`
+waits at each protection, as before.
+
 ## Not carried yet
 
 - Host movies (`MoviePresentationServices`: frames A's decoder hands the presenter) do not reach B's presenter.
 - `TraceGpuFlip` (diagnostics) does nothing in B.
 - Private guest memory (above).
-- Fast paths: restricting watches wait one round trip each (batch them and wait once before the bytes are read);
-  `CanPresentFlip`/`NextFlipPresentTimestamp` cost a round trip per presenter pass (mirror the pacing state); managed
+- Fast paths: `CanPresentFlip`/`NextFlipPresentTimestamp` cost a round trip per presenter pass (mirror the pacing state); managed
   writes under a watch are a call each.
-- Known windows, not closed yet: B's page-guard block lock (a spin) is held while a protection that takes rights away
-  waits for A's acknowledgement; managed writes made inside a bracket reach B as records and may be handled after the
+- Known windows, not closed yet: managed writes made inside a bracket reach B as records and may be handled after the
   worker resumes; the shutdown no longer orders B's watch teardown before A releases its page guard (A's guard holds no
   watches, and A acknowledges late requests without applying them).

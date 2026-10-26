@@ -14,29 +14,58 @@ namespace SharpEmu.GpuSplit.Tests;
 public sealed class SplitSharedStateTests
 {
     [MacOSFact]
-    public void TheSummaryAnswersForEveryGroupARangeTouches()
+    public void TheSummaryAnswersForEveryPageARangeTouches()
     {
         using var channel = GpuRemoteChannel.Create(SharedMemoryRegion.CreateUniqueName("sesplit"), SplitSharedState.Layout);
         var state = new SplitSharedState(channel);
-        const ulong Group = 1UL << SplitSharedState.GroupShift;
+        const ulong Page = 1UL << SplitSharedState.PageShift;
+        Assert.Equal(TrackerLayout.PageBytes, Page);
         Assert.False(state.MayInterest(0, TrackerLayout.SpaceBytes));
 
-        state.SetGroup(0x40_0000 + 3 * Group + 0x123);
-        Assert.True(state.MayInterest(0x40_0000 + 3 * Group, 8));
-        Assert.True(state.MayInterest(0x40_0000 + 4 * Group - 1, 1));
-        Assert.False(state.MayInterest(0x40_0000 + 4 * Group, Group));
-        Assert.False(state.MayInterest(0x40_0000, 3 * Group));
-        // Across words: one 4 MiB block per word.
+        state.SetPage(0x40_0000 + 3 * Page + 0x123);
+        Assert.True(state.MayInterest(0x40_0000 + 3 * Page, 8));
+        Assert.True(state.MayInterest(0x40_0000 + 4 * Page - 1, 1));
+        Assert.False(state.MayInterest(0x40_0000 + 4 * Page, Page));
+        Assert.False(state.MayInterest(0x40_0000, 3 * Page));
+        // Across words: 64 pages each.
         Assert.True(state.MayInterest(0x10_0000, 0x40_0000));
         Assert.True(state.MayInterest(0, TrackerLayout.SpaceBytes));
         Assert.False(state.MayInterest(TrackerLayout.SpaceBytes, 8));
-        Assert.False(state.MayInterest(0x40_0000 + 3 * Group, 0));
+        Assert.False(state.MayInterest(0x40_0000 + 3 * Page, 0));
 
-        state.SetGroup(TrackerLayout.SpaceBytes - 1);
-        Assert.True(state.MayInterest(TrackerLayout.SpaceBytes - Group, ulong.MaxValue / 2));
+        state.SetPage(TrackerLayout.SpaceBytes - 1);
+        Assert.True(state.MayInterest(TrackerLayout.SpaceBytes - Page, ulong.MaxValue / 2));
 
-        state.ClearGroup(0x40_0000 + 3 * Group);
+        state.ClearPage(0x40_0000 + 3 * Page);
         Assert.False(state.MayInterest(0x40_0000, 0x40_0000));
+    }
+
+    [MacOSFact]
+    public void AWriteToAnUnwatchedPageNextToAWatchedOneIsNotOfInterest()
+    {
+        using var channel = GpuRemoteChannel.Create(SharedMemoryRegion.CreateUniqueName("sesplit"), SplitSharedState.Layout);
+        var state = new SplitSharedState(channel);
+        const ulong Group = 0x10_0000;
+        // One watched page in the middle of a 64 KiB group (the old summary's granularity).
+        state.SetPage(Group + 5 * 0x1000);
+
+        Assert.True(state.MayInterest(Group + 5 * 0x1000, 1));
+        Assert.True(state.MayInterest(Group + 5 * 0x1000 + 0xFFF, 1));
+        // The same 64 KiB group, every other page.
+        for (ulong page = 0; page < 16; page++)
+        {
+            Assert.Equal(page == 5, state.MayInterest(Group + page * 0x1000, 8));
+            Assert.Equal(page == 5, state.MayInterest(Group + page * 0x1000 + 0xFF8, 8));
+        }
+
+        // A write that straddles into the watched page is of interest, one that stops short is not.
+        Assert.True(state.MayInterest(Group + 5 * 0x1000 - 4, 8));
+        Assert.False(state.MayInterest(Group + 5 * 0x1000 - 8, 8));
+        Assert.False(state.MayInterest(Group + 6 * 0x1000, 0x1000));
+        Assert.False(state.MayInterest(Group, 5 * 0x1000));
+
+        state.ClearPage(Group + 5 * 0x1000);
+        Assert.False(state.MayInterest(Group, 16 * 0x1000));
     }
 
     [MacOSFact]
@@ -178,17 +207,98 @@ public sealed unsafe class RemoteGuestAddressSpaceTests : IDisposable
         memory.Pages.AddWatch(_guest.Address, 0x1000, blockReads: false);
         memory.Pages.AddWatch(_guest.Address + 0x1000, 0x1000, blockReads: false);
         memory.Pages.AddWatch(_guest.Address + SharedGuestMemory.Chunk, 0x1000, blockReads: false);
-        Assert.Equal(new[] { _guest.Address, _guest.Address + SharedGuestMemory.Chunk }, _summary.Set);
+        // One bit per watched page, not per 64 KiB group around it.
+        Assert.Equal(new[] { _guest.Address, _guest.Address + 0x1000, _guest.Address + SharedGuestMemory.Chunk }, _summary.Set);
         // Each watch takes write access from the guest, and waits for the guest to apply it.
         Assert.Equal(3, _protections.Requests.Count(request => request.Access == GuestPageProtection.Read));
         Assert.Equal(3, _protections.Waits.Count);
 
+        // A second watcher of a page keeps its bit until the last one goes.
+        memory.Pages.AddWatch(_guest.Address, 0x1000, blockReads: false);
         memory.Pages.RemoveWatch(_guest.Address, 0x1000, blockReads: false);
         Assert.Empty(_summary.Cleared);
+        memory.Pages.RemoveWatch(_guest.Address, 0x1000, blockReads: false);
         memory.Pages.RemoveWatch(_guest.Address + 0x1000, 0x1000, blockReads: false);
         memory.Pages.RemoveWatch(_guest.Address + SharedGuestMemory.Chunk, 0x1000, blockReads: false);
-        Assert.Equal(new[] { _guest.Address + 0x1000, _guest.Address + SharedGuestMemory.Chunk }, _summary.Cleared);
+        Assert.Equal(new[] { _guest.Address, _guest.Address + 0x1000, _guest.Address + SharedGuestMemory.Chunk }, _summary.Cleared);
         Assert.Equal(3, _protections.Waits.Count);
+    }
+
+    [MacOSFact]
+    public void ProtectionsOfOneWatchChangeAreConfirmedOnceAtItsEnd()
+    {
+        _space.BeginProtectionBatch();
+        _space.BeginProtectionBatch();
+        Assert.True(_space.TryApplyDerivedProtection(_guest.Address, 0x1000, ReadWrite, GuestPageProtection.Read, ordinaryEnrollment: false));
+        Assert.True(_space.TryApplyDerivedProtection(_guest.Address + 0x4000, 0x1000, ReadWrite, GuestPageProtection.Read, ordinaryEnrollment: false));
+        // Giving rights back never waits, batched or not.
+        Assert.True(_space.TryApplyDerivedProtection(_guest.Address + 0x8000, 0x1000, ReadWrite, ReadWrite, ordinaryEnrollment: false));
+        _space.EndProtectionBatch();
+        Assert.Empty(_protections.Waits);
+        Assert.Equal(3, _protections.Requests.Count);
+        _space.EndProtectionBatch();
+        // One wait for the last of them: the guest process applies them in order.
+        Assert.Equal(new ulong[] { 2 }, _protections.Waits);
+
+        // Nothing stays pending for the next change.
+        _space.BeginProtectionBatch();
+        _space.EndProtectionBatch();
+        Assert.Single(_protections.Waits);
+
+        // Outside a batch every protection waits at once.
+        Assert.True(_space.TryApplyDerivedProtection(_guest.Address, 0x1000, ReadWrite, GuestPageProtection.Read, ordinaryEnrollment: false));
+        Assert.Equal(new ulong[] { 2, 4 }, _protections.Waits);
+    }
+
+    [MacOSFact]
+    public void AWatchChangeThatSentNothingStillWaitsForAnotherThreadsProtection()
+    {
+        using var sent = new ManualResetEventSlim(false);
+        using var finish = new ManualResetEventSlim(false);
+        var other = new Thread(() =>
+        {
+            _space.BeginProtectionBatch();
+            _ = _space.TryApplyDerivedProtection(_guest.Address, 0x1000, ReadWrite, GuestPageProtection.Read, ordinaryEnrollment: false);
+            sent.Set();
+            finish.Wait(10_000);
+            _space.EndProtectionBatch();
+        });
+        other.Start();
+        Assert.True(sent.Wait(10_000));
+
+        // This thread's watch found the page already watched by the other, so it sent nothing; the
+        // other's protection may not be applied yet, and this thread must not return before it is.
+        _space.BeginProtectionBatch();
+        _space.EndProtectionBatch();
+        Assert.Equal(new ulong[] { 1 }, _protections.Waits);
+
+        finish.Set();
+        other.Join();
+    }
+
+    [MacOSFact]
+    public void ASparseWatchMaskWaitsOnceForAllItsRuns()
+    {
+        using var memory = new GuestGpuMemory(_space);
+        memory.Register(_guest.Address, SharedGuestMemory.ViewBytes, ReadWrite);
+        _protections.Requests.Clear();
+        _protections.Waits.Clear();
+
+        var blockBase = _guest.Address & ~(TrackerLayout.BlockBytes - 1);
+        var first = (int)((_guest.Address - blockBase) / TrackerLayout.PageBytes);
+        var mask = new PageMask();
+        mask.Set(first);
+        mask.Set(first + 2);
+        mask.Set(first + 4);
+        memory.Pages.AddWatchMask(blockBase, mask, blockReads: false);
+
+        // Three runs, three requests, one wait for the last.
+        Assert.Equal(3, _protections.Requests.Count(request => request.Access == GuestPageProtection.Read));
+        Assert.Equal(new[] { _protections.LastRequested }, _protections.Waits);
+
+        _protections.Waits.Clear();
+        memory.Pages.RemoveWatchMask(blockBase, mask, blockReads: false);
+        Assert.Empty(_protections.Waits);
     }
 
     [MacOSFact]
@@ -230,8 +340,8 @@ public sealed unsafe class RemoteGuestAddressSpaceTests : IDisposable
 
         public List<ulong> Cleared { get; } = new();
 
-        public void SetGroup(ulong address) => Set.Add(address);
+        public void SetPage(ulong address) => Set.Add(address);
 
-        public void ClearGroup(ulong address) => Cleared.Add(address);
+        public void ClearPage(ulong address) => Cleared.Add(address);
     }
 }

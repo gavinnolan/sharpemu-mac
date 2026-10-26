@@ -122,6 +122,7 @@ public sealed class PageGuard : IDisposable
 
     private readonly IGuestAddressSpace _addressSpace;
     private readonly IPageWatchObserver? _watchObserver;
+    private readonly IProtectionBatchSpace? _batchSpace;
     private readonly PageBlock?[] _blocks = new PageBlock?[TrackerLayout.BlockCount];
     private readonly object _blockGate = new();
 
@@ -135,6 +136,7 @@ public sealed class PageGuard : IDisposable
 
         _addressSpace = addressSpace;
         _watchObserver = addressSpace as IPageWatchObserver;
+        _batchSpace = addressSpace as IProtectionBatchSpace;
     }
 
     public GuestPermissionLedger Permissions { get; } = new();
@@ -180,25 +182,57 @@ public sealed class PageGuard : IDisposable
     public void AddWatch(ulong address, ulong size, bool blockReads)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchAdd);
-        UpdatePages(address, size, true, blockReads);
+        _batchSpace?.BeginProtectionBatch();
+        try
+        {
+            UpdatePages(address, size, true, blockReads);
+        }
+        finally
+        {
+            _batchSpace?.EndProtectionBatch();
+        }
     }
 
     public void RemoveWatch(ulong address, ulong size, bool blockReads)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchRemove);
-        UpdatePages(address, size, false, blockReads);
+        _batchSpace?.BeginProtectionBatch();
+        try
+        {
+            UpdatePages(address, size, false, blockReads);
+        }
+        finally
+        {
+            _batchSpace?.EndProtectionBatch();
+        }
     }
 
     public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchAdd);
-        UpdateMask(blockBase, pages, true, blockReads);
+        _batchSpace?.BeginProtectionBatch();
+        try
+        {
+            UpdateMask(blockBase, pages, true, blockReads);
+        }
+        finally
+        {
+            _batchSpace?.EndProtectionBatch();
+        }
     }
 
     public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchRemove);
-        UpdateMask(blockBase, pages, false, blockReads);
+        _batchSpace?.BeginProtectionBatch();
+        try
+        {
+            UpdateMask(blockBase, pages, false, blockReads);
+        }
+        finally
+        {
+            _batchSpace?.EndProtectionBatch();
+        }
     }
 
     // Watcher state only; the guest's own permissions are the ledger's.

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Versioning;
 using SharpEmu.GpuRemote;
@@ -110,6 +111,7 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
             return false;
         }
 
+        SplitCrossingStats.Count(SplitCrossing.ManagedWriteInterest);
         if (RemoteGpuQueueRelay.CurrentBracket != 0 || SplitGpuSession.OnReverseServerThread)
         {
             return SendLanded(address, size);
@@ -119,8 +121,16 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
         // the worker as the write is published, so the GPU caches need nothing more from the ring
         // here, and a managed write does not wait for a ring thread held by the shader prewarm.
         var request = new CpuWriteRequest { Barrier = 0, Address = address, Size = size };
-        return _session.Call(GpuRemoteSyncOpcode.CpuWrite, request, out HandledResponse response, SplitGpuSession.CallNanoseconds) &&
+        var start = SplitCrossingStats.Enabled ? Stopwatch.GetTimestamp() : 0;
+        var handled = _session.Call(GpuRemoteSyncOpcode.CpuWrite, request, out HandledResponse response, SplitGpuSession.CallNanoseconds) &&
             response.Handled != 0;
+        if (SplitCrossingStats.Enabled)
+        {
+            SplitCrossingStats.Count(SplitCrossing.ManagedWriteCall);
+            SplitCrossingStats.Time(SplitCrossing.ManagedWriteCall, Stopwatch.GetTimestamp() - start);
+        }
+
+        return handled;
     }
 
     public bool MarkCpuWriteLanded(ulong address, ulong size) =>

@@ -38,6 +38,12 @@ public enum SplitCrossing
     FlipComplete,
     // Guest state the GPU side reads (AGC shader headers).
     ShaderHeaderLookup,
+    // Split only. Managed writes under a page the GPU side watches (the interest summary says so),
+    // the blocking CpuWrite calls those made (timed), and the waits for the guest process to
+    // confirm a watch's protection (timed).
+    ManagedWriteInterest,
+    ManagedWriteCall,
+    ProtectWait,
 }
 
 public static class SplitCrossingStats
@@ -50,6 +56,8 @@ public static class SplitCrossingStats
     private static readonly int KindCount = Enum.GetValues<SplitCrossing>().Length;
     private static readonly long[] Counts = new long[KindCount];
     private static readonly long[] Reported = new long[KindCount];
+    private static readonly long[] TimeTicks = new long[KindCount];
+    private static readonly long[] ReportedTimeTicks = new long[KindCount];
     private static long _storeFaultTicks;
     private static long _slowStoreFaults;
     private static long _maxStoreFaultTicks;
@@ -68,6 +76,15 @@ public static class SplitCrossingStats
 
         Interlocked.Increment(ref Counts[(int)kind]);
         EnsureTimer();
+    }
+
+    /// <summary>Adds the duration of one counted crossing of <paramref name="kind"/>; reported as its average.</summary>
+    public static void Time(SplitCrossing kind, long ticks)
+    {
+        if (Enabled)
+        {
+            Interlocked.Add(ref TimeTicks[(int)kind], ticks);
+        }
     }
 
     /// <summary>Records how long the GPU-side stores held one fault.</summary>
@@ -116,6 +133,14 @@ public static class SplitCrossingStats
             var delta = total - Reported[kind];
             Reported[kind] = total;
             line.Append(CultureInfo.InvariantCulture, $" {(SplitCrossing)kind}={delta / seconds:F0}/s");
+            var timed = Interlocked.Read(ref TimeTicks[kind]);
+            var timedDelta = timed - ReportedTimeTicks[kind];
+            ReportedTimeTicks[kind] = timed;
+            if (timed != 0)
+            {
+                line.Append(CultureInfo.InvariantCulture,
+                    $"(avg {timedDelta * 1e6 / Stopwatch.Frequency / Math.Max(delta, 1):F1}us)");
+            }
         }
 
         var faults = Math.Max(Interlocked.Read(ref Reported[(int)SplitCrossing.FaultToStores]), 1);
