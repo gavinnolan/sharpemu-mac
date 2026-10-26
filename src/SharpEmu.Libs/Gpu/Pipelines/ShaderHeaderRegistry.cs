@@ -150,42 +150,38 @@ public sealed class ShaderHeaderRegistry
         // Every draw resolves its shaders again, so an unchanged header hands back the record
         // it made last time instead of a new one. The header is still read and compared above
         // and here, so a guest that rewrites it gets a fresh record as before.
-        RegisteredShader created;
-        lock (_recent)
+        // The map is concurrent, so the hit, which is every draw but the first of a shader, takes no lock.
+        if (_recent.TryGetValue(codeAddress, out var recent) &&
+            recent.HeaderAddress == headerAddress && recent.CodeSizeBytes == codeSize &&
+            recent.ScratchDwords == scratchDwords && recent.UserDataAddress == userDataAddress &&
+            recent.InputSemanticsAddress == inputSemanticsAddress && recent.InputSemanticsCount == inputSemanticsCount &&
+            recent.ContinuationAddress == continuationAddress && recent.ContinuationSizeBytes == continuationSize &&
+            recent.ContinuationScratchDwords == continuationScratchDwords)
         {
-            if (_recent.TryGetValue(codeAddress, out var recent) &&
-                recent.HeaderAddress == headerAddress && recent.CodeSizeBytes == codeSize &&
-                recent.ScratchDwords == scratchDwords && recent.UserDataAddress == userDataAddress &&
-                recent.InputSemanticsAddress == inputSemanticsAddress && recent.InputSemanticsCount == inputSemanticsCount &&
-                recent.ContinuationAddress == continuationAddress && recent.ContinuationSizeBytes == continuationSize &&
-                recent.ContinuationScratchDwords == continuationScratchDwords)
-            {
-                return recent;
-            }
-
-            var registered = new RegisteredShader(
-                codeAddress,
-                headerAddress,
-                codeSize,
-                scratchDwords,
-                userDataAddress,
-                inputSemanticsAddress,
-                inputSemanticsCount,
-                continuationAddress,
-                continuationSize)
-            {
-                ContinuationScratchDwords = continuationScratchDwords,
-            };
-
-            // Bounded: dropping the records only costs rebuilding them.
-            if (_recent.Count >= MaxRecent && !_recent.ContainsKey(codeAddress))
-            {
-                _recent.Clear();
-            }
-
-            _recent[codeAddress] = registered;
-            created = registered;
+            return recent;
         }
+
+        var created = new RegisteredShader(
+            codeAddress,
+            headerAddress,
+            codeSize,
+            scratchDwords,
+            userDataAddress,
+            inputSemanticsAddress,
+            inputSemanticsCount,
+            continuationAddress,
+            continuationSize)
+        {
+            ContinuationScratchDwords = continuationScratchDwords,
+        };
+
+        // Bounded: dropping the records only costs rebuilding them.
+        if (_recent.Count >= MaxRecent && !_recent.ContainsKey(codeAddress))
+        {
+            _recent.Clear();
+        }
+
+        _recent[codeAddress] = created;
 
         CheckSplitVisibility(created);
         return created;
@@ -208,7 +204,7 @@ public sealed class ShaderHeaderRegistry
     }
 
     private const int MaxRecent = 4096;
-    private readonly Dictionary<ulong, RegisteredShader> _recent = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, RegisteredShader> _recent = new();
 
     // A bounded, nonfatal description for diagnostics of draws that remain rejected.
     internal bool TryGetDiagnosticCodeRanges(ulong address, out (ulong Address, uint SizeBytes)[] ranges)

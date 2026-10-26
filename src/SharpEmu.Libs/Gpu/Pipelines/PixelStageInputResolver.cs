@@ -57,6 +57,43 @@ public static class PixelStageInputResolver
         return registers;
     }
 
+    // The semantics a pixel program's header declares are static, but the guest owns the table, so every
+    // draw still reads it. One read for all of them: this was one guest read per input (up to 32), each
+    // taking the memory read lock, to decode a few words.
+    private static uint CustomInterpolationMask(CpuContext context, RegisteredShader shader, uint semanticCount)
+    {
+        if (semanticCount == 0)
+        {
+            return 0;
+        }
+
+        Span<uint> words = stackalloc uint[PixelInputInfo.InterpolatorCount];
+        words = words[..(int)semanticCount];
+        if (!context.Memory.TryRead(shader.InputSemanticsAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words)))
+        {
+            // A word is unmapped: read them one at a time to name it.
+            for (var index = 0u; index < semanticCount; index++)
+            {
+                if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out words[(int)index]))
+                {
+                    throw GpuFatal.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
+                }
+            }
+        }
+
+        var customMask = 0u;
+        for (var index = 0; index < words.Length; index++)
+        {
+            var semantic = new ShaderInputSemantic(words[index]);
+            if (semantic.IsCustom && semantic.IsHalfFloat == 0)
+            {
+                customMask |= 1u << index;
+            }
+        }
+
+        return customMask;
+    }
+
     public static PixelInputInfo Resolve(
         CpuContext context,
         RegisteredShader shader,
@@ -69,21 +106,8 @@ public static class PixelStageInputResolver
         PixelInputArrays? reuse = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
-        var customMask = 0u;
         var semanticCount = Math.Min(Math.Min(shader.InputSemanticsCount, inputCount), (uint)PixelInputInfo.InterpolatorCount);
-        for (var index = 0u; index < semanticCount; index++)
-        {
-            if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out var word))
-            {
-                throw GpuFatal.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
-            }
-
-            var semantic = new ShaderInputSemantic(word);
-            if (semantic.IsCustom && semantic.IsHalfFloat == 0)
-            {
-                customMask |= 1u << (int)index;
-            }
-        }
+        var customMask = CustomInterpolationMask(context, shader, semanticCount);
 
         Span<uint> interpolators = stackalloc uint[PixelInputInfo.InterpolatorCount];
         for (var index = 0u; index < inputCount; index++)
