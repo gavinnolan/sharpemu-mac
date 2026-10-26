@@ -212,15 +212,20 @@ public sealed class FaultThreadImportTraceTests
         private const BindingFlags Static = BindingFlags.Static | BindingFlags.NonPublic;
         private static readonly Type BackendType = typeof(DirectExecutionBackend);
         private readonly Dictionary<FieldInfo, object?> saved = new();
+        private readonly (object? Owner, long Next, long BlockEnd) savedCounters;
         internal readonly DirectExecutionBackend Backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(BackendType);
         internal readonly TrackedCpuMemory Memory = new(new RefusingMemory());
         internal DispatchMetadataFixture()
         {
-            foreach (var name in new[] { "_activeExecutionBackend", "_activeCpuContext", "_activeGuestThreadState", "_importCounterOwner", "_nextImportDispatchIndex", "_importDispatchBlockEnd", "_faultThreadImports" })
+            foreach (var name in new[] { "_activeExecutionBackend", "_activeCpuContext", "_activeGuestThreadState", "_faultThreadImports" })
             {
                 var field = BackendType.GetField(name, Static)!; saved.Add(field, field.GetValue(null));
                 field.SetValue(null, field.FieldType == typeof(long) ? (object)0L : null);
             }
+            // The import counters moved from DirectExecutionBackend statics to the per-thread state.
+            var state = GuestThreadExecution.State;
+            savedCounters = (state.ImportCounterOwner, state.NextImportDispatchIndex, state.ImportDispatchBlockEnd);
+            state.ImportCounterOwner = null; state.NextImportDispatchIndex = 0; state.ImportDispatchBlockEnd = 0;
             Context(new CpuContext(Memory, Generation.Gen5)); Export(_ => 0);
         }
         internal void Context(CpuContext? context) => BackendType.GetField("_cpuContext", Instance)!.SetValue(Backend, context);
@@ -242,7 +247,12 @@ public sealed class FaultThreadImportTraceTests
         internal ulong InvokeCore(nint pointer, int importIndex = 0) => (ulong)BackendType.GetMethod("DispatchImportWithFaultThreadDiagnostics", Instance)!.Invoke(Backend, [importIndex, pointer])!;
         internal FaultThreadImportEntry[] Snapshot() => BackendType.GetField("_faultThreadImports", Static)!.GetValue(null) is FaultThreadImportTrace trace
             ? trace.Snapshot(Backend, Environment.CurrentManagedThreadId, GuestThreadExecution.CurrentGuestThreadHandle) : [];
-        public void Dispose() { foreach (var field in saved) field.Key.SetValue(null, field.Value); }
+        public void Dispose()
+        {
+            foreach (var field in saved) field.Key.SetValue(null, field.Value);
+            var state = GuestThreadExecution.State;
+            state.ImportCounterOwner = savedCounters.Owner; state.NextImportDispatchIndex = savedCounters.Next; state.ImportDispatchBlockEnd = savedCounters.BlockEnd;
+        }
     }
     private sealed class RefusingMemory : ICpuMemory
     {

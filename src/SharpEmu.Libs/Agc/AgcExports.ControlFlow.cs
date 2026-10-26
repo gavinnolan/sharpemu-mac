@@ -255,8 +255,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.cb_branch buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
-            $"target=0x{target:X16} dwords={targetDwords}");
+            $"agc.cb_branch buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} target=0x{target:X16} dwords={targetDwords}");
         return ReturnPointer(ctx, commandAddress);
     }
 

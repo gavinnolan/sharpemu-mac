@@ -146,6 +146,34 @@ public static unsafe class GuestFastPath
         *(ulong*)(block + BlockSelfHandleOffset) = guestThreadHandle;
     }
 
+    // SHARPEMU_HLE_FAST_SELF_HOST=0 keeps scePthreadSelf on the managed export for host threads
+    // (the entry thread among them) the guest scheduler does not own.
+    private static readonly bool HostSelfEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_HLE_FAST_SELF_HOST"), "0", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Lets the native pthread_self stub answer on a host thread with no guest thread bound - the
+    /// entry (main) thread - once the managed export has answered there and registered the thread's
+    /// CPU context with the scheduler. Until then the slot stays zero, so the first call on such a
+    /// thread still reaches the managed export; a guest thread binding over the thread replaces the
+    /// handle and unbinding clears it, which sends the next call back through the export.
+    /// </summary>
+    public static void PublishHostSelf(ulong hostThreadHandle)
+    {
+        if (!_enabled || !HostSelfEnabled || hostThreadHandle == 0)
+        {
+            return;
+        }
+
+        var block = _block;
+        if (block == 0 || *(ulong*)(block + BlockSelfHandleOffset) != 0)
+        {
+            return;
+        }
+
+        *(ulong*)(block + BlockSelfHandleOffset) = hostThreadHandle;
+    }
+
     /// <summary>
     /// Records the calling host thread's own pthread handle - the one
     /// KernelPthreadState reports when no guest thread is bound - so

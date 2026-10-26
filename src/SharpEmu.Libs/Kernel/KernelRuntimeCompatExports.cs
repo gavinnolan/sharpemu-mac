@@ -61,6 +61,9 @@ public static class KernelRuntimeCompatExports
     private const uint PageExecuteReadWrite = 0x40;
     private static readonly object _stateGate = new();
     private static readonly long _processStartCounter = Stopwatch.GetTimestamp();
+
+    /// <summary>The Stopwatch reading the process-relative clocks count from (native clock stubs subtract it).</summary>
+    public static long ProcessStartCounter => _processStartCounter;
     private static readonly RdtscDelegate? _rdtscReader = CreateRdtscReader();
     private static readonly ulong _kernelTscFrequency = ResolveKernelTscFrequency();
     private static readonly ulong _stackChkGuardValue = 0xC0DEC0DECAFEBA00UL;

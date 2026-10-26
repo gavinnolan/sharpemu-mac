@@ -28,10 +28,19 @@ public static partial class KernelMemoryCompatExports
     internal const FileShare GuestFileShare = FileShare.ReadWrite | FileShare.Delete;
     private const int WideCharSize = sizeof(ushort);
     private const int MemsetChunkSize = 16 * 1024;
-    // Clears at least this large fill the guest mapping in place; smaller ones stay on the staged path.
-    private const ulong MemsetInPlaceThreshold = 4096;
+    // An in-place clear is handed to the memory in pieces of at most this size.
     private const int MemsetInPlaceChunkSize = 256 * 1024 * 1024;
     private static readonly byte[] _zeroChunk = new byte[MemsetChunkSize];
+    // Clears at least this large fill the guest mapping in place; smaller ones stay on the staged path.
+    private const ulong InPlaceMemsetThreshold = 64 * 1024;
+    // SHARPEMU_MEMSET_INPLACE=0 sends every memset through the staged chunk loop again.
+    private static readonly bool InPlaceMemsetEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MEMSET_INPLACE"), "0", StringComparison.Ordinal);
+    private static readonly GuestSpanFill<byte> FillWithByte = static (value, destination) =>
+    {
+        destination.Fill(value);
+        return destination.Length;
+    };
     private const int O_WRONLY = 0x1;
     private const int O_RDWR = 0x2;
     private const int O_APPEND = 0x8;
@@ -462,14 +471,14 @@ public static partial class KernelMemoryCompatExports
         // the speed of a guest-side fill. A range this memory cannot hand out in place, or a
         // watched one, declines and the staged loop below writes the rest.
         var filledInPlace = 0UL;
-        if (length >= MemsetInPlaceThreshold)
+        if (length >= InPlaceMemsetThreshold && InPlaceMemsetEnabled)
         {
             while (filledInPlace < length)
             {
                 var take = (int)Math.Min(length - filledInPlace, MemsetInPlaceChunkSize);
                 if (!ctx.Memory.TryFillInPlace(
                         destination + filledInPlace, take, value,
-                        static (fillValue, span) => { span.Fill(fillValue); return span.Length; },
+                        FillWithByte,
                         out var filled) ||
                     filled <= 0)
                 {

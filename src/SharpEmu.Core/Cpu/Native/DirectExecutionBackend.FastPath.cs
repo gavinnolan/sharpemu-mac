@@ -32,7 +32,35 @@ public sealed unsafe partial class DirectExecutionBackend
 		/// <c>xor eax,eax; ret</c>, so the guest never crosses into managed code.
 		/// </summary>
 		ConstantZero,
+
+		/// <summary>clock_gettime / sceKernelClockGettime for the realtime and monotonic clock ids.</summary>
+		ClockGettime,
+
+		/// <summary>gettimeofday(tv, NULL).</summary>
+		GetTimeOfDay,
+
+		/// <summary>sceKernelGetProcessTime: microseconds since process start.</summary>
+		ProcessTimeMicroseconds,
 	}
+
+	// clock_gettime / sceKernelClockGettime / gettimeofday / sceKernelGetProcessTime.
+	private const string ClockGettimeNid = "lLMT9vJAck0";
+	private const string KernelClockGettimeNid = "QBi7HCK03hw";
+	private const string GettimeofdayNid = "n88vx3C5nW8";
+	private const string KernelGetProcessTimeNid = "4J2sUJmuHZQ";
+
+	/// <summary>
+	/// What a clock stub calls and subtracts: the host's monotonic counter (the same
+	/// <c>mach_absolute_time</c> the managed Stopwatch reads, which makes the stub's answer
+	/// exactly the managed export's), the process start in that counter, and the host realtime clock.
+	/// </summary>
+	internal readonly record struct ClockStubTargets(nint MachAbsoluteTime, long ProcessStartCounter, nint ClockGettime);
+
+	// SHARPEMU_HLE_FAST_CLOCK=0 keeps the clock reads on the managed exports.
+	private static readonly bool ClockStubsEnabled =
+		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_HLE_FAST_CLOCK"), "0", StringComparison.Ordinal);
+
+	private ClockStubTargets? _clockStubTargets;
 
 	// scePthreadSelf / pthread_self.
 	private const string PthreadSelfNid = "aI+OeCz8xrQ";
@@ -122,6 +150,8 @@ public sealed unsafe partial class DirectExecutionBackend
 			!_logAllImports &&
 			string.IsNullOrEmpty(_importFilter);
 
+		_clockStubTargets = ResolveClockStubTargets();
+
 		// Emission needs a TLS read the platform can express as inline code
 		// (the Darwin pthread gs-indexed key array). Platforms whose TLS read is
 		// a real call keep the managed gateway.
@@ -160,12 +190,42 @@ public sealed unsafe partial class DirectExecutionBackend
 		_guestFastPathEnabled = true;
 	}
 
+	private ClockStubTargets? ResolveClockStubTargets()
+	{
+		// The stubs read the host clocks without entering managed code, so anything that must see
+		// every import call - and the import-loop guard, which time reads reset - rules them out.
+		if (!ClockStubsEnabled ||
+			RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
+			!_nativeConstantThunksAllowed ||
+			!NativeImportThunksEnabled ||
+			GuestWriteWatch.Armed ||
+			string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"), "0", StringComparison.Ordinal) ||
+			!SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.HostCounterMatchesProcessTimeFrequency)
+		{
+			return null;
+		}
+
+		// The platform names the routines (and vouches that its counter ticks in nanoseconds, as
+		// Stopwatch does), so no OS-specific code lives here.
+		if (!ExecutionPlatform.TryGetHostClockEntryPoints(out var counter, out var clockGettime) ||
+			counter == 0 ||
+			clockGettime == 0)
+		{
+			return null;
+		}
+
+		return new ClockStubTargets(counter, SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.ProcessStartCounter, clockGettime);
+	}
+
 	internal static GuestFastPathStub ClassifyGuestFastPathStub(string nid) => nid switch
 	{
 		PthreadSelfNid or PosixPthreadSelfNid => GuestFastPathStub.PthreadSelf,
 		PthreadGetspecificNid or PosixPthreadGetspecificNid => GuestFastPathStub.PthreadGetspecific,
 		MemcpyNid or MemmoveNid => GuestFastPathStub.MemoryCopy,
 		MemsetNid => GuestFastPathStub.MemorySet,
+		ClockGettimeNid or KernelClockGettimeNid => GuestFastPathStub.ClockGettime,
+		GettimeofdayNid => GuestFastPathStub.GetTimeOfDay,
+		KernelGetProcessTimeNid => GuestFastPathStub.ProcessTimeMicroseconds,
 		_ => IsConstantZeroImport(nid) ? GuestFastPathStub.ConstantZero : GuestFastPathStub.None,
 	};
 
@@ -201,13 +261,23 @@ public sealed unsafe partial class DirectExecutionBackend
 				return false;
 			}
 		}
+		else if (kind is GuestFastPathStub.ClockGettime or GuestFastPathStub.GetTimeOfDay or GuestFastPathStub.ProcessTimeMicroseconds)
+		{
+			// Needs neither the per-thread block nor the emitted TLS read.
+			if (_clockStubTargets is null)
+			{
+				return false;
+			}
+		}
 		else if (!_guestFastPathEnabled)
 		{
 			return false;
 		}
 
-		var code = EmitGuestFastPathStub(kind, _fastPathBlockTlsIndex, fallbackTrampoline);
-		const uint stubAllocationSize = 128u;
+		var code = kind is GuestFastPathStub.ClockGettime or GuestFastPathStub.GetTimeOfDay or GuestFastPathStub.ProcessTimeMicroseconds
+			? EmitGuestClockStub(kind, _clockStubTargets!.Value, fallbackTrampoline)
+			: EmitGuestFastPathStub(kind, _fastPathBlockTlsIndex, fallbackTrampoline);
+		const uint stubAllocationSize = 192u;
 		if (code.Count > stubAllocationSize)
 		{
 			return false;
@@ -359,6 +429,146 @@ public sealed unsafe partial class DirectExecutionBackend
 			code[fixup] = (byte)delta;
 		}
 
+		return code;
+	}
+
+	/// <summary>
+	/// Emits a clock stub. Each one checks, before touching anything, that the call is one it can
+	/// answer exactly as the managed export does, and jumps to the import's trampoline otherwise.
+	/// The answer is computed from the host clocks and written straight to the guest's timespec or
+	/// timeval; RAX is 0 (success) and only caller-saved registers and the flags change.
+	/// </summary>
+	internal static List<byte> EmitGuestClockStub(GuestFastPathStub kind, ClockStubTargets targets, nint fallbackTrampoline)
+	{
+		var code = new List<byte>(160);
+		var slowPathFixups = new List<int>();
+		void Emit(params byte[] bytes) => code.AddRange(bytes);
+		void EmitImm64(long value) => code.AddRange(BitConverter.GetBytes(value));
+		// Conditional near branch (0F 8x rel32) to a label patched once its offset is known.
+		void EmitBranch(byte shortOpcode, List<int> fixups)
+		{
+			Emit(0x0F, (byte)(shortOpcode + 0x10), 0, 0, 0, 0);
+			fixups.Add(code.Count - 4);
+		}
+
+		void Patch(List<int> fixups)
+		{
+			foreach (var fixup in fixups)
+			{
+				var delta = BitConverter.GetBytes(code.Count - (fixup + 4));
+				for (var i = 0; i < 4; i++)
+				{
+					code[fixup + i] = delta[i];
+				}
+			}
+		}
+
+		// call mach_absolute_time, leaving the nanoseconds since process start in RAX.
+		void EmitElapsedNanoseconds()
+		{
+			Emit(0x48, 0xB8); EmitImm64(targets.MachAbsoluteTime);           // mov rax, imm64
+			Emit(0xFF, 0xD0);                                                // call rax
+			Emit(0x48, 0xB9); EmitImm64(targets.ProcessStartCounter);        // mov rcx, imm64
+			Emit(0x48, 0x29, 0xC8);                                          // sub rax, rcx
+		}
+
+		// call clock_gettime(CLOCK_REALTIME, rsp) into a 16-byte scratch the caller already reserved.
+		void EmitRealtimeIntoStack()
+		{
+			Emit(0x31, 0xFF);                                                // xor edi, edi
+			Emit(0x48, 0x89, 0xE6);                                          // mov rsi, rsp
+			Emit(0x48, 0xB8); EmitImm64(targets.ClockGettime);               // mov rax, imm64
+			Emit(0xFF, 0xD0);                                                // call rax
+		}
+
+		var realtimeFixups = new List<int>();
+		switch (kind)
+		{
+			case GuestFastPathStub.ClockGettime:
+			{
+				// rdi = clock id, rsi = timespec*. A null pointer, an id outside the realtime and
+				// monotonic families, or one with high bits set is the managed export's business.
+				Emit(0x48, 0x85, 0xF6);                                      // test rsi, rsi
+				EmitBranch(0x74, slowPathFixups);                            // jz slow
+				Emit(0x48, 0x83, 0xFF, 0x0C);                                // cmp rdi, 12
+				EmitBranch(0x77, slowPathFixups);                            // ja slow
+				Emit(0xB8, 0xB0, 0x19, 0x00, 0x00);                          // mov eax, 0x19B0 (monotonic ids 4 5 7 8 11 12)
+				Emit(0x0F, 0xA3, 0xF8);                                      // bt eax, edi
+				EmitBranch(0x73, realtimeFixups);                            // jnc not-monotonic
+				Emit(0x56);                                                  // push rsi (keeps the stack 16-aligned for the call)
+				EmitElapsedNanoseconds();
+				Emit(0x31, 0xD2);                                            // xor edx, edx
+				Emit(0xB9, 0x00, 0xCA, 0x9A, 0x3B);                          // mov ecx, 1000000000
+				Emit(0x48, 0xF7, 0xF1);                                      // div rcx -> rax = seconds, rdx = nanoseconds
+				Emit(0x5E);                                                  // pop rsi
+				Emit(0x48, 0x89, 0x06);                                      // mov [rsi], rax
+				Emit(0x48, 0x89, 0x56, 0x08);                                // mov [rsi+8], rdx
+				Emit(0x31, 0xC0);                                            // xor eax, eax
+				Emit(0xC3);                                                  // ret
+				Patch(realtimeFixups);
+				Emit(0xB8, 0x01, 0x06, 0x00, 0x00);                          // mov eax, 0x601 (realtime ids 0 9 10)
+				Emit(0x0F, 0xA3, 0xF8);                                      // bt eax, edi
+				EmitBranch(0x73, slowPathFixups);                            // jnc slow
+				Emit(0x56);                                                  // push rsi
+				Emit(0x48, 0x83, 0xEC, 0x10);                                // sub rsp, 16
+				EmitRealtimeIntoStack();
+				Emit(0x48, 0x8B, 0x04, 0x24);                                // mov rax, [rsp]
+				Emit(0x48, 0x8B, 0x54, 0x24, 0x08);                          // mov rdx, [rsp+8]
+				Emit(0x48, 0x83, 0xC4, 0x10);                                // add rsp, 16
+				Emit(0x5E);                                                  // pop rsi
+				Emit(0x48, 0x89, 0x06);                                      // mov [rsi], rax
+				Emit(0x48, 0x89, 0x56, 0x08);                                // mov [rsi+8], rdx
+				Emit(0x31, 0xC0);                                            // xor eax, eax
+				Emit(0xC3);                                                  // ret
+				break;
+			}
+
+			case GuestFastPathStub.GetTimeOfDay:
+			{
+				// rdi = timeval*, rsi = timezone*. Only the common (tv, NULL) call is answered here.
+				Emit(0x48, 0x85, 0xFF);                                      // test rdi, rdi
+				EmitBranch(0x74, slowPathFixups);                            // jz slow
+				Emit(0x48, 0x85, 0xF6);                                      // test rsi, rsi
+				EmitBranch(0x75, slowPathFixups);                            // jnz slow
+				Emit(0x57);                                                  // push rdi
+				Emit(0x48, 0x83, 0xEC, 0x10);                                // sub rsp, 16
+				EmitRealtimeIntoStack();
+				Emit(0x48, 0x8B, 0x44, 0x24, 0x08);                          // mov rax, [rsp+8] (nanoseconds)
+				Emit(0x31, 0xD2);                                            // xor edx, edx
+				Emit(0xB9, 0xE8, 0x03, 0x00, 0x00);                          // mov ecx, 1000
+				Emit(0x48, 0xF7, 0xF1);                                      // div rcx -> rax = microseconds
+				Emit(0x48, 0x89, 0xC2);                                      // mov rdx, rax
+				Emit(0x48, 0x8B, 0x04, 0x24);                                // mov rax, [rsp] (seconds)
+				Emit(0x48, 0x83, 0xC4, 0x10);                                // add rsp, 16
+				Emit(0x5F);                                                  // pop rdi
+				Emit(0x48, 0x89, 0x07);                                      // mov [rdi], rax
+				Emit(0x48, 0x89, 0x57, 0x08);                                // mov [rdi+8], rdx
+				Emit(0x31, 0xC0);                                            // xor eax, eax
+				Emit(0xC3);                                                  // ret
+				break;
+			}
+
+			case GuestFastPathStub.ProcessTimeMicroseconds:
+			{
+				Emit(0x48, 0x83, 0xEC, 0x08);                                // sub rsp, 8 (16-align for the call)
+				EmitElapsedNanoseconds();
+				Emit(0x31, 0xD2);                                            // xor edx, edx
+				Emit(0xB9, 0xE8, 0x03, 0x00, 0x00);                          // mov ecx, 1000
+				Emit(0x48, 0xF7, 0xF1);                                      // div rcx
+				Emit(0x48, 0x83, 0xC4, 0x08);                                // add rsp, 8
+				Emit(0xC3);                                                  // ret
+				// Nothing to decline: the stub answers every call, but the fallback keeps the layout uniform.
+				break;
+			}
+
+			default:
+				throw new ArgumentOutOfRangeException(nameof(kind), kind, "Not a clock stub kind.");
+		}
+
+		Patch(slowPathFixups);
+		// jmp qword [rip+0] with the absolute trampoline address after it.
+		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
+		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
 		return code;
 	}
 
