@@ -101,6 +101,10 @@ public sealed partial class ResourceMaterializationCache
         private readonly Dictionary<int, int> _confirmed = new();
         private const int RecentCapacity = 512;
         private readonly Dictionary<ulong, Entry> _recent = new();
+        // The latest entry per structure and content print (EntryPrint): the same object drawn
+        // before, which _recent misses when other objects are drawn in between.
+        private readonly Dictionary<ulong, Entry> _recentByPrint = new();
+        private long _recentByPrintBytes;
 
         // The estimated bytes the recent entries hold (Entry.EstimatedBytes).
         public long RecentBytes { get; private set; }
@@ -108,7 +112,48 @@ public sealed partial class ResourceMaterializationCache
         public void ForgetRecent()
         {
             _recent.Clear();
+            _recentByPrint.Clear();
+            _recentByPrintBytes = 0;
             RecentBytes = 0;
+        }
+
+        // Keeps built as the latest entry of its structure and print; the one it replaces, if any.
+        private Entry? RememberByPrint(ulong structure, Entry built)
+        {
+            if (!_hasPrint || EntryPrint(built) is not { } print)
+                return null;
+            var key = MixPrint(structure, print);
+            _recentByPrint.TryGetValue(key, out var previous);
+            if (_recentByPrint.Count >= RecentCapacity)
+            {
+                _recentByPrint.Clear();
+                RecentBytes -= _recentByPrintBytes;
+                _recentByPrintBytes = 0;
+            }
+            else if (previous is not null)
+            {
+                RecentBytes -= previous.EstimatedBytes;
+                _recentByPrintBytes -= previous.EstimatedBytes;
+            }
+
+            _recentByPrint[key] = built;
+            RecentBytes += built.EstimatedBytes;
+            _recentByPrintBytes += built.EstimatedBytes;
+            return previous;
+        }
+
+        // Some candidate word the entries read differs: they are drawn through other pointers.
+        private bool CandidateWordsDiffer(Entry left, Entry right)
+        {
+            foreach (var candidate in _candidates)
+            {
+                var index = candidate.UserData;
+                if (index < left.UserData.Length && index < right.UserData.Length && IsUsed(left.UsedUserData, index) &&
+                    left.UserData[index] != right.UserData[index])
+                    return true;
+            }
+
+            return false;
         }
 
         private ulong StructureOf(Entry entry)
@@ -148,6 +193,8 @@ public sealed partial class ResourceMaterializationCache
 
             _candidates = candidates.ToArray();
             _candidateMask = MaskOf(_candidates.Select(candidate => candidate.UserData));
+            _printOffsets = PrintOffsetsOf(plan);
+            _hasPrint = _printOffsets.Any(offsets => offsets.Length != 0);
             var memoryBases = MemoryBaseCandidates(plan);
             MemoryBases = memoryBases.Select(candidate => candidate.Buffer).ToArray();
             _memoryState = new int[plan.Info.Buffers.Count];
@@ -427,10 +474,7 @@ public sealed partial class ResourceMaterializationCache
                     continue;
                 }
 
-                var immediate = (long)plan.Memory[value.MemoryIndex].Offset;
-                var relative = value.Kind == ScalarValueKind.ScalarBufferWord
-                    ? (immediate + (long)(uint)offset.Payload) & ~3L
-                    : (immediate & ~3L) + (long)((uint)offset.Payload & ~3u);
+                var relative = RelativeOffset(plan, value);
                 var candidate = new Candidate(index, -1, highIndex ?? -1, highIndex is null ? (uint)high.Payload : 0, relative, relative);
                 if (found.TryGetValue(index, out var existing))
                 {
@@ -451,6 +495,147 @@ public sealed partial class ResourceMaterializationCache
             }
 
             return found.Values.Where(candidate => !disqualified.Contains(candidate.UserData));
+        }
+
+        // The byte offset from its handle's base of the dword a raw scalar load reads.
+        private static long RelativeOffset(ShaderResourcePlan plan, ScalarValue value)
+        {
+            var immediate = (long)plan.Memory[value.MemoryIndex].Offset;
+            var offset = (uint)value.Operands[1].Payload;
+            return value.Kind == ScalarValueKind.ScalarBufferWord
+                ? (immediate + (long)offset) & ~3L
+                : (immediate & ~3L) + (long)(offset & ~3u);
+        }
+
+        // The content print. A raw candidate is a pointer to a descriptor table. Once it is rebased the
+        // key leaves it out, so every object a shader draws through such a pointer would share one key
+        // and the few variants chained behind it; and before it is, an object whose table moves every
+        // frame is under a new key every frame. The print puts back what tells objects apart: the
+        // descriptor dwords the plan loads through the pointer, read where it points now. It only
+        // chooses the key: Entry.Matches and Validate still decide a hit on the entry it finds.
+        //
+        // Per candidate, the byte offsets from its base of up to PrintWords such dwords, spread over
+        // the ones within PrintSpanBytes of the first so one read covers them; empty for a buffer
+        // candidate and for a pointer the plan loads no descriptor dword through. A buffer's base dword
+        // is left out: a memory-loaded base moves on every draw and TryRebaseRefresh patches it.
+        private readonly long[][] _printOffsets;
+        private readonly bool _hasPrint;
+        private const int PrintWords = 32;
+        private const int PrintSpanBytes = 4096;
+        private const ulong PrintSeed = 0x243F_6A88_85A3_08D3UL;
+        // A word that cannot be found or read: outside the range of a word.
+        private const ulong MissingWord = 1UL << 32;
+
+        private long[][] PrintOffsetsOf(ShaderResourcePlan plan)
+        {
+            var offsets = new long[_candidates.Length][];
+            offsets.AsSpan().Fill([]);
+            if (!ContentKey.Enabled)
+                return offsets;
+            var bufferSources = new HashSet<int>();
+            foreach (var buffer in plan.Info.Buffers)
+                bufferSources.Add((int)buffer.Source);
+            var found = new SortedSet<long>?[_candidates.Length];
+            for (var source = 0; source < plan.DescriptorSources.Count; source++)
+            {
+                var dwords = plan.DescriptorSources[source].Dwords;
+                for (var dword = bufferSources.Contains(source) ? 1 : 0; dword < dwords.Length; dword++)
+                {
+                    // A descriptor dword the plan flattened into its table is that slot's load.
+                    var value = dwords[dword];
+                    if (value.Kind == ScalarValueKind.ResourceTableWord && value.Payload < (ulong)plan.TableReads.Count)
+                        value = plan.TableReads[(int)value.Payload].Value;
+                    if (value.Kind is not (ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord) ||
+                        value.Operands.Length < 2 || value.Operands[0].Operands.Length < 2 ||
+                        value.Operands[1].Kind != ScalarValueKind.Constant || (uint)value.MemoryIndex >= (uint)plan.Memory.Count ||
+                        UserDataIndex(value.Operands[0].Operands[0]) is not { } index)
+                        continue;
+                    var candidate = Array.FindIndex(_candidates, candidate => candidate.UserData == index && candidate.Buffer < 0);
+                    if (candidate >= 0)
+                        (found[candidate] ??= []).Add(RelativeOffset(plan, value));
+                }
+            }
+
+            for (var candidate = 0; candidate < found.Length; candidate++)
+            {
+                if (found[candidate] is not { Count: > 0 } set)
+                    continue;
+                var first = set.Min;
+                var all = set.Where(offset => offset - first <= PrintSpanBytes - sizeof(uint)).ToArray();
+                if (all.Length > PrintWords)
+                    all = Enumerable.Range(0, PrintWords).Select(index => all[(int)((long)index * all.Length / PrintWords)]).ToArray();
+                offsets[candidate] = all;
+            }
+
+            return offsets;
+        }
+
+        private static ulong MixPrint(ulong print, ulong value) =>
+            System.Numerics.BitOperations.RotateLeft((print ^ value) * 0x9E37_79B9_7F4A_7C15UL, 29);
+
+        // The print of the descriptors the entry read through every candidate not rejected: what the
+        // print of the same object drawn again is, wherever its table then lies. Null when none has one.
+        private ulong? EntryPrint(Entry entry)
+        {
+            var print = PrintSeed;
+            var any = false;
+            for (var index = 0; index < _candidates.Length; index++)
+            {
+                var offsets = _printOffsets[index];
+                var candidate = _candidates[index];
+                if (offsets.Length == 0 || IsUsed(_rejected, candidate.UserData))
+                    continue;
+                if (candidate.UserData >= entry.UserData.Length || candidate.High >= entry.UserData.Length)
+                    return null;
+                var addressBase = RawBase(entry.UserData, candidate, entry.UserData[candidate.UserData]);
+                any = true;
+                print = MixPrint(print, (ulong)index);
+                foreach (var offset in offsets)
+                {
+                    print = TryFindWord(entry, unchecked(addressBase + (ulong)offset), out var at)
+                        ? MixPrint(print, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(at, sizeof(uint))))
+                        : MixPrint(print, MissingWord);
+                }
+            }
+
+            return any ? print : null;
+        }
+
+        // The print of the descriptors behind this draw's rebased pointers, read where they lie now;
+        // zero when no rebased candidate has one. Words that cannot be read print as missing, the
+        // same for the lookup and for the entry stored after it.
+        public ulong MemoryPrint(IReadOnlyList<uint> userData, ResidentGuestBytesReader reader, ref byte[] scratch)
+        {
+            if (!_hasPrint || Active.Length == 0)
+                return 0;
+            var print = PrintSeed;
+            var any = false;
+            for (var index = 0; index < _candidates.Length; index++)
+            {
+                var offsets = _printOffsets[index];
+                var candidate = _candidates[index];
+                if (offsets.Length == 0 || !IsUsed(Active, candidate.UserData))
+                    continue;
+                if (candidate.UserData >= userData.Count || candidate.High >= userData.Count)
+                    return 0;
+                var addressBase = RawBase(userData, candidate, userData[candidate.UserData]);
+                any = true;
+                print = MixPrint(print, (ulong)index);
+                var length = (int)(offsets[^1] - offsets[0]) + sizeof(uint);
+                if (scratch.Length < length)
+                    scratch = new byte[Math.Max(length, scratch.Length * 2)];
+                var bytes = scratch.AsSpan(0, length);
+                var start = (long)addressBase + offsets[0];
+                var read = start >= 0 && reader((ulong)start, bytes, false);
+                foreach (var offset in offsets)
+                {
+                    print = read
+                        ? MixPrint(print, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offset - offsets[0])..]))
+                        : MixPrint(print, MissingWord);
+                }
+            }
+
+            return any ? print : 0;
         }
 
         // The window [start, start + size) of reads a candidate's base covers in this entry.
@@ -561,7 +746,7 @@ public sealed partial class ResourceMaterializationCache
             if (_recent.Count >= RecentCapacity)
             {
                 _recent.Clear();
-                RecentBytes = 0;
+                RecentBytes = _recentByPrintBytes;
             }
             else if (previous is not null)
             {
@@ -570,6 +755,11 @@ public sealed partial class ResourceMaterializationCache
 
             _recent[structure] = built;
             RecentBytes += built.EstimatedBytes;
+            // The same object's previous draw through another pointer is the comparison that can
+            // confirm the pointer; the latest draw is often another object, which never does.
+            if (RememberByPrint(structure, built) is { } same && !ReferenceEquals(same, previous) &&
+                CandidateWordsDiffer(same, built))
+                previous = same;
             if (previous is null || previous.UserData.Length != built.UserData.Length ||
                 !previous.UsedUserData.AsSpan().SequenceEqual(built.UsedUserData))
                 return;
@@ -1104,7 +1294,7 @@ public sealed partial class ResourceMaterializationCache
             drawKey = DrawKeyOf(plan, inputs);
             _learnedUserData.TryGetValue(drawKey, out learned);
             rebase = RebaseOf(drawKey, plan);
-            key = KeyOf(drawKey, inputs.UserData, learned, rebase.Active);
+            key = KeyFor(drawKey, inputs, learned, rebase, residentReader);
         }
 
         bool found;
@@ -1354,7 +1544,7 @@ public sealed partial class ResourceMaterializationCache
             if (!ReferenceEquals(widened, learned) || !ReferenceEquals(activeBefore, rebase.Active))
             {
                 _learnedUserData[drawKey] = widened;
-                key = KeyOf(drawKey, inputs.UserData, widened, rebase.Active);
+                key = KeyFor(drawKey, inputs, widened, rebase, residentReader);
                 found = false;
             }
 
@@ -1595,6 +1785,26 @@ public sealed partial class ResourceMaterializationCache
         return ((ulong)high << 32) | low;
     }
 
+    private byte[] _printScratch = new byte[256];
+
+    // KeyOf, and for a rebased descriptor-table pointer the print of the descriptors it points at
+    // now (AddressRebase.MemoryPrint): objects drawn through moving tables keep apart, and the same
+    // object finds its entry wherever its table lies this time.
+    private ulong KeyFor(ulong drawKey, ResourceRuntimeInputs inputs, ulong[]? learned, AddressRebase rebase,
+        ResidentGuestBytesReader residentReader)
+    {
+        var key = KeyOf(drawKey, inputs.UserData, learned, rebase.Active);
+        var print = rebase.MemoryPrint(inputs.UserData, residentReader, ref _printScratch);
+        return print == 0 ? key : key ^ (print * 0xC2B2_AE3D_27D4_EB4FUL);
+    }
+
+    // SHARPEMU_RESOURCE_CONTENT_KEY=0: no content print, so a rebased pointer's key holds every
+    // object drawn through it, and a pointer is learned only against the plan's latest draw.
+    private static class ContentKey
+    {
+        public static readonly bool Enabled = PerfSwitches.Enabled("SHARPEMU_RESOURCE_CONTENT_KEY");
+    }
+
     private static bool IsUsed(ulong[] mask, int index) =>
         (uint)(index >> 6) < (uint)mask.Length && (mask[index >> 6] & (1UL << (index & 63))) != 0;
 
@@ -1647,20 +1857,32 @@ public sealed partial class ResourceMaterializationCache
 
     // The snapshot a hit on the entry gives this draw (AddressRebase.Apply). A draw that differs from
     // the entry's in user data words its plan never reads differs on every hit, and so does a rebased
-    // one: the entry keeps the last snapshot it made for a draw, which an identical draw shares.
+    // one: the entry keeps the last HitSnapshotCapacity snapshots it made, which identical draws share.
+    // Draws that cycle through a few pointers (meshes, descriptor tables) then allocate nothing.
+    // A kept snapshot is never written: it is handed out as is, so a draw recorded earlier and
+    // encoded later still holds exactly the snapshot it was given.
     private static ResourceSnapshot HitSnapshot(Entry entry, IReadOnlyList<uint> userData, AddressRebase rebase)
     {
-        if (entry.LastHit is { } last && ReferenceEquals(entry.LastHitActive, rebase.Active) && SameUserData(last.UserData, userData))
-            return last;
+        var kept = entry.HitSnapshots;
+        if (kept is not null)
+        {
+            foreach (var (last, active) in kept)
+                if (last is not null && ReferenceEquals(active, rebase.Active) && SameUserData(last.UserData, userData))
+                    return last;
+        }
+
         var snapshot = rebase.Apply(entry.Snapshot, userData);
         if (!ReferenceEquals(snapshot, entry.Snapshot))
         {
-            entry.LastHit = snapshot;
-            entry.LastHitActive = rebase.Active;
+            kept ??= entry.HitSnapshots = new (ResourceSnapshot?, ulong[]?)[HitSnapshotCapacity];
+            kept[entry.NextHitSnapshot] = (snapshot, rebase.Active);
+            entry.NextHitSnapshot = (entry.NextHitSnapshot + 1) % HitSnapshotCapacity;
         }
 
         return snapshot;
     }
+
+    private const int HitSnapshotCapacity = 8;
 
     private bool TryFind(ulong key, ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ulong[] rebased, out Entry entry)
     {
@@ -2227,9 +2449,10 @@ public sealed partial class ResourceMaterializationCache
         // its arrays that come out equal are shared when this entry's are made, then dropped.
         public JoinedReads? JoinedHint { get; set; }
         public SlotModel? SlotsHint { get; set; }
-        // The last snapshot a hit made for a draw (HitSnapshot), with the rebased words it applied.
-        public ResourceSnapshot? LastHit { get; set; }
-        public ulong[]? LastHitActive { get; set; }
+        // The last snapshots hits made for draws (HitSnapshot), each with the rebased words it applied;
+        // NextHitSnapshot is the slot the next one replaces.
+        public (ResourceSnapshot? Snapshot, ulong[]? Active)[]? HitSnapshots { get; set; }
+        public int NextHitSnapshot { get; set; }
         public Entry? Next { get; set; }
 
         // The chain bytes (ChainBytes) this entry was stored with as a key's head.
@@ -2239,7 +2462,7 @@ public sealed partial class ResourceMaterializationCache
 
         // An upper bound on what the entry keeps alive, from its immutable arrays. Arrays it shares
         // with the entry it was rebuilt from are counted in both. The derived data filled in later
-        // (RangeWindows, BaseWordProbes, TableCopySources, Joined, Slots, LastHit) is counted up
+        // (RangeWindows, BaseWordProbes, TableCopySources, Joined, Slots, HitSnapshots) is counted up
         // front from the sizes it is made of, so the estimate never changes.
         public long EstimatedBytes
         {
@@ -2261,8 +2484,10 @@ public sealed partial class ResourceMaterializationCache
                     ObjectBytes + ArrayBytes(ranges, sizeof(ulong)) + 4 * ArrayBytes(ranges, sizeof(int)) + ArrayBytes(ranges, sizeof(bool)) +
                     // SlotModel: at most one slot per table word.
                     ObjectBytes + 2 * ArrayBytes(table, sizeof(ulong)) + 2 * ArrayBytes(table, sizeof(int)) +
-                    // LastHit: a snapshot shell with its patched buffers.
-                    ObjectBytes + JaggedBytes(Snapshot.Buffers) + ArrayBytes(UsedUserData.Length, sizeof(ulong));
+                    // HitSnapshots: the slot array, and per slot a snapshot shell with its patched buffers
+                    // and the user data array it keeps alive.
+                    ArrayBytes(HitSnapshotCapacity, 2 * IntPtr.Size) + HitSnapshotCapacity *
+                    (ObjectBytes + JaggedBytes(Snapshot.Buffers) + ArrayBytes(UserData.Length, sizeof(uint)));
                 _estimatedBytes = size;
                 return size;
             }
