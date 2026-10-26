@@ -22,24 +22,28 @@ internal sealed partial class MetalRenderHost
     private static readonly bool FlipTessellationWinding =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TESSELLATION_FLIP_WINDING") == "1";
 
-    // The launch the next dispatch binds: patch count and first instance, and the vertex ids in the ring.
+    // The launch the next dispatch binds: patch count, first instance and patches of one instance, and
+    // the vertex ids in the ring.
     private bool _hullLaunchPending;
     private uint _hullPatchCount;
     private uint _hullFirstInstance;
+    private uint _hullInstancePatches;
     private nint _hullVertexBuffer;
     private ulong _hullVertexOffset;
 
-    // The factors the next DrawPatches hands the tessellator.
+    // The factors the next DrawPatches hands the tessellator, and the bytes of one patch's.
     private MetalGuestRange _tessellationFactors;
+    private uint _tessellationFactorBytes;
     private nint _tessellationFactorPipeline;
 
-    public void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance)
+    public void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance, uint instancePatches)
     {
         var binding = UploadTransient(MemoryMarshal.AsBytes(vertexIds.IsEmpty ? [0u] : vertexIds), 16);
         _hullVertexBuffer = (nint)binding.Handle;
         _hullVertexOffset = binding.Offset;
         _hullPatchCount = patchCount;
         _hullFirstInstance = firstInstance;
+        _hullInstancePatches = instancePatches;
         _hullLaunchPending = true;
     }
 
@@ -52,17 +56,19 @@ internal sealed partial class MetalRenderHost
         }
 
         _hullLaunchPending = false;
-        var launch = stackalloc uint[4] { _hullPatchCount, _hullFirstInstance, 0, 0 };
+        var launch = stackalloc uint[4] { _hullPatchCount, _hullFirstInstance, _hullInstancePatches, 0 };
         MetalNative.SendSetBytes(encoder, SelHullSetBytes, (nint)launch, 4 * sizeof(uint), Gen5TessellationLaunch.HullLaunchBufferIndex);
         MetalNative.SendSetBuffer(
             encoder, SelSetComputeBuffer, _hullVertexBuffer, (nuint)_hullVertexOffset, Gen5TessellationLaunch.HullVertexBufferIndex);
     }
 
-    public unsafe void PrepareTessellationFactors(ulong ringAddress, uint patchCount, float minFactor, float maxFactor)
+    public unsafe void PrepareTessellationFactors(ulong ringAddress, uint patchCount, bool quad, float minFactor, float maxFactor)
     {
         // The ring as a buffer read sees the hull kernel's stores, staged or in place.
-        var ring = ObtainBuffer(ringAddress, (ulong)patchCount * 4 * sizeof(float), isWritten: false);
-        _tessellationFactors = _guestMemory.Allocate((ulong)patchCount * 4 * sizeof(ushort), 256, out _);
+        var factorsPerPatch = quad ? 6u : 4u;
+        var ring = ObtainBuffer(ringAddress, (ulong)patchCount * factorsPerPatch * sizeof(float), isWritten: false);
+        _tessellationFactors = _guestMemory.Allocate((ulong)patchCount * factorsPerPatch * sizeof(ushort), 256, out _);
+        _tessellationFactorBytes = factorsPerPatch * sizeof(ushort);
         var encoder = EnsureComputeEncoder();
         MetalV2Native.SendMemoryBarrierScope(encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers);
         MetalNative.SendVoid(encoder, SelSetComputePipelineState, TessellationFactorPipeline());
@@ -76,7 +82,7 @@ internal sealed partial class MetalRenderHost
             patchCount,
             BitConverter.SingleToUInt32Bits(float.IsFinite(minFactor) ? Math.Max(minFactor, 1f) : 1f),
             BitConverter.SingleToUInt32Bits(float.IsFinite(maxFactor) ? Math.Clamp(maxFactor, 1f, 64f) : 64f),
-            0,
+            quad ? 1u : 0u,
         };
         MetalNative.SendSetBytes(encoder, SelHullSetBytes, (nint)limits, 4 * sizeof(uint), 2);
         MetalNative.SendDispatch(
@@ -87,7 +93,7 @@ internal sealed partial class MetalRenderHost
         MetalV2Native.SendMemoryBarrierScope(encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers);
     }
 
-    public void DrawPatches(uint controlPoints, uint patchCount, uint instanceCount, uint firstInstance)
+    public unsafe void DrawPatches(uint controlPoints, uint patchCount, uint instanceCount, uint firstInstance)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         if (!_tessellationFactors.IsValid)
@@ -97,9 +103,16 @@ internal sealed partial class MetalRenderHost
 
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
+        // Each instance's patches have their own factors, and their own place in the off-chip buffer.
         MetalNative.SendSetBuffer(
-            _renderEncoder, SelSetTessellationFactorBuffer, _tessellationFactors.Buffer, (nuint)_tessellationFactors.Offset, 0);
+            _renderEncoder, SelSetTessellationFactorBuffer, _tessellationFactors.Buffer, (nuint)_tessellationFactors.Offset,
+            (nuint)(patchCount * _tessellationFactorBytes));
         _tessellationFactors = default;
+        var launch = stackalloc uint[2] { patchCount, firstInstance };
+        MetalV2Native.SendSetBytes(
+            _renderEncoder, SelSetVertexBytes, (nint)launch, 2 * sizeof(uint), Gen5TessellationLaunch.DomainLaunchBufferIndex);
+        // A vertex-buffer slot another pipeline may use; forget it.
+        _boundVertexBuffers[Gen5TessellationLaunch.DomainLaunchBufferIndex - VertexBufferSlotBase] = -1;
         var passes = FacePassCount(entry);
         for (var pass = 0; pass < passes; pass++)
         {
@@ -203,9 +216,10 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    // One thread per patch: the guest's four factors (three edges, the inside; the edge order is
-    // Metal's too) clamped to the guest's levels, as MTLTriangleTessellationFactorsHalf. An edge not
-    // above zero (or NaN) culls the patch, which Metal does for a zero edge.
+    // One thread per patch: the guest's four factors (three edges, the inside) or a quad's six (four
+    // edges, two inside; the order is Metal's too) clamped to the guest's levels, as
+    // MTLTriangleTessellationFactorsHalf or MTLQuadTessellationFactorsHalf. An edge not above zero
+    // (or NaN) culls the patch, which Metal does for a zero edge.
     private const string TessellationFactorSource = """
         #include <metal_stdlib>
         using namespace metal;
@@ -215,12 +229,12 @@ internal sealed partial class MetalRenderHost
             uint patches;
             float min_factor;
             float max_factor;
-            uint unused;
+            uint quad;
         };
 
         kernel void sharpemu_tessellation_factors(
-            device const float4* guest [[buffer(0)]],
-            device half4* factors [[buffer(1)]],
+            device const float* guest [[buffer(0)]],
+            device half* factors [[buffer(1)]],
             constant sharpemu_tessellation_limits& limits [[buffer(2)]],
             uint patch [[thread_position_in_grid]])
         {
@@ -229,10 +243,21 @@ internal sealed partial class MetalRenderHost
                 return;
             }
 
-            float4 levels = guest[patch];
-            bool culled = !(levels.x > 0.0f) || !(levels.y > 0.0f) || !(levels.z > 0.0f);
-            float4 clamped = clamp(levels, limits.min_factor, limits.max_factor);
-            factors[patch] = culled ? half4(0.0h) : half4(isnan(clamped.w) ? float4(clamped.xyz, limits.min_factor) : clamped);
+            uint edges = limits.quad != 0u ? 4u : 3u;
+            uint count = limits.quad != 0u ? 6u : 4u;
+            device const float* levels = guest + patch * count;
+            device half* output = factors + patch * count;
+            bool culled = false;
+            for (uint edge = 0u; edge < edges; edge++)
+            {
+                culled = culled || !(levels[edge] > 0.0f);
+            }
+
+            for (uint factor = 0u; factor < count; factor++)
+            {
+                float level = levels[factor];
+                output[factor] = culled ? 0.0h : half(isnan(level) ? limits.min_factor : clamp(level, limits.min_factor, limits.max_factor));
+            }
         }
         """;
 

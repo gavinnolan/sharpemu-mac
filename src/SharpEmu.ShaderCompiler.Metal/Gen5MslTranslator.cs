@@ -833,7 +833,7 @@ public static partial class Gen5MslTranslator
                     source.AppendLine(
                         $"// tessellator: partition={tessellator.Partition} " +
                         $"output={(tessellator.OutputClockwise ? "cw" : "ccw")} max={tessellator.MaxFactor}");
-                    source.AppendLine($"[[patch(triangle, {tessellator.ControlPoints})]]");
+                    source.AppendLine($"[[patch({(tessellator.Quad ? "quad" : "triangle")}, {tessellator.ControlPoints})]]");
                 }
 
                 source.AppendLine($"vertex Gen5VsOut {EntryPointName}(");
@@ -906,11 +906,12 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
             }
 
-            if (_stage == Gen5MslStage.Vertex && _request.Tessellation is { Role: Gen5TessellationRole.Domain })
+            if (_stage == Gen5MslStage.Vertex && _request.Tessellation is { Role: Gen5TessellationRole.Domain } patchDomain)
             {
                 source.AppendLine("    uint sharpemu_patch_id [[patch_id]],");
-                source.AppendLine("    float3 sharpemu_patch_position [[position_in_patch]],");
+                source.AppendLine($"    {(patchDomain.Quad ? "float2" : "float3")} sharpemu_patch_position [[position_in_patch]],");
                 source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
+                source.AppendLine($"    constant uint* sharpemu_domain_launch [[buffer({Gen5TessellationLaunch.DomainLaunchBufferIndex})]],");
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
@@ -1498,11 +1499,12 @@ public static partial class Gen5MslTranslator
         }
 
         // The merged local/hull wave as the hardware's hull stage starts it (Gen5TessellationLaunch):
-        // one wave64 per threadgroup over PatchesPerGroup patches. s2 is the threadgroup's off-chip
-        // offset, s3 the merged wave info (local and hull thread counts, one control point each), s4
-        // its tessellation-factor offset; v0 the patch, v1 the patch within the group and the control
-        // point, v2 the local half's vertex index, v3 its thread within the group (its LDS slot), v5
-        // the instance. s[0:1] and the user data come from the layout like any user data.
+        // one wave64 per threadgroup over PatchesPerGroup patches of the draw's instances, instance
+        // after instance. s2 is the threadgroup's off-chip offset, s3 the merged wave info (local and
+        // hull thread counts, one control point each), s4 its tessellation-factor offset; v0 the patch
+        // within its instance, v1 the patch within the group and the control point, v2 the local
+        // half's vertex index, v3 its thread within the group (its LDS slot), v5 the instance. s[0:1]
+        // and the user data come from the layout like any user data.
         private static void EmitHullLaunchState(StringBuilder source, Gen5TessellationLaunch hull)
         {
             var patches = hull.PatchesPerGroup;
@@ -1515,25 +1517,30 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    s[2] = sharpemu_group_id.x * {hull.OffchipBlockBytes}u;");
             source.AppendLine("    s[3] = sharpemu_hull_points | (sharpemu_hull_points << 8);");
             source.AppendLine($"    s[4] = sharpemu_hull_first * {hull.FactorBytesPerPatch}u;");
-            source.AppendLine($"    v[0] = sharpemu_hull_first + sharpemu_hull_lane / {points}u;");
+            source.AppendLine($"    uint sharpemu_hull_patch = sharpemu_hull_first + sharpemu_hull_lane / {points}u;");
+            source.AppendLine("    uint sharpemu_hull_instance_patches = max(sharpemu_hull_launch[2], 1u);");
+            source.AppendLine("    uint sharpemu_hull_instance_patch = sharpemu_hull_patch % sharpemu_hull_instance_patches;");
+            source.AppendLine("    v[0] = sharpemu_hull_instance_patch;");
             source.AppendLine($"    v[1] = (sharpemu_hull_lane / {points}u) | ((sharpemu_hull_lane % {points}u) << 8);");
             source.AppendLine("    v[2] = sharpemu_hull_lane < sharpemu_hull_points");
-            source.AppendLine($"        ? sharpemu_hull_vertices[sharpemu_hull_first * {points}u + sharpemu_hull_lane] : 0u;");
+            source.AppendLine($"        ? sharpemu_hull_vertices[sharpemu_hull_instance_patch * {points}u + sharpemu_hull_lane % {points}u] : 0u;");
             source.AppendLine("    v[3] = sharpemu_hull_lane;");
-            source.AppendLine("    v[5] = sharpemu_hull_launch[1];");
+            source.AppendLine("    v[5] = sharpemu_hull_launch[1] + sharpemu_hull_patch / sharpemu_hull_instance_patches;");
             source.AppendLine("    active = true;");
         }
 
-        // The domain program at one point the tessellator made: its barycentric u and v in v5/v6, the
+        // The domain program at one point the tessellator made: its u and v in v5/v6 (barycentric, or a quad's), the
         // patch within its hull threadgroup in v7, the patch in v8 and that group's off-chip offset in s4.
+        // The hull kernel ran over every instance's patches, instance after instance.
         private static void EmitDomainLaunchState(StringBuilder source, Gen5TessellationLaunch domain)
         {
             var patches = domain.PatchesPerGroup;
+            source.AppendLine("    uint sharpemu_domain_patch = (sharpemu_instance_id - sharpemu_domain_launch[1]) * sharpemu_domain_launch[0] + sharpemu_patch_id;");
             source.AppendLine("    v[5] = as_type<uint>(sharpemu_patch_position.x);");
             source.AppendLine("    v[6] = as_type<uint>(sharpemu_patch_position.y);");
-            source.AppendLine($"    v[7] = sharpemu_patch_id % {patches}u;");
+            source.AppendLine($"    v[7] = sharpemu_domain_patch % {patches}u;");
             source.AppendLine("    v[8] = sharpemu_patch_id;");
-            source.AppendLine($"    s[4] = (sharpemu_patch_id / {patches}u) * {domain.OffchipBlockBytes}u;");
+            source.AppendLine($"    s[4] = (sharpemu_domain_patch / {patches}u) * {domain.OffchipBlockBytes}u;");
         }
 
         private static void EmitComputeSystemRegister(

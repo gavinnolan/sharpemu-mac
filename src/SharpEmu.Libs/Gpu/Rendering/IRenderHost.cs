@@ -150,21 +150,25 @@ public interface IRenderHost
     // and DrawPatches.
     bool SupportsTessellationEmulation => false;
 
-    // Binds the hull kernel's launch to the dispatch recorded next: the patch count and first
-    // instance (Gen5TessellationLaunch.HullLaunchBufferIndex) and each control point's vertex
-    // index in patch order (HullVertexBufferIndex).
-    void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance) =>
+    // Binds the hull kernel's launch to the dispatch recorded next: the patch count (every instance's
+    // patches, instance after instance), the first instance and the patches of one instance
+    // (Gen5TessellationLaunch.HullLaunchBufferIndex), and each control point's vertex index in the
+    // patch order of one instance (HullVertexBufferIndex).
+    void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance, uint instancePatches) =>
         throw new NotSupportedException("The renderer does not run tessellated draws.");
 
     // After the hull kernel's dispatch: the host's tessellation factors for the next DrawPatches,
     // from the guest's factor ring at ringAddress (four floats per triangle patch, the edges and
-    // the inside), clamped to the guest's VGT_HOS_MIN/MAX_TESS_LEVEL. A patch with an edge factor
-    // that is not above zero is culled, as the guest's tessellator culls it.
-    void PrepareTessellationFactors(ulong ringAddress, uint patchCount, float minFactor, float maxFactor) =>
+    // the inside; six per quad patch, four edges and two inside), clamped to the guest's
+    // VGT_HOS_MIN/MAX_TESS_LEVEL. A patch with an edge factor that is not above zero is culled, as
+    // the guest's tessellator culls it.
+    void PrepareTessellationFactors(ulong ringAddress, uint patchCount, bool quad, float minFactor, float maxFactor) =>
         throw new NotSupportedException("The renderer does not run tessellated draws.");
 
-    // Draws patchCount patches with the factors PrepareTessellationFactors made; the bound
-    // pipeline's vertex function is the domain program's post-tessellation form.
+    // Draws patchCount patches of each instance with the factors PrepareTessellationFactors made
+    // (each instance's own); the bound pipeline's vertex function is the domain program's
+    // post-tessellation form, which finds an instance's patches in the off-chip buffer from the
+    // patch count and first instance (Gen5TessellationLaunch.DomainLaunchBufferIndex).
     void DrawPatches(uint controlPoints, uint patchCount, uint instanceCount, uint firstInstance) =>
         throw new NotSupportedException("The renderer does not run tessellated draws.");
 
