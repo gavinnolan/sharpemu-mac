@@ -219,6 +219,27 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
         check.Done();
     }
 
+    // FORCE_DEGAMMA converts the filtered colour from sRGB to linear: halfway between the red and the green level, a
+    // 0.5 of each decodes to 0.214 (decoding the texels before the filter would leave 0.5, as 0 and 1 decode to themselves).
+    [Fact]
+    public void ForceDegammaSamplerDecodesTheFilteredColour()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var chain = MipChain(rig, 64, out _);
+        var pm4 = new ScenePm4();
+        var decoded = Draw(rig, pm4, 16, 16, SampleL, MipTexture(chain),
+            Descriptors.Sampler(mipFilter: 2, minFilter: 1, magFilter: 1, forceDegamma: true), UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 0.5f);
+        var plain = Draw(rig, pm4, 16, 16, SampleL, MipTexture(chain),
+            Descriptors.Sampler(mipFilter: 2, minFilter: 1, magFilter: 1), UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 0.5f);
+        rig.Submit(pm4);
+        var half = MathF.Pow((0.5f + 0.055f) / 1.055f, 2.4f);
+        var check = new Check();
+        Region(check, "force-degamma sampler", Read(rig, decoded), 16, 16, [half, half, 0f, 1f], 0.03f);
+        Region(check, "ordinary sampler", Read(rig, plain), 16, 16, [0.5f, 0.5f, 0f, 1f], 0.03f);
+        check.Done();
+    }
+
     [Fact]
     public void ScreenDerivativesPickTheLevelFromTheQuadSize()
     {

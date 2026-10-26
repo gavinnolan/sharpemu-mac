@@ -524,6 +524,16 @@ public static partial class Gen5MslTranslator
                 sampled = Temp($"vec<{kind}, 4>", $"{pastMirror} ? {BorderColour(kind, samplerInfo!.BorderColorType)} : {sampled}");
             }
 
+            if (samplerInfo is { ForceDegamma: true } && kind == "float")
+            {
+                // FORCE_DEGAMMA converts the filtered colour from sRGB to linear whatever the texture's format; alpha
+                // is linear already. Per sampler: one texture sampled through two samplers may decode in one only.
+                var encoded = Temp("float3", $"metal::max({sampled}.rgb, 0.0f)");
+                var linear = Temp("float3",
+                    $"metal::select(metal::powr(({encoded} + 0.055f) / 1.055f, 2.4f), {encoded} / 12.92f, {encoded} <= 0.04045f)");
+                sampled = Temp("vec<float, 4>", $"float4({linear}, {sampled}.a)");
+            }
+
             if (hasCompare)
             {
                 // A color format has no host depth view: its first channel is compared with

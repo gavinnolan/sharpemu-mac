@@ -302,6 +302,31 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(7u, specialization.Buffers[0].PackedStride);
     }
 
+    // A sampler's FORCE_DEGAMMA (word 0, bit 20) specializes the program, per sampler: one texture sampled through a
+    // FORCE_DEGAMMA sampler and an ordinary one keeps its format and decodes in the first only.
+    [Fact]
+    public void ForceDegammaSampler_SpecializesThatSamplerOnly()
+    {
+        const uint Format8x4Unorm = 56;
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, Format8x4Unorm));
+        instructions.AddRange(SamplerWords(ref pc, 32, 0x00100892));
+        instructions.AddRange(SamplerWords(ref pc, 36, 0x00000892));
+        instructions.Add(Image(pc, "ImageSample", 16, 32));
+        instructions.Add(Image(pc + 8, "ImageSample", 16, 36));
+        instructions.Add(EndProgram(pc + 16));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        Assert.Equal(Format8x4Unorm, GuestImageFormat.FormatOf(Assert.Single(snapshot.Images)));
+        Assert.Equal([true, false], specialization.Samplers.Select(sampler => sampler.ForceDegamma).ToArray());
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal([true, false], applied.Info.Samplers.Select(sampler => sampler.ForceDegamma).ToArray());
+    }
+
     [Fact]
     public void MixedSampler_DuplicatesTheCorrectSnapshot()
     {

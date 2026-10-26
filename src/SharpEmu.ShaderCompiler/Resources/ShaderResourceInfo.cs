@@ -125,6 +125,10 @@ public sealed class SamplerResource
 
     public uint BorderColorType { get; set; }
 
+    // The paired S#'s FORCE_DEGAMMA (word 0, bit 20): the hardware converts the filtered colour from sRGB to linear,
+    // whatever the texture's format, so the emitter decodes what the host sampled.
+    public bool ForceDegamma { get; set; }
+
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
 
