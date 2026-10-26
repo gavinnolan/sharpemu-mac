@@ -101,12 +101,14 @@ public static class ShaderIdentity
             return declaredHash;
         }
 
-        if (memo.TryGet(memory, codeAddress, ranges, out var remembered))
+        if (memo.TryGet(memory, codeAddress, ranges, out var remembered, out var compared))
         {
             return remembered;
         }
 
-        if (!memo.CanKeep(ranges))
+        // A memory that cannot compare in place would miss every draw and pay for a copy, a fresh hasher
+        // and a map write each time; it takes the plain path, as before the memo.
+        if (!compared || !memo.CanKeep(ranges))
         {
             return Compute(memory, codeAddress, ranges, label);
         }
@@ -171,9 +173,13 @@ public sealed class ShaderIdentityMemo
         return total <= MaxEntryBytes;
     }
 
-    internal bool TryGet(ICpuMemory memory, ulong codeAddress, ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges, out ulong hash)
+    // compared is false when the remembered entry matches the ranges but the memory could not compare
+    // them in place (no in-place compare, or unmapped); it is true otherwise.
+    internal bool TryGet(ICpuMemory memory, ulong codeAddress, ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges, out ulong hash,
+        out bool compared)
     {
         hash = 0;
+        compared = true;
         if (!_entries.TryGetValue(codeAddress, out var entry) || entry.Ranges.Length != ranges.Length)
         {
             return false;
@@ -189,7 +195,13 @@ public sealed class ShaderIdentityMemo
 
         for (var index = 0; index < ranges.Length; index++)
         {
-            if (!memory.TryCompare(ranges[index].Address, entry.Code[index], out var equal) || !equal)
+            if (!memory.TryCompare(ranges[index].Address, entry.Code[index], out var equal))
+            {
+                compared = false;
+                return false;
+            }
+
+            if (!equal)
             {
                 return false;
             }
