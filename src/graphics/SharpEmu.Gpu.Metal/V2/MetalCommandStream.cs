@@ -184,6 +184,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        // A commit would have been legal here, so a write fence covers everything recorded.
+        PlantWriteFenceIfWanted();
         Interlocked.Increment(ref _deferredStreamFlushes);
     }
 
