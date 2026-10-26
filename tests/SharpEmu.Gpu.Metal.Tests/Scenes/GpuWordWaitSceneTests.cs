@@ -106,6 +106,7 @@ public sealed class GpuWordWaitSceneTests(ITestOutputHelper output) : SceneTestB
             Assert.Equal(index ^ 0x5A5A, words[index]);
         }
 
+        watchdog.Dispose();
         MetalNative.SendVoid(gate, SelRelease);
         Assert.Empty(rig.Fatals);
     }
@@ -198,6 +199,7 @@ public sealed class GpuWordWaitSceneTests(ITestOutputHelper output) : SceneTestB
             Assert.Equal(index ^ 0x5A5A, consumedWords[index]);
         }
 
+        watchdog.Dispose();
         MetalNative.SendVoid(gate, SelRelease);
         Assert.Empty(rig.Fatals);
     }
@@ -226,7 +228,26 @@ public sealed class GpuWordWaitSceneTests(ITestOutputHelper output) : SceneTestB
             }
         }) { IsBackground = true };
         thread.Start();
-        return cancel;
+        return new WatchdogStop(cancel, thread);
+    }
+
+    // Disposing a token source does not cancel it: the watchdog is stopped and joined first, so it
+    // never signals a gate the test has already released.
+    private sealed class WatchdogStop(CancellationTokenSource cancel, Thread thread) : IDisposable
+    {
+        private int _stopped;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _stopped, 1) != 0)
+            {
+                return;
+            }
+
+            cancel.Cancel();
+            thread.Join();
+            cancel.Dispose();
+        }
     }
 
     private static uint ReadWord(MetalRenderHost host, ulong address)
