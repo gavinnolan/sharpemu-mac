@@ -159,9 +159,15 @@ internal static partial class Program
             // Guest pthreads are managed threads and do not inherit it (measured: a managed
             // child of a user-interactive thread reports no class), which is what keeps a
             // title with thirty worker threads from outranking the presenter.
-            var emulationQos = SharpEmu.HLE.Host.HostQosThread.TryStart(
-                "SharpEmu Emulation", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 32 * 1024 * 1024,
-                RunEmulation, out _);
+            // Opt-in (SHARPEMU_EMULATION_THREAD_QOS=1): on a user-interactive thread every guest
+            // sleep overshoots ~20% more (synthetic test eboot: usleep(1000) 1.27 -> 1.51 ms,
+            // usleep(16000) 18.1 -> 20-22 ms, sched_yield 322 -> 383 us), which outweighs anything
+            // the class was measured to give.
+            var emulationQos = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_EMULATION_THREAD_QOS"), "1", StringComparison.Ordinal)
+                ? SharpEmu.HLE.Host.HostQosThread.TryStart(
+                    "SharpEmu Emulation", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 32 * 1024 * 1024,
+                    RunEmulation, out _)
+                : null;
             Thread? emulation = null;
             if (emulationQos is null)
             {
