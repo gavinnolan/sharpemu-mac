@@ -97,6 +97,10 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// threads the dispatch launches rather than the device's 1024. Only a size the dispatch is
 /// known to use (more than one thread) is declared. <c>SHARPEMU_MSL_TGHINT=0</c> leaves it
 /// out.</param>
+/// <param name="RuntimeDwordFormatLoads">Read identity-swizzled 32-bit formatted buffer
+/// components as one checked run when the current descriptor permits it. Other formats,
+/// swizzles and bounds retain the general decoder. <c>SHARPEMU_MSL_RUNTIME_DWORD_FORMAT=0</c>
+/// disables this run-time fast path.</param>
 /// <param name="NativeFloatMinMax">Lower V_MIN/MAX/MIN3/MAX3/MED3_F32 outside IEEE mode to float
 /// compares and selects on the operand bits, where that gives the bit-level helpers' answer for
 /// every input: against an inline constant, and between two registers while FLOAT_MODE flushes
@@ -139,7 +143,8 @@ public sealed record Gen5MslCodegenOptions(
     bool NativeFloatMinMax = true,
     bool ConstantTableSlots = true,
     bool FastReciprocals = true,
-    bool ContractPixelCompute = false)
+    bool ContractPixelCompute = false,
+    bool RuntimeDwordFormatLoads = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -166,5 +171,6 @@ public sealed record Gen5MslCodegenOptions(
         NativeFloatMinMax: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FMINMAX") != "0",
         ConstantTableSlots: Environment.GetEnvironmentVariable("SHARPEMU_MSL_TABLEPAD") != "0",
         FastReciprocals: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FASTRCP") != "0",
-        ContractPixelCompute: Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONTRACT") == "1");
+        ContractPixelCompute: Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONTRACT") == "1",
+        RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0");
 }

@@ -2686,6 +2686,44 @@ public static partial class Gen5MslTranslator
             var entry = Temp("uint", $"sharpemu_gfx10_formats[({word3} >> 12) & 0x7Fu]");
             var dataFormat = Temp("uint", $"{entry} & 0xFFu");
             var numberFormat = Temp("uint", $"({entry} >> 8) & 0xFFu");
+            // Portable vertex layouts keep word 3 dynamic. The common whole-dword case
+            // needs neither four layout lookups nor four numeric conversions. Check the
+            // current word, including every selected swizzle, on each invocation: this
+            // must not specialize a descriptor that can change between draws.
+            var dwordRun = _options.RuntimeDwordFormatLoads && !d16.Enabled &&
+                byteAddress.Contiguous && memory.LoadWords is not null &&
+                !TryParseUIntLiteral(descriptorWord3, out _);
+            if (dwordRun)
+            {
+                var formats = componentCount switch
+                {
+                    1 => $"{dataFormat} == 4u || {dataFormat} == 11u || {dataFormat} == 13u || {dataFormat} == 14u",
+                    2 => $"{dataFormat} == 11u || {dataFormat} == 13u || {dataFormat} == 14u",
+                    _ => $"{dataFormat} == 13u || {dataFormat} == 14u",
+                };
+                var selectorMask = (1u << (int)(componentCount * 3)) - 1;
+                // A float3 XYZW fetch may read one extra dword only when it is in
+                // bounds; the final short element retains the general decoder.
+                var inRange = memory.ElementInBounds(byteAddress.Base, $"{componentCount * sizeof(uint)}u");
+                Line($"if (({formats}) && ({numberFormat} == 4u || {numberFormat} == 5u || {numberFormat} == 7u) && " +
+                    $"({word3} & 0x{selectorMask:X}u) == 0x{0xFACu & selectorMask:X}u && {inRange})");
+                Line("{");
+                _indent++;
+                var words = Temp("uint4", memory.LoadWords!(componentCount, byteAddress.Base));
+                if (componentCount == 4)
+                {
+                    Line($"{words}.w = {dataFormat} == 13u ? sharpemu_format_one({numberFormat}) : {words}.w;");
+                }
+                for (uint component = 0; component < componentCount; component++)
+                {
+                    StoreVector(vectorData + component, $"{words}[{component}]");
+                }
+                _indent--;
+                Line("}");
+                Line("else");
+                Line("{");
+                _indent++;
+            }
             // A format the table cannot decode reads every destination as zero there.
             var valid = memory.ZeroInvalidFormat ? Temp("bool", $"{dataFormat} != 0u") : null;
             var canonical = new string[4];
@@ -2731,6 +2769,11 @@ public static partial class Gen5MslTranslator
             }
 
             StoreFormatLoadComponents(vectorData, values, d16, numberFormat);
+            if (dwordRun)
+            {
+                _indent--;
+                Line("}");
+            }
         }
 
         private static bool TryParseUIntLiteral(string text, out uint value)

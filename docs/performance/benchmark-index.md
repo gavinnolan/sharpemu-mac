@@ -102,3 +102,10 @@ a mismatch exits with an error. REUSE passes for all 2,816 files and whitespace
 checks pass. The emulator algorithms are unchanged by this packaging follow-up;
 the Metal project only grants the uniquely named tool access to its internals.
 Full-suite/CI counts above belong to the original combined implementation.
+
+## Portable vertex-fetch follow-up
+
+See [shadow mesh fetch measurements](shadow-mesh-fetch.md) for the subsequent runtime
+localization, generic formatted-load optimization, descriptor/bounds tests, synthetic
+GPU benchmark commands and fallback costs. This follow-up has no validated gameplay
+FPS result.

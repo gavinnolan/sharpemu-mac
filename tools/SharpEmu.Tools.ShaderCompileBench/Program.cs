@@ -91,6 +91,7 @@ internal static class Program
             var items = list.LoadedComputes();
             Console.Error.WriteLine($"computes={items.Count}");
             MetalGpuBackend.Register();
+            MetalRenderHost.ApplyTranslationSwitches();
             var compiler = SharpEmu.Libs.Gpu.GuestGpu.Current;
             // The learned device data loads change the MSL; seed them as a start of the title would.
             if (Arg("loads", "") is { Length: > 0 } loads)
@@ -225,8 +226,13 @@ internal static class Program
     {
         MetalGpuBackend.Register();
         var compiler = SharpEmu.Libs.Gpu.GuestGpu.Current;
-        // The runtime turns mip statistics on with its command stream (MetalRenderHost.LodStatistics).
-        SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.RecordMipStatistics = Arg("mipstats", "1") == "1";
+        // A portable specialization has erased its stride/format. Reproduce the runtime
+        // switches, or those erased values get baked into the offline translation.
+        MetalRenderHost.ApplyTranslationSwitches();
+        if (_args.ContainsKey("mipstats"))
+        {
+            SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.RecordMipStatistics = Arg("mipstats", "1") == "1";
+        }
         if (Arg("loads", "") is { Length: > 0 } loads)
         {
             var learned = MetalDeviceDataLoadsStore.Load(Path.Combine(dir, loads), out _);
