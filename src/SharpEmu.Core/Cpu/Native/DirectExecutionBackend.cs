@@ -220,7 +220,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 		"K-jXhbt2gn4" or "upoVrzMHFeE" =>
 			unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY),
 		"H2a+IN9TP0E" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN),
-		"12wOHk8ywb0" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY),
+		"12wOHk8ywb0" or "9lvj5DjHZiA" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY),
 		"PIWqhn9oSxc" => unchecked((int)0x80410123),
 		"yH17Q6NWtVg" => unchecked((int)0x80960007),
 		"D-CzAxQL0XI" => unchecked((int)0x80960009),
