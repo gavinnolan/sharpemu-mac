@@ -7,7 +7,8 @@ This integrates the round-one audit (`cde04b713e60de7ab02dfa092e8f91d086df0c83`)
 and the valid round-two changes. Validation uses fabricated guest programs,
 synthetic descriptors and real Metal device tests. No commercial game was run for
 that integration. A later user-authorized diagnostic and the resulting generic
-[portable vertex-fetch follow-up](shadow-mesh-fetch.md) are documented separately.
+[portable vertex-fetch follow-up](shadow-mesh-fetch.md) are documented separately,
+including the later matched title-scene runtime comparison.
 Microkernel, byte-work and microbenchmark results do not establish game performance.
 
 See the [change and benchmark index](benchmark-index.md) for round-one coverage,

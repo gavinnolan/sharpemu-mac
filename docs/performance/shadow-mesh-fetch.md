@@ -7,8 +7,8 @@ The user-authorized October 26 diagnostic reproduced 2.49–2.50 guest FPS with
 scripted input. Five six-layer depth/shadow encoders averaged 55.9–56.7 ms each
 (281.3 ms summed means). Metal's vertex/tiling phase accounted for 99.7% of their
 aggregate measured duration; even the 32×32×6 target took about 56 ms. These are
-encoder observations, not an exclusive frame-time decomposition. The exact
-visual gameplay scene was not confirmed.
+encoder observations, not an exclusive frame-time decomposition. The initial capture did not establish the visual scene. The later comparison below
+confirms the rooftop/title scene with screenshots.
 
 The three mesh shaders in those encoders contain 32, 34 and 35 dynamic formatted
 buffer-fetch sites. Sites in different branches need not all execute. Offline
@@ -108,11 +108,89 @@ fallback costs increased 26–27%. Those implementations are absent from the fin
   compilation, not a draw replay or full pipeline validation.
 - REUSE lint: compliant, 2,819/2,819 files have copyright and license information.
 
+## Silent Hill runtime comparison
+
+A subsequent authorized comparison used only **SILENT HILL: The Short Message**
+(PPSA10112), at 1920×1080, render scale 1, VSync on, HDR auto and strict compute on.
+Screenshots confirm the rooftop/title menu. This is not a traversal of playable levels.
+Both processes were freshly published in Release from clean commit
+`3cf2d655e485aea8faf55ce767b6bdfba192756f`: self-contained x64 emulator and native
+ARM64 GPU host, .NET SDK 10.0.103/runtime 10.0.3, ReadyToRun disabled in both arms.
+Source provenance and both payloads' SHA256 manifests were recorded before launch.
+
+The same executable and independent APFS copies of one saved user/cache state were
+used sequentially. The sole difference between final arms was
+`SHARPEMU_MSL_RUNTIME_DWORD_FORMAT=0` versus `1`. Both used
+`SHARPEMU_SHADER_PREWARM=0` to exclude background precompilation from the steady
+comparison. Other apps stayed open; system memory pressure/paging remained present.
+Input repeated Enter every six seconds until `UI_TitleMovie01` appeared, then stopped.
+The local harness used the shared game lock, captured pass timings/memory/screenshots,
+and stopped 60 seconds after the shadow workload began presenting. Native samples
+were taken after the measured interval. Both final processes exited **0** after SIGTERM.
+
+Each measurement covers **70 ≤ elapsed seconds < 100** from process launch, after
+initial rendering and before thread sampling. FPS statistics use 15 two-second guest
+presentation reports per arm, not host window refreshes. Counts at interval boundaries
+are partial frames. One interleaved/truncated baseline pass line was excluded and
+recorded; no optimized-arm pass line was excluded. No shader library, pipeline
+compilation or library wait time was reported in either measured interval.
+
+| Measurement | Fast path disabled | Fast path enabled |
+| --- | ---: | ---: |
+| Guest FPS, median | 2.49 | 3.98 |
+| Guest FPS, minimum–maximum report | 1.99–2.50 | 3.00–4.00 |
+| Complete parsed pass records | 10,311 | 16,636 |
+| Observed frame IDs (partial boundaries) | 70 | 114 |
+| Five target shadow encoders, observations | 350 | 565 |
+| Target shadow encoder duration, weighted mean | 56.509 ms | 26.753 ms |
+| 512×512×6, 84 draws, mean | 56.299 ms | 26.692 ms |
+| 512×512×6, 102 draws, mean | 57.173 ms | 27.141 ms |
+| Two 256×256×6 encoders, pooled mean | 56.539 ms | 26.694 ms |
+| 32×32×6, 102 draws, mean | 55.995 ms | 26.544 ms |
+
+The five shadow encoders retain the same shader identities, draw counts and logical
+mesh threadgroups. Their mean duration falls **52.7%**, while the observed median
+scene FPS rises about **60%**. The optimized encoders still spend about 99% of their
+measured time in Metal's vertex/tiling phase. Summed encoder means are not an exclusive
+frame-time decomposition. This paired observation is not a statistical confidence
+interval or a general gameplay FPS claim.
+
+A separate pair with normal prewarming enabled observed 2.49 versus 3.98 median FPS
+and 56.638 versus 26.723 ms mean shadow encoders. Its control retained 9.489 seconds
+of background library work (zero reported blocking library waits); it is corroborating
+evidence, not the primary compilation-free comparison.
+
+The remaining large encoder uses a **72×41×96** layered target and mesh shader
+`80BB12DEB34BFB24` / pixel shader `B56A794C42C12B7B`. Its 46-draw variant averages
+41.263 ms in the control and 42.340 ms with the fast path, across 69 and 97 observations
+respectively. This path has no demonstrated improvement. Its vertex/tiling work and
+the remaining roughly 27 ms shadow encoders explain why the scene is still slow.
+No shader/title-specific bypass or quality reduction was introduced.
+
+Local evidence identifiers (raw captures contain game data and are not committed):
+
+- Control: `20261026-201309-silent hill short message.zar-dword-off-steady`.
+- Optimized: `20261026-201514-silent hill short message.zar-dword-on-steady`.
+- Default-prewarm pair: `20261026-200501-…-dword-on-3` and
+  `20261026-200737-…-dword-off-2`.
+- Aggregate JSON: `artifacts/runtime-diagnosis-20261026/runtime-comparison-steady.json`;
+  each run retains `game.tlog`, environment/provenance, screenshots, memory telemetry,
+  bounded pass analysis and actual process exit status.
+
+Earlier attempts are explicitly excluded: an initial cold optimized run had prolonged
+pipeline compilation and a shutdown abort; a control ended with `ENOSPC` and a shutdown
+abort; a retry stopped at the new 1 GiB free-space guard. The abort stack shows an APR
+worker reading a ZArchive decompressor after disposal. That lifetime defect is recorded,
+not fixed by this shader change. Idle generated A/B artifacts were relocated with all
+5,775 file hashes verified; idle compiler cache and this run's rebuildable intermediates
+were cleared before the completed pairs. Original source, saves and logs were retained.
+
 ## Acceptance limits
 
-The runtime capture identifies an expensive path. This patch accelerates a synthetic
-operation present in that path; it has not yet established how frequently the game's
-live descriptors take it or a gameplay FPS improvement. No additional game run was
-performed for the implementation. The retained original runtime payload has hashes
-but no verified source commit; matching the three generated MSL bodies establishes
-shader-source correspondence, not whole-binary provenance.
+The runtime result now demonstrates a substantial improvement in the captured title
+scene, but roughly four FPS is still poor performance. The 96-layer pass, remaining
+shadow cost, host memory pressure and observed shutdown lifetime defect need further
+work. No full-game visual/correctness or gameplay-performance claim is made. The
+original runtime payload had no verified source commit; the new comparisons above use
+one fully identified build in both arms. The existing GUI was not replaced by this
+isolated diagnostic build.

@@ -89,8 +89,8 @@ stalls remain unresolved; the full serial run passes unchanged assertions.
 
 The original combined validation totals are **16,741 passed, 0 failed, 13 existing
 skips**, plus REUSE, script checks and successful macOS CI at `18323b718`.
-No commercial game was run. Benchmark smoke checks for this packaging change are
-reported separately from those full-suite results.
+No commercial game was run for that original integration. Benchmark smoke checks
+for this packaging change are reported separately from those full-suite results.
 
 ## Benchmark packaging validation
 
@@ -107,5 +107,7 @@ Full-suite/CI counts above belong to the original combined implementation.
 
 See [shadow mesh fetch measurements](shadow-mesh-fetch.md) for the subsequent runtime
 localization, generic formatted-load optimization, descriptor/bounds tests, synthetic
-GPU benchmark commands and fallback costs. This follow-up has no validated gameplay
-FPS result.
+GPU benchmark commands and fallback costs. The subsequent matched Silent Hill
+rooftop/title comparison observes 2.49 → 3.98 median guest FPS and 56.509 → 26.753 ms
+mean shadow encoders. Its conditions, failed captures and remaining bottlenecks are
+listed in that report; this is not a full-game gameplay benchmark.
