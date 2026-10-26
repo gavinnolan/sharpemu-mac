@@ -147,7 +147,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>The staged guest ranges whose page watches and invalidations share this cache's hooks.</summary>
     public MetalStagedRangeCache? StagedRanges { get; set; }
     private readonly SortedDictionary<ulong, SurfaceMetadata> _surfaceMetadata = new();
-    private readonly Dictionary<GpuFormat, ResourceSlotIdentifier> _nullImages = new();
+    private readonly Dictionary<(GpuFormat Format, bool Volume), ResourceSlotIdentifier> _nullImages = new();
 
     // Evicted images whose Metal objects a recorded submission still names.
     private readonly List<(ulong Serial, MetalCachedImage Image)> _retiring = new();
@@ -2135,7 +2135,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private ResourceSlotIdentifier GetNullImage(in ImageRequest request)
     {
         var format = request.Description.PixelFormat;
-        if (_nullImages.TryGetValue(format, out var found) && _slots.TryGet(found) is not null)
+        // A volume's binding takes a volume: Metal has no 3D view of a flat texture.
+        var volume = request.View.Type == GpuImageViewType.Type3D;
+        if (_nullImages.TryGetValue((format, volume), out var found) && _slots.TryGet(found) is not null)
         {
             return found;
         }
@@ -2143,7 +2145,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var description = ImageDescription.Create();
         description.PixelFormat = format;
         description.GuestFormat = request.Description.GuestFormat;
-        description.Type = GuestImageType.Color2D;
+        description.Type = volume ? GuestImageType.Color3D : GuestImageType.Color2D;
         description.Extent = new GpuExtent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
         description.Pitch = 1;
@@ -2153,7 +2155,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = description.BytesPerBlock, Pitch = 1, Height = 1 };
         var imageIdentifier = InsertImage(description);
         _slots[imageIdentifier].RefreshComplete();
-        _nullImages[format] = imageIdentifier;
+        _nullImages[(format, volume)] = imageIdentifier;
         return imageIdentifier;
     }
 

@@ -79,6 +79,7 @@ public sealed partial class ResourceTracker
         IEnumerable<uint> results;
         ScalarValue? limit = null;
         var inclusive = false;
+        var signedLimit = false;
         var laneRead = IsLaneReadSelector(selector);
         if (laneRead)
         {
@@ -91,15 +92,21 @@ public sealed partial class ResourceTracker
             // Every counter value the loop can reach, up to the cap; a record past the loop's bound is never
             // read (the materializer compares each candidate's counter with the bound it evaluates per draw).
             if (!BufferCandidateTablePlanner.TryProveInductionBound(_plan, selector, out var initial, out var step,
-                    out limit, out inclusive, exitGuards: true) || !initial.IsConstant || limit is null)
+                    out limit, out inclusive, out signedLimit, exitGuards: true, signedGuards: true) ||
+                !initial.IsConstant || limit is null)
                 return false;
             var first = initial.ConstantU32;
+            // Under a signed bound the candidates' counters must stay non-negative, where both orders agree.
+            if (signedLimit && (first > int.MaxValue || step > (int.MaxValue - first) / (MaxLoopDirectCandidates + 1)))
+                return false;
             var counters = Enumerable.Range(0, MaxLoopDirectCandidates + 1).Select(index => first + (uint)index * step);
             if (limit.IsConstant)
             {
                 var bound = limit.ConstantU32;
                 var inside = inclusive;
-                var reached = counters.TakeWhile(counter => inside ? counter <= bound : counter < bound).ToArray();
+                var signed = signedLimit;
+                var reached = counters.TakeWhile(counter => ResourceMaterializer.CounterWithinLimit(counter, bound, inside, signed))
+                    .ToArray();
                 if (reached.Length > MaxLoopDirectCandidates) return false;
                 results = reached;
                 limit = null;
@@ -152,6 +159,7 @@ public sealed partial class ResourceTracker
                 DirectCandidates = candidates,
                 DirectLimitSource = limitSource,
                 DirectLimitInclusive = inclusive,
+                DirectLimitSigned = signedLimit,
                 DirectRecordsMayEnd = laneRead,
             },
         };

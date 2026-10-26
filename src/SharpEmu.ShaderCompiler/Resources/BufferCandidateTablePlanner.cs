@@ -198,12 +198,28 @@ internal static class BufferCandidateTablePlanner
         out uint step,
         out ScalarValue? limit,
         out bool inclusive,
-        bool exitGuards = false)
+        bool exitGuards = false) =>
+        TryProveInductionBound(plan, index, out initial, out step, out limit, out inclusive, out _, exitGuards, signedGuards: false);
+
+    // With signedGuards a signed comparison bounds the counter as well (s_cmp_lt_i32 against an int count, a C for
+    // loop); signedLimit then tells the caller to order the counter and the bound as signed values, which a bound
+    // below zero (a loop that never runs) needs.
+    internal static bool TryProveInductionBound(
+        ShaderResourcePlan plan,
+        ScalarValue index,
+        out ScalarValue initial,
+        out uint step,
+        out ScalarValue? limit,
+        out bool inclusive,
+        out bool signedLimit,
+        bool exitGuards,
+        bool signedGuards)
     {
         initial = null!;
         step = 0;
         limit = null;
         inclusive = false;
+        signedLimit = false;
         if (index.Kind != ScalarValueKind.Phi)
         {
             return false;
@@ -271,21 +287,32 @@ internal static class BufferCandidateTablePlanner
 
             ScalarValue? bound;
             bool boundInclusive;
+            var boundSigned = condition.Operation is ScalarOperation.SLessThan32 or ScalarOperation.SLessThanEqual32 or
+                ScalarOperation.SGreaterThan32 or ScalarOperation.SGreaterThanEqual32;
+            if (boundSigned && !signedGuards)
+            {
+                continue;
+            }
+
             switch (condition.Operation)
             {
-                case ScalarOperation.ULessThan32 when MatchesIndex(plan, condition.Operands[0], index, step):
+                case ScalarOperation.ULessThan32 or ScalarOperation.SLessThan32
+                    when MatchesIndex(plan, condition.Operands[0], index, step):
                     bound = condition.Operands[1];
                     boundInclusive = false;
                     break;
-                case ScalarOperation.ULessThanEqual32 when MatchesIndex(plan, condition.Operands[0], index, step):
+                case ScalarOperation.ULessThanEqual32 or ScalarOperation.SLessThanEqual32
+                    when MatchesIndex(plan, condition.Operands[0], index, step):
                     bound = condition.Operands[1];
                     boundInclusive = true;
                     break;
-                case ScalarOperation.UGreaterThan32 when MatchesIndex(plan, condition.Operands[1], index, step):
+                case ScalarOperation.UGreaterThan32 or ScalarOperation.SGreaterThan32
+                    when MatchesIndex(plan, condition.Operands[1], index, step):
                     bound = condition.Operands[0];
                     boundInclusive = false;
                     break;
-                case ScalarOperation.UGreaterThanEqual32 when MatchesIndex(plan, condition.Operands[1], index, step):
+                case ScalarOperation.UGreaterThanEqual32 or ScalarOperation.SGreaterThanEqual32
+                    when MatchesIndex(plan, condition.Operands[1], index, step):
                     bound = condition.Operands[0];
                     boundInclusive = true;
                     break;
@@ -315,13 +342,14 @@ internal static class BufferCandidateTablePlanner
                 continue;
             }
 
-            if (limit is not null && !plan.Graph.Equivalent(limit, bound))
+            if (limit is not null && (!plan.Graph.Equivalent(limit, bound) || signedLimit != boundSigned))
             {
                 return false;
             }
 
             limit = bound;
             inclusive = boundInclusive;
+            signedLimit = boundSigned;
             guardBlock = block;
         }
 

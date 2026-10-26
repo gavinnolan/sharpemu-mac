@@ -44,6 +44,12 @@ public static partial class ResourceMaterializer
         public IndirectSelectorDiagnostic? SelectorDiagnostic;
     }
 
+    // A counted loop's counter against its bound, ordered as the loop's comparison orders them.
+    internal static bool CounterWithinLimit(uint counter, uint bound, bool inclusive, bool signed) =>
+        signed
+            ? inclusive ? (int)counter <= (int)bound : (int)counter < (int)bound
+            : inclusive ? counter <= bound : counter < bound;
+
     // Direct candidates in record order over a table whose end the guest does not state (DirectRecordsMayEnd):
     // the records the host can read are a prefix, found by a binary search, and read together; the first record
     // past the end of the guest's table and every later one read as null.
@@ -300,7 +306,7 @@ public static partial class ResourceMaterializer
                         for (var candidateIndex = 0; candidateIndex < reached.Length; candidateIndex++)
                         {
                             reached[candidateIndex] = directCandidates[candidateIndex].Counter is not { } counter ||
-                                readable && (indirect.DirectLimitInclusive ? counter <= bound : counter < bound);
+                                readable && CounterWithinLimit(counter, bound, indirect.DirectLimitInclusive, indirect.DirectLimitSigned);
                         }
                     }
 

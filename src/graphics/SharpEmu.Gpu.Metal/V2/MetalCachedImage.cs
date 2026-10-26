@@ -969,6 +969,19 @@ internal sealed class MetalCachedImage : IDisposable
             return Texture;
         }
 
+        // Nor can a flat texture be viewed as a volume: a binding whose descriptor is a volume over an image the
+        // cache holds flat is wrong either way, and Metal raises on the view.
+        if (Shape.TextureType != Mtl.TextureType3D && viewType == Mtl.TextureType3D)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                $"flat-volume-view:{Shape.TextureType}",
+                $"A flat texture cannot be viewed as a volume; binding the texture instead: type={Shape.TextureType}->3D " +
+                $"format={Shape.PixelFormat}->{viewFormat} extent={Description.Extent.Width}x{Description.Extent.Height}x" +
+                $"{Description.Extent.Depth} address=0x{Description.Data.Address:X16}.{Environment.NewLine}{Environment.StackTrace}");
+            resourceId = TextureResourceId();
+            return Texture;
+        }
+
         // LOD remapping for a texture held from a later level. A request names guest levels:
         // its BaseLevel is the T# BASE_LEVEL, which on the PS5 is a view base, not a clamp -
         // the texture unit treats level BASE_LEVEL as the base map, so implicit LOD, an

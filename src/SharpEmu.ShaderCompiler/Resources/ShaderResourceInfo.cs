@@ -288,6 +288,9 @@ public sealed record IndirectImageSelector(
     public uint? DirectLimitSource { get; init; }
     public bool DirectLimitInclusive { get; init; }
 
+    // The loop compares its counter with the bound as signed values (s_cmp_lt_i32): a negative bound reaches none.
+    public bool DirectLimitSigned { get; init; }
+
     // The direct candidates are every value a lane-read selector may take below its guard, not records the guest
     // is known to hold: one the host cannot read (past the end of the table) is null rather than a failure.
     public bool DirectRecordsMayEnd { get; init; }
