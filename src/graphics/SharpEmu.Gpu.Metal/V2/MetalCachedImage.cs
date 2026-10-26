@@ -898,6 +898,12 @@ internal sealed class MetalCachedImage : IDisposable
         }
 
         var viewFormat = MetalV2Formats.PixelFormat(requested.Format);
+        if (Shape.PixelFormat == MtlFormat.Depth32FloatStencil8 && viewFormat == MtlFormat.R8Uint)
+        {
+            // The stencil plane read as 8-bit integers (MetalImageCache.StencilTwin.cs).
+            viewFormat = MtlFormat.X32Stencil8;
+        }
+
         var viewType = MetalV2Formats.ViewTextureType(requested.Type, Shape.SampleCount);
         var swizzle = SwizzleOf(requested.Mapping, out var identitySwizzle);
         // MTLTextureUsagePixelFormatView is only needed to reinterpret the pixel

@@ -631,7 +631,11 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
     {
         if (MetalGuestFormats.IsDepthStencil(format))
         {
-            return MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget;
+            // A multisampled one with a stencil plane may be read through a stencil view
+            // (MetalImageCache.StencilTwin.cs), which takes the view usage.
+            return description.Samples > 1 && format == MtlPixelFormat.Depth32FloatStencil8
+                ? MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget | MtlTextureUsage.PixelFormatView
+                : MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget;
         }
 
         // A compressed texture is only ever sampled: Metal rejects a render-target or

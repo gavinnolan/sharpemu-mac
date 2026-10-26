@@ -477,6 +477,16 @@ internal sealed partial class MetalRenderHost
             prepared.MemoPages[index] = _imageCache.RequestPageVersions(in request);
         }
 
+        if (!storage && _imageCache.TryFindStencilTwin(in request, out var stencilTwin))
+        {
+            // A multisampled depth image's stencil read as 8-bit integers: its own stencil view.
+            prepared.Images[index] = stencilTwin;
+            prepared.Requests[index] = request;
+            prepared.IsStorage[index] = false;
+            prepared.Textures[index] = 0;
+            return;
+        }
+
         var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
         resolution = resolution with { Request = request };
         var found = _imageCache.GetImage(imageIdentifier);
