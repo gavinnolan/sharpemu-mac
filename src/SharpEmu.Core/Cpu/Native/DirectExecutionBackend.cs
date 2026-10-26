@@ -988,6 +988,18 @@ public sealed unsafe partial class DirectExecutionBackend :
 	private int _readyGuestThreadCount;
 
 	private readonly Dictionary<ulong, GuestThreadState> _guestThreads = new Dictionary<ulong, GuestThreadState>();
+
+	// Lock-free mirror of _guestThreads (written under the gate next to it) for queries that
+	// must not take the gate, such as a contended mutex asking whether its owner is on a CPU.
+	private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, GuestThreadState> _guestThreadsLockFree = new();
+
+	// A wake readies a thread whose executor is idle by claiming it under the gate and
+	// signalling only that thread's runner; a wake that lands while the executor is still
+	// unwinding is handed over by that executor when it releases the thread. Neither goes
+	// through the ready queue and the SharpEmu-ReadyDispatch thread, which cost a futile
+	// dispatcher wake per resume. SHARPEMU_DIRECT_WAKE_HANDOFF=0 restores queue + dispatcher.
+	private static readonly bool _directWakeHandoff =
+		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DIRECT_WAKE_HANDOFF"), "0", StringComparison.Ordinal);
 	private readonly Queue<(IVirtualMemory Memory, ulong StackBase, ulong StackSize, ulong TlsBase)> _reusableGuestThreadRegions = new();
 
 	private readonly Dictionary<ulong, ExternalGuestThreadState> _externalGuestThreads = new Dictionary<ulong, ExternalGuestThreadState>();
@@ -4038,6 +4050,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 		using (LockGate("TryStartThread"))
 		{
 			_guestThreads[request.ThreadHandle] = thread;
+			_guestThreadsLockFree[request.ThreadHandle] = thread;
 			EnqueueReadyGuestThreadLocked(thread);
 		}
 		Console.Error.WriteLine(
@@ -4288,6 +4301,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 		var dsWakeScanned = 0;
 		var dsWakeFirst = 0UL;
 		var dsWakePumped = false;
+		GuestThreadState? handoff = null;
+		List<GuestThreadState>? moreHandoffs = null;
+		var queued = false;
 		using (LockGate("WakeBlockedThreads"))
 		{
 			if (dsWake)
@@ -4321,12 +4337,38 @@ public sealed unsafe partial class DirectExecutionBackend :
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
 				CancelBlockDeadlineTimerLocked(thread);
-				EnqueueReadyGuestThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal");
+				if (TryReadyBlockedThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal"))
+				{
+					if (handoff is null)
+					{
+						handoff = thread;
+					}
+					else
+					{
+						(moreHandoffs ??= new List<GuestThreadState>()).Add(thread);
+					}
+				}
+				else
+				{
+					queued = true;
+				}
 				if (dsWake && wakeCount == 0)
 				{
 					dsWakeFirst = thread.ThreadHandle;
 				}
 				wakeCount++;
+			}
+		}
+
+		if (handoff is not null)
+		{
+			ScheduleGuestThreadExecution(handoff, "wake");
+			if (moreHandoffs is not null)
+			{
+				foreach (var thread in moreHandoffs)
+				{
+					ScheduleGuestThreadExecution(thread, "wake");
+				}
 			}
 		}
 
@@ -4338,7 +4380,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 
 			// Pump or the readied thread waits for an import dispatch that never comes.
-			if (_cpuContext is { } wakeContext)
+			// Under direct handoff a queued thread still owns its executor, which hands it over.
+			if (queued && !_directWakeHandoff && _cpuContext is { } wakeContext)
 			{
 				Pump(wakeContext, "wake");
 				if (dsWake)
@@ -4436,6 +4479,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	public bool WakeBlockedWaiter(ulong threadHandle, IGuestThreadBlockWaiter waiter, string wakeKey)
 	{
+		GuestThreadState? handoff;
 		using (LockGate("WakeBlockedWaiter"))
 		{
 			if (!_guestThreads.TryGetValue(threadHandle, out var thread) ||
@@ -4452,7 +4496,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 			thread.BlockReason = null;
 			thread.BlockDeadlineTimestamp = 0;
 			CancelBlockDeadlineTimerLocked(thread);
-			EnqueueReadyGuestThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal");
+			handoff = TryReadyBlockedThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal")
+				? thread
+				: null;
 		}
 
 		if (_logGuestThreads)
@@ -4460,13 +4506,46 @@ public sealed unsafe partial class DirectExecutionBackend :
 			Console.Error.WriteLine($"[LOADER][INFO] guest_threads.wake_waiter handle=0x{threadHandle:X16} key={wakeKey}");
 		}
 
-		// Same hand-off as the key-based wake: dispatch from the waker right away.
-		if (_cpuContext is { } wakeContext)
+		if (handoff is not null)
 		{
+			// Claimed under the gate: signal only this thread's runner.
+			ScheduleGuestThreadExecution(handoff, "wake");
+		}
+		else if (!_directWakeHandoff && _cpuContext is { } wakeContext)
+		{
+			// Same hand-off as the key-based wake: dispatch from the waker right away.
 			Pump(wakeContext, "wake");
 		}
 
 		return true;
+	}
+
+	public bool IsGuestThreadExecuting(ulong threadHandle) =>
+		!_guestThreadsLockFree.TryGetValue(threadHandle, out var thread) ||
+		Volatile.Read(ref thread.HostThreadId) != 0;
+
+	// Caller holds the gate and has just moved a blocked thread to Ready. With direct handoff,
+	// a thread whose executor is idle is claimed here (the single-owner ExecutorActive token is
+	// taken under the gate, exactly as TryClaimReadyGuestThreadLocked does) and the caller
+	// schedules it on its runner after releasing the gate: returns true. Otherwise the thread
+	// is queued and the gate pulsed (dispatcher, or a nested-callback waiter that owns the
+	// executor); an executor that is still unwinding hands the thread over when it releases it
+	// (RunGuestThread). Returns false.
+	private bool TryReadyBlockedThreadLocked(GuestThreadState thread, string source)
+	{
+		// A thread without a runner yet is left to the dispatcher, so the runner (and the QoS
+		// class it inherits from its creator) is never created on a waker or timer thread.
+		if (_directWakeHandoff && !thread.ExecutorActive && thread.ExecutionRunner is not null)
+		{
+			ProfileGuestThreadReady(thread, source);
+			thread.ExecutorActive = true;
+			thread.State = GuestThreadRunState.Running;
+			ProfileGuestThreadClaimed(thread);
+			return true;
+		}
+
+		EnqueueReadyGuestThreadLocked(thread, source);
+		return false;
 	}
 
 	// Deadlines given to RequestCurrentThreadBlock are served by the shared timer service
@@ -4500,6 +4579,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private void WakeExpiredBlockedGuestThread(GuestThreadState thread)
 	{
+		bool handoff;
 		using (LockGate("WakeExpiredBlockedGuestThread"))
 		{
 			if (thread.State != GuestThreadRunState.Blocked ||
@@ -4514,7 +4594,12 @@ public sealed unsafe partial class DirectExecutionBackend :
 			thread.State = GuestThreadRunState.Ready;
 			thread.BlockReason = null;
 			thread.BlockDeadlineTimestamp = 0;
-			EnqueueReadyGuestThreadLocked(thread, "timeout");
+			handoff = TryReadyBlockedThreadLocked(thread, "timeout");
+		}
+
+		if (handoff)
+		{
+			ScheduleGuestThreadExecution(thread, "timeout");
 		}
 
 		if (_logGuestThreads)
@@ -5699,6 +5784,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			_readyGuestThreads.Clear();
 			Interlocked.Exchange(ref _readyGuestThreadCount, 0);
 			_guestThreads.Clear();
+			_guestThreadsLockFree.Clear();
 			_reusableGuestThreadRegions.Clear();
 			_externalGuestThreads.Clear();
 			_pendingGuestExceptions.Clear();
@@ -6258,9 +6344,12 @@ public sealed unsafe partial class DirectExecutionBackend :
 						? $"[LOADER][INFO] Pumping guest thread '{thread.Name}' reason={reason} resume=0x{continuation.Rip:X16}"
 						: $"[LOADER][INFO] Pumping guest thread '{thread.Name}' reason={reason} entry=0x{thread.EntryPoint:X16}");
 			}
-			var exitReason = resumeContinuation
-				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out var blockReason)
-				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
+			string? blockReason;
+			var exitReason = TestGuestSlice is { } testSlice
+				? RunTestGuestSlice(testSlice, thread, resumeContinuation, continuation.Rax, out blockReason)
+				: resumeContinuation
+					? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out blockReason)
+					: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
 			if (exitReason == GuestNativeCallExitReason.Returned && thread.Recycler is null)
 			{
 				// Thread exit runs TLS-key and thread_atexit destructors (pthread_exit already
@@ -6302,7 +6391,16 @@ public sealed unsafe partial class DirectExecutionBackend :
 							thread.BlockReason = null;
 							thread.BlockDeadlineTimestamp = 0;
 							CancelBlockDeadlineTimerLocked(thread);
-							EnqueueReadyGuestThreadLocked(thread, "block_recheck");
+							if (_directWakeHandoff && thread.ExecutionRunner is not null)
+							{
+								// This executor still owns the thread and hands it over to
+								// the next slice when it releases it below (same condition).
+								ProfileGuestThreadReady(thread, "block_recheck");
+							}
+							else
+							{
+								EnqueueReadyGuestThreadLocked(thread, "block_recheck");
+							}
 						}
 						break;
 					default:
@@ -6325,6 +6423,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 		finally
 		{
 			PendingGuestException? pendingAfterExecutorRelease = null;
+			var handOffToNextSlice = false;
 			_activeGuestThreadState = previousGuestThreadState;
 			Volatile.Write(ref thread.HostThreadId, 0);
 			GuestThreadExecution.RestoreGuestThread(previousGuestThreadHandle);
@@ -6337,10 +6436,22 @@ public sealed unsafe partial class DirectExecutionBackend :
 				{
 					thread.HostThread = null;
 				}
+				if (_directWakeHandoff && thread.State == GuestThreadRunState.Ready && thread.ExecutionRunner is not null)
+				{
+					// The wait was satisfied while this executor unwound (a wake that found
+					// ExecutorActive, or the park-time re-check above). Keep the single-owner
+					// token and pass it straight to the next slice instead of releasing it and
+					// waking the dispatcher to claim it back. Any queue entry left by the wake
+					// is skipped by TryClaimReadyGuestThreadLocked because the state is Running.
+					RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.ExecutorReleased);
+					thread.State = GuestThreadRunState.Running;
+					ProfileGuestThreadClaimed(thread);
+					handOffToNextSlice = true;
+				}
 				// A signal can arrive after guest code blocks but before this
 				// executor releases the thread. Deliver that signal from the saved
 				// continuation after the thread becomes parked.
-				if (TryReleaseGuestThreadExecutorLocked(thread, out var pending))
+				else if (TryReleaseGuestThreadExecutorLocked(thread, out var pending))
 				{
 					pendingAfterExecutorRelease = pending;
 				}
@@ -6352,6 +6463,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 					_reusableGuestThreadRegions.Enqueue((memory, thread.StackBase, thread.StackSize, thread.Context.FsBase));
 					thread.ExecutionRunner?.RequestStop();
 				}
+			}
+			if (handOffToNextSlice)
+			{
+				// On the thread's own runner this queues the next slice behind the current one.
+				ScheduleGuestThreadExecution(thread, "handoff");
 			}
 			if (pendingAfterExecutorRelease is { } pendingException &&
 				!TryRaiseGuestException(
@@ -6370,6 +6486,51 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 		// Reported once the executor is released, so the owner can restart the parked thread straight from this callback.
 		parkedRecycler?.OnEntryReturned(thread.ThreadHandle, thread.ExitValue);
+	}
+
+	/// <summary>
+	/// Test seam: when set, a guest thread slice runs this managed callback instead of native
+	/// guest code. Arguments: thread handle, its context, whether the slice resumes a blocked
+	/// continuation, and the resumed import's return value. The callback returns true when it
+	/// requested a block (GuestThreadExecution.RequestCurrentThreadBlock inside a simulated
+	/// import frame), which is registered exactly as the import dispatcher registers it.
+	/// </summary>
+	internal Func<ulong, CpuContext, bool, ulong, bool>? TestGuestSlice;
+
+	private GuestNativeCallExitReason RunTestGuestSlice(
+		Func<ulong, CpuContext, bool, ulong, bool> slice,
+		GuestThreadState thread,
+		bool resumed,
+		ulong resumeValue,
+		out string? reason)
+	{
+		if (!slice(thread.ThreadHandle, thread.Context, resumed, resumeValue))
+		{
+			reason = "returned";
+			return GuestNativeCallExitReason.Returned;
+		}
+
+		if (!GuestThreadExecution.TryConsumeCurrentThreadBlock(
+				out var blockReason,
+				out var blockContinuation,
+				out var hasBlockContinuation,
+				out var blockWakeKey,
+				out var blockWaiter,
+				out var blockDeadlineTimestamp) ||
+			!hasBlockContinuation)
+		{
+			reason = "test slice blocked without a block request";
+			return GuestNativeCallExitReason.Exception;
+		}
+
+		RegisterBlockedGuestThreadContinuation(
+			thread.ThreadHandle,
+			blockContinuation,
+			blockWakeKey,
+			blockWaiter,
+			blockDeadlineTimestamp);
+		reason = blockReason;
+		return GuestNativeCallExitReason.Blocked;
 	}
 
 	private bool TryReleaseGuestThreadExecutorLocked(
@@ -6714,6 +6875,10 @@ public sealed unsafe partial class DirectExecutionBackend :
 			reason = "guest thread stack pointer is zero";
 			return GuestNativeCallExitReason.Exception;
 		}
+		if (_sharedResumeStub && !SupportsSwappableStackBounds && name != "tbb_thead")
+		{
+			return ExecuteGuestContinuationEntryShared(context, entryPoint, returnSlotAddress, out reason);
+		}
 		const uint stubSize = 512u;
 		void* ptr = VirtualAlloc(null, stubSize, 12288u, 4u);
 		if (ptr == null)
@@ -6870,6 +7035,217 @@ public sealed unsafe partial class DirectExecutionBackend :
 				previousYieldReason);
 			NativeMemory.Free(hostRspStorage);
 			VirtualFree(ptr, 0u, 32768u);
+		}
+	}
+
+	// Resuming a blocked guest thread used to emit a fresh continuation trampoline per resume
+	// (VirtualAlloc, emit, VirtualProtect, run, VirtualFree). Under Rosetta every fresh executable
+	// page is translated again: ~17 us p50 per resume in a standalone mmap/mprotect/call/munmap
+	// loop, most of a cross-thread wake. This entry stub is emitted once; it saves the host frame
+	// exactly like the per-resume trampoline did and then jumps into the shared context-transfer
+	// stub, which loads the target registers from a per-call data frame. Not used where emitted
+	// code must swap thread stack bounds or for the native-worker path. The frame is passed as
+	// argument 1 and 4 so the stub can read it from rcx under either host calling convention.
+	// SHARPEMU_SHARED_RESUME_STUB=0 restores the per-resume trampoline.
+	private static readonly bool _sharedResumeStub =
+		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_SHARED_RESUME_STUB"), "0", StringComparison.Ordinal);
+
+	// Host-RSP state (HostStackStateBytes, padded to keep the frame 16-byte aligned), then the
+	// transfer frame, then the host-RSP slot address the entry stub stores the host stack into.
+	private const int ResumeBlockHostStateQwords = 4;
+	private const int ResumeFrameHostRspSlotIndex = GuestContextTransferFrameQwords;
+
+	private nint _guestResumeEntryStub;
+
+	private unsafe GuestNativeCallExitReason ExecuteGuestContinuationEntryShared(
+		CpuContext context,
+		ulong entryPoint,
+		ulong returnSlotAddress,
+		out string? reason)
+	{
+		reason = null;
+		var entryStub = GetOrCreateGuestResumeEntryStub();
+		if (entryStub == 0)
+		{
+			reason = "failed to allocate guest resume entry stub";
+			return GuestNativeCallExitReason.Exception;
+		}
+		var guestRsp = context[CpuRegister.Rsp];
+		var block = (ulong*)NativeMemory.AllocZeroed(
+			(nuint)(ResumeBlockHostStateQwords + ResumeFrameHostRspSlotIndex + 1),
+			sizeof(ulong));
+		if (block == null)
+		{
+			reason = "failed to allocate writable host-RSP storage for guest continuation stub";
+			return GuestNativeCallExitReason.Exception;
+		}
+		var hostRspSlot = (ulong)block;
+		var frame = block + ResumeBlockHostStateQwords;
+		frame[0] = entryPoint;
+		frame[1] = guestRsp;
+		frame[2] = context[CpuRegister.Rax];
+		frame[3] = context[CpuRegister.Rcx];
+		frame[4] = context[CpuRegister.Rdx];
+		frame[5] = context[CpuRegister.Rbx];
+		frame[6] = context[CpuRegister.Rbp];
+		frame[7] = context[CpuRegister.Rsi];
+		frame[8] = context[CpuRegister.Rdi];
+		frame[9] = context[CpuRegister.R8];
+		frame[10] = context[CpuRegister.R9];
+		frame[11] = context[CpuRegister.R10];
+		frame[12] = context[CpuRegister.R11];
+		frame[13] = context[CpuRegister.R12];
+		frame[14] = context[CpuRegister.R13];
+		frame[15] = context[CpuRegister.R14];
+		frame[16] = context[CpuRegister.R15];
+		frame[17] = context.Mxcsr;
+		frame[18] = context.FpuControlWord;
+		frame[19] = 1; // load MXCSR verbatim, as the per-resume trampoline did
+		frame[ResumeFrameHostRspSlotIndex] = hostRspSlot;
+
+		var previousActiveBackend = _activeExecutionBackend;
+		var previousActiveContext = _activeCpuContext;
+		var previousSentinel = _activeEntryReturnSentinelRip;
+		var previousReturnSlotAddress = _activeGuestReturnSlotAddress;
+		var previousForcedExit = _activeForcedGuestExit;
+		var previousYieldRequested = _activeGuestThreadYieldRequested;
+		var previousYieldReason = _activeGuestThreadYieldReason;
+		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		var previousExecutingHostThreadId = Interlocked.Exchange(
+			ref _executingHostThreadId, unchecked((int)GetCurrentThreadId()));
+		try
+		{
+			_activeExecutionBackend = this;
+			_activeCpuContext = context;
+			_activeEntryReturnSentinelRip = 0;
+			_activeGuestReturnSlotAddress = returnSlotAddress;
+			_activeForcedGuestExit = false;
+			_activeGuestThreadYieldRequested = false;
+			_activeGuestThreadYieldReason = null;
+			BindTlsBase(context);
+			ExecutionPlatform.RouteGuestFaultsOnCurrentThread();
+			// The transfer stub returns through [rsp-8], the slot the trampoline used to fill.
+			if (!context.TryWriteUInt64(guestRsp - sizeof(ulong), entryPoint))
+			{
+				reason = $"guest continuation transfer slot is not writable at 0x{guestRsp - sizeof(ulong):X16}";
+				return GuestNativeCallExitReason.Exception;
+			}
+			ActiveEntryReturnSentinelRip = (ulong)_guestReturnStub;
+			if (returnSlotAddress == 0 || !context.TryWriteUInt64(returnSlotAddress, (ulong)_guestReturnStub))
+			{
+				reason = $"failed to patch guest continuation return slot at 0x{returnSlotAddress:X16}";
+				return GuestNativeCallExitReason.Exception;
+			}
+			ActiveGuestThreadYieldRequested = false;
+			ActiveGuestThreadYieldReason = null;
+			try
+			{
+				if (!TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot))
+				{
+					reason = "failed to bind host-RSP storage for guest continuation stub";
+					return GuestNativeCallExitReason.Exception;
+				}
+				var nativeReturn = ((delegate* unmanaged[Cdecl]<ulong*, ulong, ulong, ulong*, ulong>)entryStub)(frame, 0, 0, frame);
+				if (ActiveGuestThreadYieldRequested)
+				{
+					reason = ActiveGuestThreadYieldReason ?? "guest thread blocked";
+					return GuestNativeCallExitReason.Blocked;
+				}
+				if (ActiveForcedGuestExit)
+				{
+					reason = LastError ?? "guest thread forced exit";
+					return GuestNativeCallExitReason.ForcedExit;
+				}
+				context[CpuRegister.Rax] = nativeReturn;
+				reason = $"returned 0x{nativeReturn:X16}";
+				return GuestNativeCallExitReason.Returned;
+			}
+			catch (AccessViolationException ex)
+			{
+				reason = "access violation: " + ex.Message;
+				return GuestNativeCallExitReason.Exception;
+			}
+			catch (Exception ex)
+			{
+				reason = ex.GetType().Name + ": " + ex.Message;
+				return GuestNativeCallExitReason.Exception;
+			}
+		}
+		finally
+		{
+			TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
+			Volatile.Write(ref _executingHostThreadId, previousExecutingHostThreadId);
+			RestoreActiveExecutionThread(
+				previousActiveBackend,
+				previousActiveContext,
+				previousSentinel,
+				previousReturnSlotAddress,
+				previousForcedExit,
+				previousYieldRequested,
+				previousYieldReason);
+			NativeMemory.Free(block);
+		}
+	}
+
+	// SysV entry: rdi = transfer frame. Saves the host non-volatile state in the same layout as
+	// the per-resume trampoline (the guest return stub restores it from the host-RSP slot),
+	// stores the host stack into frame[ResumeFrameHostRspSlotIndex] and continues in the shared
+	// context-transfer stub with rax = frame.
+	private unsafe nint GetOrCreateGuestResumeEntryStub()
+	{
+		if (Volatile.Read(ref _guestResumeEntryStub) != 0)
+		{
+			return _guestResumeEntryStub;
+		}
+
+		var transferStub = GetOrCreateGuestContextTransferStub();
+		if (transferStub == 0)
+		{
+			return 0;
+		}
+
+		lock (_guestContextTransferStubGate)
+		{
+			if (_guestResumeEntryStub != 0)
+			{
+				return _guestResumeEntryStub;
+			}
+
+			const uint stubSize = 256;
+			var code = (byte*)VirtualAlloc(null, stubSize, 12288u, 64u);
+			if (code == null)
+			{
+				return 0;
+			}
+
+			var emitter = new NativeCodeEmitter(code);
+			emitter.Emit(0x53); // push rbx
+			emitter.Emit(0x55); // push rbp
+			emitter.Emit(0x57); // push rdi
+			emitter.Emit(0x56); // push rsi
+			emitter.Emit(0x41); emitter.Emit(0x54); // push r12
+			emitter.Emit(0x41); emitter.Emit(0x55); // push r13
+			emitter.Emit(0x41); emitter.Emit(0x56); // push r14
+			emitter.Emit(0x41); emitter.Emit(0x57); // push r15
+			EmitHostNonvolatileXmmSave(code, ref emitter.Offset);
+			emitter.Emit(0x48); emitter.Emit(0x89); emitter.Emit(0xC8); // mov rax, rcx (frame: SysV arg 4, Win64 arg 1)
+			emitter.Emit(0x4C); emitter.Emit(0x8B); emitter.Emit(0x90); // mov r10, [rax+disp32]
+			emitter.Emit((uint)(ResumeFrameHostRspSlotIndex * sizeof(ulong)));
+			emitter.Emit(0x49); emitter.Emit(0x89); emitter.Emit(0x22); // mov [r10], rsp
+			emitter.EmitMovR64Immediate(0x49, 0xBB, (ulong)transferStub); // mov r11, transfer stub
+			emitter.Emit(0x41); emitter.Emit(0xFF); emitter.Emit(0xE3); // jmp r11
+			Debug.Assert(emitter.Offset <= stubSize, "Guest resume entry stub exceeded its allocation.");
+
+			uint oldProtect = 0;
+			if (!VirtualProtect(code, stubSize, 32u, &oldProtect))
+			{
+				VirtualFree(code, 0u, 32768u);
+				return 0;
+			}
+
+			FlushInstructionCache(GetCurrentProcess(), code, stubSize);
+			Volatile.Write(ref _guestResumeEntryStub, (nint)code);
+			return (nint)code;
 		}
 	}
 
@@ -7597,14 +7973,19 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private void ScheduleGuestThreadExecution(GuestThreadState thread, string reason)
 	{
-		GuestExecutionRunner runner;
-		lock (_guestThreadGate)
+		// The runner is created once under the gate and never replaced, so a set reference
+		// can be used without taking the gate again.
+		var runner = thread.ExecutionRunner;
+		if (runner is null)
 		{
-			runner = thread.ExecutionRunner ??= new GuestExecutionRunner(
-				thread.ThreadHandle,
-				thread.Name,
-				MapGuestThreadPriority(thread.Priority),
-				thread.Priority);
+			lock (_guestThreadGate)
+			{
+				runner = thread.ExecutionRunner ??= new GuestExecutionRunner(
+					thread.ThreadHandle,
+					thread.Name,
+					MapGuestThreadPriority(thread.Priority),
+					thread.Priority);
+			}
 		}
 		ProfileGuestThreadScheduled(thread);
 		runner.Schedule(() =>
@@ -7981,6 +8362,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 		{
 			VirtualFree((void*)_guestContextTransferStub, 0u, 32768u);
 			_guestContextTransferStub = 0;
+		}
+		if (_guestResumeEntryStub != 0)
+		{
+			VirtualFree((void*)_guestResumeEntryStub, 0u, 32768u);
+			_guestResumeEntryStub = 0;
 		}
 		foreach (var frame in _guestContextTransferFrames.Values)
 		{

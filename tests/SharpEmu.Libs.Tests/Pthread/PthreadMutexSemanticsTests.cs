@@ -89,6 +89,10 @@ public sealed class PthreadMutexExceptionTests
                 DeliverException!((CpuContext)args![0]!);
                 return null;
             }
+            if (targetMethod?.Name == nameof(IGuestThreadScheduler.IsGuestThreadExecuting))
+            {
+                return true;
+            }
             throw new NotSupportedException(targetMethod?.Name);
         }
     }

@@ -2761,7 +2761,16 @@ public static class KernelPthreadCompatExports
         state.ProfileOwner = MutexContentionProfile.CurrentThreadName();
     }
 
-    private static readonly long MutexWaiterSpinTicks = Stopwatch.Frequency * 40 / 1_000_000;
+    // Adaptive spin (default): spin at most SHARPEMU_MUTEX_SPIN_US (default 10 us) and only
+    // while the owner is executing on a host CPU; an owner that is blocked, ready or parked
+    // cannot release soon, so the waiter parks at once instead of burning a core.
+    // SHARPEMU_MUTEX_ADAPTIVE_SPIN=0 restores the fixed 40 us spin without the owner check.
+    private static readonly bool MutexAdaptiveSpin =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MUTEX_ADAPTIVE_SPIN"), "0", StringComparison.Ordinal);
+
+    private static readonly long MutexWaiterSpinTicks = Stopwatch.Frequency * (MutexAdaptiveSpin
+        ? (long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MUTEX_SPIN_US"), out var spinUs) && spinUs >= 0 ? spinUs : 10)
+        : 40) / 1_000_000;
 
     // A queued waiter spins briefly for its grant before it parks. Under FIFO handoff the unlock
     // hands the mutex to the queue head, and parking and waking a guest thread costs far more
@@ -2774,6 +2783,7 @@ public static class KernelPthreadCompatExports
         try
         {
             var deadline = Stopwatch.GetTimestamp() + MutexWaiterSpinTicks;
+            var scheduler = MutexAdaptiveSpin ? GuestThreadExecution.Scheduler : null;
             for (var round = 0; ; round++)
             {
                 if (Volatile.Read(ref waiter.Granted) != 0)
@@ -2781,7 +2791,8 @@ public static class KernelPthreadCompatExports
                     return true;
                 }
 
-                if (state.OwnerThreadId == 0)
+                var owner = state.OwnerThreadId;
+                if (owner == 0)
                 {
                     lock (state.SyncRoot)
                     {
@@ -2790,6 +2801,12 @@ public static class KernelPthreadCompatExports
                             return true;
                         }
                     }
+                }
+                else if (scheduler is not null && !scheduler.IsGuestThreadExecuting(owner))
+                {
+                    // Re-check the grant once: the owner may have released and handed off
+                    // between the reads above.
+                    return Volatile.Read(ref waiter.Granted) != 0;
                 }
 
                 if (Stopwatch.GetTimestamp() >= deadline)
