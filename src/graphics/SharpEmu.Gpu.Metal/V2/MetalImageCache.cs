@@ -863,7 +863,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             NoteForeignStencilShare(image, other);
-            var handedOver = (other.IsGpuModified || image.StencilPlaneStale) && TryCopyStencilOnDevice(image, other);
+            var handedOver = false;
+            if (StencilDeviceHandOver && image.IsCpuDirty && other.IsGpuModified && !other.IsCpuDirty &&
+                CanCopyStencilOnDevice(image, other))
+            {
+                // The depth plane is owed from guest memory (an alias wrote it there) and the stencil from the
+                // other image's texture. Publishing that stencil to reload both planes brought back what guest
+                // memory last held instead (Ghost of Tsushima's terrain took last frame's stencil); the device copy
+                // lands on top of the reload (CompletePendingStencilCopy).
+                image.PendingStencilSource = other;
+                image.PendingStencilSourceSlot = otherIdentifier;
+                handedOver = true;
+            }
+            else
+            {
+                handedOver = (other.IsGpuModified || image.StencilPlaneStale) && TryCopyStencilOnDevice(image, other);
+            }
+
             if (!handedOver && other.IsGpuModified)
             {
                 // The depth plane is written out first so the reload keeps it, and the
@@ -901,13 +917,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     // The stencil an 8-bit image over a depth image's stencil bytes holds, copied into the
     // depth texture's stencil plane. Caller holds the lock.
-    private bool TryCopyStencilOnDevice(MetalCachedImage depth, MetalCachedImage other)
+    private bool TryCopyStencilOnDevice(MetalCachedImage depth, MetalCachedImage other, bool pending = false)
     {
-        if (!StencilDeviceHandOver || depth.Texture == 0 || other.Texture == 0 ||
-            depth.IsCpuDirty || other.IsCpuDirty ||
-            depth.IsWindowLinearView || other.IsWindowLinearView ||
-            depth.FirstLevel != 0 || other.FirstLevel != 0 ||
-            other.Description.Data.Address != depth.Description.Stencil.Address)
+        if (!CanCopyStencilOnDevice(depth, other) || depth.IsCpuDirty || (!pending && other.IsCpuDirty))
         {
             return false;
         }
@@ -931,6 +943,43 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         depth.NoteStencilFrom(other);
         _stencilDeviceHandOvers++;
         return true;
+    }
+
+    // Whether the stencil an 8-bit image over a depth image's stencil bytes holds can be copied into the depth
+    // texture on the device at all (whatever either image owes guest memory).
+    private static bool CanCopyStencilOnDevice(MetalCachedImage depth, MetalCachedImage other) =>
+        StencilDeviceHandOver && depth.Texture != 0 && other.Texture != 0 &&
+        !depth.IsWindowLinearView && !other.IsWindowLinearView &&
+        depth.FirstLevel == 0 && other.FirstLevel == 0 &&
+        other.Description.Data.Address == depth.Description.Stencil.Address &&
+        other.Description.Samples == 1 && depth.Description.Samples == 1 &&
+        other.Description.Extent.Width == depth.Description.Extent.Width &&
+        other.Description.Extent.Height == depth.Description.Extent.Height;
+
+    // The stencil copy SynchronizeStencilPlanes left for after the depth image's reload: done once the image
+    // holds guest memory again, kept while the reload is still owed. Caller holds the lock.
+    private void CompletePendingStencilCopy(MetalCachedImage image)
+    {
+        if (image.PendingStencilSource is not { } source || image.IsCpuDirty)
+        {
+            return;
+        }
+
+        image.PendingStencilSource = null;
+        var live = ReferenceEquals(_slots.TryGet(image.PendingStencilSourceSlot), source);
+        if (live && TryCopyStencilOnDevice(image, source, pending: true))
+        {
+            return;
+        }
+
+        // The source went away or cannot be copied: its bytes go back through guest memory as before.
+        if (live && source.IsGpuModified)
+        {
+            WriteBackToGuest(source, MetalWritebackCause.ImageOverlap);
+            image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+            RefreshFromGuestCore(image);
+            _stencilPlanePublishes++;
+        }
     }
 
     private long _stencilPlanePublishes;
@@ -2378,8 +2427,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return layerBytes != 0;
     }
 
-    // Uploads the guest bytes of a CPU-dirty image through the tiler.
+    // Uploads the guest bytes of a CPU-dirty image through the tiler, then any stencil copy owed on top of them.
     private void RefreshFromGuest(MetalCachedImage image)
+    {
+        RefreshFromGuestCore(image);
+        if (image.PendingStencilSource is not null)
+        {
+            CompletePendingStencilCopy(image);
+        }
+    }
+
+    private void RefreshFromGuestCore(MetalCachedImage image)
     {
         using var censusScope = MetalGpuReferenceCensus.Scope(MetalRefKind.ImageUpload);
         if (!image.IsCpuDirty || image.Texture == 0 || ImageDescription.IsEmptyRange(image.Description.Data))

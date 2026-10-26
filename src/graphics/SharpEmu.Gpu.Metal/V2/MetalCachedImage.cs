@@ -230,6 +230,15 @@ internal sealed class MetalCachedImage : IDisposable
     /// </summary>
     public bool StencilPlaneStale { get; set; }
 
+    /// <summary>
+    /// An image over this depth image's stencil bytes whose texture holds a newer stencil, to copy in on the
+    /// device once this image has reloaded its depth plane from guest memory (MetalImageCache.SynchronizeStencilPlanes).
+    /// </summary>
+    public MetalCachedImage? PendingStencilSource { get; set; }
+
+    /// <summary>The cache slot of <see cref="PendingStencilSource"/>, to tell it is still the live image there.</summary>
+    public SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier PendingStencilSourceSlot { get; set; }
+
     /// <summary>Records that this texture's stencil plane is a device copy of the source as it is.</summary>
     public void NoteStencilFrom(MetalCachedImage source)
     {
