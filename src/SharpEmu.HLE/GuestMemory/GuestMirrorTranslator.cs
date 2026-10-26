@@ -80,6 +80,14 @@ public sealed unsafe class GuestMirrorTranslator
 
     public ulong MappingGeneration => Volatile.Read(ref _header->MappingGeneration);
 
+    /// <summary>
+    /// Whether translations count their cache hits and misses (<see cref="CacheHits"/>,
+    /// <see cref="CacheMisses"/>). Off unless SHARPEMU_SPLIT_STATS=1: the worker, the program
+    /// resolvers and the ring threads all translate, and a counter they share is a cache line
+    /// bouncing between cores on every address of every descriptor, shader read and staged range.
+    /// </summary>
+    public bool CountCacheAccesses { get; set; } = GpuMemory.SplitCrossingStats.Enabled;
+
     // Diagnostics only: plain increments, so counts from racing threads may be lost.
     public long CacheHits => Volatile.Read(ref _hits);
 
@@ -153,12 +161,12 @@ public sealed unsafe class GuestMirrorTranslator
         var cached = Volatile.Read(ref slot);
         if (cached is not null && cached.Generation == generation && address >= cached.Start && address < cached.End)
         {
-            _hits++;
+            if (CountCacheAccesses) _hits++;
             range = cached;
             return true;
         }
 
-        _misses++;
+        if (CountCacheAccesses) _misses++;
         range = null!;
         if (!GuestViewTableReader.TryFind(_header, _entries, _capacity, address, joinRun: true, out var entry, out var readGeneration))
             return false;

@@ -210,7 +210,8 @@ public sealed unsafe class SyncCallTable
 
         Volatile.Write(ref slot->State, SyncSlotState.Posted);
         Interlocked.Or(ref _control->Pending, 1UL << index);
-        new Doorbell(&_control->ServiceBell).Ring();
+        // One request, one server thread: the others stay asleep instead of waking to spin.
+        new Doorbell(&_control->ServiceBell).RingOne();
 
         var outcome = AwaitAnswer(slot, start, timeoutNanoseconds, spinNanoseconds);
         if (outcome != SyncCallStatus.Completed)

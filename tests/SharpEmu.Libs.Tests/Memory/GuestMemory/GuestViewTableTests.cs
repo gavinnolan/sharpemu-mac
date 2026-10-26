@@ -182,7 +182,10 @@ public sealed unsafe class GuestViewTableTests
         using var table = NewTable();
         table.Map(Base, 4 * Block, 3 * Block, HostPageProtection.ReadWrite);
         table.Map(Base + 4 * Block, Block, 40 * Block, HostPageProtection.ReadWrite);
-        var translator = new GuestMirrorTranslator(table.Region.Address, table.Region.Size, MirrorBase, MirrorBytes);
+        var translator = new GuestMirrorTranslator(table.Region.Address, table.Region.Size, MirrorBase, MirrorBytes)
+        {
+            CountCacheAccesses = true,
+        };
 
         Assert.True(translator.TryTranslate(Base + 0x100, 0x100, out var mirror));
         Assert.Equal(MirrorBase + 3 * Block + 0x100, mirror);
