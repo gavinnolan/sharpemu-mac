@@ -527,23 +527,6 @@ public static class KernelRuntimeCompatExports
     }
 
     /// <summary>
-    /// The CPU time the calling thread has consumed, in microseconds (the unit of
-    /// <c>sceKernelGetProcessTime</c>). The SDK headers name no such function; this is the
-    /// thread-scoped sibling of the process-time exports, kept for titles that profile their
-    /// own worker threads with it.
-    /// </summary>
-    [SysAbiExport(
-        Nid = "afZu6Sswlr4",
-        ExportName = "sceKernelGetThreadTime",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelGetThreadTime(CpuContext ctx)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(0, Threading.HostThreadCpuTime.ReadCurrentMicroseconds()));
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    /// <summary>
     /// <c>int pthread_getcpuclockid(pthread_t, clockid_t *)</c>, the one thread-CPU-time API the
     /// SDK headers (pthread.h) declare. The clock id of the calling thread is
     /// CLOCK_THREAD_CPUTIME_ID (14), which clock_gettime reads; another thread's CPU clock has

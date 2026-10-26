@@ -48,32 +48,6 @@ public sealed class KernelExitAndThreadTimeTests
     }
 
     [Fact]
-    public void GetThreadTimeReportsCpuTimeTheThreadSpends()
-    {
-        var ctx = NewContext();
-        KernelRuntimeCompatExports.KernelGetThreadTime(ctx);
-        var before = ctx[CpuRegister.Rax];
-
-        // Burn CPU on this thread (bounded by wall time so a loaded runner still ends).
-        var wall = System.Diagnostics.Stopwatch.StartNew();
-        var sink = 0L;
-        ulong after = before;
-        while (after - before < 5_000 && wall.ElapsedMilliseconds < 5_000)
-        {
-            for (var i = 0; i < 100_000; i++)
-            {
-                sink += i;
-            }
-
-            KernelRuntimeCompatExports.KernelGetThreadTime(ctx);
-            after = ctx[CpuRegister.Rax];
-        }
-
-        GC.KeepAlive(sink);
-        Assert.True(after >= before + 1_000, $"thread time moved {after - before} us after burning CPU");
-    }
-
-    [Fact]
     public void PthreadGetCpuClockIdAnswersForTheCallingThreadOnly()
     {
         var ctx = NewContext();
