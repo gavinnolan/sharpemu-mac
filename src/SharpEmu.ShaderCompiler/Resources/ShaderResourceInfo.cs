@@ -268,6 +268,10 @@ public sealed record IndirectImageSelector(
     // instead of a bounded set of bound candidates.
     public bool Bindless { get; init; }
 
+    // The bytes from one entry's descriptor to the next: 32 for a table of descriptors, the record size for
+    // a V# table of records that each hold one (Ghost of Tsushima's 340-byte materials, its 384-byte lights).
+    public uint RecordStride { get; init; } = 32;
+
     // The key is selected by a value the whole wave shares (a loop counter), not by a lane's value. Such an image
     // used to read as a null image, so a table the host cannot read stays null instead of failing the program.
     public bool SharedSelector { get; init; }
@@ -279,6 +283,10 @@ public sealed record IndirectImageSelector(
     // value the loop never reaches are compared against, so their records are not read.
     public uint? DirectLimitSource { get; init; }
     public bool DirectLimitInclusive { get; init; }
+
+    // The direct candidates are every value a lane-read selector may take below its guard, not records the guest
+    // is known to hold: one the host cannot read (past the end of the table) is null rather than a failure.
+    public bool DirectRecordsMayEnd { get; init; }
 }
 
 // Counter is the loop counter value that reads the candidate, when a counted loop selects it.

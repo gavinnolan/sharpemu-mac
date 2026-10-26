@@ -2191,10 +2191,12 @@ public static partial class Gen5MslTranslator
                 variantElements.Add((variant, (uint)variantElement));
             }
 
+            // The table's entry count, its first entry's key and the bytes from one entry to the next.
             var mapping = imageInfo.IndirectMappingOffset;
             var count = Temp("uint", LoadFlattenedWord($"{mapping}u"));
             var first = Temp("uint", LoadFlattenedWord($"{mapping + 1}u"));
-            var entry = Temp("uint", $"({key} - {first}) >> 5u");
+            var recordStride = Temp("uint", LoadFlattenedWord($"{mapping + 2}u"));
+            var entry = Temp("uint", $"{recordStride} == 32u ? ({key} - {first}) >> 5u : ({key} - {first}) / max({recordStride}, 1u)");
             var index = Temp("uint", $"{entry} < {count} ? {entry} : {count}");
             var table = Temp($"device const {BindlessEntryStruct}*",
                 $"{ResourcesName}.{Gen5MslArgumentLayout.BindlessImagesName}[{imageInfo.BindlessSlot}u]");

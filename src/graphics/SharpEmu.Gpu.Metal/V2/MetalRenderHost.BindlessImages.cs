@@ -37,8 +37,9 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelBindlessContents = MetalNative.Selector("contents");
     private static readonly nint SelBindlessNewBuffer = MetalNative.Selector("newBufferWithLength:options:");
 
-    // Device tables kept for tables seen recently; the oldest idle ones go first.
-    private const int MaxBindlessDeviceTables = 64;
+    // Device tables kept for tables seen recently; the oldest idle ones go first. Ghost of Tsushima's material
+    // programs read each texture of a material through a table of its own (19 a program), so a frame keeps hundreds.
+    private const int MaxBindlessDeviceTables = 1024;
 
     private sealed class BindlessDeviceTable
     {
@@ -64,6 +65,10 @@ internal sealed partial class MetalRenderHost
         public ResourceSlotIdentifier[] Images = [];
         public ImageRequest[] Requests = [];
         public long ResolvedImageSet = -1;
+
+        // Each descriptor's view as its last acquire stamped it: while the stamp holds, a bind takes the view
+        // again without acquiring it (a material's textures, bound by every draw of its programs).
+        public MetalImageCache.TextureMemoStamp?[] Stamps = [];
     }
 
     // Each descriptor's request as its words and the program's image shape build it, which
@@ -176,14 +181,18 @@ internal sealed partial class MetalRenderHost
             {
                 ResourceSlotIdentifier identifier;
                 ImageRequest request;
+                long pagesBefore;
+                var lookedUp = false;
                 if (device.Images[index].IsValid &&
                     (reuse || (changes is not null && !OverlapsAny(changes, device.Requests[index].Description.Data))))
                 {
                     identifier = device.Images[index];
                     request = device.Requests[index];
+                    pagesBefore = 0;
                 }
                 else
                 {
+                    lookedUp = true;
                     if (!device.Images[index].IsValid) BindlessInvalidEntries++;
                     var variant = table.DescriptorVariants[index];
                     if (variant >= table.VariantImages.Length || table.VariantImages[variant] >= (uint)info.Images.Count)
@@ -196,6 +205,7 @@ internal sealed partial class MetalRenderHost
                     var image = info.Images[(int)table.VariantImages[variant]];
                     var resolution = ResolveBindlessTexture(table.Descriptors[index], ShapeOf(image));
                     request = resolution.Request;
+                    pagesBefore = _imageCache.RequestPageVersions(in request);
                     identifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
                     _bindlessLookups++;
                     resolution = resolution with { Request = request };
@@ -208,8 +218,21 @@ internal sealed partial class MetalRenderHost
                     device.Requests[index] = request;
                 }
 
-                var texture = _imageCache.AcquireTextureView(
-                    identifier, request with { Role = ImageRole.Texture }, out device.ResourceIds[index]);
+                var textureRequest = request with { Role = ImageRole.Texture };
+                nint texture;
+                if (!lookedUp && device.Textures[index] != 0 && device.Stamps[index] is { } stamp &&
+                    _imageCache.TryReacquireTextureView(identifier, in textureRequest, in stamp))
+                {
+                    texture = device.Textures[index];
+                }
+                else
+                {
+                    if (!lookedUp)
+                        pagesBefore = _imageCache.RequestPageVersions(in request);
+                    texture = _imageCache.AcquireTextureViewForMemo(
+                        identifier, textureRequest, pagesBefore, out device.ResourceIds[index], out device.Stamps[index]);
+                }
+
                 device.Textures[index] = texture;
                 // A texture a pass can write (an attachment or a storage image, or one the GPU has written) is a hazard.
                 var cached = residency is null ? null : _imageCache.GetImage(identifier);
@@ -468,6 +491,7 @@ internal sealed partial class MetalRenderHost
             device.ResourceIds = new ulong[count];
             device.Images = new ResourceSlotIdentifier[count];
             device.Requests = new ImageRequest[count];
+            device.Stamps = new MetalImageCache.TextureMemoStamp?[count];
             device.ResolvedImageSet = -1;
         }
 

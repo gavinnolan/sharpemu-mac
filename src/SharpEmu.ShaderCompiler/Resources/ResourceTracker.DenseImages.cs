@@ -9,6 +9,7 @@ public sealed partial class ResourceTracker
 {
     private const uint DenseIndirectImageShift = 5;
     private const uint MaxDenseIndirectImageEntries = 4096;
+    private const uint MaxRecordStride = 0x10000;
 
     // An image descriptor read from a table at a key-scaled offset: S_LOAD_DWORDX8 from an
     // address pair, or S_BUFFER_LOAD_DWORDX8 through a V# that describes the table. The host
@@ -124,12 +125,32 @@ public sealed partial class ResourceTracker
             }
         }
 
-        if (scaled.Kind != ScalarValueKind.Operation || scaled.Operation != ScalarOperation.ShiftLeft32 ||
-            scaled.Operands.Length != 2 || !scaled.Operands[1].IsConstant ||
-            scaled.Operands[1].ConstantU32 != DenseIndirectImageShift)
+        // The key times the entry size: a descriptor table's 32 bytes (key << 5), or, through a V#, the size of
+        // the records that each hold the descriptor at the same offset.
+        if (scaled.Kind != ScalarValueKind.Operation || scaled.Operands.Length != 2)
             return false;
+        uint recordStride;
+        ScalarValue key;
+        if (scaled.Operation == ScalarOperation.ShiftLeft32 && scaled.Operands[1].IsConstant &&
+            scaled.Operands[1].ConstantU32 == DenseIndirectImageShift)
+        {
+            recordStride = 1u << (int)DenseIndirectImageShift;
+            key = scaled.Operands[0];
+        }
+        else if (bufferHeap && scaled.Operation == ScalarOperation.IMul32 &&
+            (scaled.Operands[0].IsConstant || scaled.Operands[1].IsConstant))
+        {
+            var constantFirst = scaled.Operands[0].IsConstant;
+            recordStride = scaled.Operands[constantFirst ? 0 : 1].ConstantU32;
+            key = scaled.Operands[constantFirst ? 1 : 0];
+            if (recordStride < 32 || recordStride > MaxRecordStride || recordStride % sizeof(uint) != 0)
+                return false;
+        }
+        else
+        {
+            return false;
+        }
 
-        var key = scaled.Operands[0];
         // A V#-described table needs no proven key bound: the scalar buffer load is range checked
         // against the V#'s size, so the host enumerates exactly the entries it reaches and a key
         // past them reads the null descriptor the hardware returns.
@@ -170,6 +191,7 @@ public sealed partial class ResourceTracker
                 KeyBound = bound,
                 WaveIndexed = waveIndexed,
                 Bindless = bufferHeap,
+                RecordStride = recordStride,
             },
         };
 
