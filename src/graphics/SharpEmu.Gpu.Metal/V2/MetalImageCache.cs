@@ -1221,6 +1221,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public bool TryReacquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, in TextureMemoStamp stamp)
     {
         using var held = _lock.Hold();
+        return TryReacquireTextureViewHeld(imageIdentifier, in request, in stamp);
+    }
+
+    /// <summary>
+    /// One hold of the cache lock for a run of <see cref="TryReacquireTextureViewHeld"/> calls: a stage
+    /// that binds eight memoised textures takes the lock once instead of eight times, which is
+    /// eight fewer chances to queue behind an upload, a compile or a fault handler. Nothing between
+    /// the hold and its end may take the cache lock again (the lock is not reentrant).
+    /// </summary>
+    internal SharpEmu.HLE.GpuMemory.RegionLock.Held HoldForReacquire() => _lock.Hold();
+
+    /// <summary><see cref="TryReacquireTextureView"/> for a caller that already holds the lock (<see cref="HoldForReacquire"/>).</summary>
+    internal bool TryReacquireTextureViewHeld(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, in TextureMemoStamp stamp)
+    {
         var image = stamp.Image;
         if (_deferredRefreshes.Count != 0 || !ReferenceEquals(_slots.TryGet(imageIdentifier), image) ||
             image.BindingVersion != stamp.ImageVersion || _stencilOwnersVersion != stamp.StencilOwners ||
