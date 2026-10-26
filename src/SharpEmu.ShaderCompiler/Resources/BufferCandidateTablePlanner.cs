@@ -248,11 +248,20 @@ internal static class BufferCandidateTablePlanner
         {
             var condition = pair.Value;
             var exitGuard = false;
-            if (exitGuards && condition is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.LogicalNot } &&
-                condition.Operands[0].Kind == ScalarValueKind.Operation)
+            if (exitGuards && condition is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.LogicalNot })
             {
-                condition = condition.Operands[0];
-                exitGuard = true;
+                // s_cselect_b64 vcc, exec, 0 then s_cbranch_vccz: the loop stays only while the comparison holds.
+                var stays = condition.Operands[0];
+                if (stays is { Kind: ScalarValueKind.Select } && stays.Operands[2] is { IsConstant: true, ConstantU64: 0 })
+                {
+                    stays = stays.Operands[0];
+                }
+
+                if (stays.Kind == ScalarValueKind.Operation)
+                {
+                    condition = stays;
+                    exitGuard = true;
+                }
             }
 
             if (condition.Kind != ScalarValueKind.Operation)
@@ -297,9 +306,10 @@ internal static class BufferCandidateTablePlanner
 
             // The guard must live at the loop header that owns the phi or one of the
             // blocks feeding it, so it really controls the recurrence. An exit guard runs
-            // before every iteration, so only at the header.
+            // before every iteration: at the header or a block every iteration passes
+            // through straight after it (a header that first tests exec).
             var header = index.PhiBlock;
-            if (exitGuard ? block != header || !BranchLeavesLoop(flow, block, header)
+            if (exitGuard ? !RunsEveryIteration(flow, block, header) || !BranchLeavesLoop(flow, block, header)
                 : block != header && !flow.Predecessors[header].Contains(block))
             {
                 continue;
@@ -316,6 +326,46 @@ internal static class BufferCandidateTablePlanner
         }
 
         return limit is not null && guardBlock is not null;
+    }
+
+    // The block is the header, or reached from it through loop blocks that each have one
+    // successor inside the loop, so an iteration that stays in the loop runs it.
+    private static bool RunsEveryIteration(Ir.IrControlFlowGraph flow, int block, int header)
+    {
+        var latch = -1;
+        foreach (var predecessor in flow.Predecessors[header])
+        {
+            latch = Math.Max(latch, predecessor >= header ? predecessor : -1);
+        }
+
+        var current = header;
+        while (current != block)
+        {
+            var next = -1;
+            foreach (var successor in flow.Successors[current])
+            {
+                if (successor < header || successor > latch)
+                {
+                    continue;
+                }
+
+                if (next >= 0)
+                {
+                    return false;
+                }
+
+                next = successor;
+            }
+
+            if (next <= current)
+            {
+                return false;
+            }
+
+            current = next;
+        }
+
+        return true;
     }
 
     // The block's taken branch leaves the loop the header heads (past its last latch) and its

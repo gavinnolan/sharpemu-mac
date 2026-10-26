@@ -5,6 +5,10 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 public sealed partial class ResourceTracker
 {
+    // The records a counted loop's direct image selects among. A loop whose bound is read per draw
+    // and runs further reads its later records' images as the first one's.
+    internal const int MaxLoopDirectCandidates = 64;
+
     private bool TryMakeDirectImage(ScalarValue handle, out IndirectImagePlan plan)
     {
         plan = null!;
@@ -36,14 +40,21 @@ public sealed partial class ResourceTracker
         if (memoryIndices.Any(index => _plan.Memory[index].Pc < block.StartPc || _plan.Memory[index].Pc >= block.EndPc))
             return false;
 
-        // Include the all-zero input result unless the scan's incoming edge proves it cannot occur.
+        // The record offset is built from one selector: a bit scan of a lane mask (s_ff1), or the counter of a
+        // loop over a table of records that each hold a descriptor (Ghost of Tsushima's terrain height patches).
         var pending = new Stack<ScalarValue>(reads.Select(read => read.Operands[1]));
         var visited = new HashSet<ScalarValue>();
         ScalarValue? selector = null;
         while (pending.TryPop(out var value))
         {
             if (!visited.Add(value)) continue;
-            if (value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.FindLowestBit32)
+            if (value.Kind == ScalarValueKind.Phi && _graph.ResolveInvariantPhi(value) is { } invariant)
+            {
+                pending.Push(invariant);
+                continue;
+            }
+            if ((value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.FindLowestBit32) ||
+                value.Kind == ScalarValueKind.Phi)
             {
                 if (selector is not null && !ReferenceEquals(selector, value)) return false;
                 selector = value;
@@ -54,11 +65,42 @@ public sealed partial class ResourceTracker
         }
         if (selector is null) return false;
 
+        IEnumerable<uint> results;
+        ScalarValue? limit = null;
+        var inclusive = false;
+        if (selector.Kind == ScalarValueKind.Phi)
+        {
+            // Every counter value the loop can reach, up to the cap; a record past the loop's bound is never
+            // read (the materializer compares each candidate's counter with the bound it evaluates per draw).
+            if (!BufferCandidateTablePlanner.TryProveInductionBound(_plan, selector, out var initial, out var step,
+                    out limit, out inclusive, exitGuards: true) || !initial.IsConstant || limit is null)
+                return false;
+            var first = initial.ConstantU32;
+            var counters = Enumerable.Range(0, MaxLoopDirectCandidates + 1).Select(index => first + (uint)index * step);
+            if (limit.IsConstant)
+            {
+                var bound = limit.ConstantU32;
+                var inside = inclusive;
+                var reached = counters.TakeWhile(counter => inside ? counter <= bound : counter < bound).ToArray();
+                if (reached.Length > MaxLoopDirectCandidates) return false;
+                results = reached;
+                limit = null;
+            }
+            else
+            {
+                results = counters.Take(MaxLoopDirectCandidates);
+            }
+        }
+        else
+        {
+            // Include the all-zero input result unless the scan's incoming edge proves it cannot occur.
+            results = Enumerable.Range(0, 32).Select(index => (uint)index);
+            if (!_graph.HasNonZeroBitScanInput(selector)) results = results.Append(uint.MaxValue);
+        }
+
         var candidates = new List<DirectImageCandidate>();
         var sources = new List<DescriptorSource>();
         var keys = new HashSet<uint>();
-        var results = Enumerable.Range(0, 32).Select(index => (uint)index);
-        if (!_graph.HasNonZeroBitScanInput(selector)) results = results.Append(uint.MaxValue);
         foreach (var result in results)
         {
             var replacements = new Dictionary<ScalarValue, ScalarValue> { [selector] = _graph.Constant(result) };
@@ -71,15 +113,28 @@ public sealed partial class ResourceTracker
             };
             if (!ValidateSource(source, out _)) return false;
             sources.Add(source);
-            candidates.Add(new DirectImageCandidate(key.ConstantU32, 0));
+            candidates.Add(new DirectImageCandidate(key.ConstantU32, 0, selector.Kind == ScalarValueKind.Phi ? result : null));
         }
+        if (candidates.Count == 0) return false;
 
         for (var index = 0; index < candidates.Count; index++)
             candidates[index] = candidates[index] with { Source = InternSource(sources[index]) };
+        uint? limitSource = null;
+        if (limit is not null)
+        {
+            var bound = new DescriptorSource { Dwords = [limit] };
+            if (!ValidateSource(bound, out _)) return false;
+            limitSource = InternSource(bound);
+        }
         var imageSource = new DescriptorSource
         {
             Dwords = sources[0].Dwords,
-            IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0) { DirectCandidates = candidates },
+            IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0)
+            {
+                DirectCandidates = candidates,
+                DirectLimitSource = limitSource,
+                DirectLimitInclusive = inclusive,
+            },
         };
         plan = new IndirectImagePlan
         {
@@ -92,6 +147,34 @@ public sealed partial class ResourceTracker
             Reads = reads,
         };
         return true;
+    }
+
+    // A sampler read from the record a counted loop selects (beside the image a direct table selects) has no
+    // candidates of its own: it reads as the first record's, which the loop reads first, rather than as null.
+    private bool TryFirstIterationSource(DescriptorSource source, out DescriptorSource first)
+    {
+        first = source;
+        var replacements = new Dictionary<ScalarValue, ScalarValue>();
+        var pending = new Stack<ScalarValue>(source.Dwords);
+        var visited = new HashSet<ScalarValue>();
+        while (pending.TryPop(out var value))
+        {
+            if (!visited.Add(value)) continue;
+            if (value.Kind == ScalarValueKind.Phi)
+            {
+                if (_graph.ResolveInvariantPhi(value) is not null) continue;
+                if (!BufferCandidateTablePlanner.TryProveInductionBound(_plan, value, out var initial, out _, out _, out _,
+                        exitGuards: true) || !initial.IsConstant) return false;
+                replacements[value] = initial;
+                continue;
+            }
+            foreach (var operand in value.Operands) pending.Push(operand);
+        }
+        if (replacements.Count == 0) return false;
+
+        var memo = new Dictionary<ScalarValue, ScalarValue>();
+        first = new DescriptorSource { Dwords = source.Dwords.Select(dword => _graph.Substitute(dword, replacements, memo)).ToArray() };
+        return ValidateSource(first, out _);
     }
 
     // A walk that reaches this many instructions before the register is written again keeps the load.

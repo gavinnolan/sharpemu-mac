@@ -647,7 +647,11 @@ public sealed partial class ResourceTracker
                  (expected == ScalarValueKind.ImageHandle && _plan.Stage != ShaderStage.Compute &&
                   source.Dwords.Any(HasLaneChosenValue)) ||
                  (expected == ScalarValueKind.SamplerHandle && source.Dwords.All(dword => dword.IsUndefined)));
-            if (dynamicImageFallback)
+            if (expected == ScalarValueKind.SamplerHandle && TryFirstIterationSource(source, out var firstIteration))
+            {
+                source = firstIteration;
+            }
+            else if (dynamicImageFallback)
             {
                 source = new DescriptorSource
                 {

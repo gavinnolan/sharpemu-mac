@@ -274,9 +274,15 @@ public sealed record IndirectImageSelector(
 
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
+
+    // Direct candidates a counted loop selects: the source of the loop's bound, which candidates whose counter
+    // value the loop never reaches are compared against, so their records are not read.
+    public uint? DirectLimitSource { get; init; }
+    public bool DirectLimitInclusive { get; init; }
 }
 
-public sealed record DirectImageCandidate(uint Offset, uint Source);
+// Counter is the loop counter value that reads the candidate, when a counted loop selects it.
+public sealed record DirectImageCandidate(uint Offset, uint Source, uint? Counter = null);
 
 // A wave-uniform descriptor selector. The guest derives each descriptor key from
 // a set bit in one scalar mask, through a compact global index table. Keeping this

@@ -245,15 +245,32 @@ public static partial class ResourceMaterializer
                 var cleanInputs = inputs.WithReader(inputs.ReadCleanMemory);
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
-                    if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
-                        cleanInputs, [], evaluateTable: false, out var descriptors, out _))
+                    // A counted loop reads only the records below its bound; the others stay null and unread. A bound
+                    // the host cannot read leaves every record null, as the access read before it had candidates.
+                    var reached = directCandidates.Select(_ => true).ToArray();
+                    if (indirect.DirectLimitSource is { } limitSource)
+                    {
+                        var readable = RuntimeValueEvaluator.EvaluateSources(plan, [limitSource], cleanInputs, [], evaluateTable: false,
+                            out var bounds, out _);
+                        var bound = readable ? bounds[0].Dwords[0] : 0u;
+                        for (var candidateIndex = 0; candidateIndex < reached.Length; candidateIndex++)
+                        {
+                            reached[candidateIndex] = directCandidates[candidateIndex].Counter is not { } counter ||
+                                readable && (indirect.DirectLimitInclusive ? counter <= bound : counter < bound);
+                        }
+                    }
+
+                    if (!RuntimeValueEvaluator.EvaluateSources(plan,
+                        directCandidates.Where((_, candidateIndex) => reached[candidateIndex]).Select(candidate => candidate.Source).ToArray(),
+                        cleanInputs, [], evaluateTable: false, out var reachedDescriptors, out _))
                     {
                         return false;
                     }
                     var directTable = new IndirectImageTable { Resource = (uint)imageIndex };
-                    for (var candidateIndex = 0; candidateIndex < descriptors.Count; candidateIndex++)
+                    var nextReached = 0;
+                    for (var candidateIndex = 0; candidateIndex < directCandidates.Count; candidateIndex++)
                     {
-                        var descriptor = descriptors[candidateIndex];
+                        var descriptor = reached[candidateIndex] ? reachedDescriptors[nextReached++] : DescriptorWords.Empty(8);
                         if (!UsableTableCandidate(descriptor.Dwords, image))
                             descriptor = DescriptorWords.Empty(8);
                         var existing = directTable.Descriptors.FindIndex(candidate => candidate.SameAs(descriptor));

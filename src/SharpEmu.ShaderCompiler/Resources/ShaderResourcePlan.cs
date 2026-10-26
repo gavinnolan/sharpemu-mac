@@ -234,6 +234,8 @@ public sealed class ShaderResourcePlan
             {
                 foreach (var candidate in directCandidates)
                     plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate.Source], cleanSlots);
+                if (indirect.DirectLimitSource is { } limitSource)
+                    plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)limitSource], cleanSlots);
             }
             else if (indirect.Dense)
             {
