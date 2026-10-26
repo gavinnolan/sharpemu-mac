@@ -7,12 +7,24 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 /// The last few thousand guest writes the command processor made or deferred to the GPU:
 /// labels, write-data packets, end-of-pipe values. A wait that never completes is either
 /// waiting for a write that has not happened or for one that happened and was overwritten
-/// before the waiter looked; this is what tells the two apart. Diagnostics only.
+/// before the waiter looked; this is what tells the two apart. Diagnostics only: nothing
+/// records unless <see cref="Enabled"/>, so the callers pay one branch per write otherwise.
+/// SHARPEMU_CP_HISTORY=1 turns it on, as do SHARPEMU_CP_WATCH and SHARPEMU_GPU_CLOBBER_DIAG
+/// (the clobber report prints the history); the stall and shader-code dumps read it when on.
 /// </summary>
 public static class CommandProcessorWriteHistory
 {
     public readonly record struct Entry(
         long Ticks, int QueueId, ulong Address, int Size, ulong Value, string Kind, bool Deferred);
+
+    // Off by default: a record costs a timestamp, an interlocked add and, at some call sites, a
+    // formatted string or a guest read made only for the record. Tests set it directly.
+    public static bool Enabled { get; set; } = EnabledByEnvironment(Environment.GetEnvironmentVariable);
+
+    internal static bool EnabledByEnvironment(Func<string, string?> getEnvironmentVariable) =>
+        getEnvironmentVariable("SHARPEMU_CP_HISTORY") == "1" ||
+        !string.IsNullOrWhiteSpace(getEnvironmentVariable("SHARPEMU_CP_WATCH")) ||
+        getEnvironmentVariable("SHARPEMU_GPU_CLOBBER_DIAG") == "1";
 
     private const int Capacity = 4096;
     private static readonly Entry[] _entries = new Entry[Capacity];
@@ -33,6 +45,11 @@ public static class CommandProcessorWriteHistory
 
     public static void Record(int queueId, ulong address, int size, ulong value, string kind, bool deferred)
     {
+        if (!Enabled)
+        {
+            return;
+        }
+
         foreach (var watched in Watched)
         {
             if (watched >= address && watched < address + (ulong)Math.Max(size, 1))

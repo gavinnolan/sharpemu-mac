@@ -913,7 +913,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         GuestMemoryWritten?.Invoke(address, (ulong)source.Length);
-        if (source.Length is sizeof(uint) or sizeof(ulong))
+        if (CommandProcessorWriteHistory.Enabled && source.Length is sizeof(uint) or sizeof(ulong))
         {
             CommandProcessorWriteHistory.Record(QueueId, address, source.Length,
                 source.Length == sizeof(uint)

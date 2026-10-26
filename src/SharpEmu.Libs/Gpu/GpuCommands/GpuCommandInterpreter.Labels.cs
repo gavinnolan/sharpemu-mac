@@ -184,7 +184,11 @@ public sealed partial class GpuCommandInterpreter
     {
         if (_host.DefersEndOfPipeLabel(kind))
         {
-            CommandProcessorWriteHistory.Record(QueueId, destination, sizeof(uint), value, kind.ToString(), deferred: true);
+            if (CommandProcessorWriteHistory.Enabled)
+            {
+                CommandProcessorWriteHistory.Record(QueueId, destination, sizeof(uint), value, kind.ToString(), deferred: true);
+            }
+
             PendingLabelRecorded?.Invoke(destination, sizeof(uint), value);
             _lastWriteLength = 0;
         }
@@ -195,7 +199,11 @@ public sealed partial class GpuCommandInterpreter
     {
         if (_host.DefersEndOfPipeLabel(kind))
         {
-            CommandProcessorWriteHistory.Record(QueueId, destination, sizeof(ulong), value, kind.ToString(), deferred: true);
+            if (CommandProcessorWriteHistory.Enabled)
+            {
+                CommandProcessorWriteHistory.Record(QueueId, destination, sizeof(ulong), value, kind.ToString(), deferred: true);
+            }
+
             PendingLabelRecorded?.Invoke(destination, sizeof(ulong), value);
             _lastWriteLength = 0;
         }
