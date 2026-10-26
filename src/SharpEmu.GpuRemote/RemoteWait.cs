@@ -95,6 +95,20 @@ internal static unsafe class RemoteWait
         }
     }
 
+    /// <summary>
+    /// Wakes one waiter blocked on <paramref name="word"/>, in any process. For a word several
+    /// threads of one process serve alike (the call tables' service bell): one request needs one
+    /// thread, and waking the rest only makes each of them spin and go back to sleep.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void WakeOne(uint* word)
+    {
+        if (RemoteNative.UlockWake != null)
+        {
+            _ = RemoteNative.UlockWake(UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, word, 0);
+        }
+    }
+
     /// <summary>One spin-loop pause instruction (PAUSE on x86-64, translated by Rosetta; YIELD on arm64).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Pause()

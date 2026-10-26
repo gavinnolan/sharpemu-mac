@@ -163,6 +163,58 @@ public sealed unsafe class SyncCallTableTests
         }
     }
 
+    [MacOSFact]
+    public void SleepingServerPoolNeverLosesACallUnderContention()
+    {
+        using var table = new TableUnderTest(slots: 16);
+        using var pool = new ServerPool(table.Calls, threads: 8);
+        const int Callers = 6;
+        const int CallsEach = 3000;
+        var failures = 0;
+        var callers = Enumerable.Range(0, Callers).Select(caller => new Thread(() =>
+        {
+            Span<byte> request = stackalloc byte[8];
+            Span<byte> response = stackalloc byte[8];
+            for (var i = 0; i < CallsEach; i++)
+            {
+                var value = ((long)caller << 32) | (uint)i;
+                BinaryPrimitives.WriteInt64LittleEndian(request, value);
+                // Servers never spin and never time out, so a wake-up that is lost is a call that
+                // is not answered; the call's own limit turns that into a failure, not a hang.
+                var result = table.Calls.Call(1, request, response, out var length, out _, 30 * Second, i % 3 == 0 ? 0 : 20_000);
+                if (result != SyncCallStatus.Completed || length != 8 || BinaryPrimitives.ReadInt64LittleEndian(response) != value)
+                {
+                    Interlocked.Increment(ref failures);
+                }
+            }
+        })).ToList();
+        callers.ForEach(thread => thread.Start());
+        callers.ForEach(thread => thread.Join());
+        Assert.Equal(0, failures);
+        Assert.Equal(Callers * CallsEach, pool.Served);
+    }
+
+    [MacOSFact]
+    public void OneCallWakesOneSleepingServerNotTheWholePool()
+    {
+        using var table = new TableUnderTest(slots: 4);
+        using var pool = new ServerPool(table.Calls, threads: 8);
+        // Let every server go to sleep.
+        Thread.Sleep(200);
+        const int Calls = 400;
+        var response = new byte[8];
+        for (var i = 0; i < Calls; i++)
+        {
+            Assert.Equal(SyncCallStatus.Completed, table.Calls.Call(1, [1], response, out _, out _, 30 * Second, 0));
+            // Let the woken server go back to sleep, as it does between a game's calls.
+            Thread.Sleep(1);
+        }
+
+        Assert.Equal(Calls, pool.Served);
+        // Waking every sleeper would make about seven of the eight find nothing, per call.
+        Assert.True(pool.EmptyWakes < Calls, $"{pool.EmptyWakes} wake-ups found nothing to serve for {Calls} calls.");
+    }
+
     private static int Echo(uint opcode, ReadOnlySpan<byte> request, Span<byte> response, out int status)
     {
         status = 0;
@@ -200,6 +252,67 @@ public sealed unsafe class SyncCallTableTests
         public Server StartServer(SyncCallHandler handler) => new(Calls, handler);
 
         public void Dispose() => Block.Dispose();
+    }
+
+    // The serving pool of the split (SplitGpuSession.ServeReverseCalls, GpuProcessClient.ServeSyncCalls):
+    // several threads asleep on one table, each serving one call at a time.
+    private sealed class ServerPool : IDisposable
+    {
+        private readonly SyncCallTable _calls;
+        private readonly List<Thread> _threads = new();
+        private volatile bool _stop;
+        private long _served;
+        private long _emptyWakes;
+
+        public ServerPool(SyncCallTable calls, int threads)
+        {
+            _calls = calls;
+            for (var i = 0; i < threads; i++)
+            {
+                var thread = new Thread(Serve) { IsBackground = true };
+                _threads.Add(thread);
+                thread.Start();
+            }
+        }
+
+        public long Served => Interlocked.Read(ref _served);
+
+        public long EmptyWakes => Interlocked.Read(ref _emptyWakes);
+
+        private void Serve()
+        {
+            SyncCallHandler handler = (uint opcode, ReadOnlySpan<byte> request, Span<byte> response, out int status) =>
+            {
+                Interlocked.Increment(ref _served);
+                return Echo(opcode, request, response, out status);
+            };
+            while (!_stop)
+            {
+                if (_calls.WaitForRequests(-1, 0))
+                {
+                    while (!_stop && _calls.ServeOne(handler))
+                    {
+                    }
+                }
+                else if (!_stop)
+                {
+                    Interlocked.Increment(ref _emptyWakes);
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            // A server between its stop check and its sleep misses one wake-up: ring until all are gone.
+            foreach (var thread in _threads)
+            {
+                while (!thread.Join(20))
+                {
+                    _calls.WakeAll();
+                }
+            }
+        }
     }
 
     private sealed class Server : IDisposable
