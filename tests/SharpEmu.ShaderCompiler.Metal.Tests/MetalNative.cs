@@ -141,8 +141,32 @@ internal static partial class MetalNative
         return Marshal.PtrToStringUTF8(utf8) ?? "unknown error";
     }
 
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    [return: MarshalAs(UnmanagedType.I1)]
+    private static partial bool RespondsTo(nint receiver, nint selector, nint argument);
+
+    private static bool RespondsTo(nint receiver, nint selector) =>
+        RespondsTo(receiver, Selector("respondsToSelector:"), selector);
+
+    /// <summary>The emulator's math mode on a compile options object (MetalNative.ApplyMslMathMode
+    /// in the Metal backend), so the harness compiles the way the backend does.</summary>
+    public static void ApplyMathMode(nint options, nuint mode)
+    {
+        if (mode == MslMathMode.Safe ||
+            !RespondsTo(options, Selector("setMathMode:")))
+        {
+            return;
+        }
+
+        SendVoidUInt(options, Selector("setMathMode:"), mode);
+        if (RespondsTo(options, Selector("setMathFloatingPointFunctions:")))
+        {
+            SendVoidUInt(options, Selector("setMathFloatingPointFunctions:"), MslMathMode.FunctionsPrecise);
+        }
+    }
+
     /// <summary>Compiles MSL source with the OS runtime compiler.</summary>
-    public static bool TryCompileLibrary(string source, out nint library, out string error)
+    public static bool TryCompileLibrary(string source, out nint library, out string error, nuint? mathMode = null)
     {
         library = 0;
         error = string.Empty;
@@ -153,6 +177,7 @@ internal static partial class MetalNative
         // MSL 3.1 or later (texture atomics) compiles here too.
         var options = Send(Send(objc_getClass("MTLCompileOptions"), Selector("alloc")), Selector("init"));
         SendVoidBool(options, Selector("setFastMathEnabled:"), false);
+        ApplyMathMode(options, mathMode ?? MslMathMode.Default);
         SendVoidUInt(options, Selector("setLanguageVersion:"), MslLanguageVersion);
 
         nint nsError = 0;

@@ -136,7 +136,10 @@ public static class PixelStageInputResolver
             DepthExportFormat = shaderInterface.DepthExportFormat is var zFormat and > 0 and <= 9
                 ? (SharpEmu.ShaderCompiler.Gen5ColorExportFormat)zFormat
                 : null,
-            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
+            // Z_ORDER 0 is LATE_Z; EARLY_Z_THEN_LATE_Z, RE_Z and EARLY_Z_THEN_RE_Z (1..3) all test
+            // before the shader. A shader that kills or exports depth, stencil or coverage is
+            // decided after it ran, whatever the order says.
+            EarlyDepth = control.DepthExportOrder != 0 && !control.KillEnable && !control.DepthExportEnable &&
                 !control.StencilExportEnable && !control.MaskExportEnable,
             ExecuteOnNoop = control.ExecuteOnNoop,
         };

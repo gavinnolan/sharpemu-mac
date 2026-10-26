@@ -1524,6 +1524,34 @@ public static partial class Gen5MslTranslator
                         : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_device_bytes({DeviceArguments}, {address}, {source}, {byteCount}u);");
                 }
+                else if (_options.DeviceAddressSpans && control.DwordCount > 1)
+                {
+                    // One page-table lookup for the whole record. A record inside one page is
+                    // contiguous host memory, so the dwords index off the one pointer; one that
+                    // crosses a page or is unmapped takes the per-dword stores.
+                    var spanValid = Temp("bool", "false");
+                    var span = Temp("device uint*", $"sharpemu_resolve_device_span({DeviceArguments}, {address}, {control.DwordCount * sizeof(uint)}u, {spanValid})");
+                    Line($"if ({spanValid})");
+                    Line("{");
+                    _indent++;
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line($"{span}[{index}] = v[{control.SourceVectorRegister + index}];");
+                    }
+
+                    _indent--;
+                    Line("}");
+                    Line("else");
+                    Line("{");
+                    _indent++;
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line($"sharpemu_store_device_dword({DeviceArguments}, {address} + {index * sizeof(uint)}ul, v[{control.SourceVectorRegister + index}]);");
+                    }
+
+                    _indent--;
+                    Line("}");
+                }
                 else
                 {
                     for (uint index = 0; index < control.DwordCount; index++)
@@ -1565,6 +1593,41 @@ public static partial class Gen5MslTranslator
                 StorePairLoad(
                     control.DestinationVectorRegister,
                     $"sharpemu_load_device_pair_coherent({DeviceArguments}, {aligned}, true, {aligned} + 4ul, true, {PairLockArguments})");
+                return true;
+            }
+
+            if (_options.DeviceAddressSpans && control.DwordCount > 1 && control.DestinationVectorRegister + control.DwordCount <= VectorRegisterFileCount)
+            {
+                // One page-table lookup for the whole record (GLOBAL_LOAD_DWORDX2-X4); see the
+                // store above. Every destination is written after the lookup, under EXEC.
+                var guarded = !_execKnownFull;
+                if (guarded)
+                {
+                    Line("if (exec)");
+                    Line("{");
+                    _indent++;
+                }
+
+                var spanValid = Temp("bool", "false");
+                var span = Temp("device uint*", $"sharpemu_resolve_device_span({DeviceArguments}, {aligned}, {control.DwordCount * sizeof(uint)}u, {spanValid})");
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var componentAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
+                    var spanWord = control.Glc
+                        ? $"atomic_load_explicit((device atomic_uint*)({span} + {index}), memory_order_relaxed)"
+                        : $"{span}[{index}]";
+                    StoreVector(
+                        control.DestinationVectorRegister + index,
+                        $"{spanValid} ? {spanWord} : sharpemu_load_device_dword{coherent}({DeviceArguments}, {componentAddress})",
+                        guardWithExec: false);
+                }
+
+                if (guarded)
+                {
+                    _indent--;
+                    Line("}");
+                }
+
                 return true;
             }
 

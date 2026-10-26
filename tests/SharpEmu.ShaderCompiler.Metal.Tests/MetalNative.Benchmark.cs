@@ -38,17 +38,20 @@ internal static partial class MetalNative
         uint threadsPerThreadgroup,
         uint iterations,
         out BenchmarkResult result,
-        out string error)
+        out string error,
+        IReadOnlyList<DeviceTable>? tables = null,
+        nuint? mathMode = null)
     {
         result = default;
-        if (!TryCompileLibrary(shader.Source, out var library, out error))
+        if (!TryCompileLibrary(shader.Source, out var library, out error, mathMode))
         {
             return false;
         }
 
         var buffer = SharedBuffer(bufferContents);
         var stepReport = SharedBuffer(new byte[sizeof(uint)]);
-        if (buffer == 0 || stepReport == 0)
+        var pairLocks = SharedBuffer(new byte[Gen5MslArgumentLayout.PairLockTableWords * sizeof(uint)]);
+        if (buffer == 0 || stepReport == 0 || pairLocks == 0)
         {
             error = "failed to create the data buffers";
             return false;
@@ -58,7 +61,9 @@ internal static partial class MetalNative
             shader.ArgumentLayout!,
             SendULong(buffer, Selector("gpuAddress")),
             (uint)bufferContents.Length,
-            SendULong(stepReport, Selector("gpuAddress")));
+            SendULong(stepReport, Selector("gpuAddress")),
+            tables,
+            SendULong(pairLocks, Selector("gpuAddress")));
         var argumentBuffer = SharedBuffer(arguments);
         var pushBuffer = SharedBuffer(pushData.Length == 0 ? new byte[4] : pushData);
         if (argumentBuffer == 0 || pushBuffer == 0)
@@ -121,6 +126,15 @@ internal static partial class MetalNative
                 (nuint)Gen5MslArgumentLayout.PushDataBufferIndex);
             SendUseResource(encoder, Selector("useResource:usage:"), buffer, ReadWriteUsage);
             SendUseResource(encoder, Selector("useResource:usage:"), stepReport, ReadWriteUsage);
+            SendUseResource(encoder, Selector("useResource:usage:"), pairLocks, ReadWriteUsage);
+            SendUseResource(encoder, Selector("useResource:usage:"), SharedTable.Value, ReadWriteUsage);
+            foreach (var table in tables ?? [])
+            {
+                foreach (var resident in (nint[])[table.Buffer, .. table.Residents])
+                {
+                    SendUseResource(encoder, Selector("useResource:usage:"), resident, ReadWriteUsage);
+                }
+            }
             for (var iteration = 0u; iteration < iterations; iteration++)
             {
                 SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), groups, threads);
@@ -156,7 +170,9 @@ internal static partial class MetalNative
         Gen5MslArgumentLayout layout,
         ulong bufferAddress,
         uint bufferBytes,
-        ulong stepReportAddress)
+        ulong stepReportAddress,
+        IReadOnlyList<DeviceTable>? tables = null,
+        ulong pairLocksAddress = 0)
     {
         var arguments = new byte[Math.Max(layout.ByteSize, 8)];
         foreach (var field in layout.Fields)
@@ -175,6 +191,19 @@ internal static partial class MetalNative
                         break;
                     case MslArgumentFieldKind.StepReport:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), stepReportAddress);
+                        break;
+                    case MslArgumentFieldKind.PairLocks:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), pairLocksAddress);
+                        break;
+                    case MslArgumentFieldKind.Pointer:
+                        BitConverter.TryWriteBytes(
+                            arguments.AsSpan((int)field.ByteOffset),
+                            FindTable(tables, field.Kind) is { } table ? SendULong(table.Buffer, Selector("gpuAddress")) : SharedTableAddress());
+                        break;
+                    case MslArgumentFieldKind.Word:
+                        BitConverter.TryWriteBytes(
+                            arguments.AsSpan((int)field.ByteOffset),
+                            FindTable(tables, field.Kind) is { } counted ? counted.Count : SharedTableDwords);
                         break;
                 }
             }

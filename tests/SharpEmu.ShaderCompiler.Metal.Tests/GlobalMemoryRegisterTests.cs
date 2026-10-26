@@ -17,7 +17,14 @@ public sealed class GlobalMemoryRegisterTests
     {
         var source = Compile(opcode);
         for (var component = 0; component < componentCount; component++)
-            Assert.Contains($"v{8 + component} = sharpemu_load_device_dword", source);
+        {
+            // A multi-dword load resolves its record once and falls back to the per-dword load
+            // for a record that crosses a page or is unmapped.
+            var load = componentCount > 1
+                ? $@"v{8 + component} = t\d+ \? t\d+\[{component}\] : sharpemu_load_device_dword"
+                : $@"v{8 + component} = sharpemu_load_device_dword";
+            Assert.Matches(load, source);
+        }
         Assert.DoesNotMatch(@"(?m)^\s*(if \(exec\) \{ )?v3 = ", source);
     }
 
