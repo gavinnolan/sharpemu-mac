@@ -108,6 +108,13 @@ public interface IGuestThreadScheduler
         WakeBlockedThreads(wakeKey) > 0;
 
     /// <summary>
+    /// Lock-free, possibly stale: whether the scheduler thread is executing a slice on a host
+    /// CPU right now (false while it is blocked, ready or parked). Unknown threads report true.
+    /// Used by contended locks to stop spinning on an owner that cannot release soon.
+    /// </summary>
+    bool IsGuestThreadExecuting(ulong threadHandle) => true;
+
+    /// <summary>
     /// Reports whether the current guest thread has an exception that waits for an import safe point.
     /// </summary>
     bool HasPendingGuestExceptionForCurrentThread();
