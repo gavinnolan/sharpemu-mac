@@ -1683,6 +1683,7 @@ internal sealed class ShaderProgramCache
                     PixelDepthExportFormat = info.DepthExportFormat,
                     PixelStencilExportEnable = info.StencilExportEnable,
                     PixelSampleMaskExportEnable = info.SampleMaskExportEnable,
+                    PixelEarlyDepth = info.EarlyDepth,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelFrontFaceAllBits = info.FrontFaceAllBits,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,

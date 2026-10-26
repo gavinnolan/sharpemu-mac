@@ -336,12 +336,16 @@ internal static class Gen5ComputeFixtures
 
     public static Gen5MslShader CompilePixelOrThrow(
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
-        Gen5ColorComponentMapping componentMapping = default)
+        Gen5ColorComponentMapping componentMapping = default,
+        bool pixelEarlyDepth = false,
+        bool pixelDepthExportEnable = false,
+        Gen5MslCodegenOptions? options = null)
     {
         var program = DecodeOrThrow(new Gen5ComputeFixture("pixel", PixelWords, 0, 0));
         var request = RequestOrThrow(program, ShaderStage.Pixel,
-            pixelOutputs: [new Gen5PixelOutputBinding(0, 0, outputKind, componentMapping)]);
-        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
+            pixelOutputs: [new Gen5PixelOutputBinding(0, 0, outputKind, componentMapping)],
+            pixelDepthExportEnable: pixelDepthExportEnable, pixelEarlyDepth: pixelEarlyDepth);
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options))
         {
             throw new InvalidOperationException($"[pixel] MSL request emit failed: {error}");
         }
@@ -782,7 +786,7 @@ internal static class Gen5ComputeFixtures
         bool pixelStencilExportEnable = false, bool pixelSampleMaskExportEnable = false,
         uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true, bool pixelGuestWave32 = false,
         uint meshPerVertexParameterMask = 0, IReadOnlyList<uint>? vertexInterpolants = null,
-        Gen5TessellationLaunch? tessellation = null)
+        Gen5TessellationLaunch? tessellation = null, bool pixelEarlyDepth = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -824,6 +828,7 @@ internal static class Gen5ComputeFixtures
             PixelDepthExportFormat = pixelDepthExportFormat,
             PixelStencilExportEnable = pixelStencilExportEnable,
             PixelSampleMaskExportEnable = pixelSampleMaskExportEnable,
+            PixelEarlyDepth = pixelEarlyDepth,
             Tessellation = tessellation,
         };
     }

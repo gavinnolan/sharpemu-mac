@@ -2965,7 +2965,7 @@ public static partial class Gen5MslTranslator
                 // to an f16 denormal is flushed as well.
                 var zero = half
                     ? $"(as_type<ushort>(half({scaled})) & 0x7C00u) == 0u"
-                    : $"{scaled} == 0.0f";
+                    : $"(as_type<uint>({scaled}) & 0x7FFFFFFFu) == 0u"; // a bit test: the relaxed math mode ignores the sign of a zero
                 expression = Temp("float", $"({zero}) ? 0.0f : {scaled}");
             }
 

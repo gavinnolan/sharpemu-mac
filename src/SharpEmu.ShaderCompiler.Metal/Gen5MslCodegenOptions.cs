@@ -77,6 +77,16 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// guest writes and reads such a record with one instruction, which other CUs see whole; here
 /// each dword is its own access, and UE5's Nanite culling read queue records half written.
 /// <c>SHARPEMU_MSL_PERSISTENT_RECORDS=0</c> accesses them dword by dword.</param>
+/// <param name="DeviceAddressSpans">Resolve a multi-dword global or device-buffer access (GLOBAL_LOAD/STORE
+/// DWORDX2-X4, BUFFER_LOAD/STORE through a device descriptor) once for the whole span instead of
+/// walking the page table per dword: a span inside one 16 KB page indexes off the one pointer and
+/// one that crosses a page falls back to the per-dword path. <c>SHARPEMU_MSL_DEVICESPAN=0</c>
+/// resolves every dword alone.</param>
+/// <param name="EarlyFragmentTests">Declare <c>[[early_fragment_tests]]</c> on a pixel function whose
+/// guest DB_SHADER_CONTROL asks for early Z (<see cref="ShaderCompileRequest.PixelEarlyDepth"/>): Metal
+/// only tests depth before the shader on its own for a function that writes no memory, so a shader
+/// with buffer or image stores ran for fragments the guest hardware would have rejected first.
+/// <c>SHARPEMU_MSL_EARLYZ=0</c> leaves the choice to Metal.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -92,7 +102,9 @@ public sealed record Gen5MslCodegenOptions(
     bool GraphicsLoopStepCap = false,
     bool LaneSpillCopies = true,
     bool PersistentWaitFences = true,
-    bool PersistentRecordLocks = true)
+    bool PersistentRecordLocks = true,
+    bool DeviceAddressSpans = true,
+    bool EarlyFragmentTests = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -111,5 +123,7 @@ public sealed record Gen5MslCodegenOptions(
         GraphicsLoopStepCap: Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MAX_STEPS_GRAPHICS") == "1",
         LaneSpillCopies: Environment.GetEnvironmentVariable("SHARPEMU_MSL_SPILLCOPY") != "0",
         PersistentWaitFences: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_FENCES") != "0",
-        PersistentRecordLocks: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_RECORDS") != "0");
+        PersistentRecordLocks: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_RECORDS") != "0",
+        DeviceAddressSpans: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEVICESPAN") != "0",
+        EarlyFragmentTests: Environment.GetEnvironmentVariable("SHARPEMU_MSL_EARLYZ") != "0");
 }

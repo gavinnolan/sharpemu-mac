@@ -706,6 +706,7 @@ internal static class MetalShaderPrewarm
             StampPart(typeof(Gen5ShaderTranslator)),
             StampPart(typeof(Gen5MslTranslator)),
             compiler.GetType().FullName,
+            MslMathMode.Identity(MslMathMode.Default),
             MetalNative.ReadNsString(MetalNative.Send(device, SelName)),
             RuntimeInformation.OSDescription);
 

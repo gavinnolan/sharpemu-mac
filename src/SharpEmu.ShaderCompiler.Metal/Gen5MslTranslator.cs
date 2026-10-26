@@ -883,7 +883,14 @@ public static partial class Gen5MslTranslator
 
                 source.AppendLine("};");
                 source.AppendLine();
-                source.AppendLine($"fragment Gen5PsOut {EntryPointName}(");
+                // The guest asked for the depth test before the shader and nothing the shader does
+                // can change its outcome (the request clears kill and every export), so the test
+                // runs first here too: Metal does that on its own only for a function that
+                // writes no memory, and a shader with buffer or image stores would run, and
+                // store, for fragments the guest hardware rejects before it starts.
+                var earlyFragmentTests = _options.EarlyFragmentTests && _request.PixelEarlyDepth &&
+                    !_pixelDepthExport && !_pixelStencilExport && !_pixelSampleMaskExport;
+                source.AppendLine($"{(earlyFragmentTests ? "[[early_fragment_tests]] " : string.Empty)}fragment Gen5PsOut {EntryPointName}(");
                 source.AppendLine("    Gen5PsIn sharpemu_in [[stage_in]],");
             }
             else if (_stage != Gen5MslStage.Mesh)

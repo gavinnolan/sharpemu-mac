@@ -321,13 +321,18 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             RuntimeInformation.OSArchitecture);
 
     /// <summary>
-    /// The library key of a source: its text and the options it compiles with (fast math
-    /// off, the MSL version the per-vertex-inputs flag picks).
+    /// The library key of a source: its text and the options it compiles with (the math mode,
+    /// the MSL version the per-vertex-inputs flag picks). A binary built in the safe math
+    /// mode is another binary than the relaxed one, so the mode is part of the seed; the
+    /// safe seed is the one every library was keyed with before the mode existed.
     /// </summary>
-    public static UInt128 LibraryKey(string source, bool usesPerVertexInputs)
+    public static UInt128 LibraryKey(string source, bool usesPerVertexInputs) =>
+        LibraryKey(source, usesPerVertexInputs, MslMathMode.Default);
+
+    internal static UInt128 LibraryKey(string source, bool usesPerVertexInputs, nuint mathMode)
     {
         var version = usesPerVertexInputs ? Gen5MslShader.PerVertexInputsLanguageVersion : MetalNative.MslLanguageVersion;
-        var seed = (long)(((ulong)FormatVersion << 48) ^ version);
+        var seed = (long)(((ulong)FormatVersion << 48) ^ version ^ ((ulong)mathMode << 40));
         return XxHash128.HashToUInt128(MemoryMarshal.AsBytes(source.AsSpan()), seed);
     }
 

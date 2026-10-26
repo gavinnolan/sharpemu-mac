@@ -72,6 +72,17 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         }
     }
 
+    // A binary compiled in the safe math mode must not be served for the relaxed one.
+    [Fact]
+    public void TheMathModeIsPartOfTheLibraryKey()
+    {
+        var safe = MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Safe);
+        var relaxed = MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Relaxed);
+        Assert.NotEqual(safe, relaxed);
+        Assert.Equal(relaxed, MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Relaxed));
+        Assert.Equal(MetalBinaryArchive.LibraryKey(ComputeSource, false), MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Default));
+    }
+
     [Fact]
     public void ALibraryAndComputePipelineFromTheArchiveComputeWhatTheCompiledOnesDo()
     {

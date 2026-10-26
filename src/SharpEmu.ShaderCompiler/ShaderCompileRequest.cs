@@ -381,6 +381,13 @@ public sealed class ShaderCompileRequest
     // DB_SHADER_CONTROL.MASK_EXPORT_ENABLE: the MRTZ export's sample mask is ANDed with the
     // fragment's coverage.
     public bool PixelSampleMaskExportEnable { get; init; }
+
+    // DB_SHADER_CONTROL.Z_ORDER asks for the depth test before the shader (EARLY_Z_THEN_LATE_Z,
+    // RE_Z, EARLY_Z_THEN_RE_Z) and the program neither kills pixels (KILL_ENABLE) nor exports
+    // depth, stencil or a sample mask, so the early test cannot disagree with the late one. The
+    // Metal backend declares [[early_fragment_tests]] for it: a fragment function that writes
+    // memory is otherwise tested after the shader.
+    public bool PixelEarlyDepth { get; init; }
     public uint PixelInputEnable { get; init; }
 
     // SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS: FRONT_FACE reads 0xFFFFFFFF/0 instead of +1.0/-1.0.
