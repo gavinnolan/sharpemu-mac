@@ -15,6 +15,24 @@ public sealed class VertexTableMetadata
     public int VertexBufferRegister { get; init; } = NoRegister;
     public int VertexAttributeRegister { get; init; } = NoRegister;
     public uint[] InputSemantics { get; init; } = [];
+
+    // The attributes and buffers decoded from the tables the guest held at the last draw, with the
+    // bytes they were decoded from. Replaced as a whole, never mutated.
+    internal VertexLayoutMemo? Layout;
+}
+
+// A draw's decoded vertex layout and the guest bytes it came from: the attribute table words from the lowest
+// to the highest semantic the program reads, and the buffer descriptors from index zero to the highest index
+// an attribute names. A draw that reads the same bytes at the same tables has the same layout.
+internal sealed class VertexLayoutMemo(ulong attributeTable, ulong bufferTable, byte[] attributeBytes, byte[] bufferBytes,
+    VertexAttributeResource[] attributes, VertexInputBuffer[] buffers)
+{
+    public readonly ulong AttributeTable = attributeTable;
+    public readonly ulong BufferTable = bufferTable;
+    public readonly byte[] AttributeBytes = attributeBytes;
+    public readonly byte[] BufferBytes = bufferBytes;
+    public readonly VertexAttributeResource[] Attributes = attributes;
+    public readonly VertexInputBuffer[] Buffers = buffers;
 }
 
 // The header-derived tables of vertex programs already read, keyed by the registered header
@@ -84,13 +102,17 @@ public static class VertexInputResolver
                     $"user_data=[{string.Join(",", userData.ToArray().Select(word => $"{word:X8}"))}].");
             }
 
-            // Per-thread scratch: the list never outlives the call; the draw keeps the array.
-            var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
-            resources.Clear();
-            ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress, resources);
-            buffers = MergeBuffers(resources, shader.CodeAddress);
-            attributes = resources.ToArray();
-            resources.Clear();
+            if (metadataCache is null ||
+                !TryResolveLayout(context, metadata, attributeTable, bufferTable, shader.CodeAddress, out attributes, out buffers))
+            {
+                // Per-thread scratch: the list never outlives the call; the draw keeps the array.
+                var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
+                resources.Clear();
+                ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress, resources);
+                buffers = MergeBuffers(resources, shader.CodeAddress);
+                attributes = resources.ToArray();
+                resources.Clear();
+            }
         }
 
         return new VertexInputInfo
@@ -298,9 +320,6 @@ public static class VertexInputResolver
             }
 
             var index = attribute & 0x1Fu;
-            var format = (attribute >> 5) & 0x1FFu;
-            var offset = (attribute >> 14) & 0xFFFu;
-            var fetchIndex = (attribute >> 26) & 0x1u;
             if (index >= VertexInputInfo.MaxBuffers)
             {
                 throw GpuFatal.Fatal($"The vertex attribute names a buffer outside the table: shader=0x{shaderAddress:X16} index={index}.");
@@ -319,34 +338,138 @@ public static class VertexInputResolver
                 throw GpuFatal.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
             }
 
-            var descriptor = BufferDescriptorWords.From(descriptorWords);
-            if (format != 0)
-            {
-                var bufferFormat = format >> 2;
-                var channels = (format & 0x3u) + 1u;
-                descriptor = descriptor with
-                {
-                    Word3 = (descriptor.Word3 & ~((0x7Fu << 12) | 0xFFFu)) |
-                            ((bufferFormat & 0x7Fu) << 12) |
-                            DestinationSelectForChannels(channels),
-                };
-            }
-
-            if (offset != 0)
-            {
-                descriptor = descriptor.WithAddress(descriptor.Address + offset);
-            }
-
-            resources.Add(new VertexAttributeResource(
-                descriptor,
-                (int)semantic.HardwareMapping,
-                (int)semantic.SizeInElements,
-                (int)semantic.Semantic,
-                fetchIndex,
-                BufferIndex: -1,
-                OffsetBytes: 0));
+            AddResource(semantic, attribute, descriptorWords, resources);
         }
     }
+
+    // The attribute one semantic names: its attribute word's format and offset applied to the buffer descriptor it indexes.
+    private static void AddResource(ShaderInputSemantic semantic, uint attribute, ReadOnlySpan<uint> descriptorWords,
+        List<VertexAttributeResource> resources)
+    {
+        var format = (attribute >> 5) & 0x1FFu;
+        var offset = (attribute >> 14) & 0xFFFu;
+        var fetchIndex = (attribute >> 26) & 0x1u;
+        var descriptor = BufferDescriptorWords.From(descriptorWords);
+        if (format != 0)
+        {
+            var bufferFormat = format >> 2;
+            var channels = (format & 0x3u) + 1u;
+            descriptor = descriptor with
+            {
+                Word3 = (descriptor.Word3 & ~((0x7Fu << 12) | 0xFFFu)) |
+                        ((bufferFormat & 0x7Fu) << 12) |
+                        DestinationSelectForChannels(channels),
+            };
+        }
+
+        if (offset != 0)
+        {
+            descriptor = descriptor.WithAddress(descriptor.Address + offset);
+        }
+
+        resources.Add(new VertexAttributeResource(
+            descriptor,
+            (int)semantic.HardwareMapping,
+            (int)semantic.SizeInElements,
+            (int)semantic.Semantic,
+            fetchIndex,
+            BufferIndex: -1,
+            OffsetBytes: 0));
+    }
+
+    // The tables of a draw in two guest reads, one over the attribute words the program names and one over the buffer
+    // descriptors they index, instead of two reads per attribute (each taking the memory read lock). A draw whose
+    // bytes equal the last draw's at the same tables gets that draw's attributes and buffers back without decoding or
+    // allocating them; any other byte decodes afresh, so a guest that rewrites a table is seen on the next draw.
+    // False leaves the word-by-word path to decode the draw, and to report whatever stopped this one.
+    private static bool TryResolveLayout(CpuContext context, VertexTableMetadata metadata, ulong attributeTable, ulong bufferTable,
+        ulong shaderAddress, out VertexAttributeResource[] attributes, out VertexInputBuffer[] buffers)
+    {
+        attributes = [];
+        buffers = [];
+        var semantics = metadata.InputSemantics;
+        if (semantics.Length > VertexInputInfo.MaxBuffers)
+        {
+            return false;
+        }
+
+        var lowest = uint.MaxValue;
+        var highest = 0u;
+        foreach (var word in semantics)
+        {
+            var semantic = new ShaderInputSemantic(word);
+            if (semantic.StaticBufferIndex || semantic.StaticAttribute)
+            {
+                return false;
+            }
+
+            lowest = Math.Min(lowest, semantic.Semantic);
+            highest = Math.Max(highest, semantic.Semantic);
+        }
+
+        // A semantic is eight bits, so the words it can name span at most 256.
+        Span<byte> attributeBytes = stackalloc byte[256 * sizeof(uint)];
+        attributeBytes = attributeBytes[..(int)((highest - lowest + 1) * sizeof(uint))];
+        if (!context.Memory.TryRead(attributeTable + lowest * sizeof(uint), attributeBytes))
+        {
+            return false;
+        }
+
+        var highestBuffer = 0u;
+        foreach (var word in semantics)
+        {
+            var attribute = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                attributeBytes[(int)((new ShaderInputSemantic(word).Semantic - lowest) * sizeof(uint))..]);
+            var index = attribute & 0x1Fu;
+            if (index >= VertexInputInfo.MaxBuffers)
+            {
+                return false;
+            }
+
+            highestBuffer = Math.Max(highestBuffer, index);
+        }
+
+        Span<byte> bufferBytes = stackalloc byte[VertexInputInfo.MaxBuffers * BufferDescriptorBytes];
+        bufferBytes = bufferBytes[..(int)((highestBuffer + 1) * BufferDescriptorBytes)];
+        if (!context.Memory.TryRead(bufferTable, bufferBytes))
+        {
+            return false;
+        }
+
+        var memo = metadata.Layout;
+        if (memo is not null && memo.AttributeTable == attributeTable && memo.BufferTable == bufferTable &&
+            attributeBytes.SequenceEqual(memo.AttributeBytes) && bufferBytes.SequenceEqual(memo.BufferBytes))
+        {
+            attributes = memo.Attributes;
+            buffers = memo.Buffers;
+            return true;
+        }
+
+        var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
+        resources.Clear();
+        Span<uint> descriptorWords = stackalloc uint[BufferDescriptorBytes / sizeof(uint)];
+        foreach (var word in semantics)
+        {
+            var semantic = new ShaderInputSemantic(word);
+            var attribute = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                attributeBytes[(int)((semantic.Semantic - lowest) * sizeof(uint))..]);
+            var descriptorBytes = bufferBytes.Slice((int)((attribute & 0x1Fu) * BufferDescriptorBytes), BufferDescriptorBytes);
+            for (var index = 0; index < descriptorWords.Length; index++)
+            {
+                descriptorWords[index] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(descriptorBytes[(index * sizeof(uint))..]);
+            }
+
+            AddResource(semantic, attribute, descriptorWords, resources);
+        }
+
+        buffers = MergeBuffers(resources, shaderAddress);
+        attributes = resources.ToArray();
+        resources.Clear();
+        metadata.Layout = new VertexLayoutMemo(attributeTable, bufferTable, attributeBytes.ToArray(), bufferBytes.ToArray(), attributes, buffers);
+        return true;
+    }
+
+    private const int BufferDescriptorBytes = 16;
 
     // Attributes with one stride and fetch rate whose bases lie within one record share a buffer.
     public static VertexInputBuffer[] MergeBuffers(List<VertexAttributeResource> resources, ulong shaderAddress)

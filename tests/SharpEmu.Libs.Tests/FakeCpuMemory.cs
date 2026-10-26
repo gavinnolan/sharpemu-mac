@@ -69,6 +69,18 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         return true;
     }
 
+    public bool TryCompare(ulong virtualAddress, ReadOnlySpan<byte> expected, out bool equal)
+    {
+        equal = false;
+        if (!TryResolve(virtualAddress, expected.Length, out var offset))
+        {
+            return false;
+        }
+
+        equal = _storage.AsSpan(offset, expected.Length).SequenceEqual(expected);
+        return true;
+    }
+
     public bool CanRead(ulong address, ulong size) =>
         size != 0 && size <= int.MaxValue && TryResolve(address, (int)size, out _);
 
