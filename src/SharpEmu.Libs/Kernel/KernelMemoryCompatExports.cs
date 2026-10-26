@@ -28,6 +28,9 @@ public static partial class KernelMemoryCompatExports
     internal const FileShare GuestFileShare = FileShare.ReadWrite | FileShare.Delete;
     private const int WideCharSize = sizeof(ushort);
     private const int MemsetChunkSize = 16 * 1024;
+    // Clears at least this large fill the guest mapping in place; smaller ones stay on the staged path.
+    private const ulong MemsetInPlaceThreshold = 4096;
+    private const int MemsetInPlaceChunkSize = 256 * 1024 * 1024;
     private static readonly byte[] _zeroChunk = new byte[MemsetChunkSize];
     private const int O_WRONLY = 0x1;
     private const int O_RDWR = 0x2;
@@ -453,9 +456,39 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        // A large clear fills the guest's host mapping in place (the same canonical alias the
+        // memcpy import copies through): a native vector fill with the same write tracking as
+        // TryWrite, instead of re-copying a staging chunk across it, which ran at a quarter of
+        // the speed of a guest-side fill. A range this memory cannot hand out in place, or a
+        // watched one, declines and the staged loop below writes the rest.
+        var filledInPlace = 0UL;
+        if (length >= MemsetInPlaceThreshold)
+        {
+            while (filledInPlace < length)
+            {
+                var take = (int)Math.Min(length - filledInPlace, MemsetInPlaceChunkSize);
+                if (!ctx.Memory.TryFillInPlace(
+                        destination + filledInPlace, take, value,
+                        static (fillValue, span) => { span.Fill(fillValue); return span.Length; },
+                        out var filled) ||
+                    filled <= 0)
+                {
+                    break;
+                }
+
+                filledInPlace += (ulong)filled;
+            }
+
+            if (filledInPlace == length)
+            {
+                ctx[CpuRegister.Rax] = destination;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+        }
+
         // Rent may hand back a larger array than requested; only the first chunkLength
         // bytes are filled, so the loop must cap at chunkLength rather than chunk.Length.
-        var chunkLength = (int)Math.Min(length, (ulong)MemsetChunkSize);
+        var chunkLength = (int)Math.Min(length - filledInPlace, (ulong)MemsetChunkSize);
         var chunk = value == 0 ? _zeroChunk : ArrayPool<byte>.Shared.Rent(chunkLength);
         if (value != 0)
         {
@@ -464,8 +497,8 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            var remaining = length;
-            var cursor = destination;
+            var remaining = length - filledInPlace;
+            var cursor = destination + filledInPlace;
             while (remaining > 0)
             {
                 var take = (int)Math.Min((ulong)chunkLength, remaining);
