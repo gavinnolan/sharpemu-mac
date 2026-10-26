@@ -8,8 +8,8 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// such a pass (EQAA): Ghost of Tsushima's checkerboard G-buffer writes one colour sample per
 /// pixel against two depth samples. Metal wants every attachment at one sample count, so the
 /// pass is drawn against a one-sample proxy of the depth target instead: before it, sample 0
-/// of each pixel is copied into the proxy (unless the pass clears everything it attaches), and
-/// after it, the proxy is written back to every sample. The depth test then sees the prepass,
+/// of each pixel's depth and stencil is resolved into the proxy (unless the pass clears every
+/// plane it attaches), and after it, the proxy is written back to every sample. The depth test then sees the prepass,
 /// the pass's own depth lands where lighting reads it, and the colour targets are untouched.
 /// Dropping the depth attachment instead (SHARPEMU_MIXED_SAMPLES=drop-depth) drew the G-buffer
 /// with no depth test and left the prepass depth behind it, so lighting took the katana, the
@@ -52,27 +52,6 @@ internal sealed partial class MetalRenderHost
             uint stencil [[stencil]];
         };
 
-        // Into the proxy: sample 0 of each pixel.
-        fragment sharpemu_mixed_depth_out sharpemu_mixed_depth_in(
-            sharpemu_mixed_depth_position in [[stage_in]], depth2d_ms<float> source [[texture(0)]])
-        {
-            return { source.read(uint2(in.position.xy), 0) };
-        }
-
-        fragment sharpemu_mixed_stencil_out sharpemu_mixed_stencil_in(
-            sharpemu_mixed_depth_position in [[stage_in]], texture2d_ms<uint> stencil [[texture(1)]])
-        {
-            return { stencil.read(uint2(in.position.xy), 0).r };
-        }
-
-        fragment sharpemu_mixed_depth_stencil_out sharpemu_mixed_depth_stencil_in(
-            sharpemu_mixed_depth_position in [[stage_in]], depth2d_ms<float> source [[texture(0)]],
-            texture2d_ms<uint> stencil [[texture(1)]])
-        {
-            const uint2 pixel = uint2(in.position.xy);
-            return { source.read(pixel, 0), stencil.read(pixel, 0).r };
-        }
-
         // Back out of it: one value per pixel, which the multisampled target takes for each sample.
         fragment sharpemu_mixed_depth_out sharpemu_mixed_depth_out_fn(
             sharpemu_mixed_depth_position in [[stage_in]], depth2d<float> source [[texture(0)]])
@@ -106,7 +85,7 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelNewTextureView = MetalNative.Selector("newTextureViewWithPixelFormat:");
 
     private nint _mixedDepthLibrary;
-    private readonly Dictionary<(ulong Format, uint Samples, bool Into), nint> _mixedDepthPipelines = [];
+    private readonly Dictionary<(ulong Format, uint Samples), nint> _mixedDepthPipelines = [];
     private nint _mixedDepthStencilState;
     private readonly Dictionary<(ulong Format, uint Width, uint Height), nint> _mixedDepthProxies = [];
     private readonly Dictionary<nint, nint> _mixedStencilViews = [];
@@ -166,7 +145,7 @@ internal sealed partial class MetalRenderHost
         var hasStencil = FormatHasStencil(format);
         if ((hasDepth && !clearsDepth) || (hasStencil && !clearsStencil))
         {
-            EncodeMixedDepthCopy(commandBuffer, source: target, destination: proxy, format, targetSamples, into: true, 0, 0);
+            EncodeMixedDepthResolve(commandBuffer, target, proxy, hasDepth, hasStencil, level, slice);
         }
 
         _mixedDepthTarget = target;
@@ -191,7 +170,7 @@ internal sealed partial class MetalRenderHost
 
         var commandBuffer = EnsureCommandBuffer();
         EncodeMixedDepthCopy(commandBuffer, source: _mixedDepthProxy, destination: _mixedDepthTarget, _mixedDepthFormat,
-            _mixedDepthSamples, into: false, _mixedDepthLevel, _mixedDepthSlice);
+            _mixedDepthSamples, _mixedDepthLevel, _mixedDepthSlice);
         _mixedDepthTarget = 0;
         _mixedDepthProxy = 0;
     }
@@ -227,7 +206,58 @@ internal sealed partial class MetalRenderHost
 
     private const ulong TextureUsagePixelFormatView = 0x10;
 
-    // The stencil plane of a depth-stencil texture as a texture a shader can read.
+    private const nuint StoreActionStoreAndMultisampleResolve = 3;
+    private const nuint ResolveFilterSample0 = 0;
+
+    // Into the proxy: a pass over the target that only loads it and resolves sample 0 of each
+    // pixel's depth and stencil into the proxy. A shader cannot read the target's stencil, which
+    // takes a stencil view and so a pixel-format-view usage the guest's depth textures lack.
+    private void EncodeMixedDepthResolve(nint commandBuffer, nint target, nint proxy, bool hasDepth, bool hasStencil,
+        uint level, uint slice)
+    {
+        var descriptor = MetalNative.Send(
+            MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
+            MetalNative.Selector("init"));
+        try
+        {
+            void Resolve(nint attachment, string filterSelector)
+            {
+                MetalNative.SendVoid(attachment, SelSetTexture, target);
+                MetalV2Native.SendVoidValue(attachment, SelSetLevel, level);
+                MetalV2Native.SendVoidValue(attachment, SelSetSlice, slice);
+                MetalV2Native.SendVoidValue(attachment, SelSetLoadAction, Mtl.LoadActionLoad);
+                MetalV2Native.SendVoidValue(attachment, SelSetStoreAction, StoreActionStoreAndMultisampleResolve);
+                MetalNative.SendVoid(attachment, MetalNative.Selector("setResolveTexture:"), proxy);
+                MetalV2Native.SendVoidValue(attachment, MetalNative.Selector(filterSelector), ResolveFilterSample0);
+            }
+
+            if (hasDepth)
+            {
+                Resolve(MetalNative.Send(descriptor, SelDepthAttachment), "setDepthResolveFilter:");
+            }
+
+            if (hasStencil)
+            {
+                Resolve(MetalNative.Send(descriptor, SelStencilAttachment), "setStencilResolveFilter:");
+            }
+
+            var encoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
+            if (encoder == 0)
+            {
+                throw Fatal("A mixed-sample depth resolve encoder could not be created.");
+            }
+
+            WaitForPreviousEncoder(encoder, render: true);
+            LabelEncoder(encoder, "mixed-sample depth in");
+            EndAndReleaseEncoder(encoder, render: true);
+        }
+        finally
+        {
+            MetalNative.SendVoid(descriptor, MetalNative.Selector("release"));
+        }
+    }
+
+    // The proxy's stencil plane as a texture a shader can read (the proxy has the view usage).
     private nint MixedStencilView(nint texture, ulong format)
     {
         if (format == MtlDepthFormats.Stencil8)
@@ -250,8 +280,9 @@ internal sealed partial class MetalRenderHost
         return view;
     }
 
+    // Back out of the proxy: every sample of each target pixel takes the proxy's value.
     private void EncodeMixedDepthCopy(nint commandBuffer, nint source, nint destination, ulong format, uint targetSamples,
-        bool into, nuint level, nuint slice)
+        nuint level, nuint slice)
     {
         var hasDepth = FormatHasDepth(format);
         var hasStencil = FormatHasStencil(format);
@@ -287,8 +318,8 @@ internal sealed partial class MetalRenderHost
             }
 
             WaitForPreviousEncoder(encoder, render: true);
-            LabelEncoder(encoder, into ? "mixed-sample depth in" : "mixed-sample depth out");
-            MetalNative.SendVoid(encoder, SelSetRenderPipelineState, MixedDepthPipeline(format, into ? 1u : targetSamples, into));
+            LabelEncoder(encoder, "mixed-sample depth out");
+            MetalNative.SendVoid(encoder, SelSetRenderPipelineState, MixedDepthPipeline(format, targetSamples));
             MetalNative.SendVoid(encoder, SelSetDepthStencilState, MixedDepthStencilState());
             if (hasStencil)
             {
@@ -316,9 +347,9 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    private nint MixedDepthPipeline(ulong format, uint samples, bool into)
+    private nint MixedDepthPipeline(ulong format, uint samples)
     {
-        if (_mixedDepthPipelines.TryGetValue((format, samples, into), out var existing))
+        if (_mixedDepthPipelines.TryGetValue((format, samples), out var existing))
         {
             return existing;
         }
@@ -347,7 +378,7 @@ internal sealed partial class MetalRenderHost
             (true, true) => "sharpemu_mixed_depth_stencil",
             (true, false) => "sharpemu_mixed_depth",
             _ => "sharpemu_mixed_stencil",
-        } + (into ? "_in" : "_out_fn");
+        } + "_out_fn";
         var newFunction = MetalNative.Selector("newFunctionWithName:");
         var vertex = MetalNative.Send(_mixedDepthLibrary, newFunction, MetalNative.NsString(MixedDepthVertex));
         var fragment = MetalNative.Send(_mixedDepthLibrary, newFunction, MetalNative.NsString(fragmentName));
@@ -382,7 +413,7 @@ internal sealed partial class MetalRenderHost
                 throw Fatal($"The mixed-sample depth copy pipeline {fragmentName} did not build: {MetalNative.DescribeError(error)}.");
             }
 
-            _mixedDepthPipelines[(format, samples, into)] = pipeline;
+            _mixedDepthPipelines[(format, samples)] = pipeline;
             return pipeline;
         }
         finally
