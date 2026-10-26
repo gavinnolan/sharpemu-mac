@@ -8,6 +8,9 @@ and the valid round-two changes. Validation uses fabricated guest programs,
 synthetic descriptors and real Metal device tests. No commercial game was run.
 Microkernel, byte-work and microbenchmark results do not establish game performance.
 
+See the [change and benchmark index](benchmark-index.md) for round-one coverage,
+source-inventory exclusions, runnable benchmark locations and a measurement summary.
+
 ## Integration and correctness
 
 The combined wire protocol is revision **7**. Independent revisions 4 (frame boundary),
