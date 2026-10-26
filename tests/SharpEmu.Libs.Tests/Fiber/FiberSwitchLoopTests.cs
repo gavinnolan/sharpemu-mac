@@ -291,6 +291,105 @@ public sealed class FiberSwitchLoopTests : IDisposable
         Assert.NotEqual(toA.Rsp, toB.Rsp);
     }
 
+    // Fibers are locked per fiber: workers running different fibers do not serialise, and
+    // workers racing for the same idle fiber must still see exactly one winner until the
+    // winner's return commits the fiber back to Idle.
+    [Fact]
+    public void ConcurrentWorkersNeverRunTheSameFiberTwice()
+    {
+        const ulong poolBase = 0x3_1000_0000UL;
+        const int fibers = 6;
+        const int workers = 8;
+        const int iterations = 1500;
+        var memory = new FakeCpuMemory(poolBase, 0x20000);
+        var setup = new CpuContext(memory, Generation.Gen5);
+        ulong FiberAt(int index) => poolBase + (ulong)index * 0x100;
+        ulong ContextAt(int index) => poolBase + 0x8000 + (ulong)index * ContextSize;
+        for (var i = 0; i < fibers; i++)
+        {
+            InitializeFiber(memory, setup, FiberAt(i), poolBase + 0x4000 + (ulong)i * 0x40,
+                EntryA + (ulong)i * 0x100, (ulong)i, ContextAt(i));
+        }
+
+        var owners = new int[fibers];
+        var runs = 0;
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        void Worker(int worker)
+        {
+            var previousThread = GuestThreadExecution.EnterGuestThread(ThreadHandle + 0x100 + (ulong)worker);
+            var previousFiber = GuestThreadExecution.EnterFiber(0);
+            var rng = new System.Random(worker * 31 + 7);
+            try
+            {
+                var ctx = new CpuContext(memory, Generation.Gen5);
+                for (var n = 0; n < iterations; n++)
+                {
+                    var index = rng.Next(fibers);
+                    var rootStack = poolBase + 0x1F000 - (ulong)worker * 0x200;
+                    GuestThreadExecution.EnterImportCallFrame(RootReturnRip, rootStack, rootStack - 8);
+                    ctx[CpuRegister.Rdi] = FiberAt(index);
+                    ctx[CpuRegister.Rsi] = 0;
+                    ctx[CpuRegister.Rdx] = 0;
+                    var result = FiberExports.FiberRun(ctx);
+                    if (result != 0)
+                    {
+                        continue; // another worker runs it: the state check rejected this run
+                    }
+                    if (!ConsumeCompletedTransfer(out _))
+                    {
+                        errors.Enqueue("run without transfer");
+                        return;
+                    }
+                    if (Interlocked.CompareExchange(ref owners[index], worker + 1, 0) != 0)
+                    {
+                        errors.Enqueue($"fiber {index} entered by two workers");
+                    }
+                    Interlocked.Increment(ref runs);
+                    Thread.SpinWait(rng.Next(1, 200));
+                    Interlocked.Exchange(ref owners[index], 0);
+
+                    var fiberStack = ContextAt(index) + ContextSize - 0x200;
+                    GuestThreadExecution.EnterImportCallFrame(ResumeRipA, fiberStack, fiberStack - 8);
+                    ctx[CpuRegister.Rdi] = 0;
+                    ctx[CpuRegister.Rsi] = 0;
+                    if (FiberExports.FiberReturnToThread(ctx) != 0 || !ConsumeCompletedTransfer(out _))
+                    {
+                        errors.Enqueue($"return from fiber {index} failed");
+                        return;
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                errors.Enqueue(error.ToString());
+            }
+            finally
+            {
+                GuestThreadExecution.EnterFiber(previousFiber);
+                GuestThreadExecution.RestoreGuestThread(previousThread);
+            }
+        }
+
+        var threads = new Thread[workers];
+        for (var w = 0; w < workers; w++)
+        {
+            var worker = w;
+            threads[w] = new Thread(() => Worker(worker)) { IsBackground = true };
+            threads[w].Start();
+        }
+        foreach (var thread in threads)
+        {
+            Assert.True(thread.Join(TimeSpan.FromSeconds(60)), "A fiber worker did not finish.");
+        }
+
+        Assert.Empty(errors);
+        Assert.True(runs > 0);
+        for (var i = 0; i < fibers; i++)
+        {
+            Assert.Equal(StateIdle, ReadUInt32(memory, FiberAt(i) + 4));
+        }
+    }
+
     private static bool ConsumeCompletedTransfer(out GuestCpuContinuation continuation)
     {
         var consumed = GuestThreadExecution.TryConsumeCurrentContextTransfer(out continuation);
