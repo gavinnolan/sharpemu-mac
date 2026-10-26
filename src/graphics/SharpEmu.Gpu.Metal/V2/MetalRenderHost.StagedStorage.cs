@@ -226,8 +226,23 @@ internal sealed partial class MetalRenderHost
         return entry.Staging;
     }
 
+    private MetalStagedRangeCache.GuestReader? _stagingReader;
+
     private unsafe void FillStagedRange(MetalStagedRangeCache.Entry entry, MetalStagedStorage staged)
     {
+        if (entry.Plan is not null)
+        {
+            // Stores touched a few pages of the entry: those are copied, unless the GPU still has
+            // bytes to write there, which the gather below picks up for the whole entry.
+            if (_gpuWrites.PendingSerial(entry.Address, entry.Size, CompletedSerial) == 0 &&
+                _stagedRanges!.RefillDirty(entry, _stagingReader ??= _guestMemory.ReadForStaging))
+            {
+                return;
+            }
+
+            entry.Plan = null;
+        }
+
         var size = entry.Size;
         var bytes = new Span<byte>((void*)entry.StagingBuffer!.Contents, checked((int)size));
         _guestMemory.ReadForStaging(entry.Address, bytes);

@@ -279,6 +279,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             if (copy.Cached && copy.Dirty)
             {
                 copy.Dirty = false;
+                copy.NeedsWholeStage = true;
                 Volatile.Write(ref copy.Stale, 1);
             }
 
@@ -330,6 +331,9 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
                 var missed = EncodeWriteback(encoder, copy);
                 if (missed != 0)
                 {
+                    // The stores to those bytes stay in the copy and guest memory never has them: the
+                    // copy is not what guest memory holds on pages no CPU store touched.
+                    copy.NeedsWholeStage = true;
                     MetalV2Diagnostics.WarnOnce(
                         $"staged-storage-unwritten:{copy.Size:X}",
                         $"A staged storage buffer has bytes no window covers, so the shader's stores to them " +
