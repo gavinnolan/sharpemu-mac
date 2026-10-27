@@ -1391,3 +1391,64 @@ existing skips each** on ARM64 and Rosetta x64. Launcher times were 13.794 and
 51.073 seconds, including build/test startup. Commands and TRX files are retained
 under `pr23-alias-fixture-{arm64,x64}-validation.json` and corresponding result
 directories. No new production-code test claim is implied by this fixture fix.
+
+### v23 default-on vertex history and drain attribution
+
+The clean `4b6bad96b38cabfc82c936efd0f561572b02deb9` build passed the x64 CLI
+and native ARM64 GPU-host publishes; the launcher verified all 471 payload
+hashes. All ten promoted performance switches were unset, including
+`SHARPEMU_VERTEX_LAYOUT_HISTORY`. Background program resolution remained on,
+command threading and local draw reuse off. The existing application GC budget
+was 64 MiB. The run used a fresh clone of the v20 warm seed, 1920×1080, scale 1
+and unchanged VSync/quality. GeForce NOW and its settings were untouched.
+Vertex-layout counters and drain-caller counters were enabled; detailed render,
+GPU-pass and memory profiling and shader prewarming were disabled.
+
+Run `20261027-225814-silent hill short message.zar-room-vertex-history-v23-on-1`
+reached the same stationary shelf/lamp room, with screenshots confirming the
+view before and during measurement. The **375–410-second** window was selected
+at 193 seconds, before gameplay. Its **18 reports measured 1.0 FPS median,
+0.0–4.49 range**. This is a poor absolute result, not an isolated comparison of
+vertex history with its reference path. The launch load average was 36.09 on
+the ten-core host. Seven system-memory samples during the FPS window recorded
+304,736 swap-in and 310,316 swap-out pages, pressure levels 1 and 2, 27–112 MiB
+free memory and 8,491–9,523 MiB swap used. Those are system-wide observations;
+they neither attribute all paging to the emulator nor prove that paging alone
+explains the frame rate. No 30-FPS result or runtime speedup is established.
+
+Layout snapshots at 372.595 and 409.655 seconds recorded 196,608 additional
+queries: 72,170 last-layout hits, **12,645 history hits (6.43%)**, and 111,793
+decodes. The final snapshot held 512 entries / 190,560 accounted payload bytes;
+110,787 changed-layout probes were suppressed by adaptive backoff during that
+interval. This demonstrates real reuse and bounded retention, not an FPS gain.
+The separate component results and full correctness validation remain in
+[the vertex-history report](vertex-layout-history.md).
+
+The eleven PERF intervals ending at 377.792–408.475 seconds total 36.36 seconds;
+their first interval begins before the FPS window. They recorded **31,565
+`DumpOcclusionCounter` drains out of 37,740 (83.6%)**, versus 4,424 global-barrier
+drains. Program-prefetch wait totaled 28,478 ms, while resolver wall time totaled
+2,442.5 ms. These overlapping wall-time counters are not exclusive CPU costs.
+Explicit host GPU waits were zero in those intervals. The evidence directs the
+next investigation toward frequent query-related drains and resolver handoff;
+it does not justify removing query ordering. A deferred dump must still publish
+the exact snapshot and prevent later operand or program-resolution reads from
+using stale query bytes. No new query-deferral behavior was enabled here.
+
+After the FPS window, the ten-second thread sample measured 2.507 CPU-seconds
+on the GPU worker, 0.953 on program resolution, 1.885 on guest RHI and 3.289 on
+the audio event thread. The separate 427.273–438.048-second event capture had
+six fully paired GC suspensions totaling 93.350 ms (24.339 ms maximum), plus
+one unmatched restart at the capture boundary; the paired total is incomplete.
+Neither later capture establishes per-frame costs in the FPS window.
+
+The stop marker was written at 438.106 seconds; the harness reported stopping
+at 440 seconds, followed by four-second controlled termination and exit 0.
+The guest CPU trap at 442.355 seconds followed the stop marker, matching the
+unresolved teardown behavior in earlier captures. Peak main-process physical
+footprint/RSS was 8,842/2,487 MiB, not combined process memory. Both game
+processes ended. Private evidence includes `measurement-plan.json`,
+`vertex-history-runtime-summary.json`, frame reports, screenshots, memory
+telemetry and post-FPS CPU/event captures in the run directory; build source
+and payload manifests are `vertex-history-v23-build-source.json` and
+`vertex-history-v23-payload-hashes.json` in the runtime diagnostic directory.

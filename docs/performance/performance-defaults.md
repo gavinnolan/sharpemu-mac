@@ -130,3 +130,11 @@ launcher had omitted the GC environment setting already supplied by the bundle
 and standard game launcher. The parity control reduced traced GC pause count
 and total pause time, but established no FPS gain. The nine promoted defaults
 remain enabled; the 30-FPS objective remains open.
+
+The later v23 capture used all ten promoted defaults, including vertex history.
+It measured 1.0 FPS median (0.0–4.49, 18 reports) during heavy system paging;
+there was no matched reference-path run, so this does not isolate a regression
+or establish a gain. History reuse occurred in the game, while occlusion dumps
+accounted for 83.6% of the sampled draw-queue drains. The runtime report retains
+the exact source, windows, counters and limitations. The defaults retain their
+component/test evidence; the 30-FPS objective remains open.
