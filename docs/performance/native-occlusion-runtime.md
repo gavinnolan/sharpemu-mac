@@ -1283,9 +1283,111 @@ every timing/allocation round and checksum. Command/TRX artifacts are retained
 in `completion-snapshot-validation.json` and `completion-snapshot-results`;
 timing files are `completion-snapshot-focused-arm64.json` and
 `completion-snapshot-full-x64.json`. The runtime comparisons above predate this
-getter optimization; it has not yet been measured in a game.
+getter optimization; the v21 captures below exercise it without establishing an
+isolated FPS effect.
 
 Additional focused controls passed **52/0/0 each** with serial hints disabled
 and with polling completions instead of native completion callbacks. These are
 configuration executions of existing tests, not 104 distinct new tests. REUSE
 passed **2,865/2,865** files, and whitespace checks passed.
+
+### v21 runtime and GC-budget control
+
+Both Release publishes from clean `b4cc8292e6f0590794c41090836b331e78154f28`
+completed successfully; all 471 immutable payload hashes were verified before
+launch. These sequential captures used fresh clones of the same warmed seed as
+the v20 controls, all nine promoted switches unset, background resolution on,
+command threading off, 1920×1080, scale 1 and VSync on. Detailed render/pass and
+memory profiling, prewarm and automatic stack sampling were disabled. GeForce
+NOW and its settings were left unchanged.
+
+The private diagnostic launcher omitted `DOTNET_GCgen0size`, whereas the existing
+app-bundle `LSEnvironment` and standard `scripts/macos/run-game.sh` already set it
+to `0x4000000` (64 MiB). The first arm retained the earlier diagnostic environment.
+The second explicitly supplied the existing application setting; process readback
+confirmed inheritance by both the guest process and ARM64 GPU host. This is a
+launcher-parity control, not a newly enabled production optimization.
+
+| Same v21 payload and cache seed | Stationary window | Reports | Median FPS | Range |
+| --- | --- | ---: | ---: | ---: |
+| Diagnostic launcher, GC budget unset | 250–285 s | 17 | 8.97 | 7.48–10.99 |
+| Existing application GC budget, 64 MiB | 250–285 s | 17 | 7.97 | 5.98–9.50 |
+
+Both windows were selected before their FPS values were read and after closing
+the phone; the shelf/lamp room was visually checked. Arrival was later in the
+first arm, requiring a later window than the earlier v20 measurements. These
+results establish neither a completion-read FPS gain nor a GC-budget FPS gain.
+They also do not isolate a regression from v20's earlier 15.48 FPS result.
+Host memory pressure was present in both that earlier run and these captures.
+Seven system-memory samples covering the v20 and first v21 windows recorded,
+respectively, 7,913 versus 12,638 swap-in pages and 7,148 versus 16,212 swap-out
+pages. These are system-wide interval totals, not emulator-attributed I/O or a
+proof of the slowdown's cause. Thirty FPS remains unachieved.
+
+Ten-second EventPipe GC/allocation/contention captures followed the FPS and
+thread-CPU windows, without the managed sample profiler:
+
+| Post-window GPU-host events | Budget unset | 64 MiB budget |
+| --- | ---: | ---: |
+| Allocation ticks | 10,728 | 10,941 |
+| Sampled weighted allocation bytes | 1,147,942,904 | 1,169,498,312 |
+| Fully paired GC pauses | 137 | 20 |
+| Total GC pause time | 477.127 ms | 233.208 ms |
+| Median / maximum GC pause | 3.205 / 6.969 ms | 11.073 / 25.998 ms |
+
+Neither capture had unmatched suspension/restart pairs or `SuspendOther` pauses.
+The larger budget reduced pause count and total traced pause time, with longer
+individual pauses; allocation volume did not decrease. Tick weights estimate
+allocation contributions and are not exact per-type allocation counts. The
+largest sampled types include vertex-input records, vertex-stage registers,
+user-scalar registers and resource snapshots. Frame-time conclusions cannot be
+derived from these separately instrumented windows. The first capture's stacks
+have frame records but unresolved method names; they are not useful allocation
+call-site evidence.
+
+The budget-unset run's 293.069–303.081-second thread-CPU capture recorded 5.163
+CPU-seconds on the GPU worker, 1.822 on program resolution, 4.365 on guest RHI and
+8.402 on the audio event thread. The 64 MiB arm's 292.258–302.269-second capture
+recorded 5.433, 1.918, 4.651 and 8.221 CPU-seconds, respectively. These samples are
+outside the FPS window and do not measure exclusive frame costs.
+
+Private run directories are
+`20261027-195142-silent hill short message.zar-room-unprofiled-defaults-v21-1`
+and `20261027-195726-silent hill short message.zar-room-unprofiled-gen0-64m-v21-2`.
+They retain selected windows, runtime environments, CPU deltas, event traces,
+allocation/GC summaries and system telemetry. They stopped at their own markers
+at 315 and 313 seconds, followed by four-second controlled termination and
+process/wrapper exit 0. Peak main-process footprint/RSS was 9,039/3,958 MiB and
+8,894/4,098 MiB, respectively; shared mappings prevent adding process footprints
+to infer combined usage. Post-stop CPU traps remain recorded as teardown behavior.
+
+A return control then launched the unchanged, hash-verified v20 `eabcd9f65`
+payload with the original no-GC-override environment and another fresh clone of
+the same seed. Run
+`20261027-200336-silent hill short message.zar-room-unprofiled-v20-return-4`
+measured **8.47 FPS median (7.47–9.50, 17 reports)** in the preselected
+250–285-second window, with the same shelf/lamp view verified. Thus the lower
+performance is not unique to v21. This does not prove the completion-read change
+has no effect, or establish the exact cause of host/session variability. The
+return run stopped at 303 seconds, exited 0 after four seconds of termination,
+and peaked at 8,903 MiB main-process footprint / 4,838 MiB RSS.
+
+### Synthetic protection-fixture follow-up
+
+One of the two macOS CI executions for `b4cc8292e` failed the 64- and 65-view
+cases in `AffectedViewBoundIsExactAndNeverPartiallyReopensOverflow`; the other
+execution passed. The failing runner reported ARM64 / .NET 10.0.14 and an
+`Assert.True` failure, without an address or source-line diagnostic. Inspection
+found that the fixture's fixed guest range could overlap its pinned backing
+array under ASLR. The ledger deliberately refuses effects on canonical aliases.
+The fixture now places its synthetic guest range beyond its backing range and
+logs both addresses. The exact overlap in the original CI process cannot be
+reconstructed from that log; this change removes the collision possibility
+without weakening the 64-view acceptance or 65-view whole-range rejection.
+Production protection behavior is unchanged.
+
+Fresh serialized Release `SharpEmu.Host.Memory.Tests` runs passed **486/0/6
+existing skips each** on ARM64 and Rosetta x64. Launcher times were 13.794 and
+51.073 seconds, including build/test startup. Commands and TRX files are retained
+under `pr23-alias-fixture-{arm64,x64}-validation.json` and corresponding result
+directories. No new production-code test claim is implied by this fixture fix.

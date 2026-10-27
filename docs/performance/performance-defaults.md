@@ -115,3 +115,13 @@ queries once all submitted work is known complete. The guarded getter measured
 Pending work retains live queries: ARM64 measured 3.241 → 2.981 ns, x64
 5.864 → 6.209 ns. Both paths allocate zero bytes; the runtime report documents its
 device ordering tests and the absence of an isolated game-FPS result.
+
+Later v21 controls measured 8.97 FPS with the diagnostic GC budget unset and
+7.97 FPS with the application's existing 64 MiB budget. Returning to the
+unchanged v20 binary measured 8.47 FPS under the later host conditions. These
+captures do not reproduce the earlier 15.48 FPS result or isolate a code
+regression; all are retained in the runtime report. The private diagnostic
+launcher had omitted the GC environment setting already supplied by the bundle
+and standard game launcher. The parity control reduced traced GC pause count
+and total pause time, but established no FPS gain. The nine promoted defaults
+remain enabled; the 30-FPS objective remains open.

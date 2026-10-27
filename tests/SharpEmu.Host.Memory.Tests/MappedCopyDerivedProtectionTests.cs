@@ -211,6 +211,11 @@ public sealed unsafe partial class MappedCopyProtectionTests
         try
         {
             var alias = ((ulong)handle.AddrOfPinnedObject() + page - 1) & ~(page - 1);
+            // These are ledger-only guest addresses, not native mappings. A fixed guest
+            // range can collide with the pinned array under ASLR, in which case the
+            // ledger correctly rejects an effect on its canonical backing alias.
+            var guestBase = checked(alias + size + page);
+            output.WriteLine($"boundary fixture: alias=0x{alias:X}, guest=0x{guestBase:X}, bytes=0x{size:X}");
             backing = new(alias, size, page, _ => new(HostBackingReleaseStatus.Released));
             var ledger = new HostMappedCopyLedger(gate, page);
             lock (gate)
@@ -218,15 +223,15 @@ public sealed unsafe partial class MappedCopyProtectionTests
                 ledger.RegisterBacking(backing);
                 for (var index = 0; index < count; index++)
                 {
-                    var address = State.Address + (ulong)index * page;
+                    var address = guestBase + (ulong)index * page;
                     var prepared = ledger.PrepareView(backing, address, page, (ulong)index * page, HostPageProtection.ReadWrite);
                     Assert.NotNull(prepared); Assert.True(ledger.BeforeNativeEffect(address, page)); ledger.PublishView(prepared);
                 }
-                Assert.True(ledger.BeginDerivedProtection(State.Address, size, RW, HostPageProtection.ReadOnly, out var receipt));
+                Assert.True(ledger.BeginDerivedProtection(guestBase, size, RW, HostPageProtection.ReadOnly, out var receipt));
                 ledger.CompleteDerivedProtection(receipt, true);
             }
             // Inspect both ends independently; overflow must not reopen its first64 rows.
-            foreach (var address in new[] { State.Address, State.Address + size - page })
+            foreach (var address in new[] { guestBase, guestBase + size - page })
                 Assert.Equal(expectedAvailable ? CpuMappedCopyResult.Copied : CpuMappedCopyResult.Rejected,
                     ledger.TryReadMappedCopy(backing, address, page, address, new byte[1], out _));
         }
