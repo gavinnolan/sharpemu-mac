@@ -21,6 +21,7 @@ VSync, guest quality, or unrelated application setting is changed.
 | Asynchronous command-item reuse | `SHARPEMU_COMMAND_ITEM_REUSE` | Native two-thread median 389.965 → 354.5175 ns; allocation 80.0008 → 0.026 B/item. Bounded 64-slot return ring; synchronous and failed items retain original ownership. No accepted runtime FPS gain. |
 | Queued CP writes | `SHARPEMU_METAL_V2_QUEUE_CP_WRITES` | Removes synchronous handoffs for eligible writes when command threading is explicitly enabled. Pending ranges, prefetch gates and CPU-read fallbacks preserve ordering; producer-thread device tests cover byte/qword/sparse/predication cases. |
 | Bounded vertex-layout history | `SHARPEMU_VERTEX_LAYOUT_HISTORY` | Exact byte-verified reuse across alternating layouts; adaptive backoff for low reuse, 512 slots and 2 MiB additional payload budget. Component timing/allocation evidence and miss costs are in [the measurements](vertex-layout-history.md); no isolated game-FPS claim. |
+| Caller resolution for short queues | `SHARPEMU_METAL_V2_CALLER_RESOLVE` | At most eight outstanding jobs; FIFO, gates, pause and ownership checks retained. Single-job ARM64 2,874 → 542 ns, x64 3,160 → 972 ns; ARM64 empty-program burst 32 costs about 27 ns/job. Same-payload room medians 16.49 enabled / 16.48 disabled, no isolated FPS gain. [Full measurements](caller-resolution.md). |
 
 The existing negative label page filter, exact materialization comparison, dense
 register lookup, mip-layout construction and target memo fixes remain enabled.
@@ -138,3 +139,10 @@ or establish a gain. History reuse occurred in the game, while occlusion dumps
 accounted for 83.6% of the sampled draw-queue drains. The runtime report retains
 the exact source, windows, counters and limitations. The defaults retain their
 component/test evidence; the 30-FPS objective remains open.
+
+
+The v24 caller-resolution follow-up adds the eleventh default based on component
+wins and correctness checks. Its same-payload Silent Hill medians were 16.49 FPS
+enabled and 16.48 disabled; this establishes no game-FPS gain. The full component
+table, larger-batch cost, run windows and paging limitations are retained in
+[the caller-resolution report](caller-resolution.md).

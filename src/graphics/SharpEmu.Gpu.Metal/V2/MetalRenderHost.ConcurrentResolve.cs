@@ -31,6 +31,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     bool IConcurrentResolveHost.ResolvesConcurrently => ParallelResolve;
 
+    // Small unclaimed queues can resolve on the drawing thread without a worker wakeup.
+    // Component gains and ordering/device checks justify the default; the Silent Hill
+    // comparison was flat. Set SHARPEMU_METAL_V2_CALLER_RESOLVE=0 for the worker-only path.
+    private static readonly bool CallerResolve =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CALLER_RESOLVE") != "0";
+
+    bool IConcurrentResolveHost.AllowsCallerResolution => CallerResolve;
+
     void IConcurrentResolveHost.BeginConcurrentResolve() => BeginConcurrentResolve();
 
     object IConcurrentResolveHost.EndConcurrentResolve() => EndConcurrentResolve();
@@ -117,12 +125,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         }
 
         var (resolved, abandoned, taken, refused, waitMs) = prefetch.TakeCounters();
+        var (callerResolves, callerMs) = prefetch.TakeCallerResolveCounters();
         var drains = Interlocked.Exchange(ref _drains, 0);
         var deferredBarriers = Interlocked.Exchange(ref _deferredBarriers, 0);
         var operandReadsKept = Interlocked.Exchange(ref _operandReadsKept, 0);
         var drained = Interlocked.Exchange(ref _drainedDraws, 0);
         return $"resolved={resolved} abandoned={abandoned} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
-            $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} {own}{TakeDrainCallers()}";
+            $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} {own}{TakeDrainCallers()}";
     }
 
     internal enum ConcurrentQuery : byte

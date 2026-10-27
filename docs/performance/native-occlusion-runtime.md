@@ -1452,3 +1452,16 @@ processes ended. Private evidence includes `measurement-plan.json`,
 telemetry and post-FPS CPU/event captures in the run directory; build source
 and payload manifests are `vertex-history-v23-build-source.json` and
 `vertex-history-v23-payload-hashes.json` in the runtime diagnostic directory.
+
+
+### v24 bounded caller resolution
+
+The query-drain investigation led to caller resolution for short, unclaimed
+prefetch queues, preserving FIFO, gates, pause and speculative-read validation.
+The component benchmark supports enabling it by default, with an explicit
+ARM64 burst-of-32 cost. The same-payload first-room comparison measured
+**16.49 FPS enabled / 16.48 disabled** at 1920x1080, scale 1, unchanged VSync and
+quality. Wait time fell while idle time rose; this is not an isolated FPS win.
+See [the full source-bound benchmark and runtime report](caller-resolution.md)
+for both run identifiers, windows, CPU counters, memory pressure and shutdown
+trap timing. The previous ten defaults remain on; 30 FPS remains unestablished.

@@ -567,6 +567,7 @@ internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetc
 // Hands back the configured programs and records every pipeline request.
 internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {
+    internal Action<VertexStageRegisters>? BeforeGraphicsResolve { get; set; }
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
     // Stands in for a backend with mesh pipelines (Metal); Vulkan leaves it false.
@@ -628,6 +629,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         bool depthAspectBound,
         bool stencilAspectBound = false)
     {
+        BeforeGraphicsResolve?.Invoke(vertex);
         Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
         ExportMappings.Add(targetExportMapping.ToArray());
         return Graphics;

@@ -211,7 +211,7 @@ public sealed partial class MetalImageTransferTests
 
         // The image releases the texture it owns; the harness releases its own reference.
         MetalNative.SendVoid(texture, MetalNative.Selector("retain"));
-        var image = new MetalCachedImage(in description, in shape, texture);
+        using var image = new MetalCachedImage(in description, in shape, texture);
         nint kept = 0;
         for (var pass = 0; pass < 3; pass++)
         {
@@ -230,8 +230,8 @@ public sealed partial class MetalImageTransferTests
 
         // An image retiring the texture (PromoteToOwned and its kin) refers to it too, so
         // the view survives until both have let go.
-        var retired = new MetalCachedImage(in description, in shape, texture);
         MetalNative.SendVoid(texture, MetalNative.Selector("retain"));
+        using var retired = new MetalCachedImage(in description, in shape, texture);
         image.Dispose();
         Assert.Equal(kept, MetalTileViews.KeptView(texture));
         retired.Dispose();

@@ -71,6 +71,10 @@ public interface IConcurrentResolveHost
     // so it can be turned on and off at run time.
     bool ResolvesConcurrently => true;
 
+    // Opt-in: the host's speculative-read context may also run on the drawing thread.
+    // The queue still permits only one resolution at a time, including that caller.
+    bool AllowsCallerResolution => false;
+
     // On the resolving thread, around one resolution.
     void BeginConcurrentResolve();
 
