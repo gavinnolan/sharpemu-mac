@@ -8,7 +8,7 @@ namespace SharpEmu.Gpu.Metal.Tests.Scenes;
 
 /// <summary>
 /// Occlusion queries (PIXEL_PIPE_STAT_DUMP begin/end pairs) and zpass predication
-/// (SET_PREDICATION + the packet predicate bit). The emulator's dumps are synthetic: every
+/// (SET_PREDICATION + the packet predicate bit). This suite explicitly tests the conservative fallback: every
 /// pair reads as visible, so occluded draws are never culled. That costs time, not pixels;
 /// what must hold is that a predicate built from real dump pairs never drops a draw whose
 /// query saw samples, whichever command buffer or queue carried the dumps.
@@ -26,6 +26,7 @@ public sealed class OcclusionSceneTests(ITestOutputHelper output) : SceneTestBas
     {
         using var rig = CreateRig();
         if (rig is null) return;
+        rig.Host.NativeOcclusionEnabled = false;
         rig.Host.OcclusionAuditEnabled = true;
         var depth = new DepthRig(rig, Size, Size, 3);
         var pm4 = depth.Pm4;
@@ -81,6 +82,7 @@ public sealed class OcclusionSceneTests(ITestOutputHelper output) : SceneTestBas
     private Scene? Create()
     {
         var rig = CreateRig();
+        if (rig is not null) rig.Host.NativeOcclusionEnabled = false;
         return rig is null ? null : new Scene { Rig = rig, Target = rig.ColorTarget(Size, Size) };
     }
 

@@ -2162,10 +2162,10 @@ public sealed partial class DirectExecutionBackend
 	// takes a host lock still qualifies, because the lock is the emulator's own
 	// and cannot park the guest thread.
 	// Queue-level reads only inspect the context/device counters and write two register-
-	// addressed outputs. They neither park the guest nor invoke guest callbacks. Keep the
-	// audio poll fast path opt-in until its runtime comparison is complete.
+	// addressed outputs. They neither park the guest nor invoke guest callbacks. The
+	// dispatch benchmark removes the gateway allocation; =0 retains the full path.
 	private static readonly bool _audioQueueLeafEnabled =
-		Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_QUEUE_LEAF") == "1";
+		Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_QUEUE_LEAF") != "0";
 
 	internal static bool IsTrivialLeafImport(string nid) =>
 		(_audioQueueLeafEnabled && nid is "R7d0F1g2qsU" or "Q8DZkKQ-SYc") ||

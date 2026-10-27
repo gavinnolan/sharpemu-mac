@@ -99,7 +99,7 @@ public sealed partial class AudioOut2QueueTests
                 entries.SetValue(Activator.CreateInstance(entryType, [0x200000UL, dispatchNid, export, false, false, false, false, 0UL]), index);
             }
             type.GetField("_importEntries", Instance)!.SetValue(_backend, entries);
-            Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_QUEUE_LEAF") == "1", DirectExecutionBackend.IsTrivialLeafImport(nid));
+            Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_QUEUE_LEAF") != "0", DirectExecutionBackend.IsTrivialLeafImport(nid));
             Assert.False(DirectExecutionBackend.IsTrivialLeafImport("test-full-audio-queue-query"));
             Assert.False((bool)type.GetField("_disableTrivialLeafDispatch", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!);
             _dispatch = type.GetMethod("DispatchImportCore", Instance)!.CreateDelegate<Func<int, nint, ulong>>(_backend);

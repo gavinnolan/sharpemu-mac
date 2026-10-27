@@ -83,7 +83,7 @@ internal static partial class MetalV2Presenter
     private static long _adoptedGuestFrameSequence;
     private static long _hostFrameSequence;
     private static readonly bool ReusePresentedFrame =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REUSE_PRESENTED_FRAME") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REUSE_PRESENTED_FRAME") != "0";
     private static readonly MetalPresentationCache PresentationCache = new();
     private static int _firstGuestFrameNoted;
     private static long _publishedGuestFrames;

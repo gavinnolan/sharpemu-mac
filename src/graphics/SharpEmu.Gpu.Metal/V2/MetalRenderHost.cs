@@ -36,7 +36,7 @@ internal sealed partial class MetalRenderHost :
     private readonly long[] _graphicsBindingAttempts = new long[3];
     private readonly long[] _graphicsBindingSkipped = new long[3];
     private bool _graphicsBindingReuseEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRAPHICS_BINDING_REUSE") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRAPHICS_BINDING_REUSE") != "0";
 
     internal bool GraphicsBindingReuseEnabled
     {

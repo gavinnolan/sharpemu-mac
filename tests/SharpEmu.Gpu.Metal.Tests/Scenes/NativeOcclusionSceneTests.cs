@@ -26,6 +26,28 @@ public sealed class NativeOcclusionSceneTests(ITestOutputHelper output) : SceneT
     }
 
     [Fact]
+    public void DefaultQueryModePublishesNativeSamplesUnlessExplicitlyDisabled()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var target = rig.ColorTarget(Size, Size);
+        var query = Query(rig);
+        var pm4 = new ScenePm4();
+        var state = new SceneState(Size, Size).ColorTarget(0, target, Size, Size);
+        state.Context[Cx.DbCountControl] = 1u << 8;
+        Dump(pm4, query);
+        rig.DrawMesh(pm4, state, SceneDraws.Quad(0.1f, 1, 0, 0));
+        Dump(pm4, query + 8);
+        rig.Submit(pm4);
+        var samples = Delta(rig, query);
+        if (Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_NATIVE_OCCLUSION") == "0")
+            Assert.Equal(16UL, samples);
+        else
+            Assert.Equal((ulong)Size * Size, samples);
+        Assert.Equal(0xFF0000FFu, SceneDraws.Pixel(rig.ReadImage(target, Size, Size), Size, Size / 2, Size / 2));
+    }
+
+    [Fact]
     public void DisabledCountingPassesDoNotReduceOrChangeTheCounter()
     {
         using var rig = CreateRig();

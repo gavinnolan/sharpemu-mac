@@ -8,7 +8,7 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 public sealed partial class DeferredCommandThread
 {
     private static readonly bool RecycleAsyncItemsEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_ITEM_REUSE") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_ITEM_REUSE") != "0";
 
     // A return channel, opposite to the work queue: only the render thread publishes items;
     // only the interpreter takes them. The existing producer/consumer ownership also applies

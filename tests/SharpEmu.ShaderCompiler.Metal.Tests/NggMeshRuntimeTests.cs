@@ -90,9 +90,17 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void ScalarConstantBuffersRequireOptInAndRawDwordSemantics()
+    public void DefaultScalarConstantBuffersUseTheConstantPointerForEligibleMeshLoads()
     {
-        foreach (var options in new[] { new Gen5MslCodegenOptions(),
+        Assert.True(Gen5MslTranslator.TryCompileProgram(ScalarConstantRequest(4, 0),
+            out var shader, out var error, new Gen5MslCodegenOptions()), error);
+        Assert.Contains("constant uint* b0 =", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ScalarConstantBuffersHonorDisableAndRequireRawDwordSemantics()
+    {
+        foreach (var options in new[] { new Gen5MslCodegenOptions { ScalarConstantBuffers = false },
                      new Gen5MslCodegenOptions(RawDwordAccess: false) { ScalarConstantBuffers = true } })
         {
             Assert.True(Gen5MslTranslator.TryCompileProgram(ScalarConstantRequest(4, 0),

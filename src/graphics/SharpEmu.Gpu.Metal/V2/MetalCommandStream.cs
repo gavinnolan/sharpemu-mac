@@ -927,7 +927,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// or a label is still owed by a completion - published by a completion behind it.
     /// </summary>
     internal bool QueueCommandProcessorWrites { get; set; } =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_QUEUE_CP_WRITES") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_QUEUE_CP_WRITES") != "0";
 
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
@@ -1895,8 +1895,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public bool DefersEndOfPipeLabels => !PublishLabelsWhenParsed;
 
-    // Keep conservative pairs by default. Precise GPU snapshots are opt-in while
-    // native query ordering and runtime behavior are validated; the audit changes no dumps.
+    // Precise GPU snapshots preserve query ordering. The disable switch retains
+    // conservative pairs; the diagnostic audit changes no guest dumps.
     public bool PublishesSyntheticOcclusionDumps => !NativeOcclusionEnabled;
 
     // A deferred label is encoded into the command buffer being recorded, before it is

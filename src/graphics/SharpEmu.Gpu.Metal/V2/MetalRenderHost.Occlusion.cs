@@ -5,13 +5,13 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
-// Experimental precise queries. A dump closes a visibility interval, not the render
+// Precise queries, enabled unless SHARPEMU_METAL_V2_NATIVE_OCCLUSION=0. A dump closes a visibility interval, not the render
 // encoder. At the encoder boundary a GPU prefix sum preserves each dump's snapshot;
 // the existing ordered-copy stream publishes them alongside guest WRITE_DATA stores.
 internal sealed partial class MetalRenderHost
 {
     internal bool NativeOcclusionEnabled { get; set; } =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_NATIVE_OCCLUSION") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_NATIVE_OCCLUSION") != "0";
 
     private const int OcclusionIntervalCapacity = 4096;
     internal int NativeOcclusionBatchBudget { get; set; } = 256;

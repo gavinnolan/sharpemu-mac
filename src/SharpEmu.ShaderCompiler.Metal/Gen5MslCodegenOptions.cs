@@ -156,9 +156,9 @@ public sealed record Gen5MslCodegenOptions(
     /// A single hardware wave may also publish its output at a loop-limit exit.</summary>
     public bool MeshExitJoin { get; init; }
 
-    /// <summary>Experimental constant indexing of provably invariant private scratch slots.
-    /// Enabled with SHARPEMU_MSL_STATIC_SCRATCH=1.</summary>
-    public bool StaticScratchSlots { get; init; }
+    /// <summary>Constant indexing of provably invariant private scratch slots.
+    /// SHARPEMU_MSL_STATIC_SCRATCH=0 retains dynamic addressing.</summary>
+    public bool StaticScratchSlots { get; init; } = true;
 
     /// <summary>Experimental removal of pure ALU guards when inactive values cannot
     /// be observed. SHARPEMU_MSL_UNOBSERVED_ALU=1 enables this for wave32 compute
@@ -169,17 +169,17 @@ public sealed record Gen5MslCodegenOptions(
     /// with complete wave64 execution. SHARPEMU_MSL_GEOMETRY_CAPACITY=1.</summary>
     public bool GeometryOutputCapacity { get; init; }
 
-    /// <summary>Experimental single-run loads for statically known packed formats.
-    /// SHARPEMU_MSL_PACKED_FORMAT_LOADS=1; partial trailing elements retain the decoder.</summary>
-    public bool PackedFormatLoads { get; init; }
+    /// <summary>Single-run loads for statically known packed formats.
+    /// SHARPEMU_MSL_PACKED_FORMAT_LOADS=0 restores component loads; partial trailing elements retain the decoder.</summary>
+    public bool PackedFormatLoads { get; init; } = true;
 
     /// <summary>Experimental guarded forwarding of the last 128-bit LDS write in a
     /// single-wave mesh subgroup. SHARPEMU_MSL_MESH_LDS_FORWARDING=1.</summary>
     public bool MeshLdsForwarding { get; init; }
 
-    /// <summary>Experimental constant-address-space bindings for scalar-only buffers
-    /// in mesh shaders without device-memory writes. SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS=1.</summary>
-    public bool ScalarConstantBuffers { get; init; }
+    /// <summary>Constant-address-space bindings for scalar-only buffers
+    /// in mesh shaders without device-memory writes. SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS=0 disables this.</summary>
+    public bool ScalarConstantBuffers { get; init; } = true;
 
     /// <summary>Experimental compact threadgroup bank for frequently addressed LDS
     /// regions, retaining device storage for other addresses. SHARPEMU_MSL_MESH_HOT_LDS=1.</summary>
@@ -215,11 +215,11 @@ public sealed record Gen5MslCodegenOptions(
     {
         UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "1",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
-        PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") == "1",
+        PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
         MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
-        ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") == "1",
+        ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") != "0",
         MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",
-        StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") == "1",
+        StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",
         MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)

@@ -3,6 +3,10 @@ SPDX-License-Identifier: GPL-2.0-or-later -->
 
 # Native occlusion and Silent Hill room measurements
 
+**Current default policy:** [performance-defaults.md](performance-defaults.md)
+supersedes the historical opt-in decisions below. Per-run flags and results
+remain unchanged; default promotion is not a new FPS measurement.
+
 Native Metal visibility counters replace the conservative always-visible query
 results when `SHARPEMU_METAL_V2_NATIVE_OCCLUSION=1`. In a paired, same-binary
 Silent Hill first-room comparison, median guest FPS increased from 4.485 to
