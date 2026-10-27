@@ -35,8 +35,13 @@ The three promoted shader properties also default on in explicitly constructed
 | `SHARPEMU_MSL_MESH_LDS_FORWARDING` | Same-binary shadow time 34.238 → 36.422 ms; title median 7.97 → 7.47 FPS. |
 | `SHARPEMU_MSL_MESH_HOT_LDS` | Same-binary total encoder time 108.483 → 109.451 ms; no benefit established. |
 | `SHARPEMU_MSL_MESH_EXIT_JOIN`, `SHARPEMU_MSL_UNOBSERVED_ALU` | Correctness coverage exists, but isolated performance evidence is inconclusive and their combined run had an unresolved mapping failure. |
-| Command thread / parallel resolution / command-thread QoS | Earlier overlap runs were slower than serial resolution. Queued writes and recycling apply when overlap is requested; this change does not enable overlap globally. |
+| Command thread / command-thread QoS | Earlier command-thread overlap runs were slower than serial command-stream interpretation. Queued writes and recycling apply when command threading is requested; this change does not enable it globally. |
 | Concurrent tiling and floating-point contraction | Representative writeback regressions or numerical differences remain; the original audit did not accept them. |
+
+Background program resolution is a separate existing default: it remains enabled
+unless `SHARPEMU_METAL_V2_PARALLEL_RESOLVE=0`. It can run while command-stream
+interpretation stays on the GPU worker. The earlier table incorrectly grouped
+it with opt-in command threading; no runtime policy is changed by this correction.
 
 Diagnostics, detailed tracing, scripted-only input and visibility auditing stay
 off. Portable-buffer policy, device LDS placement threshold and asynchronous
@@ -52,7 +57,7 @@ Fresh serial Release runs with all `SHARPEMU_*` overrides removed:
 | Suite | Passed | Failed | Existing skips |
 | --- | ---: | ---: | ---: |
 | ShaderCompiler.Metal, required device | 3,589 | 0 | 0 |
-| Gpu.Metal, required device, default synchronous mode | 1,635 | 0 | 7 |
+| Gpu.Metal, required device, serial command stream | 1,635 | 0 | 7 |
 | Libs, x64 | 9,052 | 0 | 5 |
 | Total | 14,276 | 0 | 12 |
 
@@ -86,3 +91,17 @@ footprint was 9,460 MiB (RSS 2,095 MiB); these are not combined physical-memory
 figures for the two processes. Prewarming was disabled for this diagnostic,
 while all nine promoted switches were unset. Runtime investigation toward
 30 FPS continues separately.
+
+
+A subsequent clean `eabcd9f65` build reached the stationary shelf/lamp room with
+all nine switches unset. Its detailed-profile window (375–410 seconds) reported
+**11.95 FPS median, 7.99–14.96 range, 17 reports**. This is not a matched isolated
+comparison with the earlier 14-FPS build. See the v20 section of the runtime
+report for CPU/GPU attribution and measurement limits. Background program
+resolution was enabled, while command threading remained disabled.
+
+A same-payload control with detailed render/pass profiling disabled then measured
+**15.48 FPS median (13.96–16.97, 17 reports)** in the same stationary room.
+Sequential cache warmth and host-load changes prevent assigning the entire
+difference to profiling. This confirms operation of the default combination in
+that scene; it still does not establish 30 FPS or isolate each setting's gain.

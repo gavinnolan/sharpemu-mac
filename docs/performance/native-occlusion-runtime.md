@@ -1110,3 +1110,94 @@ DOTNET_TieredCompilation=0 dotnet test \
 Use the matching ARM64 or x64 `dotnet` host. JSON includes the actual process
 architecture, each round's checksum, time and allocation. Raw records remain in
 `ordered-append-copy-{arm64,x64}-notier.json` and `ordered-append-copy-x64.json`.
+
+
+### v20 warmed defaults: stationary room and CPU attribution
+
+Clean source `eabcd9f659fcb218dd00bf8f8112f2628b4c48e8` passed both
+self-contained publishes (x64 CLI, native ARM64 GPU host) and verification of
+471 runtime payload hashes. Run
+`20261027-190045-silent hill short message.zar-room-warm-defaults-v20-1`
+used a fresh clone of v19's warmed user data. All nine promoted switches were
+unset; background program resolution retained its existing default on, and
+command-stream threading retained its default off. Portable buffers, LDS
+threshold and deferred-library policy stayed at defaults. Detailed render-phase
+and GPU-pass profiling were on; prewarming was off. Resolution stayed
+1920×1080, scale 1, VSync on, and GeForce NOW was unchanged.
+
+The shelf/lamp room was visually verified after closing the phone; no movement
+was sent during the accepted 375–410-second window. Seventeen guest-FPS reports
+had median **11.95**, range **7.99–14.96**. This does not isolate the copy fix,
+the default promotions, profiling overhead or host-load differences against
+the earlier approximately 14-FPS run. **30 FPS remains unachieved.**
+
+Sixteen complete render-profile intervals covered 379 reported frames in
+32 seconds. Leading GPU-worker self wall times per frame were:
+
+| Phase | ms/frame |
+| --- | ---: |
+| Program-prefetch wait | 12.311 |
+| Command register writes | 7.338 |
+| Command-stream interpretation | 7.332 |
+| Draw-resource preparation | 7.273 |
+| Label-copy encoding | 4.741 |
+| Graphics-state application | 3.737 |
+
+These are instrumented wall times, including scheduling and wait costs. They
+are not hardware CPU utilization. The window contained 7,123,581 register-write
+phase entries, so per-scope instrumentation also warrants an unprofiled control.
+
+GPU-pass records contained 55,906 passes across 408 frame groups. Excluding
+first and last groups, median summed encoder duration was **19.251 ms/frame**
+(mean 19.508). Encoder durations can overlap and are not exclusive frame wall
+time; they must not be added to CPU phase durations. The largest recurring
+compute groups averaged 1.566 and 1.546 ms, and the leading fullscreen render
+encoder averaged 1.115 ms. This room does not show the original large
+shadow/volume encoder as its dominant single cost.
+
+A separate ten-second thread-CPU capture at 469.759–479.765 seconds, outside
+the accepted FPS window, recorded **8.943 CPU-seconds** on the native GPU
+worker and **2.897 CPU-seconds** on its program resolver. The guest audio event
+thread used 9.686 CPU-seconds and RHI thread 6.067. Combined with the phase
+profile, this supports investigating CPU draw processing and resolver handoffs;
+it does not prove a particular optimization's gain. No native stack sampling
+was used during this run.
+
+The run stopped at its own marker after 711 seconds, followed by controlled
+four-second termination with process and wrapper exit 0. Peak main-process
+footprint was 9,807 MiB and RSS 3,314 MiB; these are not combined physical usage
+for both emulator processes. No full-game or teardown-correctness claim follows.
+Private evidence includes `room-stationary-fps.json`, `render-phases-375-410.json`,
+`pass-analysis-after-375s-before-410s.json` and `thread-cpu-deltas-0469.json`.
+
+
+The same immutable v20 payload was then run with render-phase and GPU-pass
+profiling disabled, using a fresh clone of the preceding run's warmed user data:
+`20261027-191250-silent hill short message.zar-room-unprofiled-defaults-v20-2`.
+The repeated title confirmations stopped at 132 seconds; cutscene skip finished
+at 139 seconds and phone-close input at 162 seconds. The same stationary
+shelf/lamp view was verified at 176 and 246 seconds, without movement.
+
+The preselected 205–240-second window contained **17 reports, median 15.48 FPS,
+range 13.96–16.97**. The render/pass profiles were disabled; ordinary presentation
+counters and harness screenshots remained enabled. All nine promoted switches
+remained unset and all rendering/application constraints were unchanged. This
+is a useful normal-settings control, but sequential cache warmth and changing
+host load prevent attributing the full difference from 11.95 FPS to profiling.
+It is also not an isolated before/after test of the copy fix or default changes.
+
+A separate thread-CPU capture at 259.940–269.945 seconds recorded 6.533 CPU-seconds
+on the GPU worker, 2.523 on program resolution, 6.051 on guest RHI and 9.122 on
+the audio event thread. The worker remains a substantial CPU cost even without
+detailed phase instrumentation, while guest-side command production also needs
+investigation. The result remains below 30 FPS. The profiler-off capture and
+`thread-cpu-deltas-0259.json` are retained alongside the raw run records.
+
+The control stopped at its own marker after 274 seconds; process and wrapper
+exited 0 after four seconds of controlled termination. Peak main-process
+footprint was 8,901 MiB and RSS 4,395 MiB. Both emulator processes were gone
+afterward; this is bounded-run cleanup, not full-game compatibility evidence.
+
+The only CPU-trap lines in the profiler-off capture occur at 275.367 seconds,
+after the 274-second stop marker. They remain recorded as host-stop behavior;
+process exit 0 does not establish a clean guest teardown.
