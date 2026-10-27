@@ -37,7 +37,10 @@ The benchmark now optionally records calling-thread CPU time alongside elapsed
 time (`SHARPEMU_BENCH_THREAD_CPU=1`, macOS). This excludes descheduling and other
 threads' work but does not eliminate core-placement, frequency, cache or JIT drift.
 All 300 paired samples below had positive CPU intervals no greater than their
-elapsed intervals. Separate disassembly captures confirmed optimized Tier1 code for the baseline
+elapsed intervals. These comparisons ran natively on ARM64. A later Rosetta
+clock check found unscaled ticks from `CLOCK_THREAD_CPUTIME_ID`; the diagnostic
+now uses Mach `THREAD_BASIC_INFO` in both architectures. That correction does
+not change the native ARM64 measurements below. Separate disassembly captures confirmed optimized Tier1 code for the baseline
 and variant 1; those captures are not timing evidence.
 
 ## CPU-time results

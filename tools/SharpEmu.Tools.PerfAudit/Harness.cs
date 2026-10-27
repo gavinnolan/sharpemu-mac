@@ -3,7 +3,6 @@
 
 using System.Diagnostics;
 using System.Globalization;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace SharpEmu.PerfAudit;
@@ -29,11 +28,6 @@ internal static class Harness
     public static double WarmupMs = 700;
     public static readonly List<BenchResult> Results = [];
     private static readonly bool MeasureThreadCpu = Environment.GetEnvironmentVariable("SHARPEMU_BENCH_THREAD_CPU") == "1";
-
-    // Darwin's CLOCK_THREAD_CPUTIME_ID, from the macOS SDK's _time.h. This
-    // measures only the calling thread; it is not process CPU or elapsed time.
-    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "clock_gettime_nsec_np")]
-    private static extern ulong ThreadCpuNanoseconds(int clockId);
 
     /// <param name="opsPerInvoke">operations the body performs per call (ns/op = elapsed / calls / ops).</param>
     /// <param name="opsPerFrame">illustrative operation count, not a measured game frame (6331 draws, 2700 dispatches, ...).</param>
@@ -70,9 +64,9 @@ internal static class Harness
             GC.WaitForPendingFinalizers();
             var allocatedBefore = processWideAllocations ? GC.GetTotalAllocatedBytes(true) : GC.GetAllocatedBytesForCurrentThread();
             var start = Stopwatch.GetTimestamp();
-            var cpuStart = cpuTimes is null ? 0 : ThreadCpuNanoseconds(16);
+            var cpuStart = cpuTimes is null ? 0 : DarwinThreadCpuClock.Nanoseconds();
             for (var i = 0; i < invokes; i++) body(index++);
-            var cpuEnd = cpuTimes is null ? 0 : ThreadCpuNanoseconds(16);
+            var cpuEnd = cpuTimes is null ? 0 : DarwinThreadCpuClock.Nanoseconds();
             var elapsed = Stopwatch.GetElapsedTime(start);
             var allocatedAfter = processWideAllocations ? GC.GetTotalAllocatedBytes(true) : GC.GetAllocatedBytesForCurrentThread();
             var ops = (double)invokes * opsPerInvoke;
