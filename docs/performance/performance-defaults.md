@@ -105,3 +105,13 @@ A same-payload control with detailed render/pass profiling disabled then measure
 Sequential cache warmth and host-load changes prevent assigning the entire
 difference to profiling. This confirms operation of the default combination in
 that scene; it still does not establish 30 FPS or isolate each setting's gain.
+
+
+The subsequent same-seed control with background program resolution disabled
+measured 10.99 FPS (6.49–14.47, 17 reports); its existing enabled default remains.
+A completion-read follow-up uses the existing serial-hint switch to avoid native
+queries once all submitted work is known complete. The guarded getter measured
+3.020 → 1.319 ns on ARM64 and 10.002 → 2.297 ns on x64 for completed work.
+Pending work retains live queries: ARM64 measured 3.241 → 2.981 ns, x64
+5.864 → 6.209 ns. Both paths allocate zero bytes; the runtime report documents its
+device ordering tests and the absence of an isolated game-FPS result.

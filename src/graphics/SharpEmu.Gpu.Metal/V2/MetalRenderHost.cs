@@ -92,6 +92,9 @@ internal sealed partial class MetalRenderHost :
     private nint _commandBuffer;
     private nint _previousCommandBuffer;
     private ulong _previousSerial;
+    // Published before commit: an upper bound on any value the completion event
+    // can reach. A recorded but unsubmitted command buffer cannot advance it.
+    private ulong _submittedSerial;
     private long _failedSubmissions;
     private long _reportedFailedSubmissions;
     private double _gpuBusySeconds;
@@ -221,14 +224,24 @@ internal sealed partial class MetalRenderHost :
         }
     }
 
-    public ulong CompletedSerial
+    public ulong CompletedSerial => ReadCompletedSerial(SerialHintEnabled);
+
+    internal ulong ReadCompletedSerial(bool useCompletedSnapshot)
     {
-        get
+        if (useCompletedSnapshot && _completions is { } completions)
         {
-            var completed = MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
-            _completions?.NoteSignaled(completed);
-            return completed;
+            var submitted = Volatile.Read(ref _submittedSerial);
+            var known = completions.CompletedHint;
+            // The hint is a lower bound on the event. Once it reaches the upper
+            // bound as well, another native read cannot discover more completed
+            // work. Pending submissions still query the live event as before.
+            if (known >= submitted)
+                return known;
         }
+
+        var completed = MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+        _completions?.NoteSignaled(completed);
+        return completed;
     }
 
     public RenderHostLimits Limits { get; } =
@@ -628,6 +641,7 @@ internal sealed partial class MetalRenderHost :
 
         NoteCommandBufferForTelemetry();
         MetalMemoryTelemetry.Commits.Add();
+        Volatile.Write(ref _submittedSerial, serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         if (DsTrace.Gpu && DsTrace.Armed)
         {

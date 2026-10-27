@@ -26,7 +26,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// gap between the GPU finishing and the host publishing is as wide as it is in a slow
 /// frame. Device work is behind the exclusive device gate.
 /// </summary>
-public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper output)
 {
     private const ulong GuestBase = 0x2_0000_0000;
     private const ulong WindowedLabel = GuestBase + 0x1000;

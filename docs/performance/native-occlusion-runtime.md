@@ -1201,3 +1201,91 @@ afterward; this is bounded-run cleanup, not full-game compatibility evidence.
 The only CPU-trap lines in the profiler-off capture occur at 275.367 seconds,
 after the 274-second stop marker. They remain recorded as host-stop behavior;
 process exit 0 does not establish a clean guest teardown.
+
+
+### v20 serial program-resolution control
+
+The same `eabcd9f65` payload and the same warmed seed directory as the unprofiled
+default run were used for
+`20261027-192111-silent hill short message.zar-room-unprofiled-serial-resolve-v20-3`.
+The captured environment differed only in the clone's destination path and
+`SHARPEMU_METAL_V2_PARALLEL_RESOLVE=0`. Rendering, prewarm, profiling and other
+application settings were unchanged. The stationary shelf/lamp view was verified
+at 196 and 246 seconds.
+
+The same 205–240-second window had **17 reports, median 10.99 FPS, range
+6.49–14.47**, versus 15.48 (13.96–16.97) with background resolution enabled.
+Sequential host conditions still limit causal precision, but this control gives
+no reason to disable the existing default. Thirty FPS remains unachieved.
+A separate 271.936–281.946-second CPU capture recorded 7.253 CPU-seconds on the
+GPU worker, 5.360 on guest RHI and 8.565 on the audio event thread. There was no
+background program-resolver thread in this arm.
+
+Ten-second managed stack traces followed, outside the FPS/CPU windows, for the
+GPU host and guest process. They completed and converted successfully. Their
+leaf samples were dominated by `UNMANAGED_CODE_TIME`, with managed anchors at
+monitor entry, GC polling, completion-event reads and resource rebasing. These
+are sampled wall-time anchors, not exclusive CPU costs or proof of contention.
+Earlier v14 event traces already showed why this distinction matters: actual
+worker contention was 13.96 ms while sampled monitor-entry attribution was
+1,680 ms. No lock or GC-policy change is justified by these stack totals.
+
+This control stopped at its own marker after 390 seconds; the CPU-trap lines
+appeared at 391.201 seconds, after that stop. Process/wrapper exit 0 followed
+four-second controlled termination. Peak main-process footprint was 8,877 MiB
+and RSS 3,818 MiB. Both emulator processes exited; no full-game or clean guest
+teardown claim follows.
+
+### Completion-event reads after all submitted work finishes
+
+The host already keeps the greatest completion-event value it has observed.
+It now also publishes an upper bound on submitted serials immediately before
+each native commit. When the observed completion reaches that bound, the lower
+and upper bounds agree: an additional native event read cannot reveal more
+completed work. A recorded but unsubmitted command buffer cannot advance the
+event. If submitted work remains outstanding, the getter still reads the live
+event and updates the monotonic hint. Concurrent readers can observe a valid
+earlier completion snapshot, just as a native read racing submission can.
+`SHARPEMU_METAL_V2_SERIAL_HINT=0` retains the native-query reference path.
+
+A device regression covers three successive externally gated submissions,
+checks that recording and committing do not publish completion early, releases
+each gate, then verifies the completed serial and GPU-written word in both
+reading modes. The benchmark measures the actual getter on the same host after
+its work finishes: 10,000 warmup pairs, nine alternating-order rounds of
+1,000,000 reads per arm, and equal serial checksums. A second condition holds
+a real GPU submission behind an external event, exercising the live-query
+fallback while the completion hint is stale.
+
+| Completion condition | Native query, median ns/read | Guarded getter, median ns/read | B/read, both |
+| --- | ---: | ---: | ---: |
+| ARM64, completed | 3.020 | 1.319 | 0 |
+| ARM64, pending | 3.241 | 2.981 | 0 |
+| Rosetta x64, completed | 10.002 | 2.297 | 0 |
+| Rosetta x64, pending | 5.864 | 6.209 | 0 |
+
+The x64 pending-work arm costs about 0.346 ns/read (5.9%) more; it does not take
+the shortcut. The completed-work arm saves 7.705 ns/read in that harness. These
+component medians do not establish the runtime hit ratio or an FPS gain. The
+preliminary idle-only harness used 200,000 reads and a different loop shape;
+its raw results are preserved separately rather than mixed with this table. The native getter's
+measured nanosecond cost also cautions against interpreting its sampled wall
+time as a large exclusive CPU cost. Fresh Release compilation and the focused
+ARM64 device run passed **52/0/0**. The full x64 Metal suite using those rebuilt
+assemblies passed **1,637/0/7 existing skips**. Shader/compiler/Libs production
+code did not change in this follow-up, so their earlier suites were not repeated.
+
+Reproduce the optional benchmark with
+`SHARPEMU_COMPLETION_SNAPSHOT_BENCH_OUTPUT=/absolute/path/results.json` and
+`SHARPEMU_TEST_REQUIRE_DEVICE=1`, filtering Release Metal tests to
+`MeasureCompletedSnapshotWhenRequested`. JSON records architecture, iterations,
+every timing/allocation round and checksum. Command/TRX artifacts are retained
+in `completion-snapshot-validation.json` and `completion-snapshot-results`;
+timing files are `completion-snapshot-focused-arm64.json` and
+`completion-snapshot-full-x64.json`. The runtime comparisons above predate this
+getter optimization; it has not yet been measured in a game.
+
+Additional focused controls passed **52/0/0 each** with serial hints disabled
+and with polling completions instead of native completion callbacks. These are
+configuration executions of existing tests, not 104 distinct new tests. REUSE
+passed **2,865/2,865** files, and whitespace checks passed.
