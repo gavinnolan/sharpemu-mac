@@ -12,7 +12,7 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
 // The vertex tables: registers from the header's direct resources, attributes by semantic, buffers merged by stream.
 [Collection(SchedulingStateCollection.Name)]
-public sealed class VertexInputResolverTests : IDisposable
+public sealed partial class VertexInputResolverTests : IDisposable
 {
     private const ulong MemoryBase = 0x1_0000_0000;
     private const ulong ShaderAddress = MemoryBase + 0x100;

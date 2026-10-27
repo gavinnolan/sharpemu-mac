@@ -20,6 +20,7 @@ VSync, guest quality, or unrelated application setting is changed.
 | Audio queue query leaf dispatch | `SHARPEMU_AUDIO_OUT2_QUEUE_LEAF` | Synthetic dispatch about 369 → 84.5 ns and 40 → 0 B/call; guest audio thread remains busy. Result/error and shutdown tests retain full-path behavior. |
 | Asynchronous command-item reuse | `SHARPEMU_COMMAND_ITEM_REUSE` | Native two-thread median 389.965 → 354.5175 ns; allocation 80.0008 → 0.026 B/item. Bounded 64-slot return ring; synchronous and failed items retain original ownership. No accepted runtime FPS gain. |
 | Queued CP writes | `SHARPEMU_METAL_V2_QUEUE_CP_WRITES` | Removes synchronous handoffs for eligible writes when command threading is explicitly enabled. Pending ranges, prefetch gates and CPU-read fallbacks preserve ordering; producer-thread device tests cover byte/qword/sparse/predication cases. |
+| Bounded vertex-layout history | `SHARPEMU_VERTEX_LAYOUT_HISTORY` | Exact byte-verified reuse across alternating layouts; adaptive backoff for low reuse, 512 slots and 2 MiB additional payload budget. Component timing/allocation evidence and miss costs are in [the measurements](vertex-layout-history.md); no isolated game-FPS claim. |
 
 The existing negative label page filter, exact materialization comparison, dense
 register lookup, mip-layout construction and target memo fixes remain enabled.

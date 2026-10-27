@@ -19,6 +19,8 @@ public sealed class VertexTableMetadata
     // The attributes and buffers decoded from the tables the guest held at the last draw, with the
     // bytes they were decoded from. Replaced as a whole, never mutated.
     internal VertexLayoutMemo? Layout;
+    internal ulong LayoutHash;
+    internal int HistoryProbes, HistoryHits, HistorySkipsRemaining;
 }
 
 // A draw's decoded vertex layout and the guest bytes it came from: the attribute table words from the lowest
@@ -32,12 +34,18 @@ internal sealed class VertexLayoutMemo(byte[] attributeBytes, byte[] bufferBytes
     public readonly byte[] BufferBytes = bufferBytes;
     public readonly VertexAttributeResource[] Attributes = attributes;
     public readonly VertexInputBuffer[] Buffers = buffers;
+    // Conservative object/array overhead and eight-byte alignment, including empty arrays.
+    internal long RetainedBytes => 64 + 4 * 32 + Align(AttributeBytes.LongLength) + Align(BufferBytes.LongLength) +
+        Align((long)Attributes.Length * System.Runtime.CompilerServices.Unsafe.SizeOf<VertexAttributeResource>()) +
+        Align((long)Buffers.Length * System.Runtime.CompilerServices.Unsafe.SizeOf<VertexInputBuffer>());
+
+    private static long Align(long bytes) => (bytes + 7) & ~7L;
 }
 
 // The header-derived tables of vertex programs already read, keyed by the registered header
 // and the code hash so a different binary at the same address never reuses an entry.
-// Used under the pipeline cache's resolve lock; entries are never mutated after they are stored.
-public sealed class VertexTableMetadataCache
+// Header metadata stays fixed; the layout memo and history are maintained under that lock.
+public sealed partial class VertexTableMetadataCache
 {
     private const int MaxEntries = 4096;
     private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), VertexTableMetadata> _entries = new();
@@ -50,6 +58,7 @@ public sealed class VertexTableMetadataCache
         if (_entries.Count >= MaxEntries)
         {
             _entries.Clear();
+            _history?.Clear();
         }
 
         _entries[(shader, codeHash)] = metadata;
@@ -102,8 +111,9 @@ public static class VertexInputResolver
             }
 
             if (metadataCache is null ||
-                !TryResolveLayout(context, metadata, attributeTable, bufferTable, shader.CodeAddress, out attributes, out buffers))
+                !TryResolveLayout(context, metadataCache, metadata, attributeTable, bufferTable, shader.CodeAddress, out attributes, out buffers))
             {
+                if (metadataCache is { CollectStatistics: true }) metadataCache.RecordLookup(VertexLayoutLookup.Refused);
                 // Per-thread scratch: the list never outlives the call; the draw keeps the array.
                 var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
                 resources.Clear();
@@ -163,7 +173,17 @@ public static class VertexInputResolver
     // Reads the direct resource registers and the input semantics; false with the reason when invalid.
     public static bool TryReadTables(CpuContext context, RegisteredShader shader, uint maxUserScalarRegisters, out VertexTableMetadata metadata, out string error)
     {
-        metadata = new VertexTableMetadata();
+        var valid = TryReadTablesCore(context, shader, maxUserScalarRegisters, out var parsed, out error);
+        // Keep the public non-null out contract on empty/error paths without
+        // allocating a throwaway metadata object before every successful parse.
+        metadata = parsed ?? new VertexTableMetadata();
+        return valid;
+    }
+
+    private static bool TryReadTablesCore(CpuContext context, RegisteredShader shader, uint maxUserScalarRegisters,
+        out VertexTableMetadata? metadata, out string error)
+    {
+        metadata = null;
         if (shader.UserDataAddress == 0)
         {
             error = "the header has no user data block";
@@ -379,9 +399,10 @@ public static class VertexInputResolver
     // The tables of a draw in two guest reads, one over the attribute words the program names and one over the buffer
     // descriptors they index, instead of two reads per attribute (each taking the memory read lock). A draw whose
     // bytes equal the last draw's gets that draw's attributes and buffers back without decoding or
-    // allocating them; any other byte decodes afresh, so a guest that rewrites a table is seen on the next draw.
+    // allocating them. The bounded history also requires an exact match of freshly read bytes.
+    // Any other byte decodes afresh, so a guest rewrite is seen on the next draw.
     // False leaves the word-by-word path to decode the draw, and to report whatever stopped this one.
-    private static bool TryResolveLayout(CpuContext context, VertexTableMetadata metadata, ulong attributeTable, ulong bufferTable,
+    private static bool TryResolveLayout(CpuContext context, VertexTableMetadataCache cache, VertexTableMetadata metadata, ulong attributeTable, ulong bufferTable,
         ulong shaderAddress, out VertexAttributeResource[] attributes, out VertexInputBuffer[] buffers)
     {
         attributes = [];
@@ -441,7 +462,24 @@ public static class VertexInputResolver
         {
             attributes = memo.Attributes;
             buffers = memo.Buffers;
+            if (cache.CollectStatistics) cache.RecordLookup(VertexLayoutLookup.LastHit);
             return true;
+        }
+
+        ulong contentHash = 0;
+        if (memo is not null && cache.ReuseLayouts && cache.ShouldProbeHistory(metadata))
+        {
+            var recalled = cache.FindPrevious(metadata, attributeBytes, bufferBytes, out contentHash);
+            cache.Remember(metadata, memo, metadata.LayoutHash);
+            if (recalled is not null)
+            {
+                metadata.Layout = recalled;
+                metadata.LayoutHash = contentHash;
+                attributes = recalled.Attributes;
+                buffers = recalled.Buffers;
+                if (cache.CollectStatistics) cache.RecordLookup(VertexLayoutLookup.HistoryHit);
+                return true;
+            }
         }
 
         var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
@@ -465,6 +503,8 @@ public static class VertexInputResolver
         attributes = resources.ToArray();
         resources.Clear();
         metadata.Layout = new VertexLayoutMemo(attributeBytes.ToArray(), bufferBytes.ToArray(), attributes, buffers);
+        metadata.LayoutHash = contentHash;
+        if (cache.CollectStatistics) cache.RecordLookup(VertexLayoutLookup.Decoded);
         return true;
     }
 
