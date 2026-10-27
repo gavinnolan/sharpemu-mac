@@ -30,6 +30,7 @@ The three promoted shader properties also default on in explicitly constructed
 
 | Setting | Reason |
 | --- | --- |
+| `SHARPEMU_LOCAL_DRAW_REUSE` | Removes 184 B/draw within its bounded cache, but component timings are mixed. Enabled/disabled/enabled room medians were 5.97 / 7.98 / 6.485 FPS under differing paging pressure. This does not isolate a regression, but it also does not establish a speed benefit. Kept opt-in pending better timing evidence; [full measurements and fallback](local-draw-reuse.md). |
 | `SHARPEMU_REGISTER_IDENTICAL_SCALARS` | Always-changing packets regress: native 101.40 → 103.08 ns; Rosetta 164.85 → 178.94 ns. Only 0.805% of eligible packets reused in the observed room. Identical-packet synthetic gains do not outweigh this demonstrated mixed-workload cost. |
 | `SHARPEMU_MSL_GEOMETRY_CAPACITY` | Volume pass 39.888 → 57.027 ms, changed image, no accepted broad correctness/performance result. |
 | `SHARPEMU_MSL_MESH_LDS_FORWARDING` | Same-binary shadow time 34.238 → 36.422 ms; title median 7.97 → 7.47 FPS. |

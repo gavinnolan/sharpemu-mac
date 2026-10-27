@@ -176,9 +176,10 @@ public static partial class AgcExports
         private readonly ShaderPipelineCache? _pipelines;
         private readonly RenderExecutor? _executor;
 
-        internal CommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host)
+        internal CommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host, bool? recycleLocalDraws = null)
         {
             _host = host;
+            _recycleLocalDraws = recycleLocalDraws ?? LocalDrawReuseEnabled;
             _context = new CpuContext(memory, Generation.Gen5);
             _gpuState = _submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState());
             if (host is IRenderHost renderHost && host is IShaderPipelineHost pipelineHost)
@@ -230,16 +231,62 @@ public static partial class AgcExports
             }
         }
 
-        private sealed record PendingDraw(
-            ulong SubmitId,
-            SubmittedDcbState State,
-            RegisterBanks Banks,
-            bool Indexed,
-            DrawIndexedArguments IndexedArguments,
-            DrawAutoArguments AutoArguments,
-            SubmittedVertexSnapshot? VertexSnapshot,
-            SubmittedIndexSnapshot? IndexSnapshot,
-            ParallelProgramPrefetch.Job? Job) : DeferredWork;
+        private sealed record PendingDraw : DeferredWork
+        {
+            public ulong SubmitId;
+            public SubmittedDcbState State = null!;
+            public RegisterBanks Banks = null!;
+            public bool Indexed;
+            public DrawIndexedArguments IndexedArguments;
+            public DrawAutoArguments AutoArguments;
+            public SubmittedVertexSnapshot? VertexSnapshot;
+            public SubmittedIndexSnapshot? IndexSnapshot;
+            public ParallelProgramPrefetch.Job? Job;
+        }
+
+        // Only the interpreter/render thread's local queue owns reusable wrappers. A sink
+        // may retain work on another thread, so its wrappers are never taken from or returned
+        // to this cache. Draw snapshots and resolver jobs themselves are never recycled.
+        private static readonly bool LocalDrawReuseEnabled =
+            Environment.GetEnvironmentVariable("SHARPEMU_LOCAL_DRAW_REUSE") == "1";
+        private const int MaximumSpareLocalDraws = 256;
+        private readonly bool _recycleLocalDraws;
+        private readonly Stack<PendingDraw> _spareLocalDraws = new();
+
+        private PendingDraw TakePendingDraw(bool producing, ulong submitId, SubmittedDcbState state,
+            RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments,
+            in DrawAutoArguments autoArguments, ParallelProgramPrefetch.Job? job)
+        {
+            var draw = !producing && _recycleLocalDraws && _spareLocalDraws.TryPop(out var spare)
+                ? spare : new PendingDraw();
+            draw.SubmitId = submitId;
+            draw.State = state;
+            draw.Banks = banks;
+            draw.Indexed = indexed;
+            draw.IndexedArguments = indexedArguments;
+            draw.AutoArguments = autoArguments;
+            draw.VertexSnapshot = state.CurrentVertexSnapshot;
+            draw.IndexSnapshot = state.CurrentIndexSnapshot;
+            draw.Job = job;
+            return draw;
+        }
+
+        private void ReturnLocalDraw(PendingDraw draw)
+        {
+            if (!_recycleLocalDraws || _spareLocalDraws.Count >= MaximumSpareLocalDraws) return;
+            // Execution has finished and restored the current queue/prefetch state. Clear
+            // every payload, including on failure, before retaining the empty wrapper.
+            draw.SubmitId = 0;
+            draw.State = null!;
+            draw.Banks = null!;
+            draw.Indexed = false;
+            draw.IndexedArguments = default;
+            draw.AutoArguments = default;
+            draw.VertexSnapshot = null;
+            draw.IndexSnapshot = null;
+            draw.Job = null;
+            _spareLocalDraws.Push(draw);
+        }
 
         private sealed record PendingDispatch(
             ulong SubmitId,
@@ -440,6 +487,7 @@ public static partial class AgcExports
                     {
                         _parallel.Current = null;
                     }
+                    ReturnLocalDraw(pending);
                 }
             }
 
@@ -467,8 +515,8 @@ public static partial class AgcExports
             if (_parallel is not null || producing)
             {
                 var snapshot = banks.Snapshot();
-                var pending = new PendingDraw(submitId, state, snapshot, indexed, indexedArguments, autoArguments,
-                    state.CurrentVertexSnapshot, state.CurrentIndexSnapshot, _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed));
+                var pending = TakePendingDraw(producing, submitId, state, snapshot, indexed, in indexedArguments, in autoArguments,
+                    _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed));
                 if (producing)
                 {
                     Sink!.EnqueueDeferred(pending, isDraw: true);
