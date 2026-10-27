@@ -13,38 +13,53 @@ namespace SharpEmu.HLE.Host;
 /// </remarks>
 public sealed class WindowHostInput : IHostInput
 {
+    private readonly bool _scriptedOnly;
+
+    public WindowHostInput()
+        : this(ScriptedKeyInput.IsEnabled &&
+            Environment.GetEnvironmentVariable("SHARPEMU_INPUT_SCRIPTED_ONLY") == "1")
+    {
+    }
+
+    internal WindowHostInput(bool scriptedOnly) => _scriptedOnly = scriptedOnly;
+
+    // A controlled run must not mix file input with keys/sticks from a focused window.
+    // Without both an input file and the explicit opt-in, physical input stays available.
+    private IHostWindowInputSource? PhysicalInput =>
+        _scriptedOnly ? null : HostWindowInputSource.Current;
+
     public void EnsureStarted()
     {
         // SDL owns device discovery and pumps it on the window thread.
     }
 
     public int GetGamepadStates(Span<HostGamepadState> destination) =>
-        HostWindowInputSource.Current?.GetGamepadStates(destination) ?? 0;
+        PhysicalInput?.GetGamepadStates(destination) ?? 0;
 
     public string? DescribeConnectedGamepad() =>
-        HostWindowInputSource.Current?.DescribeConnectedGamepad();
+        PhysicalInput?.DescribeConnectedGamepad();
 
     public void SetRumble(byte largeMotor, byte smallMotor) =>
-        HostWindowInputSource.Current?.SetRumble(largeMotor, smallMotor);
+        PhysicalInput?.SetRumble(largeMotor, smallMotor);
 
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) =>
-        HostWindowInputSource.Current?.SetTriggerRumble(leftTrigger, rightTrigger);
+        PhysicalInput?.SetTriggerRumble(leftTrigger, rightTrigger);
 
     public void SetAdaptiveTriggerEffect(
         HostAdaptiveTriggerEffect? leftTrigger,
         HostAdaptiveTriggerEffect? rightTrigger) =>
-        HostWindowInputSource.Current?.SetAdaptiveTriggerEffect(leftTrigger, rightTrigger);
+        PhysicalInput?.SetAdaptiveTriggerEffect(leftTrigger, rightTrigger);
 
     public void SetLightbar(byte red, byte green, byte blue) =>
-        HostWindowInputSource.Current?.SetLightbar(red, green, blue);
+        PhysicalInput?.SetLightbar(red, green, blue);
 
-    public void ResetLightbar() => HostWindowInputSource.Current?.ResetLightbar();
+    public void ResetLightbar() => PhysicalInput?.ResetLightbar();
 
     public bool IsHostWindowFocused() =>
-        (HostWindowInputSource.Current?.HasKeyboardFocus ?? false) ||
+        (PhysicalInput?.HasKeyboardFocus ?? false) ||
         (ScriptedKeyInput.IsEnabled && ScriptedKeyInput.AnyHeld);
 
     public bool IsKeyDown(int virtualKey) =>
         (ScriptedKeyInput.IsEnabled && ScriptedKeyInput.IsHeld(virtualKey)) ||
-        (HostWindowInputSource.Current?.IsKeyDown(virtualKey) ?? false);
+        (PhysicalInput?.IsKeyDown(virtualKey) ?? false);
 }

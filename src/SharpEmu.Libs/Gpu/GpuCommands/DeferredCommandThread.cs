@@ -17,7 +17,7 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 // The command stream is interpreted on its own thread, which hands its work to the render thread
 // in stream order. Draws, dispatches, barriers, completions and the interpreter's own stores are
 // queued; a callback that returns a result waits for the render thread to run everything before it.
-public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
+public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 {
     // The thread runs this far ahead of the render thread at most: enough to keep it busy, and
     // no more, since a GPU round trip (a readback, a label wait) waits for everything queued.
@@ -56,6 +56,10 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     // Wakes the thread that runs the queued items (the backend's render or GPU worker thread).
     private readonly Action _wakeConsumer;
     private readonly Thread _thread;
+    private readonly bool _useHostQos;
+    private SharpEmu.HLE.Host.HostHelperThread? _helperThread;
+    private int _producerThreadId;
+    private int _started;
     private readonly object _lock = new();
     private List<Item> _incoming = new();
     private List<Item> _draining = new();
@@ -88,17 +92,33 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         ICpuMemory memory,
         Action<AgcExports.DeferredWork> runDeferred,
         ParallelProgramPrefetch? prefetch,
-        Action wakeConsumer)
+        Action wakeConsumer,
+        bool useHostQos = false,
+        bool? recycleAsyncItems = null)
     {
         _wakeConsumer = wakeConsumer;
         _queue = queue;
         _memory = memory;
         _runDeferred = runDeferred;
         _prefetch = prefetch;
+        _useHostQos = useHostQos;
+        if (recycleAsyncItems ?? RecycleAsyncItemsEnabled)
+            _recycledItems = new Item?[MaxOutstanding];
         _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu command stream" };
     }
 
-    public void Start() => _thread.Start();
+    public void Start()
+    {
+        if (Interlocked.Exchange(ref _started, 1) != 0)
+            throw new ThreadStateException("The command thread has already started.");
+        if (_useHostQos)
+            _helperThread = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu command stream", 16 * 1024 * 1024, Run);
+        else
+            _thread.Start();
+    }
+
+    /// <summary>Whether the producer was created with its requested native QoS class.</summary>
+    public bool HasHostQos => _helperThread?.HasQos == true;
 
     // The producer's side since the last TakeCounters: synchronous calls, their wait, the wait for
     // room in the queue, and the items handed over.
@@ -119,7 +139,7 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     /// </summary>
     public Action? ProducerIdle { get; set; }
 
-    public bool IsProducerThread => Environment.CurrentManagedThreadId == _thread.ManagedThreadId;
+    public bool IsProducerThread => Environment.CurrentManagedThreadId == Volatile.Read(ref _producerThreadId);
 
     public long Gate => _enqueuedNonDraw;
 
@@ -131,14 +151,24 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         set => _consumerIdle = value;
     }
 
-    public bool IsAlive => _thread.IsAlive;
+    public bool IsAlive => _helperThread is { } helper ? !helper.Join(TimeSpan.Zero) : _thread.IsAlive;
 
     // The producer side, on the command stream thread.
 
-    public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw) =>
-        Enqueue(new Item { Kind = Kind.Deferred, Work = work, IsDraw = isDraw });
+    public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw)
+    {
+        var item = RentAsyncItem(Kind.Deferred);
+        item.Work = work;
+        item.IsDraw = isDraw;
+        Enqueue(item);
+    }
 
-    public void Post(Action action) => Enqueue(new Item { Kind = Kind.Call, Action = action });
+    public void Post(Action action)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.Action = action;
+        Enqueue(item);
+    }
 
     public void Run(Action action)
     {
@@ -159,7 +189,9 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     public void PostWrite(ulong address, ReadOnlySpan<byte> data)
     {
-        var item = new Item { Kind = Kind.Write, Address = address, Data = data.ToArray() };
+        var item = RentAsyncItem(Kind.Write);
+        item.Address = address;
+        item.Data = data.ToArray();
         lock (_writeLock)
         {
             _pendingWrites.Enqueue(item);
@@ -172,7 +204,10 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     // A fill or copy the render thread runs in order; reads of its destination wait for it.
     public void PostRange(Action action, ulong address, ulong size)
     {
-        var item = new Item { Kind = Kind.Call, Action = action, Address = address, RangeSize = size };
+        var item = RentAsyncItem(Kind.Call);
+        item.Action = action;
+        item.Address = address;
+        item.RangeSize = size;
         if (size != 0)
         {
             lock (_writeLock)
@@ -385,6 +420,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 }
             }
 
+            // Execute has removed pending write/range references, and the consumer has finished
+            // reading the item. Synchronous callers still own their result, so never recycle them.
+            if (!item.Sync)
+                RecycleAsyncItem(item);
+
             betweenItems();
             if (ran >= maxItems || ((ran & 31) == 0 && Stopwatch.GetTimestamp() >= deadline))
             {
@@ -483,10 +523,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         _stopping = true;
         _queue.Wake();
         var deadline = Stopwatch.GetTimestamp() + 5 * Stopwatch.Frequency;
-        while (_thread.IsAlive && Stopwatch.GetTimestamp() < deadline)
+        while (IsAlive && Stopwatch.GetTimestamp() < deadline)
         {
             runItems();
-            _thread.Join(1);
+            if (_helperThread is { } helper) helper.Join(TimeSpan.FromMilliseconds(1));
+            else _thread.Join(1);
         }
 
         runItems();
@@ -494,6 +535,9 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     private void Run()
     {
+        // A native helper can enter before Start has returned its wrapper. Publish
+        // identity from the body, rather than depending on that wrapper assignment.
+        Volatile.Write(ref _producerThreadId, Environment.CurrentManagedThreadId);
         try
         {
             var lastProgress = Stopwatch.GetTimestamp();

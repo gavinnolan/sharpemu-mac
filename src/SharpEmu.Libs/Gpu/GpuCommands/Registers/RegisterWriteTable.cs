@@ -10,7 +10,7 @@ public delegate uint RegisterPacketWriter(RegisterBanks banks, in PacketContext 
 public delegate void RegisterWriter(RegisterBanks banks, uint offset, uint value);
 
 // Two tiers per bank: a packet tries its direct writer, then needs an indirect writer for every value.
-public static class RegisterWriteTable
+public static partial class RegisterWriteTable
 {
     public static readonly RegisterPacketWriter?[] Context = new RegisterPacketWriter?[RegisterBankLayout.ContextRegisterCount];
     public static readonly RegisterPacketWriter?[] Shader = new RegisterPacketWriter?[RegisterBankLayout.ShaderRegisterCount];
@@ -44,8 +44,18 @@ public static class RegisterWriteTable
     // A shader packet without values has no writer; the other banks accept it.
     public static uint WriteShaderPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
-        banks.PrepareShaderWrite(offset, (uint)values.Length);
-        var consumed = WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
+        uint consumed;
+        if (ScalarReuseEnabled && TryReuseScalarPacket(banks, offset, values))
+        {
+            // The packet still consumes its marker, even when its stored state is unchanged.
+            banks.UserDataMarker = UserScalarKind.Unknown;
+            consumed = (uint)values.Length;
+        }
+        else
+        {
+            banks.PrepareShaderWrite(offset, (uint)values.Length);
+            consumed = WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
+        }
         if (Rendering.RenderTrace.Enabled)
         {
             for (var index = 0; index < values.Length && index < consumed; index++)

@@ -1577,6 +1577,14 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     {
         get
         {
+            // The table lives until quiescent disposal. Publish its address only after
+            // zeroing and residency registration; subsequent draws need no monitor.
+            var published = Volatile.Read(ref _pairLockTableGpuAddress);
+            if (published != 0)
+            {
+                return published;
+            }
+
             lock (_pairLockTableLock)
             {
                 if (_pairLockTable == 0)
@@ -1590,8 +1598,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
                     AddResident(buffer);
                     CommitResidency();
-                    _pairLockTableGpuAddress = gpuAddress;
                     _pairLockTable = buffer;
+                    Volatile.Write(ref _pairLockTableGpuAddress, gpuAddress);
                 }
 
                 return _pairLockTableGpuAddress;

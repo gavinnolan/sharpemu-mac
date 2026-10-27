@@ -508,6 +508,13 @@ public sealed partial class DirectExecutionBackend
 			LastError = $"Import dispatch index out of range: {importIndex}";
 			return 18446744071562199042uL;
 		}
+		// Every managed import path, including leaves, is a shutdown safe point.
+		// The full-path check below remains for a request racing this earlier check.
+		if (Volatile.Read(ref _forcedGuestExit) && TryEndGuestSliceForShutdown(argPackPtr))
+		{
+			cpuContext[CpuRegister.Rax] = 1uL;
+			return 1uL;
+		}
 		// By reference: the entry is 48 bytes of per-import classification that
 		// nothing here mutates, and copying it was pure cost on every guest call.
 		ref readonly ImportStubEntry importStubEntry = ref _importEntries[importIndex];
@@ -576,7 +583,7 @@ public sealed partial class DirectExecutionBackend
 					in importStubEntry, num,
 					leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, builderResult);
 			}
-			return builderResult;
+			return CompleteLeafImportShutdown(cpuContext, argPackPtr, builderResult);
 		}
 
 		// The leaf paths skip the rest of the gateway entirely, so they mark
@@ -599,7 +606,7 @@ public sealed partial class DirectExecutionBackend
 						in importStubEntry, num,
 						leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, hotMemoryResult);
 				}
-				return hotMemoryResult;
+				return CompleteLeafImportShutdown(cpuContext, argPackPtr, hotMemoryResult);
 			}
 		}
 
@@ -614,7 +621,7 @@ public sealed partial class DirectExecutionBackend
 					in importStubEntry, num,
 					leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, trivialResult);
 			}
-			return trivialResult;
+			return CompleteLeafImportShutdown(cpuContext, argPackPtr, trivialResult);
 		}
 
 		if (importStubEntry.IsLeaf)
@@ -635,7 +642,7 @@ public sealed partial class DirectExecutionBackend
 						in importStubEntry, num,
 						leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, leafResult);
 				}
-				return leafResult;
+				return CompleteLeafImportShutdown(cpuContext, argPackPtr, leafResult);
 			}
 		}
 
@@ -2154,7 +2161,14 @@ public sealed partial class DirectExecutionBackend
 	// Every entry below was checked for those four properties - a poll that
 	// takes a host lock still qualifies, because the lock is the emulator's own
 	// and cannot park the guest thread.
+	// Queue-level reads only inspect the context/device counters and write two register-
+	// addressed outputs. They neither park the guest nor invoke guest callbacks. Keep the
+	// audio poll fast path opt-in until its runtime comparison is complete.
+	private static readonly bool _audioQueueLeafEnabled =
+		Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_QUEUE_LEAF") == "1";
+
 	internal static bool IsTrivialLeafImport(string nid) =>
+		(_audioQueueLeafEnabled && nid is "R7d0F1g2qsU" or "Q8DZkKQ-SYc") ||
 		nid is
 			"0-KXaS70xy4" or // pthread_getspecific
 			"eoht7mQOCmo" or // scePthreadGetspecific
@@ -2516,6 +2530,20 @@ public sealed partial class DirectExecutionBackend
 
 			frame = next;
 		}
+	}
+
+	// A stop can arrive while a leaf body runs. Only ordinary guest returns may
+	// be redirected here: preserve already prepared exits, blocks and context transfers.
+	// Failed redirects retain the existing behavior; this is not a quiescence fence.
+	private unsafe ulong CompleteLeafImportShutdown(CpuContext context, nint argPackPtr, ulong result)
+	{
+		if (!Volatile.Read(ref _forcedGuestExit)) return result;
+		var state = GuestThreadExecution.State;
+		if (ActiveGuestThreadYieldRequested || state.HasPendingDispatchOutcome || state.PreparedContextTransferStub != 0)
+			return result;
+		if (!TryEndGuestSliceForShutdown(argPackPtr)) return result;
+		context[CpuRegister.Rax] = 1uL;
+		return 1uL;
 	}
 
 	// Returns the import straight to the host entry stub, which ends this guest slice.

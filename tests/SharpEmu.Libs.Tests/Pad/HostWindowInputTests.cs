@@ -169,6 +169,38 @@ public sealed class HostWindowInputTests
         }
     }
 
+    [Fact]
+    public void ScriptedOnlyInputIgnoresPhysicalKeysControllersAndOutputs()
+    {
+        var output = new RecordingGamepadOutput();
+        var input = new WindowHostInput(scriptedOnly: true);
+        HostWindowInput.Connect(output);
+        try
+        {
+            HostWindowInput.SetKey(0x57, true);
+            HostWindowInput.SetGamepad("Physical pad", new HostGamepadState(
+                true, HostGamepadButtons.Cross, 0, 255, 0, 255, 255, 255));
+            Span<HostGamepadState> states = stackalloc HostGamepadState[1];
+
+            Assert.False(input.IsKeyDown(0x57));
+            Assert.False(input.IsHostWindowFocused());
+            Assert.Equal(0, input.GetGamepadStates(states));
+            Assert.Null(input.DescribeConnectedGamepad());
+            input.SetRumble(10, 20);
+            input.SetTriggerRumble(30, 40);
+            input.SetLightbar(50, 60, 70);
+            input.ResetLightbar();
+            Assert.Equal(((byte)0, (byte)0), output.Rumble);
+            Assert.Equal(((byte?)null, (byte?)null), output.TriggerRumble);
+            Assert.Equal(((byte)0, (byte)0, (byte)0), output.Lightbar);
+            Assert.False(output.LightbarReset);
+        }
+        finally
+        {
+            HostWindowInput.Disconnect();
+        }
+    }
+
     private sealed class RecordingGamepadOutput : IHostGamepadOutput
     {
         public (byte Large, byte Small) Rumble { get; private set; }
