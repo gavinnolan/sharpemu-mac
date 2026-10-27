@@ -52,6 +52,15 @@ The printed p95 is a percentile of run averages, not individual operation latenc
 The scaled-cost column uses illustrative counts (6,331 draws / 2,700 dispatches);
 it does not measure a game frame, predict FPS, or account for overlapping work.
 
+On macOS, `SHARPEMU_BENCH_THREAD_CPU=1` additionally prints paired per-run
+`ns_op` (calling-thread CPU time) and `wall_ns_op` samples. The regular summary
+table continues to report elapsed wall time. CPU time uses Darwin's
+`CLOCK_THREAD_CPUTIME_ID`; it excludes descheduling and work on other threads,
+including background resolvers, GC workers and the GPU. It does not remove
+frequency, cache, JIT or core-placement effects. Retain both measurements and
+unchanged controls when investigating a busy host; lower CPU time alone is not
+evidence of higher game FPS. This diagnostic currently rejects non-macOS hosts.
+
 For the final cold-admission A/B experiment, use the dedicated
 [materialization harness](../SharpEmu.Tools.MaterializationBench/README.md), whose
 sampling and counters match the published final result. Historical measurements

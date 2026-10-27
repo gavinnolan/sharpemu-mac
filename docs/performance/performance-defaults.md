@@ -23,6 +23,9 @@ VSync, guest quality, or unrelated application setting is changed.
 
 The existing negative label page filter, exact materialization comparison, dense
 register lookup, mip-layout construction and target memo fixes remain enabled.
+The later [dense register-range experiment](dense-register-range-experiment.md)
+was rejected: isolated warm-copy gains did not carry across representative
+interpreter workloads under normal tiering. It adds no new default or switch.
 The three promoted shader properties also default on in explicitly constructed
 `Gen5MslCodegenOptions`; reference tests set those properties to `false`.
 
