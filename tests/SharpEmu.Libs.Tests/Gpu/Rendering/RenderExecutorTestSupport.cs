@@ -576,6 +576,8 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 
     public uint MeshPrimitiveType { get; private set; }
 
+    public UserConfigRegisters? MeshUserConfig { get; private set; }
+
     public bool MeshDepthBound { get; private set; }
 
     public GraphicsPrograms GetMeshGraphicsPrograms(
@@ -590,6 +592,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     {
         Calls.Add($"get_mesh_programs pixelActive={pixelActive}");
         MeshPrimitiveType = userConfig.PrimitiveType;
+        MeshUserConfig = userConfig;
         MeshDepthBound = depthBound;
         return Graphics;
     }

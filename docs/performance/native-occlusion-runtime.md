@@ -1020,3 +1020,93 @@ one trailing blank line from the new scalar-constant MSL template; that final
 formatting-only difference was made after the suite build. Main remained clean.
 The publication contains source, tests, benchmark tools and this report, without
 raw commercial captures, game binaries or local runtime bundles.
+
+
+### v19 defaults diagnostic: cold introduction, no matched room result
+
+Clean source `fb717072ad11ada9a53e27ac34219fdc91f1f5bb`, self-contained
+x64 CLI/native ARM64 GPU host, with 471 verified runtime payload hashes.
+Run `20261027-183237-silent hill short message.zar-room-defaults-v19-1`
+used a fresh clone of `runtime-data-world-unprofiled-1`, all nine newly promoted
+switches unset, and the existing default portable-buffer/LDS/library-deferral
+policies. Prewarming was disabled for measurement; resolution, scale, VSync and
+GeForce NOW were unchanged. Initial host load average was 13.16.
+
+The title menu was visually verified at 350 seconds. New Game was selected at
+367 seconds; a long warning/loading phase followed, with zero-frame intervals
+and Metal pipeline/library compilation visible in the GPU-host native sample.
+Short confirmation pulses during stalled frames did not immediately advance
+the warning. After a later confirmation the introduction advanced, and the
+opening cutscene was visually verified at 832 and 872 seconds. The 900-second
+cap ended the run before the stationary shelf/lamp room. Thus no FPS comparison
+against the earlier room windows is valid. Process exit was 0 after a controlled
+four-second termination; this does not certify guest teardown or full-game
+compatibility. Main-process peak footprint was 9,460 MiB and peak RSS 2,095 MiB.
+
+The main-process native sample had only ten snapshots and is insufficient for
+precise CPU attribution. Separate per-process unique-memory captures at
+514.53–515.33 seconds recorded main task footprint 5,050,704,280 bytes and
+compressed bytes 3,900,620,800. The helper attributed 4,155,510,784 logical
+swapped/compressed bytes to stack/guard objects. This is a diagnostic lead,
+not proof that reducing stack reservations is safe or would improve FPS.
+The guest shared objects appear in both process maps and must not be added
+together. Native samples and VM-object walks were outside any accepted FPS
+window. Raw logs, samples and captures remain private diagnostic artifacts.
+
+
+A follow-up synthetic check rejects treating that stack-region number as direct
+physical footprint. Eight idle managed threads with 64-MiB reservations used
+only 0.406 MiB of stack-resident pages on ARM64 and 0.516 MiB under Rosetta x64;
+zero-thread and 4-MiB controls were also captured. After a one-second native
+`sample`, the x64 VM-object walk reported **523.211 MiB** of stack-resident pages,
+while task footprint changed only **13.233 → 13.339 MiB** (RSS 27.590 → 27.613
+MiB). ARM64's stack count did not change. All six probe processes exited 0.
+Thus native sampling can strongly alter this Rosetta VM-object accounting;
+the stack-category count cannot establish equivalent process-owned physical
+memory or explain the game's FPS. The 64-MiB reservation remains unchanged.
+Private source/results: `stack-reservation-probe/Program.cs`,
+`run-stack-reservation-probe.py`, `stack-reservation-probe-results.json`.
+
+### Avoid redundant user-config and ordered-append copies
+
+Indexed triangle-list mesh draws already have the topology the resolver needs.
+They now reuse the read-only user-config snapshot instead of deep-copying it.
+Indexed triangle strips still get a private topology-conversion copy; tests
+check source topology and independent ordered-append storage. Other topologies
+and nonindexed paths keep their existing behavior.
+
+`OrderedAppendRegisters.Copy` now constructs directly with its cloned counter
+array. The former public-constructor/object-initializer sequence allocated an
+empty eight-counter array and immediately replaced it with the clone. The new
+path still owns every counter and preserves all register values.
+
+Nine alternating-order rounds, 100,000 copies per arm after 10,000 warmup copies,
+with matching checksums and allocation measured on the executing thread:
+
+| Runtime / configuration | Reference ns/copy | New ns/copy | Reference B/copy | New B/copy |
+| --- | ---: | ---: | ---: | ---: |
+| ARM64, tiering disabled | 33.331 | 28.991 | 208 | 120 |
+| Rosetta x64, tiering disabled | 58.851 | 51.310 | 208 (one round +0.00056) | 120 |
+| Rosetta x64, default tiering, full-suite run | 61.755 | 46.973 | 208 | 120 |
+
+These are component medians: about 13% less time with tiering disabled and 88
+fewer allocated bytes per counter-bank copy. They are not a game-FPS result.
+The complete Release Libs run passed **9,060 / 0 / 5 existing skips**. Both
+architecture-specific benchmark executions passed separately, using the same
+compiled test/Libs assemblies. No Metal/shader source changed in this follow-up;
+the earlier default-configuration device suites retain their own attribution.
+
+Reproduce the opt-in benchmark after building Release Libs tests:
+
+```sh
+SHARPEMU_ORDERED_APPEND_BENCH_OUTPUT=/tmp/ordered-append-copy.json \
+DOTNET_TieredCompilation=0 dotnet test \
+  tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj \
+  -c Release --no-build --no-restore \
+  --settings docs/performance/shader-serial.runsettings \
+  --filter FullyQualifiedName~MeasureOrderedAppendCopiesWhenRequested
+```
+
+Use the matching ARM64 or x64 `dotnet` host. JSON includes the actual process
+architecture, each round's checksum, time and allocation. Raw records remain in
+`ordered-append-copy-{arm64,x64}-notier.json` and `ordered-append-copy-x64.json`.

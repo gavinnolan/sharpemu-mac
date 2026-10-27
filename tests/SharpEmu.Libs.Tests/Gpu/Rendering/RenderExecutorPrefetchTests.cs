@@ -55,6 +55,44 @@ public sealed class RenderExecutorPrefetchTests : IDisposable
         Assert.Equal(PrimitiveTriangleStrip, banks.UserConfig.PrimitiveType);
     }
 
+    [Theory]
+    [InlineData(4u, false)]
+    [InlineData(4u, true)]
+    [InlineData(6u, false)]
+    [InlineData(6u, true)]
+    [InlineData(2u, false)]
+    [InlineData(2u, true)]
+    public void MeshResolutionCopiesUserConfigOnlyForIndexedStripExpansion(uint primitive, bool indexed)
+    {
+        _pipelines.MeshShadersSupported = true;
+        var banks = Banks(primitive);
+        banks.Context.ShaderStages = 0x20;
+        banks.UserConfig.OrderedAppend.Control = 5;
+        banks.UserConfig.OrderedAppend.Counters[5] = new() { Counter = 17, Address = 23 };
+        var snapshot = banks.Snapshot();
+        var inputs = RenderExecutor.ProgramInputsOf(snapshot, _host.FormatSupport, _host.Fatal, indexed);
+
+        _executor.ResolveGraphicsPrograms(snapshot, in inputs);
+
+        var resolved = Assert.IsType<UserConfigRegisters>(_pipelines.MeshUserConfig);
+        if (indexed && primitive == PrimitiveTriangleStrip)
+        {
+            Assert.NotSame(snapshot.UserConfig, resolved);
+            Assert.Equal(4u, resolved.PrimitiveType);
+            Assert.Equal(5u, resolved.OrderedAppend.Control);
+            Assert.Equal(17u, resolved.OrderedAppend.Counters[5].Counter);
+            Assert.Equal(23u, resolved.OrderedAppend.Counters[5].Address);
+            resolved.OrderedAppend.Counters[5].Counter = 99;
+            Assert.Equal(17u, snapshot.UserConfig.OrderedAppend.Counters[5].Counter);
+        }
+        else
+        {
+            Assert.Same(snapshot.UserConfig, resolved);
+        }
+        Assert.Equal(primitive, snapshot.UserConfig.PrimitiveType);
+        Assert.Equal(primitive, banks.UserConfig.PrimitiveType);
+    }
+
     // Resolves ahead with the executor, as a worker would, and hands the result back once.
     private sealed class AheadPrefetch(RenderExecutor executor, IRenderHost host) : IProgramPrefetch
     {

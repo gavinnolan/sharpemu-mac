@@ -74,6 +74,15 @@ above passed. No numerical or pixel oracle was relaxed. REUSE passed
 diagnostic directory. The earlier ShaderCompiler core suite passed 2,192/0/1
 before this defaults-only follow-up and was not rerun here.
 
-This validation establishes tested configuration paths, not a fresh game-FPS
-measurement of the new default combination. Runtime investigation toward
+This validation establishes tested configuration paths, not a first-room FPS
+measurement of the new default combination. A clean `fb717072a` x64 CLI/native
+ARM64 GPU-host runtime passed both publishes and verification of all 471 payload
+hashes. Its bounded 900-second Silent Hill diagnostic reached the opening
+cutscene, but did not reach the stationary comparison room. Cold pipeline
+compilation and long zero-frame intervals remain visible; this run does not
+establish a gain or regression against the earlier approximately 14-FPS room.
+It ended at the harness deadline with process exit 0. Peak main-process physical
+footprint was 9,460 MiB (RSS 2,095 MiB); these are not combined physical-memory
+figures for the two processes. Prewarming was disabled for this diagnostic,
+while all nine promoted switches were unset. Runtime investigation toward
 30 FPS continues separately.

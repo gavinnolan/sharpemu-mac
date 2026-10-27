@@ -40,11 +40,20 @@ public sealed class OrderedAppendRegisters
     public const int CounterCount = 8;
 
     public uint Control;
-    public OrderedAppendCounter[] Counters = new OrderedAppendCounter[CounterCount];
+    public OrderedAppendCounter[] Counters;
+
+    public OrderedAppendRegisters() => Counters = new OrderedAppendCounter[CounterCount];
+
+    private OrderedAppendRegisters(uint control, OrderedAppendCounter[] counters)
+    {
+        Control = control;
+        Counters = counters;
+    }
 
     public uint Index => Control & (CounterCount - 1u);
 
-    public OrderedAppendRegisters Copy() => new() { Control = Control, Counters = (OrderedAppendCounter[])Counters.Clone() };
+    // The public constructor would allocate an empty array that the clone immediately replaces.
+    public OrderedAppendRegisters Copy() => new(Control, (OrderedAppendCounter[])Counters.Clone());
 }
 
 // The user-config bank: primitive assembly and the ordered-append counters.
