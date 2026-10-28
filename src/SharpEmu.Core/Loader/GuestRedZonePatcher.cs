@@ -1106,11 +1106,12 @@ internal static partial class GuestRedZonePatcher
                 // span with that branch; the trampoline runs it once RSP is restored.
                 terminalBranch = instruction;
                 byteLength += instruction.Length;
-                if (absorbJumpPadding && byteLength < MinimumJumpBytes &&
+                if (absorbJumpPadding && canBorrowFollowingInstructions && byteLength < MinimumJumpBytes &&
                     instruction.FlowControl == FlowControl.UnconditionalBranch)
                 {
                     // `pause; jmp short loop` is 4 bytes: take the alignment nops after the jump. Execution
-                    // never falls through an unconditional jump, so they are dead unless something branches there.
+                    // never falls through an unconditional jump, so they are dead unless something branches there;
+                    // only when every jump table here is resolved, so no unknown indirect target can land on one.
                     for (var padding = index + 1; padding < decoded.Count && byteLength < MinimumJumpBytes; padding++)
                     {
                         var filler = decoded[padding].Instruction;
