@@ -15,6 +15,8 @@ using SharpEmu.Libs.Gpu.Pipelines;
 // Arguments are key=value:
 //   dir=<copy of pipeline_cache/<title>/metal-v2>  (required; the list loader prunes files)
 //   mode=translate|compute|libraries               (default compute)
+//   mode=gpu  synthetic GPU-time benchmark of every translated shader (see GpuBench.cs)
+//   mode=gpureport csv=<gpu-*.csv,...> out=<dir>   ranking and variant A/B tables (GpuBenchReport.cs)
 //   mode=analysis hash=<comma-separated hex hashes> reports graphics IR opportunities only
 //   workers=4 tworkers=4 priority=normal|below limit=0 order=list|bigfirst
 //   salt=<text>  prefixes every source with a comment, so the front end misses its cache
@@ -72,6 +74,11 @@ internal static class Program
             return 0;
         }
 
+        if (Arg("mode", "") == "gpureport")
+        {
+            return GpuBenchReport.Run(Arg);
+        }
+
         var dir = Arg("dir", "");
         if (dir.Length == 0)
         {
@@ -82,6 +89,11 @@ internal static class Program
         MetalNative.EnsureFrameworksLoaded();
         var device = MetalNative.MTLCreateSystemDefaultDevice();
         var mode = Arg("mode", "compute");
+        if (mode == "gpu")
+        {
+            return GpuBench.Run(dir, Arg);
+        }
+
         var listener = Arg("alloctypes", "") == "1" ? new AllocTypeListener() : null;
         var limit = int.Parse(Arg("limit", "0"), CultureInfo.InvariantCulture);
         var rows = new List<Row>();
