@@ -1140,7 +1140,10 @@ internal sealed partial class MetalRenderHost
             OcclusionAuditAttach(descriptor);
             _renderEncoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
             MetalMemoryTelemetry.RenderEncoders.Add();
-            LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
+            if (EncoderStatusEnabled)
+            {
+                LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
+            }
             if (_renderEncoder == 0)
             {
                 throw Fatal(
