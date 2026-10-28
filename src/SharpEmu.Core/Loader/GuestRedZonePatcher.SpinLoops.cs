@@ -83,9 +83,10 @@ internal static partial class GuestRedZonePatcher
         }
 
         var includeLocked = !lockedProbeCode.IsEmpty;
+        var wideShapes = SpinNapRuntime.WideShapesEnabled;
         var lockedAddresses = new HashSet<ulong>();
         var sites = CollectSpinSites(
-            memory, programHeaders, imageBase, functionStarts, includeLocked, lockedAddresses, out var result);
+            memory, programHeaders, imageBase, functionStarts, includeLocked, wideShapes, lockedAddresses, out var result);
         if (sites.Count == 0)
         {
             return result;
@@ -170,6 +171,7 @@ internal static partial class GuestRedZonePatcher
         ulong imageBase,
         IReadOnlyList<ulong> functionStarts,
         bool includeLocked,
+        bool wideShapes,
         HashSet<ulong> lockedAddresses,
         out SpinPatchResult result)
     {
@@ -249,7 +251,7 @@ internal static partial class GuestRedZonePatcher
                 branchTargets.Clear();
                 CollectBranchTargets(decoded, branchTargets);
                 var canBorrow = TryCollectJumpTableTargets(
-                    memory, programHeaders, imageBase, decoded, functionStart, functionEnd, branchTargets);
+                    memory, programHeaders, imageBase, decoded, functionStart, functionEnd, branchTargets, wideShapes);
 
                 var lastSiteEnd = 0UL;
                 for (var index = 0; index < decoded.Count; index++)
@@ -276,7 +278,9 @@ internal static partial class GuestRedZonePatcher
                         continue;
                     }
 
-                    if (!TryBuildPatchSpan(decoded, index, branchTargets, canBorrow, groupInstructions: false, out var span, out _))
+                    if (!TryBuildPatchSpan(
+                            decoded, index, branchTargets, canBorrow, groupInstructions: false, out var span, out _,
+                            absorbJumpPadding: wideShapes))
                     {
                         unrelocatable++;
                         continue;

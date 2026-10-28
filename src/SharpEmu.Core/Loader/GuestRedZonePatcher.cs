@@ -463,7 +463,8 @@ internal static partial class GuestRedZonePatcher
         IReadOnlyList<DecodedInstruction> decoded,
         ulong functionStart,
         ulong functionEnd,
-        HashSet<ulong> branchTargets)
+        HashSet<ulong> branchTargets,
+        bool hoistedTables = false)
     {
         List<ulong>? resolvedTargets = null;
         HashSet<ulong>? instructionBoundaries = null;
@@ -488,7 +489,8 @@ internal static partial class GuestRedZonePatcher
                     functionEnd,
                     instructionBoundaries,
                     branchTargets,
-                    resolvedTargets))
+                    resolvedTargets,
+                    hoistedTables))
             {
                 return false;
             }
@@ -512,7 +514,8 @@ internal static partial class GuestRedZonePatcher
         ulong functionEnd,
         IReadOnlySet<ulong> instructionBoundaries,
         IReadOnlySet<ulong> knownBranchTargets,
-        List<ulong> targets)
+        List<ulong> targets,
+        bool hoistedTables = false)
     {
         if (jumpIndex < 4)
         {
@@ -588,7 +591,9 @@ internal static partial class GuestRedZonePatcher
             boundsCompare.Mnemonic != Mnemonic.Cmp || boundsCompare.OpCount != 2 ||
             boundsCompare.GetOpKind(0) != OpKind.Register ||
             boundsCompare.GetOpRegister(0).GetFullRegister() != selectorRegister ||
-            boundsCompare.GetOpRegister(0).GetSize() != sizeof(int) ||
+            // A 64-bit compare bounds every bit of the selector, so the sign-extending table load stays in range too.
+            (boundsCompare.GetOpRegister(0).GetSize() != sizeof(int) &&
+             !(hoistedTables && boundsCompare.GetOpRegister(0).GetSize() == sizeof(ulong))) ||
             !TryGetNonNegativeImmediate(boundsCompare, 1, out var maximumIndex) ||
             maximumIndex >= MaximumJumpTableEntries)
         {
@@ -631,6 +636,11 @@ internal static partial class GuestRedZonePatcher
             tableDefinitionFound = true;
         }
 
+        if (!tableDefinitionFound && hoistedTables)
+        {
+            tableDefinitionFound = TryFindHoistedTableBase(decoded, tableRegister, out tableAddress);
+        }
+
         if (!tableDefinitionFound)
         {
             return false;
@@ -665,6 +675,89 @@ internal static partial class GuestRedZonePatcher
         }
 
         return true;
+    }
+
+    // A compiler hoists the jump table's base address out of a loop into a callee-saved register
+    // (`lea r12,[rip+table]` before the loop, `movsxd rax,[r12+rax*4]; add rax,r12; jmp rax` inside it).
+    // The base is trusted only when that one RIP-relative lea is the sole write of the register in the
+    // whole function: then every execution of the dispatch sees the lea's value. Writes the instruction
+    // info reports (explicit or implicit) all count; the epilogue pop that restores the caller's value
+    // does not, since it only runs on the way out.
+    private static bool TryFindHoistedTableBase(
+        IReadOnlyList<DecodedInstruction> decoded,
+        Register tableRegister,
+        out ulong tableAddress)
+    {
+        tableAddress = 0;
+        if (tableRegister is not (Register.RBX or Register.RBP or Register.R12 or Register.R13 or Register.R14 or Register.R15))
+        {
+            return false;
+        }
+
+        var infoFactory = new InstructionInfoFactory();
+        var found = false;
+        for (var index = 0; index < decoded.Count; index++)
+        {
+            var instruction = decoded[index].Instruction;
+            var writes = false;
+            foreach (var used in infoFactory.GetInfo(instruction, InstructionInfoOptions.NoMemoryUsage).GetUsedRegisters())
+            {
+                if (used.Access is OpAccess.Write or OpAccess.CondWrite or OpAccess.ReadWrite or OpAccess.ReadCondWrite &&
+                    used.Register.GetFullRegister() == tableRegister)
+                {
+                    writes = true;
+                    break;
+                }
+            }
+
+            if (!writes || IsEpiloguePop(decoded, index, tableRegister))
+            {
+                continue;
+            }
+
+            if (found ||
+                instruction.Mnemonic != Mnemonic.Lea || instruction.OpCount != 2 ||
+                instruction.GetOpKind(0) != OpKind.Register || instruction.GetOpRegister(0) != tableRegister ||
+                !instruction.IsIPRelativeMemoryOperand)
+            {
+                return false;
+            }
+
+            tableAddress = instruction.IPRelativeMemoryAddress;
+            found = true;
+        }
+
+        return found;
+    }
+
+    // `pop reg` that only restores a callee-saved register on the way out: nothing but pops, stack
+    // cleanup and the final ret or jmp follow it.
+    private static bool IsEpiloguePop(IReadOnlyList<DecodedInstruction> decoded, int index, Register register)
+    {
+        var instruction = decoded[index].Instruction;
+        if (instruction.Mnemonic != Mnemonic.Pop || instruction.GetOpKind(0) != OpKind.Register ||
+            instruction.GetOpRegister(0) != register)
+        {
+            return false;
+        }
+
+        for (var next = index + 1; next < decoded.Count; next++)
+        {
+            var following = decoded[next].Instruction;
+            if (following.Mnemonic is Mnemonic.Ret or Mnemonic.Jmp)
+            {
+                return true;
+            }
+
+            if (following.Mnemonic is not (Mnemonic.Pop or Mnemonic.Leave or Mnemonic.Add) ||
+                following.Mnemonic == Mnemonic.Add &&
+                (following.GetOpKind(0) != OpKind.Register || following.GetOpRegister(0) != Register.RSP))
+            {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsStoreToMemory(in Instruction instruction) =>
@@ -994,7 +1087,8 @@ internal static partial class GuestRedZonePatcher
         bool canBorrowFollowingInstructions,
         bool groupInstructions,
         out PatchSite site,
-        out SpanRefusal refusal)
+        out SpanRefusal refusal,
+        bool absorbJumpPadding = false)
     {
         refusal = SpanRefusal.None;
         var instructions = new List<Instruction>(3);
@@ -1012,6 +1106,23 @@ internal static partial class GuestRedZonePatcher
                 // span with that branch; the trampoline runs it once RSP is restored.
                 terminalBranch = instruction;
                 byteLength += instruction.Length;
+                if (absorbJumpPadding && byteLength < MinimumJumpBytes &&
+                    instruction.FlowControl == FlowControl.UnconditionalBranch)
+                {
+                    // `pause; jmp short loop` is 4 bytes: take the alignment nops after the jump. Execution
+                    // never falls through an unconditional jump, so they are dead unless something branches there.
+                    for (var padding = index + 1; padding < decoded.Count && byteLength < MinimumJumpBytes; padding++)
+                    {
+                        var filler = decoded[padding].Instruction;
+                        if (filler.Mnemonic != Mnemonic.Nop || branchTargets.Contains(filler.IP))
+                        {
+                            break;
+                        }
+
+                        byteLength += filler.Length;
+                    }
+                }
+
                 break;
             }
 
