@@ -913,8 +913,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 {
                     low = Math.Min(low, copy.GuestAddress);
                     high = Math.Max(high, copy.GuestAddress + (ulong)copy.Bytes);
-                    _cpOverlay.Forget(copy.GuestAddress, (ulong)copy.Bytes);
-                    _labelOverlay.Forget(copy.GuestAddress, (ulong)copy.Bytes);
+                    _cpOverlay.ForgetRecordedWrite(copy.GuestAddress, (ulong)copy.Bytes);
+                    _labelOverlay.ForgetRecordedWrite(copy.GuestAddress, (ulong)copy.Bytes);
                 }
             }
 

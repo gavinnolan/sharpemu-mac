@@ -1236,8 +1236,8 @@ internal sealed partial class MetalRenderHost :
         // of them has to see from now on, whenever it lands.
         using (var overlayScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteOverlays))
         {
-            _cpOverlay.Forget(address, size);
-            _labelOverlay.Forget(address, size);
+            _cpOverlay.ForgetRecordedWrite(address, size);
+            _labelOverlay.ForgetRecordedWrite(address, size);
         }
 
         NoteGuestMemoryWriteBeyondOverlays(address, size, origin);

@@ -95,6 +95,56 @@ public sealed class MetalPendingWriteOverlayTests
         Assert.Equal(MetalOverlayCoverage.None, overlay.Coverage(0x7000_0010, 4, () => 0));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AForgetOfARecordedWriteMovesTheVersionOnlyWhenAnEntryChanged(bool pageFilter)
+    {
+        var overlay = new MetalPendingWriteOverlay(pageFilter);
+        overlay.Add(0x7000_0010, [1, 2, 3, 4], serial: 5);
+
+        var version = overlay.Version;
+        overlay.ForgetRecordedWrite(0x7000_0010 + Page, 4);
+        overlay.ForgetRecordedWrite(0x7000_0000, 8);
+        Assert.Equal(version, overlay.Version);
+
+        overlay.ForgetRecordedWrite(0x7000_0012, 2);
+        Assert.NotEqual(version, overlay.Version);
+        Assert.Equal(MetalOverlayCoverage.Partial, overlay.Coverage(0x7000_0010, 4, () => 0));
+        Span<byte> bytes = [9, 9, 9, 9];
+        overlay.Apply(0x7000_0010, bytes);
+        Assert.Equal([1, 2, 9, 9], bytes.ToArray());
+
+        version = overlay.Version;
+        overlay.ForgetRecordedWrite(0x7000_0000, 0x100);
+        Assert.NotEqual(version, overlay.Version);
+        Assert.Equal(0, overlay.Count);
+
+        // The unconditional forget still moves it for a range that holds nothing.
+        version = overlay.Version;
+        overlay.Forget(0x7000_0000, 8);
+        Assert.NotEqual(version, overlay.Version);
+    }
+
+    [Fact]
+    public void ALongEntryForgetsOnlyTheBytesALaterWriteCovers()
+    {
+        var overlay = new MetalPendingWriteOverlay();
+        overlay.Add(0x7000_0000, new byte[100].Select((_, index) => (byte)(index + 1)).ToArray(), serial: 5);
+
+        overlay.ForgetRecordedWrite(0x7000_0000 + 10, 4);
+        overlay.ForgetRecordedWrite(0x7000_0000 + 70, 4);
+        var bytes = new byte[100];
+        overlay.Apply(0x7000_0000, bytes);
+        for (var index = 0; index < 100; index++)
+        {
+            var forgotten = index is >= 10 and < 14 or >= 70 and < 74;
+            Assert.Equal(forgotten ? 0 : index + 1, bytes[index]);
+        }
+
+        Assert.Equal(MetalOverlayCoverage.Partial, overlay.Coverage(0x7000_0000, 100, () => 0));
+    }
+
     [Fact]
     public void PagesThatShareACountStillAnswerOnlyForTheirOwnWrites()
     {

@@ -268,8 +268,8 @@ internal sealed partial class MetalRenderHost
             if (!CoalesceOcclusionDumps)
             {
                 // The note below forgets them as well; this is the order before it did.
-                _cpOverlay.Forget(destinationAddress, sizeof(ulong));
-                _labelOverlay.Forget(destinationAddress, sizeof(ulong));
+                _cpOverlay.ForgetRecordedWrite(destinationAddress, sizeof(ulong));
+                _labelOverlay.ForgetRecordedWrite(destinationAddress, sizeof(ulong));
             }
         }
         if (batch is not null)
