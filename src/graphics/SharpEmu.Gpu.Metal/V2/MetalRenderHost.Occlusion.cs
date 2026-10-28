@@ -45,6 +45,8 @@ internal sealed partial class MetalRenderHost
     private sealed class OcclusionBatch(nint counts, nint results)
     {
         internal readonly nint Counts = counts, Results = results;
+        // A shared buffer's contents pointer holds for the buffer's life: one message send at creation, not one per dump.
+        internal readonly nint CountsContents = MetalNative.Send(counts, SelOcclusionContents);
         internal ulong Serial;
         internal int Slot, Queue;
         internal int VisibilityMode = -1, VisibilitySlot = -1;
@@ -173,7 +175,7 @@ internal sealed partial class MetalRenderHost
 
     private unsafe void InitializeOcclusionSlot(OcclusionBatch batch)
     {
-        ((ulong*)MetalNative.Send(batch.Counts, SelOcclusionContents))[batch.Slot] = 0;
+        ((ulong*)batch.CountsContents)[batch.Slot] = 0;
         _oqInitializedSlots++;
     }
 
