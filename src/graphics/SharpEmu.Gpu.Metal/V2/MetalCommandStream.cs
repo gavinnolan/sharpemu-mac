@@ -795,7 +795,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         string? profileKind,
         ulong profileBytes,
         bool sourceIsFinal = true,
-        bool deferStableGpuResult = false)
+        bool deferStableGpuResult = false,
+        bool noteAsOneRange = false)
     {
         ulong serial;
         // A copy whose source later work in the same encoder may still change (the GDS a
@@ -893,6 +894,47 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             var bytes = copies[0].Bytes;
             _completions.Enqueue(serial, () => CommandProcessorWriteHistory.Record(
                 -1, guestAddress, bytes, landedValue, landedKind, deferred: true));
+        }
+
+        if (noteAsOneRange && copies.Length > 1)
+        {
+            // Copies the caller made into one small run (an occlusion dump's blocks): the image cache,
+            // the overlays and the write ranges each take the run once, which also keeps them from
+            // holding a record per block. The few bytes between the copies are noted with them: the
+            // note over them can only make a read wait or an image reload that did not need to. The
+            // two overlays are not: a pending store into the bytes between the copies still speaks for
+            // them, so each copy's own bytes are forgotten and nothing wider.
+            var low = ulong.MaxValue;
+            var high = 0UL;
+            using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+                SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteOverlays))
+            {
+                foreach (ref readonly var copy in copies)
+                {
+                    low = Math.Min(low, copy.GuestAddress);
+                    high = Math.Max(high, copy.GuestAddress + (ulong)copy.Bytes);
+                    _cpOverlay.Forget(copy.GuestAddress, (ulong)copy.Bytes);
+                    _labelOverlay.Forget(copy.GuestAddress, (ulong)copy.Bytes);
+                }
+            }
+
+            if (origin != MetalGpuWriteOrigin.EndOfPipeLabel)
+            {
+                _imageCache.InvalidateMemoryFromGpu(low, high - low);
+            }
+            else
+            {
+                _imageCache.ForgetStandingDccClaims(low, high - low);
+            }
+
+            using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+                SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping))
+            {
+                NoteGuestMemoryWriteBeyondOverlays(low, high - low, origin);
+            }
+
+            _pendingLabelWrites += (ulong)copies.Length;
+            return serial;
         }
 
         foreach (ref readonly var copy in copies)

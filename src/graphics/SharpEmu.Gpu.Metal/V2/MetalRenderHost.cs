@@ -1240,6 +1240,15 @@ internal sealed partial class MetalRenderHost :
             _labelOverlay.Forget(address, size);
         }
 
+        NoteGuestMemoryWriteBeyondOverlays(address, size, origin);
+    }
+
+    /// <summary>
+    /// <see cref="NoteGuestMemoryWrite"/> without the two overlays, for a caller that has forgotten the
+    /// bytes it wrote itself and notes a run that also spans bytes it did not write.
+    /// </summary>
+    public void NoteGuestMemoryWriteBeyondOverlays(ulong address, ulong size, MetalGpuWriteOrigin origin)
+    {
         using (var stagedScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteStaged))
         {
             _stagedStorageCopies?.Forget(address, size);

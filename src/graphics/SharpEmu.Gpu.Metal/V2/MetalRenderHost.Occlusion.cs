@@ -13,6 +13,13 @@ internal sealed partial class MetalRenderHost
     internal bool NativeOcclusionEnabled { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_NATIVE_OCCLUSION") != "0";
 
+    // SHARPEMU_METAL_V2_COALESCE_OCCLUSION_DUMPS=0 resolves and notes every block of a dump on its own again.
+    internal bool CoalesceOcclusionDumps { get; set; } =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_COALESCE_OCCLUSION_DUMPS");
+
+    // A dump covers at most 24 blocks of at most 32 bytes; past this the blocks are not one result buffer.
+    private const ulong MaxCoalescedDumpBytes = 1024;
+
     private const int OcclusionIntervalCapacity = 4096;
     internal int NativeOcclusionBatchBudget { get; set; } = 256;
     private const ulong OcclusionReady = 1UL << 63;
@@ -221,29 +228,49 @@ internal sealed partial class MetalRenderHost
         if (instanceMask == 0) return true;
         Span<DeferredLabelCopy> copies = stackalloc DeferredLabelCopy[24];
         var count = 0;
-        for (var block = 0; block < 24; block++)
+        var selected = instanceMask & 0xFF_FFFFu;
+        // The blocks sit in one run of guest memory, so one window usually covers them all: one
+        // resolve for the run instead of one per block. A run no single window covers falls back
+        // to resolving each block.
+        var run = default(MetalGuestRange);
+        var firstBlock = 0;
+        if (CoalesceOcclusionDumps && selected != 0)
         {
-            if ((instanceMask & (1u << block)) == 0) continue;
-            var destinationAddress = checked(address + (ulong)block * strideBytes);
-            var destination = _guestMemory.ResolveWritable(destinationAddress, sizeof(ulong));
-            if (!destination.IsValid) throw Fatal($"Native occlusion has no writable result window at 0x{destinationAddress:X16}.");
-            copies[count++] = new DeferredLabelCopy(0, 0, destination.Buffer, destination.Offset, sizeof(ulong), destinationAddress);
+            firstBlock = System.Numerics.BitOperations.TrailingZeroCount(selected);
+            var lastBlock = System.Numerics.BitOperations.Log2(selected);
+            var runBytes = checked((ulong)(lastBlock - firstBlock) * strideBytes + sizeof(ulong));
+            if (runBytes <= MaxCoalescedDumpBytes)
+            {
+                run = _guestMemory.ResolveWritable(checked(address + (ulong)firstBlock * strideBytes), runBytes);
+                if (run.Size < runBytes) run = default;
+            }
         }
         var batch = _oqOpen;
         var source = batch?.Results ?? _oqBank;
         var offset = batch is null ? (ulong)queueId * sizeof(ulong) : (ulong)batch.Slot * sizeof(ulong);
-        var index = 0;
         for (var block = 0; block < 24; block++)
         {
             if ((instanceMask & (1u << block)) == 0) continue;
-            copies[index] = copies[index] with
+            var destinationAddress = checked(address + (ulong)block * strideBytes);
+            var destinationBuffer = run.Buffer;
+            var destinationOffset = run.Offset + (ulong)(block - firstBlock) * strideBytes;
+            if (!run.IsValid)
             {
-                StagingBuffer = block == 0 ? source : _oqBank,
-                StagingOffset = block == 0 ? offset : (ulong)CommandStreamQueue.QueueCount * sizeof(ulong),
-            };
-            _cpOverlay.Forget(copies[index].GuestAddress, sizeof(ulong));
-            _labelOverlay.Forget(copies[index].GuestAddress, sizeof(ulong));
-            index++;
+                var destination = _guestMemory.ResolveWritable(destinationAddress, sizeof(ulong));
+                if (!destination.IsValid) throw Fatal($"Native occlusion has no writable result window at 0x{destinationAddress:X16}.");
+                destinationBuffer = destination.Buffer;
+                destinationOffset = destination.Offset;
+            }
+            copies[count++] = new DeferredLabelCopy(
+                block == 0 ? source : _oqBank,
+                block == 0 ? offset : (ulong)CommandStreamQueue.QueueCount * sizeof(ulong),
+                destinationBuffer, destinationOffset, sizeof(ulong), destinationAddress);
+            if (!CoalesceOcclusionDumps)
+            {
+                // The note below forgets them as well; this is the order before it did.
+                _cpOverlay.Forget(destinationAddress, sizeof(ulong));
+                _labelOverlay.Forget(destinationAddress, sizeof(ulong));
+            }
         }
         if (batch is not null)
         {
@@ -254,7 +281,8 @@ internal sealed partial class MetalRenderHost
             if (batch.Slot < OcclusionIntervalCapacity) InitializeOcclusionSlot(batch);
         }
         _ = EncodeOrderedCopies(copies[..count], address, null, 0, MetalGpuWriteOrigin.Copy,
-            "occlusion dump", null, (ulong)count * sizeof(ulong), sourceIsFinal: false, deferStableGpuResult: batch is not null);
+            "occlusion dump", null, (ulong)count * sizeof(ulong), sourceIsFinal: false, deferStableGpuResult: batch is not null,
+            noteAsOneRange: CoalesceOcclusionDumps);
         if (batch is { Slot: OcclusionIntervalCapacity }) EndRendering();
         _oqDumps++;
         return true;
