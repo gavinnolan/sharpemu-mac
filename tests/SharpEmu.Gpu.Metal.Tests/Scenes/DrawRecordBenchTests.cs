@@ -19,7 +19,9 @@ namespace SharpEmu.Gpu.Metal.Tests.Scenes;
 public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBase(output)
 {
     private const uint Rgba8 = 56;
-    private const uint TextureSize = 8;
+    // SHARPEMU_DRAW_RECORD_BENCH_TEXTURE=<edge> samples edge x edge linear images (8 by default; a title's are megabytes).
+    private static readonly uint TextureSize =
+        uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DRAW_RECORD_BENCH_TEXTURE"), out var edge) ? edge : 8;
     private const uint TargetSize = 64;
     private const int DrawsPerSubmit = 256;
 
@@ -62,9 +64,10 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
 
     private static ulong SolidTexture(SceneRig rig, uint abgr)
     {
-        var texels = new uint[TextureSize * 64];
+        var pitchTexels = SceneDraws.LinearPitchBytes(TextureSize, 4) / 4;
+        var texels = new uint[pitchTexels * TextureSize];
         Array.Fill(texels, abgr);
-        var address = rig.Memory.Allocate(TextureSize * 64 * 4, 0x10000);
+        var address = rig.Memory.Allocate((ulong)texels.Length * 4, 0x10000);
         rig.Memory.Write(address, MemoryMarshal.AsBytes(texels.AsSpan()));
         return address;
     }
