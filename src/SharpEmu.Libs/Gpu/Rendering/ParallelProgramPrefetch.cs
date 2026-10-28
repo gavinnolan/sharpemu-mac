@@ -208,16 +208,20 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         Current = null;
-        var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-        // Caller work is reported separately, not disguised as a shorter resolver wait.
-        // Keep completed jobs and long queues out of the claim routine's lock/finally
-        // frame. Almost every take in a well-prefetched burst is already complete.
-        if (!_allowCallerResolution || job.State != 0 || Volatile.Read(ref _outstanding) > MaximumCallerOutstanding ||
-            !TryResolveOnCaller(job))
+        // A completed job waits for nothing, so it reads no clock: almost every take in a
+        // well-prefetched burst is one, and two clock reads per draw were measurable.
+        if (job.State == 0)
         {
-            WaitFor(job);
-            Interlocked.Add(ref _waitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+            var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            // Caller work is reported separately, not disguised as a shorter resolver wait.
+            // Keep long queues out of the claim routine's lock/finally frame.
+            if (!_allowCallerResolution || Volatile.Read(ref _outstanding) > MaximumCallerOutstanding || !TryResolveOnCaller(job))
+            {
+                WaitFor(job);
+                Interlocked.Add(ref _waitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+            }
         }
+
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
         if (job.State != 1)
         {

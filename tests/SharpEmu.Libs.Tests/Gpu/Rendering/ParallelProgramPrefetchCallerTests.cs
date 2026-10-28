@@ -275,4 +275,28 @@ public sealed partial class ParallelProgramPrefetchCallerTests
         Assert.Equal(count, f.Concurrent.Begins);
         Assert.Equal(count, f.Concurrent.Releases);
     }
+
+    [Fact]
+    public void TakingACompletedJobReportsNoWaitAndAnUnfinishedOneDoes()
+    {
+        using var f = new Fixture(false);
+        var banks = Banks();
+        var done = f.Prefetch.Submit(banks);
+        f.Idle();
+        Assert.True(f.Take(banks, done));
+        Assert.Equal(0, f.Prefetch.TakeCounters().WaitMilliseconds);
+        Task<bool> waiter;
+        Monitor.Enter(f.QueueLock);
+        try
+        {
+            // The worker cannot start the job while this thread holds the queue lock, so the take waits for it.
+            var late = f.Prefetch.Submit(banks);
+            waiter = Task.Run(() => f.Take(banks, late));
+            Assert.False(waiter.Wait(50));
+        }
+        finally { Monitor.Exit(f.QueueLock); }
+
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)) && waiter.Result);
+        Assert.True(f.Prefetch.TakeCounters().WaitMilliseconds > 0);
+    }
 }
