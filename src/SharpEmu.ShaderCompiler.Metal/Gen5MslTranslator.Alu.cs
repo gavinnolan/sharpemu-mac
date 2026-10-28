@@ -1846,6 +1846,51 @@ public static partial class Gen5MslTranslator
         private string EmitWave64ReadLane(string value, string lane) =>
             EmitWave64BroadcastFromLane(value, lane);
 
+        /// <summary>Whether <paramref name="first"/> and <paramref name="second"/> are two
+        /// consecutive V_READLANE_B32 of a wave64 that one exchange can serve: both read a
+        /// vector register at an inline-constant lane into a scalar register, and neither
+        /// is a reload of a parked scalar.</summary>
+        private bool CanFuseWave64ReadLanes(Gen5ShaderInstruction first, Gen5ShaderInstruction second)
+        {
+            if (!_options.FusedLaneReads || !IsWave64 || IsSingleLaneStage ||
+                first.Opcode != "VReadlaneB32" || second.Opcode != "VReadlaneB32" ||
+                !IsPlainConstantLaneRead(first) || !IsPlainConstantLaneRead(second))
+            {
+                return false;
+            }
+
+            if (LaneSpillPlan() is { } spills &&
+                (spills.CopyReads.ContainsKey(first.Pc) || spills.CopyReads.ContainsKey(second.Pc)))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsPlainConstantLaneRead(Gen5ShaderInstruction instruction) =>
+            instruction.Destinations.Count != 0 &&
+            instruction.Destinations[0].Kind == Gen5OperandKind.ScalarRegister &&
+            instruction.Sources.Count >= 2 &&
+            instruction.Sources[0].Kind == Gen5OperandKind.VectorRegister &&
+            instruction.Sources[1].Kind is Gen5OperandKind.EncodedConstant or Gen5OperandKind.LiteralConstant;
+
+        /// <summary>Emits two fused V_READLANE_B32: each lane's owner writes its own value slot,
+        /// one barrier, then both scalars read their slot.</summary>
+        private void EmitFusedWave64ReadLanes(Gen5ShaderInstruction first, Gen5ShaderInstruction second)
+        {
+            var valueA = RawSource(first, 0);
+            var laneA = Temp("uint", $"({RawSource(first, 1)}) & 63u");
+            var valueB = RawSource(second, 0);
+            var laneB = Temp("uint", $"({RawSource(second, 1)}) & 63u");
+            Line(WaveSetFlip);
+            Line($"if (sharpemu_lane == {laneA}) {{ {WaveSlot(2)} = {valueA}; }}");
+            Line($"if (sharpemu_lane == {laneB}) {{ {WaveSlot(3)} = {valueB}; }}");
+            Line(WaveExchangeBarrier);
+            StoreScalar(first.Destinations[0].Value, Temp("uint", WaveSlot(2)));
+            StoreScalar(second.Destinations[0].Value, Temp("uint", WaveSlot(3)));
+        }
+
         /// <summary>Stores the wave ballot of <paramref name="condition"/> into the
         /// mask register pair (low, low+1). Wave32 fills the low dword and clears
         /// the high; wave64 bridges both 32-wide halves through threadgroup

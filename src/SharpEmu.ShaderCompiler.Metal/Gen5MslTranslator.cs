@@ -1850,13 +1850,30 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
 
-                if (!TryEmitInstruction(instruction, out error))
+                if (!isTerminator && CanFuseWave64ReadLanes(instruction, instructions[index + 1]))
+                {
+                    // One exchange for both reads (see EmitFusedWave64ReadLanes).
+                    var second = instructions[++index];
+                    isTerminator = index == block.EndIndex - 1;
+                    if (Gen5MslDump.Enabled)
+                    {
+                        Line($"// 0x{second.Pc:X4} {second.Opcode} (fused)");
+                    }
+
+                    BeginInstruction(instruction);
+                    EmitFusedWave64ReadLanes(instruction, second);
+                    EmitInterpolationRewrites(instruction.Pc);
+                    EmitInterpolationRewrites(second.Pc);
+                }
+                else if (!TryEmitInstruction(instruction, out error))
                 {
                     error = $"pc=0x{instruction.Pc:X4} {instruction.Opcode}: {error}";
                     return false;
                 }
-
-                EmitInterpolationRewrites(instruction.Pc);
+                else
+                {
+                    EmitInterpolationRewrites(instruction.Pc);
+                }
 
                 if (isTerminator)
                 {

@@ -146,9 +146,31 @@ public sealed class MslTranslatorOverheadBenchTests(ITestOutputHelper output)
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 16);
 
-    private static Gen5MslShader Compile(Gen5ComputeFixture fixture, Gen5MslCodegenOptions options)
+    // 256 trips of the wave-scan idiom: V_READLANE_B32 of lanes 31 and 63, folded back into
+    // every lane. A guest wave64, so each read is a threadgroup exchange.
+    private static readonly Gen5ComputeFixture LaneReads = new(
+        "bench-readlane",
+        [
+            0xD7650001, 0x000100C1, // v_mbcnt_lo_u32_b32 v1, -1, 0
+            0xD7660001, 0x000202C1, // v_mbcnt_hi_u32_b32 v1, -1, v1
+            0xBE8003FF, 0x00000100, // s_mov_b32 s0, 256
+            // loop:
+            0xD7600001, 0x00013F01, // v_readlane_b32 s1, v1, 31
+            0xD7600002, 0x00017F01, // v_readlane_b32 s2, v1, 63
+            0x4A020201, // v_add_nc_u32 v1, s1, v1
+            0x4A020202, // v_add_nc_u32 v1, s2, v1
+            0x81808100, // s_sub_i32 s0, s0, 1
+            0xBF078000, // s_cmp_lg_u32 s0, 0
+            0xBF85FFF7, // s_cbranch_scc1 loop
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000, // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
+    private static Gen5MslShader Compile(Gen5ComputeFixture fixture, Gen5MslCodegenOptions options, uint waveLanes = 32)
     {
-        var request = Gen5ComputeFixtures.CreateComputeRequest(fixture, localSizeX: Threads);
+        var request = Gen5ComputeFixtures.CreateComputeRequest(fixture, waveLanes, localSizeX: Threads);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
         return shader;
     }
@@ -164,10 +186,10 @@ public sealed class MslTranslatorOverheadBenchTests(ITestOutputHelper output)
         return result.GpuMilliseconds;
     }
 
-    private void Compare(Gen5ComputeFixture fixture, string name, Gen5MslCodegenOptions before, Gen5MslCodegenOptions after, int bufferBytes)
+    private void Compare(Gen5ComputeFixture fixture, string name, Gen5MslCodegenOptions before, Gen5MslCodegenOptions after, int bufferBytes, uint waveLanes = 32)
     {
-        var old = Compile(fixture, before);
-        var current = Compile(fixture, after);
+        var old = Compile(fixture, before, waveLanes);
+        var current = Compile(fixture, after, waveLanes);
         Assert.NotEqual(old.Source, current.Source);
         var (bestOld, bestNew) = (double.MaxValue, double.MaxValue);
         for (var round = 0; round < Rounds; round++)
@@ -181,7 +203,7 @@ public sealed class MslTranslatorOverheadBenchTests(ITestOutputHelper output)
 
     private static readonly Gen5MslCodegenOptions Baseline = new(
         VectorDwordLoads: false, ThreadgroupSizeHint: false, NativeFloatMinMax: false, ConstantTableSlots: false,
-        FastReciprocals: false, ContractPixelCompute: false);
+        FastReciprocals: false, ContractPixelCompute: false, FusedLaneReads: false);
 
     [Fact]
     public void VectorDwordLoads()
@@ -209,6 +231,13 @@ public sealed class MslTranslatorOverheadBenchTests(ITestOutputHelper output)
     {
         if (!Enabled) return;
         Compare(MultiplyAdds, "mad/mul+add f32", Baseline, Baseline with { ContractPixelCompute = true }, 16);
+    }
+
+    [Fact]
+    public void FusedLaneReads()
+    {
+        if (!Enabled) return;
+        Compare(LaneReads, "wave64 readlane 31 + 63", Baseline, Baseline with { FusedLaneReads = true }, 16, waveLanes: 64);
     }
 
     [Fact]

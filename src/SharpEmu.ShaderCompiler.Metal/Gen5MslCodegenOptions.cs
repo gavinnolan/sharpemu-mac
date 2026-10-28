@@ -120,6 +120,11 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// the product on the guest, so a fused result can differ by an ULP; vertex and mesh programs,
 /// which feed positions, keep the pragma either way. Off by default;
 /// <c>SHARPEMU_MSL_CONTRACT=1</c> turns it on.</param>
+/// <param name="FusedLaneReads">Two V_READLANE_B32 in a row from constant lanes of a guest wave64
+/// share one exchange (two value slots, one barrier) instead of one each. The wave-scan and
+/// reduction idiom reads lane 31 and lane 63 back to back. A pair whose second lane is not an
+/// inline constant keeps one exchange each. <c>SHARPEMU_MSL_READLANE_FUSE=0</c> keeps one
+/// exchange per read.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -144,7 +149,8 @@ public sealed record Gen5MslCodegenOptions(
     bool ConstantTableSlots = true,
     bool FastReciprocals = true,
     bool ContractPixelCompute = false,
-    bool RuntimeDwordFormatLoads = true)
+    bool RuntimeDwordFormatLoads = true,
+    bool FusedLaneReads = true)
 {
     /// <summary>Diagnostic threshold for moving mesh LDS from threadgroup memory to the
     /// device pool, in bytes. The supported mesh allocation is at most 16 KiB. Zero
@@ -211,7 +217,8 @@ public sealed record Gen5MslCodegenOptions(
         ConstantTableSlots: Environment.GetEnvironmentVariable("SHARPEMU_MSL_TABLEPAD") != "0",
         FastReciprocals: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FASTRCP") != "0",
         ContractPixelCompute: Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONTRACT") == "1",
-        RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0")
+        RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0",
+        FusedLaneReads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_READLANE_FUSE") != "0")
     {
         UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "1",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",

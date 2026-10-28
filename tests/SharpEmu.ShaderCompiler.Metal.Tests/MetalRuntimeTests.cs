@@ -265,6 +265,24 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64FusedConstantLaneReadsReturnEachLanesValue()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ReadLaneTriple, new byte[1024],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        // Lane l holds 3 * l + 7: every lane sees lanes 63 and 5 from the fused exchange and
+        // lane 40 from its own.
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(3u * 63u + 7u, ReadDword(result, lane * 16));
+            Assert.Equal(3u * 5u + 7u, ReadDword(result, lane * 16 + 4));
+            Assert.Equal(3u * 40u + 7u, ReadDword(result, lane * 16 + 8));
+        }
+    }
+
+    [Fact]
     public void Wave64SpillReloadsReadACopyInsteadOfTheExchange()
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(

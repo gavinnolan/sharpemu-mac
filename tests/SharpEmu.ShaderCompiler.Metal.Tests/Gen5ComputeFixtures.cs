@@ -378,6 +378,28 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 512);
 
+    // v1 = 3 * lane + 7; three constant-lane reads in a row: lanes 63 and 5 (one fused
+    // exchange) and lane 40 (its own).
+    public static readonly Gen5ComputeFixture Wave64ReadLaneTriple = new(
+        "wave64-readlane-triple",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xD7600000, 0x00017F01, // v_readlane_b32 s0, v1, 63
+            0xD7600001, 0x00010B01, // v_readlane_b32 s1, v1, 5
+            0xD7600002, 0x00015101, // v_readlane_b32 s2, v1, 40
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x7E060201,             // v_mov_b32 v3, s1
+            0x7E0A0202,             // v_mov_b32 v5, s2
+            0x34080084,             // v_lshlrev_b32 v4, 4, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:8
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
     private static readonly uint[] Wave64LaneSpillPark =
     [
         0xBE8203FF, 0x00001234, // s_mov_b32 s2, 0x1234

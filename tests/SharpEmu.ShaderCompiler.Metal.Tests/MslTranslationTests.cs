@@ -552,7 +552,7 @@ public sealed class MslTranslationTests
     /// flips the slot set once, so flips and barriers match.</summary>
     [Theory]
     [InlineData("readfirstlane", 2)]
-    [InlineData("readlane", 2)]
+    [InlineData("readlane", 1)]
     [InlineData("loop", 2)]
     public void EveryWave64ExchangeCostsOneBarrier(string program, int exchanges)
     {
@@ -566,6 +566,27 @@ public sealed class MslTranslationTests
 
         Assert.Equal(exchanges, Occurrences(body, "threadgroup_barrier"));
         Assert.Equal(exchanges, Occurrences(body, "sharpemu_wave_set ^= 4u;"));
+    }
+
+    /// <summary>Back-to-back V_READLANE_B32 at inline-constant lanes share one exchange: the
+    /// owner of each lane writes its own value slot and one barrier serves both. A third read
+    /// after the pair takes its own, and SHARPEMU_MSL_READLANE_FUSE=0 keeps one per read.</summary>
+    [Fact]
+    public void ConsecutiveConstantLaneReadsShareOneWave64Exchange()
+    {
+        var request = Gen5ComputeFixtures.CreateComputeRequest(
+            Gen5ComputeFixtures.Wave64ReadLaneTriple, waveLaneCount: 64, localSizeX: 64);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var fused, out var error), error);
+        Assert.Equal(2, Occurrences(Body(fused), "threadgroup_barrier"));
+        Assert.Equal(2, Occurrences(Body(fused), "sharpemu_wave_set ^= 4u;"));
+        Assert.Contains("sharpemu_wave_scratch[sharpemu_wave_set + 3u] =", fused.Source, StringComparison.Ordinal);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request, out var each, out error, new Gen5MslCodegenOptions(FusedLaneReads: false)),
+            error);
+        Assert.Equal(3, Occurrences(Body(each), "threadgroup_barrier"));
+        Assert.Equal(3, Occurrences(Body(each), "sharpemu_wave_set ^= 4u;"));
     }
 
     /// <summary>DS_APPEND counts the wave's active lanes in one exchange and broadcasts the
