@@ -1465,3 +1465,18 @@ quality. Wait time fell while idle time rose; this is not an isolated FPS win.
 See [the full source-bound benchmark and runtime report](caller-resolution.md)
 for both run identifiers, windows, CPU counters, memory pressure and shutdown
 trap timing. The previous ten defaults remain on; 30 FPS remains unestablished.
+
+
+## Pixel-input analysis cache (v25–v26)
+
+The native/JIT-mapped v25 profile identified repeated pixel-input instruction
+analysis on the resolver. The follow-up caches immutable instruction facts and
+keeps each draw's controls live. It is the twelfth promoted default, accepted
+for component gains with correctness coverage. Same-payload v26 room medians
+were 16.93 FPS enabled and 16.465 disabled; differing paging and overlapping
+ranges prevent a reliable FPS-gain claim. Post-window resolver CPU fell from
+3.052 to 2.510 s over ten seconds. The 30-FPS objective remains open.
+
+See [pixel-input analysis](pixel-input-analysis.md) for the source-bound
+profiling method, warm/cold ARM64 and Rosetta measurements, tests, exact run
+windows, host-pressure counters and shutdown limitations.

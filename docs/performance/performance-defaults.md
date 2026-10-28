@@ -22,6 +22,7 @@ VSync, guest quality, or unrelated application setting is changed.
 | Queued CP writes | `SHARPEMU_METAL_V2_QUEUE_CP_WRITES` | Removes synchronous handoffs for eligible writes when command threading is explicitly enabled. Pending ranges, prefetch gates and CPU-read fallbacks preserve ordering; producer-thread device tests cover byte/qword/sparse/predication cases. |
 | Bounded vertex-layout history | `SHARPEMU_VERTEX_LAYOUT_HISTORY` | Exact byte-verified reuse across alternating layouts; adaptive backoff for low reuse, 512 slots and 2 MiB additional payload budget. Component timing/allocation evidence and miss costs are in [the measurements](vertex-layout-history.md); no isolated game-FPS claim. |
 | Caller resolution for short queues | `SHARPEMU_METAL_V2_CALLER_RESOLVE` | At most eight outstanding jobs; FIFO, gates, pause and ownership checks retained. Single-job ARM64 2,874 → 542 ns, x64 3,160 → 972 ns; ARM64 empty-program burst 32 costs about 27 ns/job. Same-payload room medians 16.49 enabled / 16.48 disabled, no isolated FPS gain. [Full measurements](caller-resolution.md). |
+| Cached pixel-input analysis | `SHARPEMU_PIXEL_INPUT_ANALYSIS` | Immutable decoded-program analysis with live draw controls. Warm 512-instruction sparse shader: ARM64 2,602 → 8.5 ns, x64 5,681 → 13.7 ns. Cold entries cost 32 extra bytes; smallest cold cases cost 0.9–2.3% time. [Full measurements and runtime limits](pixel-input-analysis.md). |
 
 The existing negative label page filter, exact materialization comparison, dense
 register lookup, mip-layout construction and target memo fixes remain enabled.
@@ -146,3 +147,11 @@ wins and correctness checks. Its same-payload Silent Hill medians were 16.49 FPS
 enabled and 16.48 disabled; this establishes no game-FPS gain. The full component
 table, larger-batch cost, run windows and paging limitations are retained in
 [the caller-resolution report](caller-resolution.md).
+
+
+The v26 follow-up adds cached pixel-input analysis as the twelfth promoted
+default. Full Libs passed 9,106/0/5 and required-device Metal 1,639/0/7, with
+79/0/0 focused executions on each architecture and another 79/0/0 with the
+cache disabled. Same-payload room medians were 16.93 enabled and 16.465 disabled;
+this does not establish a reliable FPS gain. The [full report](pixel-input-analysis.md)
+retains the small cold-entry cost and the warm-path improvement.

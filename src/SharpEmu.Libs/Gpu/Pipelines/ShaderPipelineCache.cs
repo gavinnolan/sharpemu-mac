@@ -640,18 +640,23 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
     // was rebuilt with LINQ on every draw.
-    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, uint[]> InterpolatedAttributeCache = new();
+    private sealed record PixelProgramAnalysis(uint[] Attributes, uint PerVertexAttributes);
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, PixelProgramAnalysis> InterpolatedAttributeCache = new();
 
     internal uint[] GetPixelAttributes(Gen5ShaderProgram program) => InterpolatedAttributesOf(program);
 
-    internal static uint[] InterpolatedAttributesOf(Gen5ShaderProgram program) =>
-        InterpolatedAttributeCache.GetValue(program, static program => program.Instructions
-            .Select(static instruction => instruction.Control)
-            .OfType<Gen5InterpolationControl>()
-            .Select(static control => control.Attribute)
-            .Distinct()
-            .Order()
-            .ToArray());
+    internal static uint[] InterpolatedAttributesOf(Gen5ShaderProgram program) => PixelAnalysisOf(program).Attributes;
+
+    private static PixelProgramAnalysis PixelAnalysisOf(Gen5ShaderProgram program) =>
+        InterpolatedAttributeCache.GetValue(program, static program => new PixelProgramAnalysis(
+            program.Instructions.Select(static instruction => instruction.Control)
+                .OfType<Gen5InterpolationControl>()
+                .Select(static control => control.Attribute)
+                .Distinct().Order().ToArray(),
+            // Empty controls map each input to itself: this is the instruction-only
+            // attribute mask. Draw controls still map those attributes on every use.
+            Gen5PixelInputMapping.PerVertexParameterMask(program, [])));
 
     // One past the highest parameter location the pixel program reads, resolved as its translator does.
     internal static uint ReadVertexOutputCount(ReadOnlySpan<uint> attributes, PixelInputInfo info)
