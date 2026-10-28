@@ -1557,6 +1557,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         using var encodeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandLabelEncode);
+        if (TryEncodeLabelScatter(commandBuffer, copies))
+        {
+            return;
+        }
+
         EncodeLabelBarrier(commandBuffer);
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
