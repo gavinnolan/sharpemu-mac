@@ -259,8 +259,10 @@ public sealed partial class GpuCommandInterpreter
         if (bank == RegisterBank.Context && ScissorTrace.Instance is { Active: true } scissorTrace)
             scissorTrace.RegisterTable(TypedRegisters, SubmitId, QueueId, in packet, tableAddress, count);
 
-        Span<byte> tableBlock = stackalloc byte[entriesPerBlock * entryBytes];
-        Span<byte> beforeSynchronization = stackalloc byte[entriesPerBlock * entryBytes];
+        // Both are zeroed when allocated: a table is usually a few dozen entries, so the block is sized
+        // to it, and the unsynchronized copy exists only for the table trace.
+        Span<byte> tableBlock = stackalloc byte[(int)Math.Min(count, (uint)entriesPerBlock) * entryBytes];
+        Span<byte> beforeSynchronization = TraceRegisterTables ? stackalloc byte[entriesPerBlock * entryBytes] : default;
         for (var index = 0u; index < count; index++)
         {
             var blockEntry = (int)(index % entriesPerBlock);
