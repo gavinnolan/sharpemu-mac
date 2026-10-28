@@ -41,6 +41,12 @@ public sealed unsafe partial class DirectExecutionBackend
 
 		/// <summary>sceKernelGetProcessTime: microseconds since process start.</summary>
 		ProcessTimeMicroseconds,
+
+		/// <summary>
+		/// An sceAgc command builder that appends one fixed-shape packet (see <see cref="SharpEmu.Libs.Agc.AgcPacketStubSpec"/>):
+		/// the stub stores the dwords and the cursor itself, as the title's own code does.
+		/// </summary>
+		AgcPacket,
 	}
 
 	// clock_gettime / sceKernelClockGettime / gettimeofday / sceKernelGetProcessTime.
@@ -55,6 +61,9 @@ public sealed unsafe partial class DirectExecutionBackend
 	/// exactly the managed export's), the process start in that counter, and the host realtime clock.
 	/// </summary>
 	internal readonly record struct ClockStubTargets(nint MachAbsoluteTime, long ProcessStartCounter, nint ClockGettime);
+
+	// SHARPEMU_AGC_PACKET_STUBS=0 keeps the sceAgc command builders on the managed exports.
+	private static readonly bool AgcPacketStubsEnabled = SharpEmu.Libs.Agc.AgcExports.PacketStubsEnabled;
 
 	// SHARPEMU_HLE_FAST_CLOCK=0 keeps the clock reads on the managed exports.
 	private static readonly bool ClockStubsEnabled =
@@ -226,7 +235,9 @@ public sealed unsafe partial class DirectExecutionBackend
 		ClockGettimeNid or KernelClockGettimeNid => GuestFastPathStub.ClockGettime,
 		GettimeofdayNid => GuestFastPathStub.GetTimeOfDay,
 		KernelGetProcessTimeNid => GuestFastPathStub.ProcessTimeMicroseconds,
-		_ => IsConstantZeroImport(nid) ? GuestFastPathStub.ConstantZero : GuestFastPathStub.None,
+		_ => IsConstantZeroImport(nid)
+			? GuestFastPathStub.ConstantZero
+			: SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) ? GuestFastPathStub.AgcPacket : GuestFastPathStub.None,
 	};
 
 	/// <summary>
@@ -269,15 +280,39 @@ public sealed unsafe partial class DirectExecutionBackend
 				return false;
 			}
 		}
+		else if (kind == GuestFastPathStub.AgcPacket)
+		{
+			// Stores into the command buffer from guest-side code, so the write watch (which
+			// inspects managed writes only) and any mode that has to see every builder call
+			// (import and AGC tracing) rule it out; it needs no per-thread block.
+			if (!AgcPacketStubsEnabled ||
+				!NativeImportThunksEnabled ||
+				!_nativeConstantThunksAllowed ||
+				GuestWriteWatch.Armed ||
+				SharpEmu.Libs.Agc.AgcExports.PacketStubsBlockedByTracing ||
+				!SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _))
+			{
+				return false;
+			}
+		}
 		else if (!_guestFastPathEnabled)
 		{
 			return false;
 		}
 
-		var code = kind is GuestFastPathStub.ClockGettime or GuestFastPathStub.GetTimeOfDay or GuestFastPathStub.ProcessTimeMicroseconds
-			? EmitGuestClockStub(kind, _clockStubTargets!.Value, fallbackTrampoline)
-			: EmitGuestFastPathStub(kind, _fastPathBlockTlsIndex, fallbackTrampoline);
-		const uint stubAllocationSize = 192u;
+		List<byte> code;
+		if (kind == GuestFastPathStub.AgcPacket)
+		{
+			SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out var packetSpec);
+			code = EmitGuestAgcPacketStub(packetSpec, fallbackTrampoline);
+		}
+		else
+		{
+			code = kind is GuestFastPathStub.ClockGettime or GuestFastPathStub.GetTimeOfDay or GuestFastPathStub.ProcessTimeMicroseconds
+				? EmitGuestClockStub(kind, _clockStubTargets!.Value, fallbackTrampoline)
+				: EmitGuestFastPathStub(kind, _fastPathBlockTlsIndex, fallbackTrampoline);
+		}
+		var stubAllocationSize = kind == GuestFastPathStub.AgcPacket ? 512u : 192u;
 		if (code.Count > stubAllocationSize)
 		{
 			return false;
@@ -566,6 +601,157 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 
 		Patch(slowPathFixups);
+		// jmp qword [rip+0] with the absolute trampoline address after it.
+		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
+		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
+		return code;
+	}
+
+	/// <summary>
+	/// An sceAgc builder that appends one fixed-shape packet, as guest-side code: with the command
+	/// buffer in RDI it reads the cursor, the end and the reserve, declines (jumps to the import's
+	/// trampoline, with every argument register intact) unless the buffer is non-null and has the room
+	/// <c>AgcExports.GetRemainingCommandDwords</c> demands, stores the packet's dwords at the cursor,
+	/// advances the cursor, and returns the packet's address. The stores are plain guest stores, the
+	/// kind the title makes into the same buffer: a page the GPU process watches faults and is
+	/// resolved from the fault address, which the managed write hooks exist to emulate. Only RAX, R10,
+	/// R11 and the flags change, all caller-saved.
+	/// </summary>
+	internal static List<byte> EmitGuestAgcPacketStub(SharpEmu.Libs.Agc.AgcPacketStubSpec spec, nint fallbackTrampoline)
+	{
+		const int CursorUpOffset = 0x10;
+		const int CursorDownOffset = 0x18;
+		const int ReservedDwordsOffset = 0x30;
+		if (spec.SizeDwords is < 1 or > 15 || spec.Words.Length != spec.SizeDwords || spec.ReturnDwordOffset >= spec.SizeDwords)
+		{
+			throw new ArgumentException("Unsupported AGC packet stub shape.", nameof(spec));
+		}
+
+		var code = new List<byte>(256);
+		var slowPathFixups = new List<int>();
+		void Emit(params byte[] bytes) => code.AddRange(bytes);
+		void EmitImm32(uint value) => code.AddRange(BitConverter.GetBytes(value));
+		void EmitBranchToSlowPath(byte shortOpcode)
+		{
+			Emit(0x0F, (byte)(shortOpcode + 0x10), 0, 0, 0, 0);
+			slowPathFixups.Add(code.Count - 4);
+		}
+
+		// test rdi, rdi / jz slow: a null buffer is the export's to refuse.
+		Emit(0x48, 0x85, 0xFF);
+		EmitBranchToSlowPath(0x74);
+		Emit(0x48, 0x8B, 0x47, CursorUpOffset);                // mov rax, [rdi+0x10]      cursor
+		Emit(0x4C, 0x8B, 0x57, CursorDownOffset);              // mov r10, [rdi+0x18]      end
+		Emit(0x49, 0x29, 0xC2);                                // sub r10, rax
+		EmitBranchToSlowPath(0x72);                            // jb slow: end below the cursor
+		Emit(0x49, 0xC1, 0xEA, 0x02);                          // shr r10, 2               available dwords
+		Emit(0x41, 0xBB); EmitImm32(0xFFFF_FFFFu);             // mov r11d, 0xFFFFFFFF
+		Emit(0x4D, 0x39, 0xDA);                                // cmp r10, r11
+		EmitBranchToSlowPath(0x77);                            // ja slow: the export clamps the span to 32 bits
+		Emit(0x44, 0x8B, 0x5F, ReservedDwordsOffset);          // mov r11d, [rdi+0x30]     reserve
+		Emit(0x49, 0x83, 0xC3, checked((byte)spec.SizeDwords)); // add r11, size
+		Emit(0x4D, 0x39, 0xDA);                                // cmp r10, r11
+		EmitBranchToSlowPath(0x72);                            // jb slow: size > available - reserve
+
+		// Loads one part of a word into r10, or into r11 when intoR11.
+		void EmitPart(SharpEmu.Libs.Agc.AgcPacketStubPart part, bool intoR11)
+		{
+			var destination = intoR11 ? (byte)3 : (byte)2;   // r11 / r10 low three bits
+			var source = (byte)part.Register;
+			var rex = (byte)(0x40 | (source >= 8 ? 0x04 : 0) | 0x01);     // REX.R for r8, REX.B for r10/r11
+			var modrm = (byte)(0xC0 | ((source & 7) << 3) | destination);
+			if (part.ShiftRight == 0)
+			{
+				Emit(rex, 0x89, modrm);                                   // mov r10d/r11d, reg32
+			}
+			else
+			{
+				Emit((byte)(rex | 0x08), 0x89, modrm);                    // mov r10/r11, reg64
+				Emit(0x49, 0xC1, (byte)(0xE8 | destination), checked((byte)part.ShiftRight)); // shr r10/r11, n
+			}
+
+			Emit(0x41, 0x81, (byte)(0xE0 | destination)); EmitImm32(part.Mask);                // and r10d/r11d, mask
+			if (part.ShiftLeft != 0)
+			{
+				Emit(0x41, 0xC1, (byte)(0xE0 | destination), checked((byte)part.ShiftLeft));   // shl r10d/r11d, n
+			}
+		}
+
+		for (var index = 0; index < spec.Words.Length; index++)
+		{
+			var word = spec.Words[index];
+			var displacement = checked((byte)(index * sizeof(uint)));
+			if (word.Kind == SharpEmu.Libs.Agc.AgcPacketStubWordKind.Parts && word.Parts.Length == 0)
+			{
+				Emit(0xC7, 0x40, displacement); EmitImm32(word.Constant);                       // mov dword [rax+disp], imm32
+				continue;
+			}
+
+			switch (word.Kind)
+			{
+				case SharpEmu.Libs.Agc.AgcPacketStubWordKind.Parts:
+					EmitPart(word.Parts[0], intoR11: false);
+					for (var part = 1; part < word.Parts.Length; part++)
+					{
+						EmitPart(word.Parts[part], intoR11: true);
+						Emit(0x45, 0x09, 0xDA);                                                 // or r10d, r11d
+					}
+
+					if (word.Constant != 0)
+					{
+						Emit(0x41, 0x81, 0xCA); EmitImm32(word.Constant);                       // or r10d, imm32
+					}
+
+					break;
+
+				case SharpEmu.Libs.Agc.AgcPacketStubWordKind.AtLeastOne:
+					EmitPart(word.Parts[0], intoR11: false);
+					Emit(0x45, 0x85, 0xD2);                                                     // test r10d, r10d
+					Emit(0x75, 0x06);                                                           // jnz +6
+					Emit(0x41, 0xBA); EmitImm32(1);                                             // mov r10d, 1
+					break;
+
+				case SharpEmu.Libs.Agc.AgcPacketStubWordKind.DrawInitiator:
+				{
+					// bit 32 of the modifier set: 0; else (uint)modifier >> 3 & 0x20.
+					var source = (byte)word.Parts[0].Register;
+					var rex = (byte)(0x40 | (source >= 8 ? 0x04 : 0) | 0x01);
+					Emit(rex, 0x89, (byte)(0xC0 | ((source & 7) << 3) | 2));                   // mov r10d, reg32
+					Emit(0x41, 0xC1, 0xEA, 0x03);                                               // shr r10d, 3
+					Emit(0x41, 0x83, 0xE2, 0x20);                                               // and r10d, 0x20
+					Emit((byte)(rex | 0x08), 0x89, (byte)(0xC0 | ((source & 7) << 3) | 3));    // mov r11, reg64
+					Emit(0x49, 0xC1, 0xEB, 0x20);                                               // shr r11, 32
+					Emit(0x41, 0xF7, 0xC3); EmitImm32(1);                                       // test r11d, 1
+					Emit(0x74, 0x03);                                                           // jz +3
+					Emit(0x45, 0x31, 0xD2);                                                     // xor r10d, r10d
+					break;
+				}
+
+				default:
+					throw new ArgumentOutOfRangeException(nameof(spec), word.Kind, "Unknown packet word kind.");
+			}
+
+			Emit(0x44, 0x89, 0x50, displacement);                                               // mov [rax+disp], r10d
+		}
+
+		Emit(0x4C, 0x8D, 0x58, checked((byte)(spec.SizeDwords * sizeof(uint))));                // lea r11, [rax + size*4]
+		Emit(0x4C, 0x89, 0x5F, CursorUpOffset);                                                 // mov [rdi+0x10], r11
+		if (spec.ReturnDwordOffset != 0)
+		{
+			Emit(0x48, 0x83, 0xC0, checked((byte)(spec.ReturnDwordOffset * sizeof(uint))));     // add rax, offset*4
+		}
+
+		Emit(0xC3);
+
+		foreach (var fixup in slowPathFixups)
+		{
+			var delta = BitConverter.GetBytes(code.Count - (fixup + 4));
+			for (var i = 0; i < 4; i++)
+			{
+				code[fixup + i] = delta[i];
+			}
+		}
+
 		// jmp qword [rip+0] with the absolute trampoline address after it.
 		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
 		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
