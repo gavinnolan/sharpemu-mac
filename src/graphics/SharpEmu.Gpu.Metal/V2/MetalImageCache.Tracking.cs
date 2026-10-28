@@ -868,6 +868,11 @@ internal sealed partial class MetalImageCache
     // Whether any recorded fill reaches the slice. Caller holds the lock.
     private bool RecordedDccFillOverlapsLocked(ulong address, ulong size)
     {
+        if (!MayHoldRecordedDccFill(address, size))
+        {
+            return false;
+        }
+
         foreach (var (start, fill) in _recordedDccFills)
         {
             if (address < start + fill.Size && start < address + size)
@@ -1320,6 +1325,79 @@ internal sealed partial class MetalImageCache
         public bool AwaitingOwnWrite;
     }
 
+    // The recorded fills by the 4 KiB page their start is on, and the largest one ever recorded: a store
+    // reaches a fill only if the fill starts less than that size below the store's first byte, or inside
+    // the store, so a store over pages none of those starts is on reaches none, without the walk over every
+    // fill that each GPU store and each slice lookup made (a frame leaves hundreds). The sizes only grow,
+    // so the bound only loosens. SHARPEMU_METAL_V2_DCC_CLAIM_INDEX=0 walks them all, as before.
+    private readonly Dictionary<ulong, int> _recordedDccFillPages = new();
+    private ulong _recordedDccFillMaxSize;
+
+    // Caller holds the lock.
+    private void SetRecordedDccFillLocked(ulong address, RecordedDccFill fill)
+    {
+        if (_recordedDccFills.ContainsKey(address))
+        {
+            UnindexRecordedDccFillLocked(address);
+        }
+
+        _recordedDccFills[address] = fill;
+        System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(
+            _recordedDccFillPages, address >> DccClaimPageShift, out _)++;
+        _recordedDccFillMaxSize = Math.Max(_recordedDccFillMaxSize, fill.Size);
+    }
+
+    // Caller holds the lock.
+    private void RemoveRecordedDccFillLocked(ulong address)
+    {
+        if (_recordedDccFills.Remove(address))
+        {
+            UnindexRecordedDccFillLocked(address);
+        }
+    }
+
+    private void UnindexRecordedDccFillLocked(ulong address)
+    {
+        var page = address >> DccClaimPageShift;
+        ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(_recordedDccFillPages, page);
+        if (!System.Runtime.CompilerServices.Unsafe.IsNullRef(ref count) && --count <= 0)
+        {
+            _recordedDccFillPages.Remove(page);
+        }
+    }
+
+    // Whether a recorded fill may reach the range; false only when none does. Caller holds the lock.
+    private bool MayHoldRecordedDccFill(ulong address, ulong size)
+    {
+        if (_recordedDccFills.Count == 0)
+        {
+            return false;
+        }
+
+        if (!DccClaimIndexEnabled || size == 0 || address + (size - 1) < address)
+        {
+            return true;
+        }
+
+        var lowestStart = address >= _recordedDccFillMaxSize ? address - (_recordedDccFillMaxSize - 1) : 0;
+        var first = lowestStart >> DccClaimPageShift;
+        var last = (address + (size - 1)) >> DccClaimPageShift;
+        if (last - first >= DccClaimIndexMaxPages)
+        {
+            return true;
+        }
+
+        for (var page = first; page <= last; page++)
+        {
+            if (_recordedDccFillPages.ContainsKey(page))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Caller holds the lock.</summary>
     private void RecordDccFillLocked(ulong address, ulong size, byte code, bool record)
     {
@@ -1327,7 +1405,7 @@ internal sealed partial class MetalImageCache
         if (record)
         {
             ForgetDccRunMarkersLocked(null, address, size);
-            _recordedDccFills[address] = new RecordedDccFill { Size = size, Code = code, AwaitingOwnWrite = true };
+            SetRecordedDccFillLocked(address, new RecordedDccFill { Size = size, Code = code, AwaitingOwnWrite = true });
             Epochs.NoteDccChanged();
         }
     }
@@ -1340,7 +1418,7 @@ internal sealed partial class MetalImageCache
     /// </summary>
     private void NoteRecordedDccStoreLocked(ulong address, ulong size)
     {
-        if (_recordedDccFills.Count == 0)
+        if (!MayHoldRecordedDccFill(address, size))
         {
             return;
         }
@@ -1361,7 +1439,7 @@ internal sealed partial class MetalImageCache
                 continue;
             }
 
-            _recordedDccFills.Remove(start);
+            RemoveRecordedDccFillLocked(start);
             Epochs.NoteDccChanged();
         }
     }
@@ -1369,7 +1447,7 @@ internal sealed partial class MetalImageCache
     /// <summary>Caller holds the lock.</summary>
     private void ForgetRecordedDccFillsLocked(ulong address, ulong size)
     {
-        if (_recordedDccFills.Count == 0)
+        if (!MayHoldRecordedDccFill(address, size))
         {
             return;
         }
@@ -1379,7 +1457,7 @@ internal sealed partial class MetalImageCache
         {
             if (address < start + fill.Size && start < address + size)
             {
-                _recordedDccFills.Remove(start);
+                RemoveRecordedDccFillLocked(start);
                 Epochs.NoteDccChanged();
             }
         }
@@ -1394,6 +1472,11 @@ internal sealed partial class MetalImageCache
     private bool TryFindRecordedDccFillLocked(ulong address, ulong size, out byte code)
     {
         code = 0;
+        if (!MayHoldRecordedDccFill(address, size))
+        {
+            return false;
+        }
+
         foreach (var (start, fill) in _recordedDccFills)
         {
             if (address >= start && address + size <= start + fill.Size)
