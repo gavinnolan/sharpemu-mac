@@ -21,5 +21,7 @@ SPDX-License-Identifier: GPL-2.0-or-later -->
     <ProjectReference Include="../../src/SharpEmu.Libs/SharpEmu.Libs.csproj" />
     <ProjectReference Include="../../src/SharpEmu.HLE/SharpEmu.HLE.csproj" />
     <ProjectReference Include="../../src/SharpEmu.ShaderCompiler/SharpEmu.ShaderCompiler.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.GpuRemote/SharpEmu.GpuRemote.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.GpuSplit/SharpEmu.GpuSplit.csproj" />
   </ItemGroup>
 </Project>
