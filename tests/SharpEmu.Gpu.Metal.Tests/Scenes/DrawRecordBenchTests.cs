@@ -23,7 +23,20 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
     private static readonly uint TextureSize =
         uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DRAW_RECORD_BENCH_TEXTURE"), out var edge) ? edge : 8;
     private const uint TargetSize = 64;
-    private const int DrawsPerSubmit = 256;
+    // SHARPEMU_DRAW_RECORD_BENCH_DRAWS=<n> draws per submission (256 by default).
+    private static readonly int DrawsPerSubmit =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DRAW_RECORD_BENCH_DRAWS"), out var drawCount) && drawCount > 0 ? drawCount : 256;
+
+    // SHARPEMU_DRAW_RECORD_BENCH_FILL=images=760,windows=300,overlay=400,writes=400,dccfills=500 pre-fills the host's
+    // state to a title's size before the draws are measured: cached images over distinct 1 MiB-spaced ranges, guest
+    // windows the draws' vertex buffers are spread over (needs SHARPEMU_SCENE_MEMORY_MB of about 33 per window),
+    // pending command-processor writes, GPU write ranges, and recorded DCC fills.
+    private static readonly Dictionary<string, int> Fill =
+        (Environment.GetEnvironmentVariable("SHARPEMU_DRAW_RECORD_BENCH_FILL") ?? "")
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(item => item.Split('='))
+        .Where(parts => parts.Length == 2 && int.TryParse(parts[1], out _))
+        .ToDictionary(parts => parts[0], parts => int.Parse(parts[1]));
 
     // Three images sampled through one sampler and summed (T# s[0:7], s[8:15], s[16:23], S# s[24:27]; the
     // primitive mask is s28), the way a material pass reads several textures.
@@ -74,7 +87,16 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
 
     // Same: one state, 256 draws. AlternatingTexture: texture 0 flips every draw. AlternatingProgram: sixteen
     // pixel programs in turn. PassChurn: two colour targets, a new render pass every four draws. Mixed: all three.
-    private enum Variation { Same, AlternatingTexture, AlternatingProgram, PassChurn, Mixed }
+    // Production: Mixed with an occlusion dump after every draw and an end-of-pipe label after every eighth, as a
+    // title's frame has them.
+    private enum Variation { Same, AlternatingTexture, AlternatingProgram, PassChurn, Mixed, Production }
+
+    private static readonly FieldInfo CpOverlayField =
+        typeof(MetalRenderHost).GetField("_cpOverlay", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    private static readonly FieldInfo GpuWritesField =
+        typeof(MetalRenderHost).GetField("_gpuWrites", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    private static readonly MethodInfo RecordDccFill =
+        typeof(MetalImageCache).GetMethod("RecordDccFillLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
     // SHARPEMU_DRAW_RECORD_BENCH_OUTPUT=<path>: microseconds per recorded draw for each variation, and
     // with SHARPEMU_PROFILE_RENDER=1 the self time per render phase. Draws record on this thread
@@ -92,6 +114,14 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
         var depth = rig.Memory.Allocate(TargetSize * TargetSize * 4 + 0x10000, 0x10000);
         var textures = Enumerable.Range(0, 10).Select(index => SolidTexture(rig, 0x80000040u + (uint)index * 0x00101000u)).ToArray();
         var meshData = rig.UploadMesh(SceneDraws.TexturedQuad());
+        // One mesh per guest window (32 MiB granules): draw n fetches from window n modulo the count.
+        var windowMeshes = Enumerable.Range(0, Fill.GetValueOrDefault("windows")).Select(_ =>
+        {
+            rig.Memory.Allocate(1, 32UL * 1024 * 1024);
+            return rig.UploadMesh(SceneDraws.TexturedQuad());
+        }).ToArray();
+        var queries = rig.Memory.Allocate((ulong)DrawsPerSubmit * 256, 256);
+        var labels = rig.Memory.Allocate((ulong)DrawsPerSubmit * 16, 256);
         var vertexProgram = rig.Program(ScenePrograms.FetchVertex);
         var programs = Enumerable.Range(0, 16).Select(count => rig.Program(SampledThreeNops(count))).ToArray();
         var rounds = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DRAW_RECORD_BENCH_ROUNDS"), out var configured) ? configured : 60;
@@ -101,16 +131,18 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
 
         uint[] Stream(Variation variation)
         {
-            var textureChanges = variation is Variation.AlternatingTexture or Variation.Mixed;
-            var programChanges = variation is Variation.AlternatingProgram or Variation.Mixed;
-            var passChanges = variation is Variation.PassChurn or Variation.Mixed;
-            var passLength = variation == Variation.Mixed ? 8 : 4;
+            var mixed = variation is Variation.Mixed or Variation.Production;
+            var textureChanges = variation is Variation.AlternatingTexture || mixed;
+            var programChanges = variation is Variation.AlternatingProgram || mixed;
+            var passChanges = variation is Variation.PassChurn || mixed;
+            var passLength = mixed ? 8 : 4;
             var pm4 = new ScenePm4();
             for (var draw = 0; draw < DrawsPerSubmit; draw++)
             {
-                var texture = textures[textureChanges ? (variation == Variation.Mixed ? draw % 7 : draw & 1) : 0];
-                var program = programs[programChanges ? (variation == Variation.Mixed ? draw % 5 : draw) % programs.Length : 0];
+                var texture = textures[textureChanges ? (mixed ? draw % 7 : draw & 1) : 0];
+                var program = programs[programChanges ? (mixed ? draw % 5 : draw) % programs.Length : 0];
                 var color = colors[passChanges ? draw / passLength & 1 : 0];
+                var mesh = windowMeshes.Length != 0 ? windowMeshes[draw % windowMeshes.Length] : meshData;
                 uint[] pixelData =
                 [
                     .. Descriptors.Texture(texture, Rgba8, TextureSize, TextureSize),
@@ -120,36 +152,106 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
                 ];
                 if (draw == 0 || (passChanges && draw % passLength == 0))
                 {
-                    new SceneState(TargetSize, TargetSize)
+                    var full = new SceneState(TargetSize, TargetSize)
                         .ColorTarget(0, color, TargetSize, TargetSize, format: 14, numberType: 7)
                         .DepthTarget(depth, TargetSize, TargetSize, zFormat: 3)
                         .DepthControl(test: true, write: true, CompareFunc.Always)
-                        .VertexShader(vertexProgram, meshData)
-                        .PixelShader(program, pixelData)
-                        .Emit(pm4);
+                        .VertexShader(vertexProgram, mesh)
+                        .PixelShader(program, pixelData);
+                    if (variation == Variation.Production) full.Context[Cx.DbCountControl] = 1u << 8;
+                    full.Emit(pm4);
                 }
-                else if (textureChanges || programChanges)
+                else if (textureChanges || programChanges || windowMeshes.Length != 0)
                 {
                     // A guest rewrites the pixel stage's registers when its material changes, nothing else.
                     var changed = new SceneState(TargetSize, TargetSize);
                     changed.Context.Clear();
                     changed.Uconfig.Clear();
                     changed.Shader.Clear();
+                    if (windowMeshes.Length != 0) changed.VertexShader(vertexProgram, mesh);
                     changed.PixelShader(program, pixelData).Emit(pm4);
                 }
 
                 pm4.NumInstances(1);
                 pm4.DrawAuto(6);
+                if (variation != Variation.Production) continue;
+                pm4.EventWithAddress(ScenePm4.EventPixelPipeStatDump, 1, queries + (ulong)draw * 256);
+                if (draw % 8 == 7) pm4.Packet(0x49, 0x28u | (5u << 8), 1u << 29, (uint)(labels + (ulong)draw * 16), (uint)((labels + (ulong)draw * 16) >> 32), (uint)draw, 0, 0);
             }
 
             return pm4.ToArray();
         }
 
-        var results = new List<object>();
         ulong submissionId = 1000;
+        if (Fill.GetValueOrDefault("images") is > 0 and var imageCount)
+        {
+            // Sampled once so each becomes a cached image; 1 MiB apart, which is how a title's few-megabyte targets sit.
+            var fillTextures = Enumerable.Range(0, imageCount).Select(index =>
+            {
+                rig.Memory.Allocate(1, 1UL << 20);
+                return SolidTexture(rig, 0x80000040u + (uint)index * 0x1010u);
+            }).ToArray();
+            var fillStream = new ScenePm4();
+            for (var index = 0; index < imageCount; index += 3)
+            {
+                uint[] pixelData =
+                [
+                    .. Descriptors.Texture(fillTextures[index], Rgba8, TextureSize, TextureSize),
+                    .. Descriptors.Texture(fillTextures[(index + 1) % imageCount], Rgba8, TextureSize, TextureSize),
+                    .. Descriptors.Texture(fillTextures[(index + 2) % imageCount], Rgba8, TextureSize, TextureSize),
+                    .. Descriptors.Sampler(),
+                ];
+                var state = new SceneState(TargetSize, TargetSize);
+                if (index == 0)
+                {
+                    state.ColorTarget(0, colors[0], TargetSize, TargetSize, format: 14, numberType: 7)
+                        .DepthTarget(depth, TargetSize, TargetSize, zFormat: 3)
+                        .DepthControl(test: true, write: true, CompareFunc.Always)
+                        .VertexShader(vertexProgram, meshData);
+                }
+                else
+                {
+                    state.Context.Clear();
+                    state.Uconfig.Clear();
+                    state.Shader.Clear();
+                }
+
+                state.PixelShader(programs[0], pixelData).Emit(fillStream);
+                fillStream.NumInstances(1);
+                fillStream.DrawAuto(6);
+            }
+
+            for (var pass = 0; pass < 2; pass++) rig.Submit(fillStream);
+            Output.WriteLine($"fill: {imageCount} images, host reports {rig.Host.ImageCache.ImageCount} cached");
+        }
+
+        // 16 MiB each for the overlay entries, the write ranges and the DCC fills, away from every address a draw uses.
+        var fillRegion = rig.Memory.Allocate(3UL << 24, 1UL << 20);
+        const ulong NeverCompleted = ulong.MaxValue / 2;
+        var overlayCount = Fill.GetValueOrDefault("overlay");
+        if (overlayCount > 0)
+        {
+            var overlay = (MetalPendingWriteOverlay)CpOverlayField.GetValue(rig.Host)!;
+            Span<byte> value = stackalloc byte[8];
+            for (var index = 0; index < overlayCount; index++) overlay.Add(fillRegion + (ulong)index * 256, value, NeverCompleted);
+        }
+
+        var writeCount = Fill.GetValueOrDefault("writes");
+        if (writeCount > 0)
+        {
+            var writes = (MetalGpuWriteRanges)GpuWritesField.GetValue(rig.Host)!;
+            for (var index = 0; index < writeCount; index++)
+                writes.Note(fillRegion + (1UL << 24) + (ulong)index * 0x2000, 0x1000, NeverCompleted + (ulong)index);
+        }
+
+        for (var index = 0; index < Fill.GetValueOrDefault("dccfills"); index++)
+            RecordDccFill.Invoke(rig.Host.ImageCache, [fillRegion + (2UL << 24) + (ulong)index * 0x2000, 0x1000UL, (byte)0, true]);
+
+        var results = new List<object>();
         var profiling = RenderPhaseProfile.Enabled;
         foreach (var variation in Enum.GetValues<Variation>().Where(variation => only is null || variation.ToString() == only))
         {
+            rig.Host.NativeOcclusionEnabled = variation == Variation.Production;
             var words = Stream(variation);
             // The stream is placed once: every round submits the same packets.
             var streamAddress = rig.Memory.Upload<uint>(words, 256);
@@ -232,7 +334,7 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
 
         Assert.Empty(rig.Fatals);
         File.WriteAllText(path, JsonSerializer.Serialize(
-            new { arch = RuntimeInformation.ProcessArchitecture.ToString(), profiling, results },
+            new { arch = RuntimeInformation.ProcessArchitecture.ToString(), profiling, fill = Fill, results },
             new JsonSerializerOptions { WriteIndented = true }));
     }
 }
