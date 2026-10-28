@@ -54,6 +54,19 @@ public sealed class WorkerFrameBenchTests(ITestOutputHelper output) : SceneTestB
                 for (var dump = 0; dump < 5; dump++)
                     pm4.EventWithAddress(ScenePm4.EventPixelPipeStatDump, 1, queries + (ulong)draw * 256 + (ulong)dump * 8);
             })),
+            ("write_data_256_bytes", 1, Stream((pm4, draw) =>
+            {
+                var query = queries + (ulong)draw * 256;
+                pm4.Packet(ScenePm4.OpWriteData, [0x100u, (uint)query, (uint)(query >> 32), .. new uint[64]]);
+            })),
+            // UE4 and UE5 zero a query's 256 bytes with WRITE_DATA, then dump its begin and end into it.
+            ("zero_fill_then_dump_pair", 3, Stream((pm4, draw) =>
+            {
+                var query = queries + (ulong)draw * 256;
+                pm4.Packet(ScenePm4.OpWriteData, [0x100u, (uint)query, (uint)(query >> 32), .. new uint[64]]);
+                pm4.EventWithAddress(ScenePm4.EventPixelPipeStatDump, 1, query);
+                pm4.EventWithAddress(ScenePm4.EventPixelPipeStatDump, 1, query + 8);
+            })),
             ("dump_pair_16_blocks", 2, Stream((pm4, draw) =>
             {
                 pm4.EventWithAddress(ScenePm4.EventPixelPipeStatDump, 1, queries + (ulong)draw * 256);
