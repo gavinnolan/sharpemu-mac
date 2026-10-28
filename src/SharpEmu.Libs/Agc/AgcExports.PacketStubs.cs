@@ -114,4 +114,46 @@ public static partial class AgcExports
     /// <summary>The packet stub for a builder import, when it has one.</summary>
     public static bool TryGetPacketStubSpec(string nid, out AgcPacketStubSpec spec) =>
         PacketStubSpecs.TryGetValue(nid, out spec!);
+
+    /// <summary>The marker NOP header and payload sceAgcCbSetShRegisterRangeDirect puts in front of its packet.</summary>
+    public static readonly uint RangePacketNopHeader = Pm4(2, ItNop, RZero);
+
+    public const uint RangePacketMarker = CbSetShRegisterRangeMarker;
+
+    /// <summary>The SET_SH_REG header of a zero-length payload; the stub ORs the value count shifted left by 16.</summary>
+    public static readonly uint SetShRegHeaderWithoutCount = Pm4(2, ItSetShReg, 0);
+
+    /// <summary>The most values a variable-length packet stub copies; a larger packet is the export's.</summary>
+    public const int RangeStubMaxValues = 64;
+
+    public const int RegistersStubMaxRegisters = 32;
+
+    private const string CbSetShRegisterRangeDirectNid = "n2fD4A+pb+g";
+    private const string CbSetShRegistersDirectNid = "UZbQjYAwwXM";
+
+    /// <summary>The variable-length packet stub for a builder import, when it has one.</summary>
+    public static bool TryGetVariablePacketStub(string nid, out AgcVariablePacketStub kind)
+    {
+        switch (nid)
+        {
+            case CbSetShRegisterRangeDirectNid:
+                kind = AgcVariablePacketStub.ShRegisterRange;
+                return true;
+            case CbSetShRegistersDirectNid:
+                kind = AgcVariablePacketStub.ShRegisters;
+                return true;
+            default:
+                kind = default;
+                return false;
+        }
+    }
+}
+
+public enum AgcVariablePacketStub
+{
+    /// <summary>sceAgcCbSetShRegisterRangeDirect(cb, offset, values, count): marker NOP + SET_SH_REG with the values copied in.</summary>
+    ShRegisterRange,
+
+    /// <summary>sceAgcCbSetShRegistersDirect(cb, (offset, value) pairs, count) for one run of consecutive ascending offsets.</summary>
+    ShRegisters,
 }

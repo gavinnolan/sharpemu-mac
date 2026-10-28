@@ -123,12 +123,167 @@ public sealed unsafe class AgcPacketStubTests
         Assert.True(stubRan > 100, $"{nid}: the stub took the fast path only {stubRan} times");
     }
 
+    private const int ValuesOffset = 0xC00;
+
+    public static IEnumerable<object[]> VariableNids() =>
+        new[] { "n2fD4A+pb+g", "UZbQjYAwwXM" }.Select(nid => new object[] { nid });
+
+    [Theory]
+    [MemberData(nameof(VariableNids))]
+    public void TheVariableLengthStubWritesWhatTheExportWritesAndLeavesTheBufferAloneWhenItDeclines(string nid)
+    {
+        if (!OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        Assert.True(AgcExports.TryGetVariablePacketStub(nid, out var kind));
+        var isRange = kind == AgcVariablePacketStub.ShRegisterRange;
+        using var harness = new StubHarness(kind);
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        var random = new System.Random(unchecked(nid.GetHashCode() ^ 0x77A1));
+        var stubRan = 0;
+        var declinedWithRoom = 0;
+        for (var iteration = 0; iteration < 1500; iteration++)
+        {
+            var reserved = (uint)random.Next(3) * 3;
+            var count = random.Next(12) switch
+            {
+                0 => 0,
+                1 => 1,
+                2 => 65,
+                3 => 64,
+                4 => 33,
+                5 => 32,
+                _ => random.Next(1, 20),
+            };
+            var packetDwords = (isRange ? 4 : 2) + count;
+            var room = random.Next(6) switch
+            {
+                0 => packetDwords * 4 + (int)reserved * 4,
+                1 => packetDwords * 4 + (int)reserved * 4 - 4,
+                2 => packetDwords * 4 + (int)reserved * 4 + 4,
+                3 => 0x700,
+                4 => 0,
+                _ => -64,
+            };
+            var nullBuffer = random.Next(30) == 0;
+
+            using var managedBlock = new Block();
+            using var stubBlock = new Block();
+            managedBlock.Reset(reserved, room, random.Next(1 << 30));
+
+            // The source: the block's tail (clear of the packet area) or, now and then, inside the packet area.
+            var valuesInside = random.Next(8) == 0;
+            var valuesNull = random.Next(40) == 0;
+            var sourceOffset = valuesInside ? PacketOffset + 4 * random.Next(0, 24) : ValuesOffset;
+            var firstOffset = random.Next(6) switch
+            {
+                0 => 0u,
+                1 => 0x3FFu,
+                2 => 0x400u,
+                3 => 0xFFFF_FFF0u,
+                _ => (uint)random.Next(1, 0x3F0),
+            };
+            var consecutive = random.Next(4) != 0;
+            unsafe
+            {
+                var source = (uint*)(managedBlock.Pointer + ValuesOffset);
+                if (!isRange)
+                {
+                    for (var index = 0; index < 64; index++)
+                    {
+                        source[index * 2] = consecutive ? firstOffset + (uint)index : (uint)random.Next(0, 0x400);
+                        source[index * 2 + 1] = (uint)random.NextInt64();
+                    }
+
+                    if (consecutive && random.Next(5) == 0 && count > 1)
+                    {
+                        source[2 * random.Next(1, count)] += 1;
+                        consecutive = false;
+                    }
+
+                    // The stub leaves a run that would wrap past 32 bits to the export.
+                    consecutive &= (ulong)firstOffset + (ulong)count < 0x1_0000_0000UL;
+                }
+            }
+
+            stubBlock.CopyFrom(managedBlock);
+            managedBlock.Rebase();
+            stubBlock.Rebase();
+            var pristine = stubBlock.Normalized();
+
+            ulong Source(Block block) => valuesNull ? 0UL : (ulong)(block.Pointer + sourceOffset);
+            var offsetArgument = isRange ? (ulong)(random.Next(8) == 0 ? random.Next(0, 0x500) : random.Next(1, 0x3FF)) : 0UL;
+            var buffer = nullBuffer ? 0UL : (ulong)managedBlock.Pointer;
+            var context = new CpuContext(new RawMemory(managedBlock), Generation.Gen5);
+            context[CpuRegister.Rdi] = buffer;
+            if (isRange)
+            {
+                context[CpuRegister.Rsi] = offsetArgument;
+                context[CpuRegister.Rdx] = Source(managedBlock);
+                context[CpuRegister.Rcx] = (ulong)count;
+            }
+            else
+            {
+                context[CpuRegister.Rsi] = Source(managedBlock);
+                context[CpuRegister.Rdx] = (ulong)count;
+            }
+
+            var previousScheduler = GuestThreadExecution.Scheduler;
+            GuestThreadExecution.Scheduler = null;
+            try
+            {
+                context.DeclineGuestCallbacks = true;
+                manager.Dispatch(nid, context);
+                context.DeclineGuestCallbacks = false;
+            }
+            finally
+            {
+                GuestThreadExecution.Scheduler = previousScheduler;
+            }
+
+            var stubSource = valuesNull ? 0UL : (ulong)(stubBlock.Pointer + sourceOffset);
+            var stubRax = isRange
+                ? harness.Call(nullBuffer ? 0UL : (ulong)stubBlock.Pointer, offsetArgument, stubSource, (ulong)count, 0)
+                : harness.Call(nullBuffer ? 0UL : (ulong)stubBlock.Pointer, stubSource, (ulong)count, 0, 0);
+            if (stubRax == Sentinel)
+            {
+                // A decline never touches the buffer; the export then runs.
+                Assert.Equal(pristine, stubBlock.Normalized());
+                if (!nullBuffer && room >= packetDwords * 4 + (int)reserved * 4 && count is >= 1 and <= 32 && !valuesNull && !valuesInside &&
+                    (isRange ? offsetArgument is >= 1 and <= 0x3FF : consecutive))
+                {
+                    declinedWithRoom++;
+                }
+
+                continue;
+            }
+
+            stubRan++;
+            Assert.False(context.GuestCallbackDeclined, $"{nid}: the stub built a packet where the export had to call back");
+            Assert.False(nullBuffer, nid + ": the stub accepted a null buffer");
+            Assert.Equal(context[CpuRegister.Rax] - (ulong)managedBlock.Pointer, stubRax - (ulong)stubBlock.Pointer);
+            Assert.Equal(managedBlock.Normalized(), stubBlock.Normalized());
+        }
+
+        Assert.True(stubRan > 150, $"{nid}: the stub took the fast path only {stubRan} times");
+        Assert.True(declinedWithRoom < 40, $"{nid}: the stub declined {declinedWithRoom} calls the export builds as one in-place packet");
+    }
+
     [Fact]
     public void EveryStubbedBuilderIsAlsoALeafBuilder()
     {
         foreach (var nid in Nids().Select(row => (string)row[0]))
         {
             Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport(nid), nid);
+            Assert.Equal(DirectExecutionBackend.GuestFastPathStub.AgcPacket, DirectExecutionBackend.ClassifyGuestFastPathStub(nid));
+        }
+
+        Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport("n2fD4A+pb+g"));
+        foreach (var nid in VariableNids().Select(row => (string)row[0]))
+        {
             Assert.Equal(DirectExecutionBackend.GuestFastPathStub.AgcPacket, DirectExecutionBackend.ClassifyGuestFastPathStub(nid));
         }
     }
@@ -225,6 +380,16 @@ public sealed unsafe class AgcPacketStubTests
         private readonly delegate* unmanaged<ulong, ulong, ulong, ulong, ulong, ulong> _entry;
 
         public StubHarness(AgcPacketStubSpec spec)
+            : this(spec, null)
+        {
+        }
+
+        public StubHarness(AgcVariablePacketStub kind)
+            : this(null, kind)
+        {
+        }
+
+        private StubHarness(AgcPacketStubSpec? spec, AgcVariablePacketStub? kind)
         {
             _page = (byte*)HostMemory.Alloc(null, 4096, HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE, HostMemory.PAGE_EXECUTE_READWRITE);
             Assert.True(_page != null);
@@ -233,7 +398,9 @@ public sealed unsafe class AgcPacketStubTests
             _page[0x101] = 0xB8;
             *(ulong*)(_page + 0x102) = Sentinel;
             _page[0x10A] = 0xC3;
-            var stub = DirectExecutionBackend.EmitGuestAgcPacketStub(spec, (nint)(_page + 0x100));
+            var stub = spec is not null
+                ? DirectExecutionBackend.EmitGuestAgcPacketStub(spec, (nint)(_page + 0x100))
+                : DirectExecutionBackend.EmitGuestAgcVariablePacketStub(kind!.Value, (nint)(_page + 0x100));
             Assert.True(stub.Count < 0x400);
             for (var i = 0; i < stub.Count; i++)
             {

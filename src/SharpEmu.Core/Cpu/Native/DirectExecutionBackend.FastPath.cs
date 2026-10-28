@@ -237,7 +237,9 @@ public sealed unsafe partial class DirectExecutionBackend
 		KernelGetProcessTimeNid => GuestFastPathStub.ProcessTimeMicroseconds,
 		_ => IsConstantZeroImport(nid)
 			? GuestFastPathStub.ConstantZero
-			: SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) ? GuestFastPathStub.AgcPacket : GuestFastPathStub.None,
+			: SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _)
+					? GuestFastPathStub.AgcPacket
+					: GuestFastPathStub.None,
 	};
 
 	/// <summary>
@@ -290,7 +292,7 @@ public sealed unsafe partial class DirectExecutionBackend
 				!_nativeConstantThunksAllowed ||
 				GuestWriteWatch.Armed ||
 				SharpEmu.Libs.Agc.AgcExports.PacketStubsBlockedByTracing ||
-				!SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _))
+				!(SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _)))
 			{
 				return false;
 			}
@@ -303,8 +305,9 @@ public sealed unsafe partial class DirectExecutionBackend
 		List<byte> code;
 		if (kind == GuestFastPathStub.AgcPacket)
 		{
-			SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out var packetSpec);
-			code = EmitGuestAgcPacketStub(packetSpec, fallbackTrampoline);
+			code = SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out var variableKind)
+				? EmitGuestAgcVariablePacketStub(variableKind, fallbackTrampoline)
+				: EmitGuestAgcPacketStub(SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out var packetSpec) ? packetSpec : throw new InvalidOperationException(nid), fallbackTrampoline);
 		}
 		else
 		{
@@ -753,6 +756,189 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 
 		// jmp qword [rip+0] with the absolute trampoline address after it.
+		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
+		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
+		return code;
+	}
+
+	/// <summary>
+	/// The two variable-length register-set builders as guest-side code, on the same terms as
+	/// <see cref="EmitGuestAgcPacketStub"/> (plain stores, decline to the trampoline with the arguments
+	/// intact; only RAX, R8-R11 and the flags change, all caller-saved). Both decline for a null
+	/// pointer, a count outside the stub's range, a buffer without room for the packet plus its
+	/// reserve, and a source that overlaps the packet being written; the export handles the rest.
+	/// <list type="bullet">
+	/// <item>ShRegisterRange(cb, offset, values, count): offset 1..0x3FF, count 1..64; writes the marker
+	/// NOP, the SET_SH_REG header, the offset and the values, and returns the SET_SH_REG packet's address.</item>
+	/// <item>ShRegisters(cb, pairs, count): count 1..32 and the pairs' offsets consecutive ascending (the
+	/// export's sort is then a no-op and it emits exactly one packet); verified before anything is
+	/// written, so a decline leaves the buffer untouched.</item>
+	/// </list>
+	/// </summary>
+	internal static List<byte> EmitGuestAgcVariablePacketStub(SharpEmu.Libs.Agc.AgcVariablePacketStub kind, nint fallbackTrampoline)
+	{
+		const int CursorUpOffset = 0x10;
+		const int CursorDownOffset = 0x18;
+		const int ReservedDwordsOffset = 0x30;
+		var range = kind == SharpEmu.Libs.Agc.AgcVariablePacketStub.ShRegisterRange;
+		var code = new List<byte>(320);
+		var slowPathFixups = new List<int>();
+		void Emit(params byte[] bytes) => code.AddRange(bytes);
+		void EmitImm32(uint value) => code.AddRange(BitConverter.GetBytes(value));
+		void EmitBranchToSlowPath(byte shortOpcode)
+		{
+			Emit(0x0F, (byte)(shortOpcode + 0x10), 0, 0, 0, 0);
+			slowPathFixups.Add(code.Count - 4);
+		}
+
+		// A backwards short jump (opcode jb 0x72) to a code offset.
+		void EmitLoopBack(int target)
+		{
+			var delta = target - (code.Count + 2);
+			if (delta < -128)
+			{
+				throw new InvalidOperationException("Stub loop too long.");
+			}
+
+			Emit(0x72, unchecked((byte)(sbyte)delta));
+		}
+
+		// Arguments: rdi = buffer, then (range) rsi = offset, rdx = values, rcx = count
+		//                       or (registers) rsi = pairs, rdx = count.
+		Emit(0x48, 0x85, 0xFF);                                       // test rdi, rdi
+		EmitBranchToSlowPath(0x74);                                   // jz slow
+		if (range)
+		{
+			Emit(0x8D, 0x46, 0xFF);                                   // lea eax, [rsi-1]
+			Emit(0x3D); EmitImm32(0x3FF);                             // cmp eax, 0x3FF
+			EmitBranchToSlowPath(0x73);                               // jae slow: offset outside 1..0x3FF
+			Emit(0x8D, 0x41, 0xFF);                                   // lea eax, [rcx-1]
+			Emit(0x83, 0xF8, (byte)(SharpEmu.Libs.Agc.AgcExports.RangeStubMaxValues - 1)); // cmp eax, max-1
+			EmitBranchToSlowPath(0x77);                               // ja slow: count 0 or too large
+			Emit(0x48, 0x85, 0xD2);                                   // test rdx, rdx
+			EmitBranchToSlowPath(0x74);                               // jz slow: a null source reserves the payload for the caller
+		}
+		else
+		{
+			Emit(0x48, 0x85, 0xF6);                                   // test rsi, rsi
+			EmitBranchToSlowPath(0x74);                               // jz slow
+			Emit(0x8D, 0x42, 0xFF);                                   // lea eax, [rdx-1]
+			Emit(0x83, 0xF8, (byte)(SharpEmu.Libs.Agc.AgcExports.RegistersStubMaxRegisters - 1)); // cmp eax, max-1
+			EmitBranchToSlowPath(0x77);                               // ja slow
+		}
+
+		Emit(0x48, 0x8B, 0x47, CursorUpOffset);                       // mov rax, [rdi+0x10]      cursor
+		Emit(0x4C, 0x8B, 0x57, CursorDownOffset);                     // mov r10, [rdi+0x18]      end
+		Emit(0x49, 0x29, 0xC2);                                       // sub r10, rax
+		EmitBranchToSlowPath(0x72);                                   // jb slow
+		Emit(0x49, 0xC1, 0xEA, 0x02);                                 // shr r10, 2               available dwords
+		Emit(0x41, 0xBB); EmitImm32(0xFFFF_FFFFu);                    // mov r11d, 0xFFFFFFFF
+		Emit(0x4D, 0x39, 0xDA);                                       // cmp r10, r11
+		EmitBranchToSlowPath(0x77);                                   // ja slow
+		Emit(0x44, 0x8B, 0x5F, ReservedDwordsOffset);                 // mov r11d, [rdi+0x30]     reserve
+		if (range)
+		{
+			Emit(0x44, 0x8D, 0x49, 0x04);                             // lea r9d, [rcx+4]         dwords: marker 2 + header 2 + values
+		}
+		else
+		{
+			Emit(0x44, 0x8D, 0x4A, 0x02);                             // lea r9d, [rdx+2]         dwords: header 2 + values
+		}
+
+		Emit(0x4D, 0x01, 0xCB);                                       // add r11, r9
+		Emit(0x4D, 0x39, 0xDA);                                       // cmp r10, r11
+		EmitBranchToSlowPath(0x72);                                   // jb slow: no room
+
+		// The source must not overlap the packet area [rax, rax + r9*4).
+		Emit(0x4E, 0x8D, 0x04, 0x88);                                 // lea r8, [rax + r9*4]     end of the packet
+		if (range)
+		{
+			Emit(0x4C, 0x39, 0xC2);                                   // cmp rdx, r8
+			Emit(0x73, 0x0D);                                         // jae ok                   source starts at or after the packet's end
+			Emit(0x4C, 0x8D, 0x04, 0x8A);                             // lea r8, [rdx + rcx*4]    end of the source
+		}
+		else
+		{
+			Emit(0x4C, 0x39, 0xC6);                                   // cmp rsi, r8
+			Emit(0x73, 0x0D);                                         // jae ok
+			Emit(0x4C, 0x8D, 0x04, 0xD6);                             // lea r8, [rsi + rdx*8]    end of the pairs
+		}
+
+		Emit(0x49, 0x39, 0xC0);                                       // cmp r8, rax
+		EmitBranchToSlowPath(0x77);                                   // ja slow: the source ends after the packet starts
+		// ok:
+		if (!range)
+		{
+			Emit(0x44, 0x8B, 0x06);                                   // mov r8d, [rsi]           first offset
+			Emit(0x45, 0x89, 0xC2);                                   // mov r10d, r8d
+			Emit(0x41, 0x01, 0xD2);                                   // add r10d, edx
+			EmitBranchToSlowPath(0x72);                               // jc slow: the offsets would wrap
+			Emit(0x45, 0x31, 0xC9);                                   // xor r9d, r9d
+			var verify = code.Count;
+			Emit(0x46, 0x8B, 0x14, 0xCE);                             // mov r10d, [rsi + r9*8]
+			Emit(0x45, 0x89, 0xC3);                                   // mov r11d, r8d
+			Emit(0x45, 0x01, 0xCB);                                   // add r11d, r9d
+			Emit(0x45, 0x39, 0xDA);                                   // cmp r10d, r11d
+			EmitBranchToSlowPath(0x75);                               // jne slow: not consecutive ascending
+			Emit(0x41, 0xFF, 0xC1);                                   // inc r9d
+			Emit(0x41, 0x39, 0xD1);                                   // cmp r9d, edx
+			EmitLoopBack(verify);                                     // jb verify
+		}
+
+		if (range)
+		{
+			Emit(0xC7, 0x00); EmitImm32(SharpEmu.Libs.Agc.AgcExports.RangePacketNopHeader);       // mov dword [rax], nop header
+			Emit(0xC7, 0x40, 0x04); EmitImm32(SharpEmu.Libs.Agc.AgcExports.RangePacketMarker);    // mov dword [rax+4], marker
+			Emit(0x41, 0x89, 0xCA);                                   // mov r10d, ecx
+			Emit(0x41, 0xC1, 0xE2, 0x10);                             // shl r10d, 16
+			Emit(0x41, 0x81, 0xCA); EmitImm32(SharpEmu.Libs.Agc.AgcExports.SetShRegHeaderWithoutCount); // or r10d, header
+			Emit(0x44, 0x89, 0x50, 0x08);                             // mov [rax+8], r10d
+			Emit(0x89, 0x70, 0x0C);                                   // mov [rax+12], esi        the register offset
+			Emit(0x45, 0x31, 0xC0);                                   // xor r8d, r8d
+			var copy = code.Count;
+			Emit(0x46, 0x8B, 0x14, 0x82);                             // mov r10d, [rdx + r8*4]
+			Emit(0x46, 0x89, 0x54, 0x80, 0x10);                       // mov [rax + r8*4 + 16], r10d
+			Emit(0x41, 0xFF, 0xC0);                                   // inc r8d
+			Emit(0x41, 0x39, 0xC8);                                   // cmp r8d, ecx
+			EmitLoopBack(copy);                                       // jb copy
+			Emit(0x44, 0x8D, 0x49, 0x04);                             // lea r9d, [rcx+4]
+		}
+		else
+		{
+			Emit(0x41, 0x89, 0xD2);                                   // mov r10d, edx
+			Emit(0x41, 0xC1, 0xE2, 0x10);                             // shl r10d, 16
+			Emit(0x41, 0x81, 0xCA); EmitImm32(SharpEmu.Libs.Agc.AgcExports.SetShRegHeaderWithoutCount); // or r10d, header
+			Emit(0x44, 0x89, 0x10);                                   // mov [rax], r10d
+			Emit(0x45, 0x0F, 0xB7, 0xD0);                             // movzx r10d, r8w          first offset & 0xFFFF
+			Emit(0x44, 0x89, 0x50, 0x04);                             // mov [rax+4], r10d
+			Emit(0x45, 0x31, 0xC9);                                   // xor r9d, r9d
+			var copy = code.Count;
+			Emit(0x46, 0x8B, 0x54, 0xCE, 0x04);                       // mov r10d, [rsi + r9*8 + 4]
+			Emit(0x46, 0x89, 0x54, 0x88, 0x08);                       // mov [rax + r9*4 + 8], r10d
+			Emit(0x41, 0xFF, 0xC1);                                   // inc r9d
+			Emit(0x41, 0x39, 0xD1);                                   // cmp r9d, edx
+			EmitLoopBack(copy);                                       // jb copy
+			Emit(0x44, 0x8D, 0x4A, 0x02);                             // lea r9d, [rdx+2]
+		}
+
+		Emit(0x4E, 0x8D, 0x1C, 0x88);                                 // lea r11, [rax + r9*4]    the new cursor
+		Emit(0x4C, 0x89, 0x5F, CursorUpOffset);                       // mov [rdi+0x10], r11
+		if (range)
+		{
+			Emit(0x48, 0x83, 0xC0, 0x08);                             // add rax, 8               the SET_SH_REG packet, after the marker
+		}
+
+		Emit(0xC3);
+
+		foreach (var fixup in slowPathFixups)
+		{
+			var delta = BitConverter.GetBytes(code.Count - (fixup + 4));
+			for (var i = 0; i < 4; i++)
+			{
+				code[fixup + i] = delta[i];
+			}
+		}
+
 		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
 		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
 		return code;
