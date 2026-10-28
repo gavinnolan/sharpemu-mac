@@ -1239,7 +1239,17 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
         if (_touchedWindows.Add(window.Id))
         {
-            _residentDirty = true;
+            if (ResidentAppendEnabled && !_residentDirty && _residencySet == 0 && window.Buffer != 0)
+            {
+                // A first touch adds one buffer to a list that is otherwise current: put it on the end
+                // (ResidentVersion holds, ResidentBuffers grows) instead of rebuilding every window's
+                // entry, which a submission touching a few hundred windows did a few hundred times.
+                Append(ref _submissionResidentBuffers, ref _submissionResidentCount, window.Buffer);
+            }
+            else
+            {
+                _residentDirty = true;
+            }
         }
 
         var windowOffset = offset - window.Start;
@@ -1828,9 +1838,14 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
     }
 
+    // SHARPEMU_METAL_V2_RESIDENT_APPEND=0 rebuilds the list on every first touch of a window, as before.
+    private static readonly bool ResidentAppendEnabled =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_RESIDENT_APPEND");
+
     /// <summary>
-    /// Changes whenever <see cref="ResidentBuffers"/> is rebuilt: the list is the same set while
-    /// it holds. Read after the list, which is what rebuilds it.
+    /// Changes whenever <see cref="ResidentBuffers"/> is rebuilt: while it holds, the list at any later
+    /// read starts with the list of an earlier one (a window touched since only adds to its end).
+    /// Read after the list, which is what rebuilds it.
     /// </summary>
     public long ResidentVersion => _residentVersion;
 

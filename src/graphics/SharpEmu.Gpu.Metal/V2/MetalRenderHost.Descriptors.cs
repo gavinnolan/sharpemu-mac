@@ -1812,7 +1812,8 @@ internal sealed partial class MetalRenderHost
     private const int ResidentMarkCompute = 1;
     private const int ResidentMarkDeviceAddress = 2;
 
-    private readonly record struct ResidentMark(long Epoch, long Version, nuint Stages)
+    // Count: how many of the list's buffers the encoder has been told, for a list that only grows while its version holds.
+    private readonly record struct ResidentMark(long Epoch, long Version, nuint Stages, int Count = 0)
     {
         public bool Matches(long epoch, long version, nuint stages) =>
             Epoch == epoch && Version == version && Stages == stages;
@@ -1830,14 +1831,21 @@ internal sealed partial class MetalRenderHost
         var buffers = _guestMemory.ResidentBuffers;
         var version = _guestMemory.ResidentVersion;
         ref var mark = ref _residentMarks[markIndex];
-        if (ResidentWatermark && mark.Matches(_encoderEpoch, version, stages))
+        var named = 0;
+        if (ResidentWatermark && mark.Matches(_encoderEpoch, version, stages) && mark.Count <= buffers.Length)
         {
-            _residentWalksSkipped++;
-            return;
+            if (mark.Count == buffers.Length)
+            {
+                _residentWalksSkipped++;
+                return;
+            }
+
+            // Windows touched since the last draw were added to the end: name those, not every one again.
+            named = mark.Count;
         }
 
-        NameResidentBuffers(encoder, buffers, stages);
-        mark = new ResidentMark(_encoderEpoch, version, stages);
+        NameResidentBuffers(encoder, buffers[named..], stages);
+        mark = new ResidentMark(_encoderEpoch, version, stages, buffers.Length);
     }
 
     private nint[] _useResourcesScratch = new nint[64];
