@@ -137,12 +137,12 @@ public static partial class AgcExports
         // With the room for all of them, the index base, buffer size and draw are one allocation and
         // one write; otherwise each packet is allocated on its own, as the buffer's callback expects.
         ulong baseCommand, drawCommand;
-        if (TryAllocateCommandDwordsInPlace(ctx, commandBufferAddress, 11, out baseCommand))
+        if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, 11, out baseCommand, out var nextCursor))
         {
             drawCommand = baseCommand + 5 * sizeof(uint);
-            if (!TryWriteCommandDwords(ctx, baseCommand,
-                    Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount,
-                    Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator))
+            if (!TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, baseCommand,
+                    [Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount,
+                    Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator]))
             {
                 return ReturnPointer(ctx, 0);
             }

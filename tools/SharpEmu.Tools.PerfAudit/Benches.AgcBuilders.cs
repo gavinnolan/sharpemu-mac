@@ -104,6 +104,8 @@ internal static unsafe class AgcBuilderBenches
             ctx.TryWriteUInt64(packets + (ulong)((i & 255) << 3), 1), unit: "call");
         Harness.Measure("b3", "TrackedCpuMemory.TryWrite 40 B (packet, with hooks)", 1, 1, i =>
             memory.TryWrite(packets + (ulong)((i & 255) << 3), forty), unit: "call");
+        Harness.Measure("b5", "TrackedCpuMemory.TryWritePair 8 B + 40 B (cursor + packet; SHARPEMU_PAIR_WRITE=0 makes it two writes)", 1, 1, i =>
+            memory.TryWritePair(packets + (ulong)((i & 255) << 3), eight, packets + 0x1000 + (ulong)((i & 255) << 3), forty), unit: "call");
         Harness.Measure("b4", "TrackedCpuMemory.TryWrite 8 B at a page with interest (hooks fire, filter hit)", 1, 1, i =>
             memory.TryWrite(address + 0x40_0000 + (ulong)((i & 255) << 3), eight), unit: "call");
 

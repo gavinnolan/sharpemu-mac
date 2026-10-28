@@ -235,6 +235,36 @@ public sealed class GuestGpuMemory : IDisposable
         _ = Images?.MarkCpuWriteLanded(address, size);
     }
 
+    // MarkCpuWriteLanded for two writes that have both landed: one full barrier orders both byte
+    // ranges before the page state of either is read, which is what each call's own barrier does for
+    // its bytes (and for any landed before it); the stores then hear of the first and of the second,
+    // in that order, as they do from two calls.
+    public void MarkCpuWriteLanded(ulong firstAddress, ulong firstSize, ulong secondAddress, ulong secondSize)
+    {
+        var firstCovered = firstSize != 0 && Covers(firstAddress, firstSize);
+        var secondCovered = secondSize != 0 && Covers(secondAddress, secondSize);
+        if (!firstCovered && !secondCovered)
+        {
+            return;
+        }
+
+        // The new bytes must be visible before the store reads its page state.
+        Interlocked.MemoryBarrier();
+        if (firstCovered)
+        {
+            SplitCrossingStats.Count(SplitCrossing.ManagedWriteLanded);
+            Buffers?.MarkCpuWriteLanded(firstAddress, firstSize);
+            _ = Images?.MarkCpuWriteLanded(firstAddress, firstSize);
+        }
+
+        if (secondCovered)
+        {
+            SplitCrossingStats.Count(SplitCrossing.ManagedWriteLanded);
+            Buffers?.MarkCpuWriteLanded(secondAddress, secondSize);
+            _ = Images?.MarkCpuWriteLanded(secondAddress, secondSize);
+        }
+    }
+
     public bool Covers(ulong address, ulong size)
     {
         if (!new GuestSpan(address, size).IsValid)

@@ -236,6 +236,9 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
     }
     public bool TryWriteSingleView(ulong address, ReadOnlySpan<byte> data) => _views.TryWriteSingleView(address, data);
 
+    public bool TryWritePairSingleView(ulong firstAddress, ReadOnlySpan<byte> first, ulong secondAddress, ReadOnlySpan<byte> second) =>
+        _views.TryWritePairSingleView(firstAddress, first, secondAddress, second);
+
     public bool TryFillSingleView<TState>(ulong address, int length, TState state, GuestSpanFill<TState> fill, out int filled) =>
         _views.TryFillSingleView(address, length, state, fill, out filled);
 

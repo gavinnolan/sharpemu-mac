@@ -493,26 +493,45 @@ public static partial class AgcExports
     private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
         => TryPrepareCommandDwords(ctx, commandBufferAddress, sizeDwords, true, out commandAddress);
 
-    // Allocates only when the buffer already has the room, never calling its full callback: a caller
-    // that emits several packets takes them in one allocation then, and packet by packet otherwise, so
-    // each packet still reaches the callback with the size it asks for alone.
-    private static bool TryAllocateCommandDwordsInPlace(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
+    // Whether the buffer already has the room, without calling its full callback or moving the
+    // cursor: a caller that emits several packets takes them in one allocation then, and packet by
+    // packet otherwise, so each packet still reaches the callback with the size it asks for alone.
+    // The packet goes to commandAddress and the cursor to nextCursor, together, in TryCommitCommandDwords.
+    private static bool TryReserveCommandDwordsInPlace(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress, out ulong nextCursor)
     {
-        commandAddress = 0;
+        commandAddress = nextCursor = 0;
         if (sizeDwords == 0 ||
             !TryReadCommandBufferState(ctx, commandBufferAddress, out var cursorUp, out var cursorDown, out _, out _, out var reservedDwords) ||
-            sizeDwords > GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords) ||
-            !ctx.TryWriteUInt64(commandBufferAddress + CommandBufferCursorUpOffset, cursorUp + (ulong)sizeDwords * sizeof(uint)))
+            sizeDwords > GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords))
         {
             return false;
         }
 
         commandAddress = cursorUp;
+        nextCursor = cursorUp + (ulong)sizeDwords * sizeof(uint);
         return true;
+    }
+
+    // The cursor store and the packet write of a reservation, as one guest-memory operation (the
+    // cursor first, as when they were two writes; SHARPEMU_PAIR_WRITE=0 makes them two again).
+    private static bool TryCommitCommandDwords(CpuContext ctx, ulong commandBufferAddress, ulong nextCursor, ulong commandAddress, ReadOnlySpan<uint> dwords)
+    {
+        Span<byte> cursor = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(cursor, nextCursor);
+        var packet = System.Runtime.InteropServices.MemoryMarshal.AsBytes(dwords);
+        var cursorAddress = commandBufferAddress + CommandBufferCursorUpOffset;
+        return ctx.Memory.TryWritePair(cursorAddress, cursor, commandAddress, packet);
     }
 
     private static bool TryEmitCommandDwords(CpuContext ctx, ulong commandBufferAddress, out ulong commandAddress, params ReadOnlySpan<uint> dwords)
     {
+        if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, (uint)dwords.Length, out commandAddress, out var nextCursor))
+        {
+            return TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, commandAddress, dwords);
+        }
+
+        // No room (or no readable buffer): the buffer's callback, a leaf's decline and the failure
+        // paths are TryAllocateCommandDwords's.
         return TryAllocateCommandDwords(ctx, commandBufferAddress, (uint)dwords.Length, out commandAddress) &&
             TryWriteCommandDwords(ctx, commandAddress, dwords);
     }

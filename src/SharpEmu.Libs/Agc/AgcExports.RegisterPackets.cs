@@ -130,7 +130,7 @@ public static partial class AgcExports
             // leading dwords one write - with a small payload, read first, in it too: each guest write
             // and cursor update is a backing admission, and this runs once per draw on GTA V's render
             // threads.
-            if (TryAllocateCommandDwordsInPlace(ctx, commandBufferAddress, 2 + packetDwords, out var markerAddress))
+            if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, 2 + packetDwords, out var markerAddress, out var nextCursor))
             {
                 commandAddress = markerAddress + 2 * sizeof(uint);
                 Span<uint> packet = stackalloc uint[4 + (int)Math.Min(valueCount, InlinePayloadDwords)];
@@ -142,7 +142,7 @@ public static partial class AgcExports
                     (valuesAddress >= markerAddress + (2 + (ulong)packetDwords) * sizeof(uint) ||
                      valuesAddress + (ulong)valueCount * sizeof(uint) <= markerAddress) &&
                     ctx.Memory.TryRead(valuesAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(packet[4..]));
-                if (!TryWriteCommandDwords(ctx, markerAddress, payloadWritten ? packet : packet[..4]))
+                if (!TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, markerAddress, payloadWritten ? packet : packet[..4]))
                 {
                     AgcRegisterPacketProfile.RecordResult(false);
                     return ReturnPointer(ctx, 0);

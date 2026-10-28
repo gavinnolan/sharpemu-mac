@@ -13,6 +13,13 @@ public interface ICpuMemory
 
     bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source);
 
+    // Two writes, first then second, as one unit when this memory can: the same bytes, in the same
+    // order and with the same write tracking as two TryWrite calls, but one guest-memory admission
+    // and one pass of the GPU write hooks. A command builder's cursor store and its packet are such
+    // a pair. False when either write failed (the first may then have landed, as with two calls).
+    bool TryWritePair(ulong firstAddress, ReadOnlySpan<byte> first, ulong secondAddress, ReadOnlySpan<byte> second) =>
+        TryWrite(firstAddress, first) && TryWrite(secondAddress, second);
+
     bool TryCompare(ulong virtualAddress, ReadOnlySpan<byte> expected) =>
         TryCompare(virtualAddress, expected, out var equal) && equal;
 
