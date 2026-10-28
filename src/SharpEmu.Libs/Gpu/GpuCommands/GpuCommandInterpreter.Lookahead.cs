@@ -25,7 +25,8 @@ public sealed partial class GpuCommandInterpreter
         Environment.GetEnvironmentVariable("SHARPEMU_GPU_PIPELINE_LOOKAHEAD") != "0";
 
     // A look-ahead stops at whichever comes first; the next dispatch that suspends past where it
-    // stopped reads on from there.
+    // stopped reads on from there. The time limit applies only after the first block, so a first
+    // scan slowed by JIT or a busy host still reads the packets right after the waiting dispatch.
     private const uint LookaheadMaxDwords = 1u << 20;
     private const int LookaheadMaxDispatches = 2048;
     private const int LookaheadMaxDepth = 4;
@@ -187,7 +188,7 @@ public sealed partial class GpuCommandInterpreter
             }
 
             if (state.Dwords >= LookaheadMaxDwords || state.Dispatches >= LookaheadMaxDispatches ||
-                Stopwatch.GetTimestamp() > state.Deadline)
+                (state.Dwords >= LookaheadBlockDwords && Stopwatch.GetTimestamp() > state.Deadline))
             {
                 state.Stopped = true;
                 return address == startAddress ? offset : uint.MaxValue;
