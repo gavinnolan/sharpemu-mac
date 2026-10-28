@@ -53,7 +53,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // a completion that reaches an entry point from another thread leaves the draws to it.
     private void DrainDraws([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
-        if (_translation is { HasPendingDraws: true } translation && _relay.IsGpuQueueThread)
+        if (_translation is { HasPendingDraws: true, IsDraining: false } translation && _relay.IsGpuQueueThread)
         {
             _drains++;
             if (MetalV2Diagnostics.CountDrainCallers)

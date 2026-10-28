@@ -17,6 +17,16 @@ internal sealed partial class MetalRenderHost
     internal bool CoalesceOcclusionDumps { get; set; } =
         SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_COALESCE_OCCLUSION_DUMPS");
 
+    // SHARPEMU_METAL_V2_DEFER_OCCLUSION_DUMPS=0 drains the deferred draws at every dump again.
+    internal bool DeferOcclusionDumps { get; set; } =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_DEFER_OCCLUSION_DUMPS");
+
+    private static ulong DumpRangeBytes(uint instanceMask, uint strideBytes)
+    {
+        var mask = instanceMask & 0xFF_FFFFu;
+        return mask == 0 ? 0 : checked((ulong)System.Numerics.BitOperations.Log2(mask) * strideBytes + sizeof(ulong));
+    }
+
     // A dump covers at most 24 blocks of at most 32 bytes; past this the blocks are not one result buffer.
     private const ulong MaxCoalescedDumpBytes = 1024;
 
@@ -215,12 +225,28 @@ internal sealed partial class MetalRenderHost
         if (OnCommandThread)
         {
             // No CPU result is needed here. Publish the pending guest range before
-            // returning so later producer reads cannot pass the queued GPU dump.
-            var mask = instanceMask & 0xFF_FFFFu;
-            var size = mask == 0 ? 0 : checked((ulong)System.Numerics.BitOperations.Log2(mask) * strideBytes + sizeof(ulong));
-            _commandThread!.PostRange(() => DumpOcclusionCounter(queueId, address, instanceMask, strideBytes), address, size);
+            // returning so later producer reads cannot pass the queued GPU dump. The worker
+            // records it where it stands (deferring is for the worker's own stream): a producer
+            // read of the range is held only until this item has run.
+            _commandThread!.PostRange(() => DumpOcclusionCounter(queueId, address, instanceMask, strideBytes, defer: false), address,
+                DumpRangeBytes(instanceMask, strideBytes));
             return true;
         }
+
+        return DumpOcclusionCounter(queueId, address, instanceMask, strideBytes, defer: true);
+    }
+
+    private bool DumpOcclusionCounter(int queueId, ulong address, uint instanceMask, uint strideBytes, bool defer)
+    {
+        // A dump only orders GPU work, so behind deferred draws it joins their queue rather than draining
+        // them: the program resolver keeps its lead over the draws and they record together at the next drain.
+        if (defer && DeferOcclusionDumps && TryDeferBehindDraws(
+                () => DumpOcclusionCounter(queueId, address, instanceMask, strideBytes, defer: false), address,
+                DumpRangeBytes(instanceMask, strideBytes), always: true))
+        {
+            return true;
+        }
+
         DrainDraws();
         ValidateOcclusionQueue(queueId);
         InitializeNativeOcclusion();

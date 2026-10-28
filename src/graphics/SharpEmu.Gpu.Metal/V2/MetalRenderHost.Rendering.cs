@@ -2455,9 +2455,9 @@ internal sealed partial class MetalRenderHost
     // A barrier or release only orders GPU commands, so behind deferred draws it joins their queue
     // instead of draining them: a drain at every barrier left the program resolver, which only
     // starts a draw's programs once it is submitted, no lead over the draws the drain runs.
-    private bool TryDeferBehindDraws(Action ordered, ulong writeAddress = 0, ulong writeSize = 0)
+    private bool TryDeferBehindDraws(Action ordered, ulong writeAddress = 0, ulong writeSize = 0, bool always = false)
     {
-        if (!MetalV2Diagnostics.DeferBarriers || _translation is not { HasPendingDraws: true, IsDraining: false } translation ||
+        if (!(always || MetalV2Diagnostics.DeferBarriers) || _translation is not { HasPendingDraws: true, IsDraining: false } translation ||
             !_relay.IsGpuQueueThread)
         {
             return false;
