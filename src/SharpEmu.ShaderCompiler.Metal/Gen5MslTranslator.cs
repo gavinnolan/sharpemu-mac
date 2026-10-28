@@ -32,7 +32,10 @@ public static partial class Gen5MslTranslator
     /// Every helper block a module with <paramref name="preludes"/> carries, in emission
     /// order, without the per-request resource struct (no prelude refers to it).
     /// </summary>
-    internal static string RenderModulePreludes(Gen5MslPreludes preludes)
+    internal static string RenderModulePreludes(Gen5MslPreludes preludes) =>
+        RenderModulePreludes(preludes, Gen5MslCodegenOptions.FromEnvironment);
+
+    internal static string RenderModulePreludes(Gen5MslPreludes preludes, Gen5MslCodegenOptions options)
     {
         var source = new StringBuilder();
         source.AppendLine("#include <metal_stdlib>");
@@ -40,7 +43,7 @@ public static partial class Gen5MslTranslator
         source.AppendLine("using namespace metal;");
         source.AppendLine();
         CompilationContext.AppendLeadingPreludes(source, preludes);
-        CompilationContext.AppendTrailingPreludes(source, preludes);
+        CompilationContext.AppendTrailingPreludes(source, preludes, options.BranchlessDwordLoads);
         return source.ToString();
     }
 
@@ -776,7 +779,7 @@ public static partial class Gen5MslTranslator
             // A request binds one argument buffer per stage; its lengths replace the uniforms.
             EmitResourceStruct(source);
 
-            AppendTrailingPreludes(source, preludes);
+            AppendTrailingPreludes(source, preludes, _options.BranchlessDwordLoads);
             if (UsesMipStatisticsConstant)
             {
                 source.AppendLine(
@@ -1344,15 +1347,21 @@ public static partial class Gen5MslTranslator
 
         // The helpers after the resource struct. A pair lock reads through the coherent
         // helpers, so it always carries coherent_load_prelude.
-        internal static void AppendTrailingPreludes(StringBuilder source, Gen5MslPreludes preludes)
+        internal static void AppendTrailingPreludes(StringBuilder source, Gen5MslPreludes preludes, bool branchlessDwordLoads)
         {
+            var dwordLoads = branchlessDwordLoads ? "dword_loads_branchless" : "dword_loads_checked";
             source.Append(MslTemplates.Render(
                 "prelude",
                 ("ballot_return", (preludes & Gen5MslPreludes.RealWaveLanes) != 0
                     ? "(uint)(uint64_t)simd_ballot(value)"
-                    : "value ? 1u : 0u")));
+                    : "value ? 1u : 0u"),
+                ("dword_loads_device", MslTemplates.Render(dwordLoads, ("space", "device")))));
             if ((preludes & Gen5MslPreludes.ScalarConstants) != 0)
-                source.Append(MslTemplates.Render("scalar_constant_prelude"));
+            {
+                source.Append(MslTemplates.Render(
+                    "scalar_constant_prelude",
+                    ("dword_loads_constant", MslTemplates.Render(dwordLoads, ("space", "constant")))));
+            }
 
             if ((preludes & Gen5MslPreludes.BufferOffset) != 0)
             {

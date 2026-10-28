@@ -187,6 +187,14 @@ public sealed record Gen5MslCodegenOptions(
     /// in mesh shaders without device-memory writes. SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS=0 disables this.</summary>
     public bool ScalarConstantBuffers { get; init; } = true;
 
+    /// <summary>Read a raw buffer dword (sharpemu_load_dword and the runs sharpemu_load_dwords makes)
+    /// at an index clamped into the binding and select zero for one past the end, instead of
+    /// branching around the load. Every dword is what the checked form reads; only the branch
+    /// per load is gone, which lets the compiler issue a shader's constant-buffer loads together
+    /// (about a quarter of the time of the branching form on uniform four-dword loads in a
+    /// device micro-benchmark). SHARPEMU_MSL_BRANCHLESS_LOADS=0 keeps the branch.</summary>
+    public bool BranchlessDwordLoads { get; init; } = true;
+
     /// <summary>Experimental compact threadgroup bank for frequently addressed LDS
     /// regions, retaining device storage for other addresses. SHARPEMU_MSL_MESH_HOT_LDS=1.</summary>
     public bool MeshHotLds { get; init; }
@@ -226,6 +234,7 @@ public sealed record Gen5MslCodegenOptions(
         MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
         ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") != "0",
         MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",
+        BranchlessDwordLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_BRANCHLESS_LOADS") != "0",
         StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",
         MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
