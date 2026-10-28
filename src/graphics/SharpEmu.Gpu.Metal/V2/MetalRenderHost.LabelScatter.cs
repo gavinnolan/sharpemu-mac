@@ -22,7 +22,10 @@ internal sealed partial class MetalRenderHost
 
     // Fewer copies than this cost less as blits than a compute encoder does.
     private const int LabelScatterMinCopies = 16;
-    private const int LabelScatterMaxBuffers = 32;
+    // A command buffer's held copies read the result buffer of every render pass that dumped occlusion counts
+    // into them (one per pass, up to NativeOcclusionBatchBudget of them), so a batch spans far more than a few
+    // buffers; declined, every copy of it is a blit of its own.
+    private const int LabelScatterMaxBuffers = 512;
     private const int LabelScatterThreads = 64;
 
     private const string LabelScatterSource = """
@@ -63,11 +66,12 @@ internal sealed partial class MetalRenderHost
 
         // The buffers copied from come first, then those copied into; none may be both.
         var sources = 0;
+        var sourceHint = 0;
         foreach (ref readonly var copy in copies)
         {
             if (copy.Bytes <= 0 || (copy.Bytes & 3) != 0 || ((copy.StagingOffset | copy.DestinationOffset) & 3) != 0 ||
                 copy.StagingBuffer == 0 || copy.DestinationBuffer == 0 ||
-                !NoteLabelScatterBuffer(copy.StagingBuffer, 0, ref sources))
+                !NoteLabelScatterBuffer(copy.StagingBuffer, 0, ref sources, ref sourceHint))
             {
                 _labelScatterDeclined++;
                 return false;
@@ -75,10 +79,11 @@ internal sealed partial class MetalRenderHost
         }
 
         var buffers = sources;
+        var destinationHint = sources;
         foreach (ref readonly var copy in copies)
         {
-            if (Array.IndexOf(_labelScatterBuffers, copy.DestinationBuffer, 0, sources) >= 0 ||
-                !NoteLabelScatterBuffer(copy.DestinationBuffer, sources, ref buffers))
+            if (FindLabelScatterBuffer(copy.DestinationBuffer, 0, sources, ref sourceHint) >= 0 ||
+                !NoteLabelScatterBuffer(copy.DestinationBuffer, sources, ref buffers, ref destinationHint))
             {
                 _labelScatterDeclined++;
                 return false;
@@ -98,10 +103,12 @@ internal sealed partial class MetalRenderHost
         // One entry per destination word, holding the source of the last copy into it.
         _labelScatterWords.Clear();
         var count = 0;
+        sourceHint = 0;
+        destinationHint = sources;
         foreach (ref readonly var copy in copies)
         {
-            var source = _labelScatterAddresses[Array.IndexOf(_labelScatterBuffers, copy.StagingBuffer, 0, sources)] + copy.StagingOffset;
-            var destination = _labelScatterAddresses[Array.IndexOf(_labelScatterBuffers, copy.DestinationBuffer, sources, buffers - sources)] +
+            var source = _labelScatterAddresses[FindLabelScatterBuffer(copy.StagingBuffer, 0, sources, ref sourceHint)] + copy.StagingOffset;
+            var destination = _labelScatterAddresses[FindLabelScatterBuffer(copy.DestinationBuffer, sources, buffers - sources, ref destinationHint)] +
                 copy.DestinationOffset;
             for (var offset = 0UL; offset < (ulong)copy.Bytes; offset += sizeof(uint))
             {
@@ -164,9 +171,27 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
-    private bool NoteLabelScatterBuffer(nint buffer, int first, ref int count)
+    // Consecutive copies mostly share their buffers (an occlusion dump's blocks, a pass's dumps), so the
+    // buffer found last answers first.
+    private int FindLabelScatterBuffer(nint buffer, int first, int count, ref int hint)
     {
-        if (Array.IndexOf(_labelScatterBuffers, buffer, first, count - first) >= 0)
+        if ((uint)(hint - first) < (uint)count && _labelScatterBuffers[hint] == buffer)
+        {
+            return hint;
+        }
+
+        var index = Array.IndexOf(_labelScatterBuffers, buffer, first, count);
+        if (index >= 0)
+        {
+            hint = index;
+        }
+
+        return index;
+    }
+
+    private bool NoteLabelScatterBuffer(nint buffer, int first, ref int count, ref int hint)
+    {
+        if (FindLabelScatterBuffer(buffer, first, count - first, ref hint) >= 0)
         {
             return true;
         }

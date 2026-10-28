@@ -281,6 +281,38 @@ public sealed class NativeOcclusionSceneTests(ITestOutputHelper output) : SceneT
             Assert.Equal(Ready | ((ulong)Size * Size * (i < 4096 ? 1UL : 2UL)), words[i * 32]);
     }
 
+    // Every pass dumps into a result buffer of its own, so one command buffer's held snapshots read from as many
+    // buffers as it has passes: past the scatter's old limit of 32 they still land through one dispatch.
+    [Fact]
+    public void DumpsFromMoreThanThirtyTwoPassesLandThroughOneScatter()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        rig.Host.NativeOcclusionEnabled = true;
+        const int passes = 48;
+        var targets = new[] { rig.ColorTarget(Size, Size), rig.ColorTarget(Size, Size) };
+        var results = rig.Memory.Allocate(passes * 256, 64);
+        var before = rig.Host.LabelScatterTotals;
+        var pm4 = new ScenePm4();
+        for (var i = 0; i < passes; i++)
+        {
+            var state = new SceneState(Size, Size).ColorTarget(0, targets[i % 2], Size, Size);
+            state.Context[Cx.DbCountControl] = 1u << 8;
+            rig.DrawMesh(pm4, state, SceneDraws.Quad(0.1f, 1, 0, 0));
+            Dump(pm4, results + (ulong)i * 256);
+        }
+        rig.Submit(pm4);
+        var words = rig.Read<ulong>(results, passes * 32);
+        for (var i = 0; i < passes; i++)
+        {
+            Assert.Equal(Ready | ((ulong)Size * Size * (ulong)(i + 1)), words[i * 32]);
+            for (var block = 1; block < 16; block++) Assert.Equal(Ready, words[i * 32 + block * 2]);
+        }
+        var after = rig.Host.LabelScatterTotals;
+        Assert.True(after.Batches > before.Batches, $"The dumps did not land through the scatter: {before} -> {after}.");
+        Assert.Equal(before.Declined, after.Declined);
+    }
+
     [Fact]
     public void BatchBudgetWaitsForCompletedStorageWithoutLosingDrawsOrDumps()
     {
