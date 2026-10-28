@@ -1352,6 +1352,26 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_PAGE_FILTER") != "0";
     private readonly MetalPageRangeFilter _deferredGuestPages = new();
     private readonly MetalPageRangeFilter _deferredBufferPages = new();
+
+    // A guest range a scan found no held copy in, with how many copies it covered. Copies are only
+    // appended until ClearHeldLabelCopies and never change, so the same range asked again can only
+    // be touched by copies held since: its scan starts there. Draws bind the same storage ranges
+    // over and over while the held copies grow to the commit (Silent Hill: ~17000 held, a scan of
+    // thousands of them for one binding in fifteen). SHARPEMU_METAL_V2_LABEL_SCAN_MEMO=0 scans
+    // every held copy each time again.
+    private static readonly bool LabelScanMemoEnabled =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_LABEL_SCAN_MEMO");
+    private const int LabelScanMemoBits = 10;
+    private struct LabelScanMemo
+    {
+        public ulong Address;
+        public ulong Size;
+        public uint Epoch;
+        public int Scanned;
+    }
+
+    private readonly LabelScanMemo[] _labelScanMemo = new LabelScanMemo[1 << LabelScanMemoBits];
+    private uint _labelScanEpoch = 1;
     private long _labelLookupQueries, _labelHullRejects, _labelPageRejects, _labelExactScans, _labelEntriesInspected;
     private int _labelMaxHeldCopies;
 
@@ -1407,6 +1427,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private void ClearHeldLabelCopies()
     {
         _deferredLabelCopies.Clear();
+        _labelScanEpoch++;
         if (DeferredLabelFilterEnabled)
         {
             _deferredGuestPages.Clear();
@@ -1606,25 +1627,57 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelHullRejects++;
             return false;
         }
+
+        var held = _deferredLabelCopies.Count;
+        ref var memo = ref _labelScanMemo[
+            LabelScanMemoEnabled
+                ? (int)(((address ^ (size * 0x9E3779B97F4A7C15UL)) * 0xFF51AFD7ED558CCDUL) >> (64 - LabelScanMemoBits))
+                : 0];
+        var from = 0;
+        if (LabelScanMemoEnabled && memo.Epoch == _labelScanEpoch && memo.Address == address && memo.Size == size)
+        {
+            from = memo.Scanned;
+            if (from == held)
+            {
+                return false;
+            }
+        }
+
         if (DeferredLabelFilterEnabled && !_deferredGuestPages.MayOverlap(address, size))
         {
             if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelPageRejects++;
+            RememberLabelScan(ref memo, address, size, held);
             return false;
         }
 
         var copies = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies);
-        for (var index = 0; index < copies.Length; index++)
+        for (var index = from; index < copies.Length; index++)
         {
             ref readonly var copy = ref copies[index];
             if (copy.GuestAddress < address + size && address < copy.GuestAddress + (ulong)copy.Bytes)
             {
-                NoteLabelScan(index + 1);
+                NoteLabelScan(index + 1 - from);
                 return true;
             }
         }
 
-        NoteLabelScan(copies.Length);
+        NoteLabelScan(copies.Length - from);
+        RememberLabelScan(ref memo, address, size, held);
         return false;
+    }
+
+    // Only an answer of "no copy touches it" is kept: a touch lands the copies, which clears them.
+    private void RememberLabelScan(ref LabelScanMemo memo, ulong address, ulong size, int scanned)
+    {
+        if (!LabelScanMemoEnabled)
+        {
+            return;
+        }
+
+        memo.Address = address;
+        memo.Size = size;
+        memo.Epoch = _labelScanEpoch;
+        memo.Scanned = scanned;
     }
 
     // Buffer identity is part of the page key: aliases with different guest addresses

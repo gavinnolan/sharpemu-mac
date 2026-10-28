@@ -84,6 +84,54 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
         Assert.Equal(0x332211UL, rig.Backing.Read64(LaterLabel + 0x400) & 0xFF_FFFF);
     }
 
+    // A binding that no held copy touched is not scanned again until another copy is held, and
+    // the copy held afterwards is found: the second answer starts where the first left off.
+    [Fact]
+    public void AnUntouchedRangeIsFoundTouchedOnceACopyOverItIsHeld()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+
+        _ = host.EnsureComputeEncoder();
+        for (var index = 0; index < 64; index++)
+        {
+            host.RecordCommandProcessorWrite(LaterLabel + (ulong)index * 16, BitConverter.GetBytes(0x3000UL + (ulong)index), "WRITE_DATA");
+        }
+
+        // Between two held qwords, and inside the span and the pages the held copies cover.
+        var between = LaterLabel + 3 * 16 + 8;
+        host.OrderAfterDeferredCopies(between, 8);
+        host.OrderAfterDeferredCopies(between, 8);
+        Assert.Equal(64, host.DeferredLabelCopyCount);
+
+        host.RecordCommandProcessorWrite(LaterLabel + 70 * 16, BitConverter.GetBytes(0x4000UL), "WRITE_DATA");
+        host.OrderAfterDeferredCopies(between, 8);
+        Assert.Equal(65, host.DeferredLabelCopyCount);
+
+        host.RecordCommandProcessorWrite(between, BitConverter.GetBytes(0x5000UL), "WRITE_DATA");
+        host.OrderAfterDeferredCopies(between, 8);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        // The copies landed: a new batch starts from nothing, and the old answer is not reused.
+        _ = host.EnsureComputeEncoder();
+        for (var index = 0; index < 8; index++)
+        {
+            host.RecordCommandProcessorWrite(LaterLabel + (ulong)index * 32, BitConverter.GetBytes(0x6000UL + (ulong)index), "WRITE_DATA");
+        }
+
+        host.OrderAfterDeferredCopies(between, 8);
+        Assert.Equal(8, host.DeferredLabelCopyCount);
+        host.RecordCommandProcessorWrite(between, BitConverter.GetBytes(0x7000UL), "WRITE_DATA");
+        host.OrderAfterDeferredCopies(between, 8);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x7000UL, rig.Backing.Read64(between));
+    }
+
     // SHARPEMU_LABEL_SCATTER_BENCH_OUTPUT=<path>: the worker's cost of landing a held batch, and the
     // GPU's time to run it, through blits and through the scatter, alternating per round.
     [Fact]
@@ -130,6 +178,54 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
         host.LabelScatterEnabled = true;
         File.WriteAllText(path, JsonSerializer.Serialize(new {
             architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(), rounds },
+            new JsonSerializerOptions { WriteIndented = true }));
+    }
+    // SHARPEMU_LABEL_SCAN_BENCH_OUTPUT=<path>: nanoseconds per binding lookup against held copies, for
+    // ranges that sit between them (so no filter rejects them and each lookup scans), with a copy
+    // held now and then. Run once per setting of SHARPEMU_METAL_V2_LABEL_SCAN_MEMO.
+    [Fact]
+    public void MeasureLabelScanWhenRequested()
+    {
+        var path = Environment.GetEnvironmentVariable("SHARPEMU_LABEL_SCAN_BENCH_OUTPUT");
+        if (path is null || !RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        var rounds = new List<object>();
+        var value = new byte[8];
+        const ulong benchBase = GuestBase + 0x10000;
+        foreach (var held in new[] { 256, 2048 })
+        {
+            for (var round = 0; round < 14; round++)
+            {
+                _ = host.EnsureComputeEncoder();
+                for (var index = 0; index < held; index++)
+                {
+                    host.RecordCommandProcessorWrite(benchBase + (ulong)index * 16, value, "WRITE_DATA");
+                }
+
+                const int queries = 200_000;
+                var started = Stopwatch.GetTimestamp();
+                for (var query = 0; query < queries; query++)
+                {
+                    // Sixty-four distinct 8-byte gaps between held qwords, asked in turn.
+                    host.OrderAfterDeferredCopies(benchBase + (ulong)(query % 64) * 16 * (ulong)(held / 64) + 8, 8);
+                    if (query % 4096 == 4095)
+                    {
+                        host.RecordCommandProcessorWrite(benchBase + 0x8000 + (ulong)(query / 4096) * 16, value, "WRITE_DATA");
+                    }
+                }
+
+                var elapsed = Stopwatch.GetTimestamp() - started;
+                Assert.True(host.DeferredLabelCopyCount >= held);
+                host.OrderAfterDeferredCopies(0, ulong.MaxValue);
+                if (round < 8) continue;
+                rounds.Add(new { held, round, nsPerQuery = elapsed * 1e9 / Stopwatch.Frequency / queries });
+            }
+        }
+
+        File.WriteAllText(path, JsonSerializer.Serialize(new {
+            architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+            scanMemo = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_SCAN_MEMO") != "0", rounds },
             new JsonSerializerOptions { WriteIndented = true }));
     }
 }
