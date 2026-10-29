@@ -181,6 +181,11 @@ internal interface IMetalImageTransfer
         in ImageDescription colorDescription, nint colorTexture,
         in ImageDescription depthDescription, nint depthTexture) => false;
 
+    // The other way: a depth texture's stencil plane into the 8-bit image over its bytes.
+    bool TryEncodeColorFromStencil(IMetalSubmissionContext context,
+        in ImageDescription depthDescription, nint depthTexture,
+        in ImageDescription colorDescription, nint colorTexture) => false;
+
     // Copies every slice and level of one texture into another of the same shape, on the
     // device. The two may differ in usage only.
     void EncodeWholeTextureCopy(IMetalSubmissionContext context, nint sourceTexture, nint targetTexture);

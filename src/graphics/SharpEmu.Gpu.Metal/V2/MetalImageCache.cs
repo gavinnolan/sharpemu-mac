@@ -823,12 +823,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             NoteForeignStencilShare(depth, image);
             var (start, end) = image.OverlapWithin(depth.Description.Stencil.Address, depth.Description.Stencil.Size);
-            if (depth.IsGpuModified)
+            var copiedOnDevice = false;
+            if (depth.IsGpuModified && !depth.StencilPlaneStale)
             {
-                // Both planes go out together: only the depth image's texture holds them.
-                WriteBackToGuest(depth, MetalWritebackCause.ImageOverlap);
-                MarkAliasRunDirty(image, start, end);
-                _stencilPlanePublishes++;
+                // Only the depth image's texture holds the stencil: copied straight into this
+                // texture when the device can, and otherwise both planes go out together.
+                copiedOnDevice = TryCopyStencilToColorOnDevice(depth, image);
+                if (!copiedOnDevice)
+                {
+                    WriteBackToGuest(depth, MetalWritebackCause.ImageOverlap);
+                    MarkAliasRunDirty(image, start, end);
+                    _stencilPlanePublishes++;
+                }
             }
 
             if (takesGpuOwnership)
@@ -839,7 +845,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 // planes from guest memory instead round-trips the depth plane, and a reload
                 // that does not give back exactly what was written left Black Myth: Wukong's
                 // scene depth as garbage or zeros, every pass that tests or samples it with it.
-                depth.ClearGpuModified();
+                // A depth image that handed its stencil over on the device, or had already
+                // given it up, still owes guest memory its depth plane and keeps it.
+                if (!copiedOnDevice && !depth.StencilPlaneStale)
+                {
+                    depth.ClearGpuModified();
+                }
+
                 if (StencilDeviceHandOver)
                 {
                     depth.StencilPlaneStale = true;
@@ -893,7 +905,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (image.StencilPlaneStale)
         {
             // The image that took the stencil over is gone (its bytes were published when it
-            // was released): only guest memory has them now.
+            // was released): only guest memory has them now. A depth plane still owed goes
+            // out first (the writeback leaves the stale stencil out), so the reload keeps it.
+            if (image.IsGpuModified)
+            {
+                WriteBackToGuest(image, MetalWritebackCause.ImageOverlap);
+            }
+
             image.StencilPlaneStale = false;
             image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
         }
@@ -939,6 +957,57 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         _stencilDeviceHandOvers++;
         return true;
     }
+
+    // SHARPEMU_METAL_V2_STENCIL_TO_COLOR_DEVICE=0 publishes a depth image's GPU-written
+    // stencil to the 8-bit image over it through guest memory again (both planes written
+    // back, the 8-bit image reloaded).
+    private static readonly bool StencilToColorOnDevice =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STENCIL_TO_COLOR_DEVICE") != "0";
+
+    private long _stencilColorCopies;
+
+    // The stencil plane a GPU-modified depth image's texture holds, copied into the 8-bit
+    // image over its bytes. The depth image stays GPU-modified and owes guest memory both
+    // planes as before; the 8-bit image owes it nothing. Caller holds the lock.
+    private bool TryCopyStencilToColorOnDevice(MetalCachedImage depth, MetalCachedImage image)
+    {
+        if (!StencilToColorOnDevice || !StencilDeviceHandOver || depth.Texture == 0 || image.Texture == 0 ||
+            depth.IsCpuDirty || image.IsGpuModified ||
+            depth.IsWindowLinearView || image.IsWindowLinearView ||
+            depth.FirstLevel != 0 || image.FirstLevel != 0 ||
+            image.Description.TileMode != depth.Description.TileMode ||
+            image.Description.Data.Address != depth.Description.Stencil.Address ||
+            image.Description.Data.Size > depth.Description.Stencil.Size)
+        {
+            return false;
+        }
+
+        if (image.StillHoldsStencilCopyOf(depth))
+        {
+            return true;
+        }
+
+        EnsureSparseBacked(image);
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback, depth.Texture, image.Texture);
+        if (!_transfer.TryEncodeColorFromStencil(
+                context, in depth.Description, depth.Texture, in image.Description, image.Texture))
+        {
+            return false;
+        }
+
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded(ProfileLabel("stencil-to-color", in image.Description));
+        }
+        // The whole image is the plane's bytes, and its texture now holds them.
+        image.RefreshComplete();
+        image.NoteStencilCopyOf(depth);
+        _stencilColorCopies++;
+        return true;
+    }
+
+    /// <summary>Stencil planes copied into the 8-bit image over them on the device.</summary>
+    public long TakeStencilColorCopies() => Interlocked.Exchange(ref _stencilColorCopies, 0);
 
     private long _stencilPlanePublishes;
 
@@ -2769,7 +2838,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         ulong written;
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
-            var stencil = description.HasStencil
+            // A stencil plane another image took over is that image's to publish.
+            var stencil = description.HasStencil && !image.StencilPlaneStale
                 ? _guestMemory.ResolveWritable(description.Stencil.Address, description.Stencil.Size)
                 : default;
             var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
@@ -2839,7 +2909,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         var batch = (uint)Math.Clamp(TransferPieceBytes / layerBytes, 1, layers);
-        var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
+        var stencilLayerBytes = description.HasStencil && !image.StencilPlaneStale && layers != 0 ? description.Stencil.Size / layers : 0;
         var written = 0UL;
         for (uint first = 0; first < layers; first += batch)
         {
@@ -2891,7 +2961,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // run's stencil bytes are its layers' stencil bytes.
         var layers = description.TransferLayers;
         var layerBytes = layers != 0 ? description.Data.Size / layers : 0;
-        var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
+        var stencilLayerBytes = description.HasStencil && !image.StencilPlaneStale && layers != 0 ? description.Stencil.Size / layers : 0;
         var written = 0UL;
         StringBuilder? trace = null;
         foreach (var run in runs)

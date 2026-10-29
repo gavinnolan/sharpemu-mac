@@ -249,7 +249,8 @@ internal sealed class MetalCachedImage : IDisposable
     /// <summary>
     /// Set when an image that writes this depth image's stencil bytes takes them over: the
     /// next time this image binds, its stencil plane is copied from that image on the
-    /// device, and the depth plane its texture holds stays as it is.
+    /// device, and the depth plane its texture holds stays as it is. The image may still be
+    /// GPU-modified for its depth plane; its writeback then leaves the stencil bytes alone.
     /// </summary>
     public bool StencilPlaneStale { get; set; }
 
@@ -268,6 +269,31 @@ internal sealed class MetalCachedImage : IDisposable
     public bool HoldsStencilFrom(MetalCachedImage source) =>
         Texture != 0 && source.Texture != 0 &&
         _stencilSourceTexture == source.Texture && _stencilSourceVersion == source.ContentVersion;
+
+    // The other direction, on the 8-bit image over a depth image's stencil bytes: the depth
+    // texture its last device copy came from, that image's version then, and this image's
+    // own version once the copy landed.
+    private nint _stencilCopySourceTexture;
+    private long _stencilCopySourceVersion;
+    private long _stencilCopyOwnVersion;
+
+    /// <summary>Records that this texture now holds a device copy of the depth image's stencil plane as it is.</summary>
+    public void NoteStencilCopyOf(MetalCachedImage depth)
+    {
+        _stencilCopySourceTexture = depth.Texture;
+        _stencilCopySourceVersion = depth.ContentVersion;
+        _stencilCopyOwnVersion = ContentVersion;
+    }
+
+    /// <summary>
+    /// True while neither this texture nor the depth image has changed since the last
+    /// stencil copy out of it: a copy now would write the same texels.
+    /// </summary>
+    public bool StillHoldsStencilCopyOf(MetalCachedImage depth) =>
+        !_cpuDirty && Texture != 0 && depth.Texture != 0 &&
+        _stencilCopySourceTexture == depth.Texture &&
+        _stencilCopySourceVersion == depth.ContentVersion &&
+        _stencilCopyOwnVersion == ContentVersion;
 
     public ImageDescription Description;
 

@@ -49,8 +49,9 @@ public sealed unsafe partial class MetalDccMaterializationTests
     }
 
     // A pass writes the stencil, then a shader samples the plane: the depth target owns
-    // the only copy, so it is written back and the R8 image reloads from guest memory.
-    // Sampled again with nothing written in between, nothing moves.
+    // the only copy, so its stencil plane is copied into the R8 texture on the device and
+    // the depth target stays GPU-modified, owing guest memory both planes. Sampled again
+    // with nothing written in between, nothing moves.
     [Fact]
     public void AStencilPlaneSampledAsR8SeesWhatTheDepthTargetWrote()
     {
@@ -66,21 +67,69 @@ public sealed unsafe partial class MetalDccMaterializationTests
         var plane = rig.Cache.FindImage(ref planeRequest);
         Assert.NotEqual(depth, plane);
         rig.Cache.AcquireTextureView(plane, in planeRequest);
-        Assert.Equal(1, rig.Cache.TakeStencilPlanePublishes());
-        Assert.False(rig.Cache.GetImage(depth).IsGpuModified);
+        Assert.Equal(0, rig.Cache.TakeStencilPlanePublishes());
+        Assert.Equal(1, rig.Cache.TakeStencilColorCopies());
+        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
         Assert.False(rig.Cache.GetImage(plane).IsCpuDirty);
+        Assert.False(rig.Cache.GetImage(plane).IsGpuModified);
 
         rig.Cache.AcquireTextureView(plane, in planeRequest);
         Assert.Equal(0, rig.Cache.TakeStencilPlanePublishes());
+        Assert.Equal(0, rig.Cache.TakeStencilColorCopies());
 
         // The next frame's stencil writes owe the R8 image another copy.
         rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
         rig.Cache.AcquireTextureView(plane, in planeRequest);
-        Assert.Equal(1, rig.Cache.TakeStencilPlanePublishes());
+        Assert.Equal(1, rig.Cache.TakeStencilColorCopies());
+        Assert.Equal(0, rig.Cache.TakeStencilPlanePublishes());
         rig.Harness.Submit();
     }
 
-    // A shader that writes the plane through the R8 image takes it from the depth target.
+    // What the copies carry: the stencil the depth target loaded reaches the R8 texture, and
+    // what a shader then stores through the R8 image is what guest memory ends up with. The
+    // depth target still owes its depth plane then, and its writeback must leave the stencil
+    // bytes the R8 image took over alone.
+    [Fact]
+    public void AStencilPlaneCopiedToR8OnTheDeviceKeepsItsTexelsBothWays()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var depthRequest = DepthAliasRequest(ImageRole.DepthTarget, stencil: true);
+        var stencilSize = (int)depthRequest.Description.Stencil.Size;
+        Assert.True(rig.Backing.TryWriteBacking(StencilPlaneAddress, Enumerable.Repeat((byte)0x11, stencilSize).ToArray()));
+        var depth = rig.Cache.FindImage(ref depthRequest);
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        // Guest memory forgets the stencil: only the depth texture has it now.
+        Assert.True(rig.Backing.TryWriteBacking(StencilPlaneAddress, new byte[stencilSize]));
+
+        var planeRequest = StencilPlaneRequest(ImageRole.Texture);
+        var plane = rig.Cache.FindImage(ref planeRequest);
+        rig.Cache.AcquireTextureView(plane, in planeRequest);
+        Assert.Equal(1, rig.Cache.TakeStencilColorCopies());
+        var sampled = ReadPlane(rig.Harness, planeRequest.Description, rig.Cache.GetImage(plane).Texture);
+        Assert.All(sampled, texel => Assert.Equal(0x11, texel));
+
+        var storageRequest = StencilPlaneRequest(ImageRole.StorageImage);
+        Assert.Equal(plane, rig.Cache.FindImage(ref storageRequest));
+        rig.Cache.AcquireTextureView(plane, in storageRequest);
+        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
+        Assert.True(rig.Cache.GetImage(depth).StencilPlaneStale);
+        var texels = (int)(AliasWidth * AliasHeight);
+        FillPlane(rig.Harness, storageRequest.Description, rig.Cache.GetImage(plane).Texture,
+            Enumerable.Repeat((byte)0x5A, texels).ToArray());
+
+        rig.Cache.FlushAllGpuWrites();
+        rig.Harness.Submit();
+        var guest = new byte[stencilSize];
+        Assert.True(rig.Backing.TryReadBacking(StencilPlaneAddress, guest));
+        Assert.Equal(texels, guest.Count(b => b == 0x5A));
+        Assert.DoesNotContain((byte)0x11, guest);
+    }
+
+    // A shader that writes the plane through the R8 image takes it from the depth target,
+    // copied out of the depth texture on the device.
     // When the depth target binds again its stencil plane is copied from the R8 texture on
     // the device: the depth plane its texture holds is the newest and must not round-trip
     // through guest memory, which is what a reload of both planes did.
@@ -96,8 +145,9 @@ public sealed unsafe partial class MetalDccMaterializationTests
         var storageRequest = StencilPlaneRequest(ImageRole.StorageImage);
         var plane = rig.Cache.FindImage(ref storageRequest);
         rig.Cache.AcquireTextureView(plane, in storageRequest);
-        Assert.Equal(1, rig.Cache.TakeStencilPlanePublishes());
-        Assert.False(rig.Cache.GetImage(depth).IsGpuModified);
+        Assert.Equal(0, rig.Cache.TakeStencilPlanePublishes());
+        Assert.Equal(1, rig.Cache.TakeStencilColorCopies());
+        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
         Assert.False(rig.Cache.GetImage(depth).IsCpuDirty);
         Assert.True(rig.Cache.GetImage(depth).StencilPlaneStale);
         Assert.True(rig.Cache.GetImage(plane).IsGpuModified);
