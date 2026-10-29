@@ -204,8 +204,11 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// <summary>The device, OS and format directory, for tests.</summary>
     internal string Directory => _directory;
 
-    /// <summary>What the open segments may add up to; for tests.</summary>
-    internal long ResidentLimit { get; set; } = ResidentSegmentBytes;
+    /// <summary>What the open segments may add up to; for tests. SHARPEMU_METAL_V2_BINARY_ARCHIVE_RESIDENT_MB=<n> sets it.</summary>
+    internal long ResidentLimit { get; set; } =
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINARY_ARCHIVE_RESIDENT_MB"), out var residentMb) && residentMb > 0
+            ? residentMb << 20
+            : ResidentSegmentBytes;
 
     /// <summary>Segments opened for a pipeline lookup and pipelines the archiver refused, for tests.</summary>
     internal (int SegmentsOpened, int PipelinesRefused) SegmentCounters =>
