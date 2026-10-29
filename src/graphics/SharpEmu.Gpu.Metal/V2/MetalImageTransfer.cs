@@ -1697,6 +1697,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
     private static int _multisampledDepthWarned;
     private static int _mipmappedDepthWarned;
+    private static int _oversizedDepthWarned;
 
     private static TransferPlan PlanDepth(in ImageDescription description)
     {
@@ -1779,6 +1780,21 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
                 plan.StencilPlane = false;
                 return plan;
+            }
+
+            // Dynamic resolution keeps the full-size allocation and describes a smaller extent over it (Ghost of
+            // Tsushima's 1600x1800 checkerboard depth in a 1920x2160 one's bytes): one slice larger than its layout
+            // holds the layout's tiles first, and the rest is not part of this image.
+            if (layers == 1 && plan.SliceSize > surface.BlockSliceSize)
+            {
+                if (Interlocked.Exchange(ref _oversizedDepthWarned, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][WARN] A depth surface is larger than its tile layout; its layout's tiles are transferred: " +
+                        $"slice=0x{plan.SliceSize:x} layout=0x{surface.BlockSliceSize:x} extent={description.Extent.Width}x{description.Extent.Height}.");
+                }
+
+                plan.SliceSize = surface.BlockSliceSize;
             }
 
             if (plan.SliceSize != surface.BlockSliceSize)
