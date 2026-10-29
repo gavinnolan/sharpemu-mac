@@ -19,10 +19,14 @@ VSync, guest quality, or unrelated application setting is changed.
 | Unchanged-frame presentation reuse | `SHARPEMU_METAL_V2_REUSE_PRESENTED_FRAME` | Avoids repeated host presentations of an unchanged guest frame; movie updates, output changes, restoration and animated overlays invalidate the memo. Guest FPS is distinct from host Hz. |
 | Audio queue query leaf dispatch | `SHARPEMU_AUDIO_OUT2_QUEUE_LEAF` | Synthetic dispatch about 369 → 84.5 ns and 40 → 0 B/call; guest audio thread remains busy. Result/error and shutdown tests retain full-path behavior. |
 | Asynchronous command-item reuse | `SHARPEMU_COMMAND_ITEM_REUSE` | Native two-thread median 389.965 → 354.5175 ns; allocation 80.0008 → 0.026 B/item. Bounded 64-slot return ring; synchronous and failed items retain original ownership. No accepted runtime FPS gain. |
-| Queued CP writes | `SHARPEMU_METAL_V2_QUEUE_CP_WRITES` | Removes synchronous handoffs for eligible writes when command threading is explicitly enabled. Pending ranges, prefetch gates and CPU-read fallbacks preserve ordering; producer-thread device tests cover byte/qword/sparse/predication cases. |
+| Queued CP writes | `SHARPEMU_METAL_V2_QUEUE_CP_WRITES` | Removes synchronous handoffs for eligible writes on the command thread. Pending ranges, prefetch gates and CPU-read fallbacks preserve ordering; producer-thread device tests cover byte/qword/sparse/predication cases. |
 | Bounded vertex-layout history | `SHARPEMU_VERTEX_LAYOUT_HISTORY` | Exact byte-verified reuse across alternating layouts; adaptive backoff for low reuse, 512 slots and 2 MiB additional payload budget. Component timing/allocation evidence and miss costs are in [the measurements](vertex-layout-history.md); no isolated game-FPS claim. |
 | Caller resolution for short queues | `SHARPEMU_METAL_V2_CALLER_RESOLVE` | At most eight outstanding jobs; FIFO, gates, pause and ownership checks retained. Single-job ARM64 2,874 → 542 ns, x64 3,160 → 972 ns; ARM64 empty-program burst 32 costs about 27 ns/job. Same-payload room medians 16.49 enabled / 16.48 disabled, no isolated FPS gain. [Full measurements](caller-resolution.md). |
 | Cached pixel-input analysis | `SHARPEMU_PIXEL_INPUT_ANALYSIS` | Immutable decoded-program analysis with live draw controls. Warm 512-instruction sparse shader: ARM64 2,602 → 8.5 ns, x64 5,681 → 13.7 ns. Cold entries cost 32 extra bytes; smallest cold cases cost 0.9–2.3% time. [Full measurements and runtime limits](pixel-input-analysis.md). |
+| Command stream on its own thread | `SHARPEMU_METAL_V2_COMMAND_THREAD` | The GPU worker no longer reads packets or writes registers. Silent Hill's first room, same binary: 22.9 → 24.9 / 25.0 FPS, screenshots unchanged. |
+| Stencil plane copied on the device | `SHARPEMU_METAL_V2_STENCIL_TO_COLOR_DEVICE` | An R8 image over a D32S8 stencil plane is filled by blits instead of a guest-memory round trip. Writeback overlaps and alias uploads fell to zero; GPU busy 845 → 772–791 ms/s. FPS within noise; screenshots identical. Device test covers both directions. |
+| Ungated barriers and queued writes | `SHARPEMU_METAL_V2_UNGATED_BARRIERS`, `SHARPEMU_METAL_V2_UNGATED_WRITES` | Barriers, write releases, CP writes, fills, copies, occlusion dumps and end-of-pipe labels no longer hold back the program resolutions behind them. A resolution that reads a still-queued write's bytes is abandoned and redone on the worker. Resolution wait 195–275 → 55–77 ms per 2 s; two A/B pairs 25.5 / 24.9 → 26.0 / 25.9 FPS; screenshots unchanged. |
+| Polled words answered from queued fills | `SHARPEMU_METAL_V2_QUEUED_FILL_READS` | A wait on a word a queued small DMA fill writes reads the fill's word instead of running the whole queue on the worker first; end-of-pipe labels no longer make the stream wait at all. Command-thread synchronous runs 11.9k → 2.9k per 2 s. Two A/B pairs 26.45 / 22.47 → 25.94 / 26.90 FPS: within noise, as the worker stays the limit. Screenshots unchanged. |
 
 The existing negative label page filter, exact materialization comparison, dense
 register lookup, mip-layout construction and target memo fixes remain enabled.
@@ -42,13 +46,12 @@ The three promoted shader properties also default on in explicitly constructed
 | `SHARPEMU_MSL_MESH_LDS_FORWARDING` | Same-binary shadow time 34.238 → 36.422 ms; title median 7.97 → 7.47 FPS. |
 | `SHARPEMU_MSL_MESH_HOT_LDS` | Same-binary total encoder time 108.483 → 109.451 ms; no benefit established. |
 | `SHARPEMU_MSL_MESH_EXIT_JOIN`, `SHARPEMU_MSL_UNOBSERVED_ALU` | Correctness coverage exists, but isolated performance evidence is inconclusive and their combined run had an unresolved mapping failure. |
-| Command thread / command-thread QoS | Earlier command-thread overlap runs were slower than serial command-stream interpretation. Queued writes and recycling apply when command threading is requested; this change does not enable it globally. |
+| Command-thread QoS | `SHARPEMU_METAL_V2_COMMAND_THREAD_QOS=1`; no gain established. |
 | Concurrent tiling and floating-point contraction | Representative writeback regressions or numerical differences remain; the original audit did not accept them. |
 
 Background program resolution is a separate existing default: it remains enabled
-unless `SHARPEMU_METAL_V2_PARALLEL_RESOLVE=0`. It can run while command-stream
-interpretation stays on the GPU worker. The earlier table incorrectly grouped
-it with opt-in command threading; no runtime policy is changed by this correction.
+unless `SHARPEMU_METAL_V2_PARALLEL_RESOLVE=0`. It also runs when command-stream
+interpretation stays on the GPU worker (`SHARPEMU_METAL_V2_COMMAND_THREAD=0`).
 
 Diagnostics, detailed tracing, scripted-only input and visibility auditing stay
 off. Portable-buffer policy, device LDS placement threshold and asynchronous
