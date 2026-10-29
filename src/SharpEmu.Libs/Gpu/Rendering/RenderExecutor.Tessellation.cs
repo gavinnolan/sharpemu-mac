@@ -94,6 +94,8 @@ public sealed partial class RenderExecutor
         }
     }
 
+    private static readonly bool ReverseTessellationBatches = Environment.GetEnvironmentVariable("SHARPEMU_TESS_BATCHES_REVERSED") == "1";
+
     private void DrawTessellated(ulong submitId, RegisterBanks banks, in TessellatedDraw arguments, uint controlPoints, bool quad)
     {
         var patchCount = arguments.VertexCount / controlPoints;
@@ -123,14 +125,34 @@ public sealed partial class RenderExecutor
         }
 
         var batchInstances = ringPatches / patchCount;
-        for (var done = 0u; done < arguments.InstanceCount; done += batchInstances)
+        var traceStarted = TraceTessellationTimes ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        // The batches share every register, so their programs are resolved once: the lookup materializes the
+        // pixel program's resources, which for Ghost of Tsushima's particles (a 138-image table) cost ~3.5 ms a batch.
+        TessellationPrograms? programs = null;
+        var batches = (arguments.InstanceCount + batchInstances - 1) / batchInstances;
+        for (var batch = 0u; batch < batches; batch++)
         {
+            // SHARPEMU_TESS_BATCHES_REVERSED=1 (diagnostic): the last batch first, for telling a batch that draws
+            // wrong because of its place in the draw from one whose instances are wrong.
+            var done = (ReverseTessellationBatches ? batches - 1 - batch : batch) * batchInstances;
             var instances = Math.Min(batchInstances, arguments.InstanceCount - done);
             if (!DrawTessellatedInstances(submitId, banks, in arguments, controlPoints, quad, patchCount, instances,
-                    arguments.FirstInstance + done))
+                    arguments.FirstInstance + done, ref programs))
             {
                 return;
             }
+        }
+
+        if (TraceTessellationTimes && _tracedTessellationTimes++ < 400)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][TESS-TIME] instances={arguments.InstanceCount} batches={(arguments.InstanceCount + batchInstances - 1) / batchInstances} " +
+                $"total_ms={System.Diagnostics.Stopwatch.GetElapsedTime(traceStarted).TotalMilliseconds:F2} " +
+                $"targets_ms={_tessTargetsTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F2} " +
+                $"programs_ms={_tessProgramsTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F2} " +
+                $"hull_ms={_tessHullTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F2} " +
+                $"record_ms={_tessRecordTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F2}");
+            _tessTargetsTicks = _tessProgramsTicks = _tessHullTicks = _tessRecordTicks = 0;
         }
 
         if (!_tessellationAnnounced)
@@ -147,15 +169,17 @@ public sealed partial class RenderExecutor
     // One batch of a tessellated draw's instances: the hull kernel over each instance's patches, then
     // the patches of those instances through the host's tessellator. False when the draw is given up.
     private bool DrawTessellatedInstances(ulong submitId, RegisterBanks banks, in TessellatedDraw arguments,
-        uint controlPoints, bool quad, uint patchCount, uint instances, uint firstInstance)
+        uint controlPoints, bool quad, uint patchCount, uint instances, uint firstInstance, ref TessellationPrograms? resolved)
     {
         var draw = new DrawCall("DrawTessellated", RecordedOperation.DrawIndex, patchCount, instances, firstInstance);
+        var phase = System.Diagnostics.Stopwatch.GetTimestamp();
         ref var state = ref BeginDrawState();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
             _host.ResetBindings();
             return false;
         }
+        _tessTargetsTicks += NextTessellationPhase(ref phase);
 
         var inputs = GraphicsProgramInputs.Create();
         Span<ColorComponentMap> mapping = inputs.Mapping;
@@ -168,7 +192,7 @@ public sealed partial class RenderExecutor
             (ViewFormatRules.FullAspects(state.Depth.Target.Target.Format) & GpuImageAspect.DepthBit) != 0;
         var stencilAspect = state.Depth.HasTarget &&
             (ViewFormatRules.DepthAspects(state.Depth.Target.Target.Format) & GpuImageAspect.StencilBit) != 0;
-        var programs = _pipelines.GetTessellationPrograms(
+        var programs = resolved ??= _pipelines.GetTessellationPrograms(
             banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface, banks.Context, mapping,
             state.PixelActive, state.Depth.HasTarget, depthAspect, stencilAspect, controlPoints, quad);
         if (programs is not { Graphics.Available: true, Hull: { Available: true } hull })
@@ -178,11 +202,13 @@ public sealed partial class RenderExecutor
         }
 
         state.Programs = programs.Graphics;
+        _tessProgramsTicks += NextTessellationPhase(ref phase);
         if (!TryRunHull(hull, banks, in arguments, controlPoints, quad, patchCount, instances, firstInstance))
         {
             _host.ResetBindings();
             return false;
         }
+        _tessHullTicks += NextTessellationPhase(ref phase);
 
         // Every patch through the host's tessellator, with the factors TryRunHull had it make.
         var emission = new DrawEmission(false, 0, 0, firstInstance, PatchControlPoints: controlPoints);
@@ -190,7 +216,22 @@ public sealed partial class RenderExecutor
         _ = RecordDraw(submitId, banks, in draw, ref state, GpuPrimitiveTopology.TriangleList, in emission, in indexSource,
             primitiveRestart: false, setBindDebug: true, setAutoDebug: false);
         _host.ResetBindings();
+        _tessRecordTicks += NextTessellationPhase(ref phase);
         return true;
+    }
+
+    // SHARPEMU_TRACE_TESSELLATION_TIMES=1: what each tessellated draw costs the worker, by phase.
+    private static readonly bool TraceTessellationTimes =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TESSELLATION_TIMES") == "1";
+    private int _tracedTessellationTimes;
+    private long _tessTargetsTicks, _tessProgramsTicks, _tessHullTicks, _tessRecordTicks;
+
+    private static long NextTessellationPhase(ref long phase)
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var elapsed = now - phase;
+        phase = now;
+        return elapsed;
     }
 
     // Runs the hull kernel over every patch of the batch's instances, instance after instance; false

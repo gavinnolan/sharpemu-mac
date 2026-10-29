@@ -62,6 +62,51 @@ internal sealed partial class MetalRenderHost
             encoder, SelSetComputeBuffer, _hullVertexBuffer, (nuint)_hullVertexOffset, Gen5TessellationLaunch.HullVertexBufferIndex);
     }
 
+    // SHARPEMU_TRACE_TESS_FACTORS=1 (diagnostic): once each patch draw's submission completes, how many of the
+    // factors the tessellator read cull their patch (zero or not finite), with the draw's first instance.
+    private static readonly bool TraceTessFactors = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TESS_FACTORS") == "1";
+    private int _tracedTessFactors;
+
+    private unsafe void TraceTessellationFactors(MetalGuestRange factors, uint patches, uint firstInstance, uint instances)
+    {
+        if (!TraceTessFactors || !factors.IsValid || _tracedTessFactors++ > 4000)
+        {
+            return;
+        }
+
+        var contents = MetalNative.Send(factors.Buffer, MetalNative.Selector("contents"));
+        if (contents == 0)
+        {
+            return;
+        }
+
+        var flip = Interlocked.Read(ref _flips);
+        var count = (int)Math.Min((ulong)patches * (_tessellationFactorBytes / sizeof(ushort)), 1u << 20);
+        var address = contents + (nint)factors.Offset;
+        _completions.Enqueue(SubmissionSerial, () =>
+        {
+            var halves = new ReadOnlySpan<ushort>((void*)address, count);
+            int culled = 0, finite = 0;
+            float max = 0;
+            foreach (var bits in halves)
+            {
+                var value = (float)BitConverter.UInt16BitsToHalf(bits);
+                if (!float.IsFinite(value) || value <= 0) culled++;
+                else { finite++; max = Math.Max(max, value); }
+            }
+
+            Console.Error.WriteLine($"[METAL-V2][TESS-FACTORS] flip={flip} first={firstInstance} instances={instances} " +
+                $"factors={count} culling={culled} max={max}");
+            // SHARPEMU_TRACE_TESS_FACTORS_DIR=<dir>: the half factors themselves, per patch draw.
+            if (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TESS_FACTORS_DIR") is { Length: > 0 } directory)
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllBytes(Path.Combine(directory, $"factors-flip{flip}-first{firstInstance}.bin"),
+                    System.Runtime.InteropServices.MemoryMarshal.AsBytes(halves).ToArray());
+            }
+        });
+    }
+
     public unsafe void PrepareTessellationFactors(ulong ringAddress, uint patchCount, bool quad, float minFactor, float maxFactor)
     {
         // The ring as a buffer read sees the hull kernel's stores, staged or in place.
@@ -107,8 +152,15 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetTessellationFactorBuffer, _tessellationFactors.Buffer, (nuint)_tessellationFactors.Offset,
             (nuint)(patchCount * _tessellationFactorBytes));
+        var factors = _tessellationFactors;
         _tessellationFactors = default;
-        var launch = stackalloc uint[2] { patchCount, firstInstance };
+        TraceTessellationFactors(factors, patchCount * instanceCount, firstInstance, instanceCount);
+        // The batch is drawn from instance 0. The tessellator reads each instance's factors at its instance id times the
+        // stride, base instance included, and the factors hold this batch's instances only: drawn from the batch's first
+        // guest instance, a second batch (Ghost of Tsushima's menu particles past 4096) read factors past their end, mostly
+        // zero, so its patches were culled in most frames and its wind flashed in and out. The domain needs only its
+        // patch's place among the batch's (the hull, which reads the guest's instances, has the first instance itself).
+        var launch = stackalloc uint[2] { patchCount, 0 };
         MetalV2Native.SendSetBytes(
             _renderEncoder, SelSetVertexBytes, (nint)launch, 2 * sizeof(uint), Gen5TessellationLaunch.DomainLaunchBufferIndex);
         // A vertex-buffer slot another pipeline may use; forget it.
@@ -130,13 +182,22 @@ internal sealed partial class MetalRenderHost
                 0,
                 0,
                 Math.Max(instanceCount, 1),
-                firstInstance);
+                0);
         }
 
         EndFacePasses(entry, passes);
         CountDraw(started);
         ProfileWork(entry, "draw-patches", WorkShape.Vertices(patchCount * controlPoints, instanceCount));
+        if (FlushAfterPatchDraws)
+        {
+            FlushCommandBuffer();
+        }
     }
+
+    // SHARPEMU_DIAG_FLUSH_AFTER_PATCHES=1 (diagnostic): commit the command buffer after every patch draw, so each
+    // tessellation batch's hull, factor conversion and draw run in a command buffer of their own.
+    private static readonly bool FlushAfterPatchDraws =
+        Environment.GetEnvironmentVariable("SHARPEMU_DIAG_FLUSH_AFTER_PATCHES") == "1";
 
     // The tessellator state of a domain program's pipeline (Gen5TessellationLaunch): factors per
     // patch, the guest's partition and winding, and a maximum factor that admits the guest's largest
@@ -153,8 +214,12 @@ internal sealed partial class MetalRenderHost
             _ => (Mtl.TessellationPartitionModeInteger, tessellation.MaxFactor),
         };
         var clockwise = tessellation.OutputClockwise == FlipTessellationWinding;
+        // Each instance's patches have factors of their own (the hull kernel runs over every instance's patches, and
+        // DrawPatches binds them with a stride of one instance). Per patch alone, Metal ignores the stride and every
+        // instance takes the first instance's factors: Ghost of Tsushima's menu particles, one patch an instance, were
+        // drawn or culled whole by the first particle of each batch, so its wind and dots flashed in and out.
         MetalV2Native.SendVoidValue(
-            descriptor, MetalNative.Selector("setTessellationFactorStepFunction:"), Mtl.TessellationFactorStepFunctionPerPatch);
+            descriptor, MetalNative.Selector("setTessellationFactorStepFunction:"), Mtl.TessellationFactorStepFunctionPerPatchAndPerInstance);
         MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setTessellationPartitionMode:"), partition);
         MetalV2Native.SendVoidValue(
             descriptor,
