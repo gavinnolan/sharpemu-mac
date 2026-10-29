@@ -230,25 +230,38 @@ internal sealed partial class MetalRenderHost
             // returning so later producer reads cannot pass the queued GPU dump. The worker
             // records it where it stands (deferring is for the worker's own stream): a producer
             // read of the range is held only until this item has run.
-            _commandThread!.PostRange(() => DumpOcclusionCounter(queueId, address, instanceMask, strideBytes, defer: false), address,
-                DumpRangeBytes(instanceMask, strideBytes));
+            PostOcclusionDump(queueId, address, instanceMask, strideBytes);
             return true;
         }
 
         return DumpOcclusionCounter(queueId, address, instanceMask, strideBytes, defer: true);
     }
 
+    private void PostOcclusionDump(int queueId, ulong address, uint instanceMask, uint strideBytes) =>
+        _commandThread!.PostRange(() => DumpOcclusionCounterNow(queueId, address, instanceMask, strideBytes), address,
+            DumpRangeBytes(instanceMask, strideBytes));
+
     private bool DumpOcclusionCounter(int queueId, ulong address, uint instanceMask, uint strideBytes, bool defer)
     {
         // A dump only orders GPU work, so behind deferred draws it joins their queue rather than draining
         // them: the program resolver keeps its lead over the draws and they record together at the next drain.
-        if (defer && DeferOcclusionDumps && TryDeferBehindDraws(
-                () => DumpOcclusionCounter(queueId, address, instanceMask, strideBytes, defer: false), address,
-                DumpRangeBytes(instanceMask, strideBytes), always: true))
+        if (defer && DeferOcclusionDumps && TryDeferOcclusionDump(queueId, address, instanceMask, strideBytes))
         {
             return true;
         }
 
+        return DumpOcclusionCounterNow(queueId, address, instanceMask, strideBytes);
+    }
+
+    // Its own method so the closure is only built when a dump is deferred: a lambda over the
+    // parameters makes the compiler allocate its capture at entry of the method that holds it.
+    private bool TryDeferOcclusionDump(int queueId, ulong address, uint instanceMask, uint strideBytes) =>
+        TryDeferBehindDraws(
+            () => DumpOcclusionCounterNow(queueId, address, instanceMask, strideBytes), address,
+            DumpRangeBytes(instanceMask, strideBytes), always: true);
+
+    private bool DumpOcclusionCounterNow(int queueId, ulong address, uint instanceMask, uint strideBytes)
+    {
         DrainDraws();
         ValidateOcclusionQueue(queueId);
         InitializeNativeOcclusion();

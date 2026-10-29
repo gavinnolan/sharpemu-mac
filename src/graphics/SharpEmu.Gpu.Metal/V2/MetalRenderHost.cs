@@ -2590,6 +2590,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" data_replans=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Replans)
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count)
+            .Append(" window_memo_hits=").Append(_guestMemory.WindowMemoCounts.Hits)
+            .Append(" window_memo_misses=").Append(_guestMemory.WindowMemoCounts.Misses)
             .Append(TakeWriteFenceCounters());
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
         var bindless = TakeBindlessCost();

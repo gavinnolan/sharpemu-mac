@@ -1299,7 +1299,9 @@ public static partial class ResourceMaterializer
     private static bool SpecializeSamplers(ShaderResourceInfo info, MaterializedSnapshot snapshot, out List<SamplerSpecialization> samplers)
     {
         samplers = [];
-        var specialized = new SamplerSpecialization[info.Samplers.Count];
+        Span<SamplerSpecialization> specialized = info.Samplers.Count <= 64
+            ? stackalloc SamplerSpecialization[info.Samplers.Count]
+            : new SamplerSpecialization[info.Samplers.Count];
         var any = false;
         for (var index = 0; index < info.Samplers.Count && index < snapshot.Samplers.Length; index++)
         {
@@ -1363,7 +1365,8 @@ public static partial class ResourceMaterializer
         using var specializationProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Specialization);
         failure = ResourceMaterializationFailure.Other;
         specializedSnapshot = snapshot;
-        specialization = new ResourceSpecialization();
+        // Read only on success, which assigns it at the end.
+        specialization = null!;
         var info = plan.Info;
         var imageCount = info.Images.Count;
         var mappingWordCount = 0;

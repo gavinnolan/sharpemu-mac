@@ -971,6 +971,23 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     internal bool QueueCommandProcessorWrites { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_QUEUE_CP_WRITES") != "0";
 
+    // The hops below are their own methods so the worker's own calls build no closure: a lambda
+    // over the parameters makes the compiler allocate its capture at entry of the method that holds it.
+    private void PostCommandProcessorWrite(ulong address, byte[] queued, string kind)
+    {
+        if (QueueCommandProcessorWrites)
+        {
+            // Reads overlapping this queued write wait until the worker installed
+            // its overlay. Unrelated packets can continue; prefetch's non-draw gate
+            // still orders future resource reads after the write.
+            _commandThread!.PostRange(() => RecordCommandProcessorWrite(address, queued, kind), address, (ulong)queued.Length);
+        }
+        else
+        {
+            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind), nameof(RecordCommandProcessorWrite));
+        }
+    }
+
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
         if (OnCommandThread)
@@ -978,18 +995,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             if (source.IsEmpty) return;
             if (address == 0 || (ulong)source.Length > ulong.MaxValue - address)
                 throw Fatal($"A command-processor write has an invalid range: address=0x{address:X16} bytes={source.Length}.");
-            var queued = source.ToArray();
-            if (QueueCommandProcessorWrites)
-            {
-                // Reads overlapping this queued write wait until the worker installed
-                // its overlay. Unrelated packets can continue; prefetch's non-draw gate
-                // still orders future resource reads after the write.
-                _commandThread!.PostRange(() => RecordCommandProcessorWrite(address, queued, kind), address, (ulong)queued.Length);
-            }
-            else
-            {
-                RunTagged(() => RecordCommandProcessorWrite(address, queued, kind));
-            }
+            PostCommandProcessorWrite(address, source.ToArray(), kind);
             return;
         }
 
@@ -1284,12 +1290,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // host fast path, which writes as parsed, is what the ordered path leaves out.
     private const ulong MaxStagedCommandProcessorFillBytes = 4096;
 
+    private void PostFillBufferInOrder(ulong address, ulong size, uint value) =>
+        _commandThread!.PostRange(() => FillBufferInOrder(address, size, value), address, size);
+
     /// <summary>A DMA fill of guest memory that lands in record order with the labels.</summary>
     public void FillBufferInOrder(ulong address, ulong size, uint value)
     {
         if (OnCommandThread)
         {
-            _commandThread!.PostRange(() => FillBufferInOrder(address, size, value), address, size);
+            PostFillBufferInOrder(address, size, value);
             return;
         }
 
@@ -2575,7 +2584,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void ReleaseShaderWrites()
     {
         // Ordered behind the draws before it, and nothing the stream waits for: queued, not waited on.
-        if (PostToWorker(ReleaseShaderWrites))
+        if (PostToWorker(_releaseShaderWrites ??= ReleaseShaderWrites))
         {
             return;
         }
@@ -2589,6 +2598,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _translation?.ReleaseShaderWrites();
     }
 
+    private Action? _releaseShaderWrites;
     private Action? _releaseOrderedShaderWrites;
 
     /// <summary>
