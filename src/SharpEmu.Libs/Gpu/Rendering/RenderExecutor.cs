@@ -95,6 +95,20 @@ public sealed partial class RenderExecutor
     private bool _fragmentWritesPending;
     private long _fragmentWritesPass;
 
+    // A draw stored to memory from its vertex stage through a device address or a storage image,
+    // which no barrier after the draw orders, in the pass with this serial.
+    private bool _vertexStoresUnordered;
+    private long _vertexStoresPass;
+
+    /// <summary>
+    /// Whether the open render pass holds shader stores no barrier has ordered yet: fragment stores
+    /// whose pass end is deferred, or vertex stores the draw's own barrier does not cover. A guest
+    /// cache flush or invalidate in the pass has nothing else to make visible to later draws.
+    /// </summary>
+    public bool HasUnorderedStoresInOpenPass =>
+        (_fragmentWritesPending && _host.RenderPassSerial == _fragmentWritesPass) ||
+        (_vertexStoresUnordered && _host.RenderPassSerial == _vertexStoresPass);
+
     // The buffer ranges those deferred stores may have written, or untracked when one of the
     // storing draws wrote through a device address or a storage image.
     private readonly List<(ulong Start, ulong End)> _fragmentWriteRanges = new();
@@ -497,6 +511,7 @@ public sealed partial class RenderExecutor
 
         var draw = new DrawCall("DrawIndexed", RecordedOperation.DrawIndex, arguments.IndexCount, arguments.InstanceCount, arguments.FirstInstance);
         byte[]? expandedIndices = null;
+        var expandedLength = 0;
         var triangleListIndices = 0u;
         if (TriangulatesFans(userConfig))
         {
@@ -505,14 +520,14 @@ public sealed partial class RenderExecutor
             var restartIndex = primitiveRestart
                 ? banks.Context.PrimitiveResetIndex & IndexMask((GuestIndexType)arguments.IndexTypeAndSize)
                 : (uint?)null;
-            var vertices = ReadGuestIndices(arguments.IndexAddress, arguments.IndexCount, (GuestIndexType)arguments.IndexTypeAndSize);
-            var list = TriangulateFans((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex);
+            var vertices = ReadGuestIndicesScratch(arguments.IndexAddress, arguments.IndexCount, (GuestIndexType)arguments.IndexTypeAndSize);
+            var list = TriangulateFansScratch((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex);
             if (list.Length == 0)
             {
                 return;
             }
 
-            expandedIndices = ListIndexBytes(list, wide: true);
+            expandedIndices = ListIndexBytesScratch(list, wide: true, out expandedLength);
             triangleListIndices = (uint)list.Length;
             indexType = GpuIndexType.Uint32;
             topology = GpuPrimitiveTopology.TriangleList;
@@ -520,7 +535,7 @@ public sealed partial class RenderExecutor
         }
         else if (expandIndex8)
         {
-            expandedIndices = ExpandIndex8(arguments.IndexAddress, arguments.IndexCount, primitiveRestart, banks.Context.PrimitiveResetIndex);
+            expandedIndices = ExpandIndex8Scratch(arguments.IndexAddress, arguments.IndexCount, primitiveRestart, banks.Context.PrimitiveResetIndex, out expandedLength);
         }
         else if (primitiveRestart)
         {
@@ -528,7 +543,7 @@ public sealed partial class RenderExecutor
             var restartIndex = banks.Context.PrimitiveResetIndex & indexMask;
             if (restartIndex != indexMask)
             {
-                expandedIndices = ConvertRestartIndices(arguments.IndexAddress, arguments.IndexCount, indexType, restartIndex);
+                expandedIndices = ConvertRestartIndicesScratch(arguments.IndexAddress, arguments.IndexCount, indexType, restartIndex, out expandedLength);
                 indexType = GpuIndexType.Uint32;
             }
         }
@@ -537,7 +552,7 @@ public sealed partial class RenderExecutor
             true,
             arguments.IndexAddress,
             expandedIndices,
-            expandedIndices is null ? indexSize : (ulong)expandedIndices.Length,
+            expandedIndices is null ? indexSize : (ulong)expandedLength,
             indexType);
         ref var state = ref BeginDrawState();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
@@ -835,13 +850,8 @@ public sealed partial class RenderExecutor
                 throw _host.Fatal("A triangle fan to convert to a triangle list still has its counts in guest memory.");
             }
 
-            var vertices = new uint[arguments.VertexCount];
-            for (var index = 0u; index < arguments.VertexCount; index++)
-            {
-                vertices[index] = index;
-            }
-
-            var list = TriangulateFans((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex: null);
+            var vertices = SequentialVerticesScratch(arguments.VertexCount);
+            var list = TriangulateFansScratch((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex: null);
             if (list.Length == 0)
             {
                 _host.ResetBindings();
@@ -849,8 +859,8 @@ public sealed partial class RenderExecutor
             }
 
             var wide = arguments.VertexCount > ushort.MaxValue;
-            var bytes = ListIndexBytes(list, wide);
-            var listSource = new IndexSource(true, 0, bytes, (ulong)bytes.Length, wide ? GpuIndexType.Uint32 : GpuIndexType.Uint16);
+            var bytes = ListIndexBytesScratch(list, wide, out var byteCount);
+            var listSource = new IndexSource(true, 0, bytes, (ulong)byteCount, wide ? GpuIndexType.Uint32 : GpuIndexType.Uint16);
             var listEmission = new DrawEmission(true, vertexOffset, 0, firstInstance, TriangleListIndices: (uint)list.Length);
             RecordDraw(submitId, banks, in draw, ref state, GpuPrimitiveTopology.TriangleList, in listEmission, in listSource,
                 primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
@@ -876,81 +886,6 @@ public sealed partial class RenderExecutor
         !_host.DrawsTriangleFans &&
         (GuestPrimitiveType)userConfig.PrimitiveType is
             GuestPrimitiveType.TriangleFan or GuestPrimitiveType.Polygon or GuestPrimitiveType.QuadListLegacy;
-
-    // The triangle list the primitive assembler makes of these vertices, in its vertex order:
-    // fan triangle i is (v[i+1], v[i+2], v[0]), the order DI_PT_TRIFAN assembles (the
-    // first-vertex provoking vertex is v[i+1], as radv's VK fans report it), and a restart
-    // index ends the fan, the next index starting a new one. A polygon is one fan. Each
-    // quad of a quad list is (q0, q1, q2) and (q0, q2, q3), both taking q0 as their
-    // provoking vertex; a count that is not a whole number of quads is refused.
-    private uint[] TriangulateFans(GuestPrimitiveType type, uint[] vertices, uint? restartIndex)
-    {
-        if (type == GuestPrimitiveType.QuadListLegacy)
-        {
-            if ((vertices.Length & 0x3) != 0)
-            {
-                throw _host.Fatal($"A legacy quad list count is not a multiple of four: count={vertices.Length}.");
-            }
-
-            var quads = new uint[checked((vertices.Length / 4) * 6)];
-            for (int quad = 0, output = 0; quad < vertices.Length; quad += 4, output += 6)
-            {
-                quads[output] = vertices[quad];
-                quads[output + 1] = vertices[quad + 1];
-                quads[output + 2] = vertices[quad + 2];
-                quads[output + 3] = vertices[quad];
-                quads[output + 4] = vertices[quad + 2];
-                quads[output + 5] = vertices[quad + 3];
-            }
-
-            return quads;
-        }
-
-        var triangles = new List<uint>(Math.Max(0, (vertices.Length - 2) * 3));
-        var hub = 0;
-        for (var index = 0; index < vertices.Length; index++)
-        {
-            if (restartIndex is { } restart && vertices[index] == restart)
-            {
-                hub = index + 1;
-                continue;
-            }
-
-            if (index - hub >= 2)
-            {
-                triangles.Add(vertices[index - 1]);
-                triangles.Add(vertices[index]);
-                triangles.Add(vertices[hub]);
-            }
-        }
-
-        return [.. triangles];
-    }
-
-    private byte[] ListIndexBytes(uint[] list, bool wide)
-    {
-        var bytes = new byte[checked(list.Length * (wide ? sizeof(uint) : sizeof(ushort)))];
-        for (var index = 0; index < list.Length; index++)
-        {
-            var value = list[index];
-            if (wide)
-            {
-                // Metal reserves the all-ones index for primitive restart.
-                if (value == uint.MaxValue)
-                {
-                    throw _host.Fatal("A triangle fan converted to a triangle list has a 32-bit vertex index of 0xFFFFFFFF.");
-                }
-
-                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), value);
-            }
-            else
-            {
-                BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(index * sizeof(ushort)), checked((ushort)value));
-            }
-        }
-
-        return bytes;
-    }
 
     private static uint IndexMask(GuestIndexType type) => type switch
     {
@@ -987,59 +922,6 @@ public sealed partial class RenderExecutor
         }
 
         return indices;
-    }
-
-    private byte[] ConvertRestartIndices(ulong indexAddress, uint indexCount, GpuIndexType indexType, uint restartIndex)
-    {
-        var sourceStride = indexType == GpuIndexType.Uint16 ? sizeof(ushort) : sizeof(uint);
-        var source = new byte[checked((int)indexCount * sourceStride)];
-        if (indexAddress == 0 || !_host.TryReadGuest(indexAddress, source))
-        {
-            throw _host.Fatal($"The restart index data is unreadable: address=0x{indexAddress:X16} count={indexCount}.");
-        }
-
-        // Widen 16-bit indices so their maximum value remains an ordinary vertex.
-        var converted = new byte[checked((int)indexCount * sizeof(uint))];
-        for (var index = 0; index < (int)indexCount; index++)
-        {
-            var value = sourceStride == sizeof(ushort)
-                ? BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan(index * sourceStride))
-                : BinaryPrimitives.ReadUInt32LittleEndian(source.AsSpan(index * sourceStride));
-            if (value == uint.MaxValue)
-            {
-                throw _host.Fatal("A custom restart index conflicts with a 32-bit vertex index of 0xFFFFFFFF.");
-            }
-
-            BinaryPrimitives.WriteUInt32LittleEndian(converted.AsSpan(index * sizeof(uint)),
-                value == restartIndex ? uint.MaxValue : value);
-        }
-
-        return converted;
-    }
-
-    private byte[] ExpandIndex8(ulong indexAddress, uint indexCount, bool primitiveRestart, uint restartIndex)
-    {
-        if (indexAddress == 0)
-        {
-            throw _host.Fatal($"An 8-bit index draw has no index address: count={indexCount}.");
-        }
-
-        var source = new byte[indexCount];
-        if (!_host.TryReadGuest(indexAddress, source))
-        {
-            throw _host.Fatal($"The 8-bit index data is unreadable: address=0x{indexAddress:X16} count={indexCount}.");
-        }
-
-        var expanded = new byte[indexCount * 2];
-        for (var i = 0; i < indexCount; i++)
-        {
-            var value = source[i];
-            ushort index = primitiveRestart && value == (restartIndex & 0xFF) ? (ushort)0xFFFF : value;
-            expanded[i * 2] = (byte)index;
-            expanded[(i * 2) + 1] = (byte)(index >> 8);
-        }
-
-        return expanded;
     }
 
     // Vertex offset: the index offset register, or the embedded fetch scalar when that register is zero.
@@ -1176,7 +1058,7 @@ public sealed partial class RenderExecutor
         var control = shaderInterface.DepthShaderControl;
         // The export format describes data; it does not enable shader execution.
         return control.KillEnable || control.DepthExportEnable || control.StencilExportEnable ||
-               control.MaskExportEnable || control.DualExportEnable || control.ExecuteOnNoop;
+               control.MaskExportEnable || control.ExecuteOnHierFail || control.ExecuteOnNoop;
     }
 
     private static bool HasActivePixelShader(RegisterBanks banks)

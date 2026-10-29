@@ -279,6 +279,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             if (copy.Cached && copy.Dirty)
             {
                 copy.Dirty = false;
+                copy.NeedsWholeStage = true;
                 Volatile.Write(ref copy.Stale, 1);
             }
 
@@ -330,6 +331,9 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
                 var missed = EncodeWriteback(encoder, copy);
                 if (missed != 0)
                 {
+                    // The stores to those bytes stay in the copy and guest memory never has them: the
+                    // copy is not what guest memory holds on pages no CPU store touched.
+                    copy.NeedsWholeStage = true;
                     MetalV2Diagnostics.WarnOnce(
                         $"staged-storage-unwritten:{copy.Size:X}",
                         $"A staged storage buffer has bytes no window covers, so the shader's stores to them " +
@@ -405,18 +409,27 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             MetalNative.SendVoid(gather, SelEndEncoding);
         }
 
-        if (!pristine.IsValid)
+        if (pristine.IsValid)
         {
-            return;
+            EncodeSnapshot(commandBuffer, staging, pristine, ordering);
         }
+    }
 
+    /// <summary>
+    /// Fills a pristine copy from its staged copy on the GPU, in an encoder of its own that
+    /// <paramref name="ordering"/> runs before whatever is recorded after it: before the
+    /// shader that stores into the staged copy, so the pristine bytes are what was staged.
+    /// </summary>
+    public void EncodeSnapshot(nint commandBuffer, in MetalGuestRange staging, in MetalGuestRange pristine,
+        IMetalSubmissionContext? ordering = null)
+    {
         var snapshot = BlitEncoder(commandBuffer, ordering);
         try
         {
             MetalNative.SendCopyBuffer(
                 snapshot, SelCopyBuffer,
                 staging.Buffer, (nuint)staging.Offset,
-                pristine.Buffer, (nuint)pristine.Offset, (nuint)size);
+                pristine.Buffer, (nuint)pristine.Offset, (nuint)staging.Size);
         }
         finally
         {

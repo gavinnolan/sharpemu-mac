@@ -7,7 +7,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 namespace SharpEmu.Gpu.Metal.V2;
 
 /// <summary>
-/// SHARPEMU_METAL_V2_COMMAND_THREAD=1: the command stream is interpreted on a thread of its own
+/// The command stream is interpreted on a thread of its own
 /// (DeferredCommandThread, the Vulkan presenter's command thread), and the GPU worker runs what it
 /// hands over in stream order - the translation's deferred draws and dispatches, and the host calls
 /// the stream makes. The worker no longer reads packets or writes registers: Grand Theft Auto V spent
@@ -19,11 +19,18 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// before it (Run). Command memory is read on the command thread itself unless something the worker
 /// records may own the bytes. A deferred dispatch cannot suspend its packet, so the worker waits for
 /// a compute pipeline's compile in this mode (SupportsPipelineSuspend).
+///
+/// On by default: in Silent Hill's first room the worker sheds the packets and register writes and
+/// the title runs at about 25 fps instead of 23. SHARPEMU_METAL_V2_COMMAND_THREAD=0 interprets the
+/// stream on the worker again.
 /// </summary>
 internal sealed partial class MetalRenderHost
 {
     internal static readonly bool CommandThreadEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD") != "0";
+
+    private static readonly bool CommandThreadQosEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD_QOS") == "1";
 
     // Items run in batches; completions and relay commands are taken between them.
     private const int CommandItemBatch = 256;
@@ -48,13 +55,16 @@ internal sealed partial class MetalRenderHost
     {
         if (_commandThread is null)
         {
-            _commandThread = new DeferredCommandThread(CommandStream, _memory, RunDeferredWork, _translation!.Prefetch, WakeWorker)
+            _commandThread = new DeferredCommandThread(CommandStream, _memory, RunDeferredWork, _translation!.Prefetch, WakeWorker,
+                useHostQos: CommandThreadQosEnabled)
             {
                 ProducerIdle = RequestIdleCommit,
             };
             _betweenCommandItems = RunRelayBetweenCommandItems;
             _translation.Sink = _commandThread;
             _commandThread.Start();
+            if (CommandThreadQosEnabled)
+                Console.Error.WriteLine($"[METAL-V2][QOS] command_stream requested=UserInteractive applied={_commandThread.HasHostQos}.");
         }
 
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 100;
@@ -85,7 +95,7 @@ internal sealed partial class MetalRenderHost
 
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         var (runs, runWaitMs, spaceWaitMs, items) = thread.TakeCounters();
-        return $"runs={runs} run_wait_ms={runWaitMs.ToString("F1", culture)} space_wait_ms={spaceWaitMs.ToString("F1", culture)} items={items} sites=({TakeSyncSites()})";
+        return $"runs={runs} run_wait_ms={runWaitMs.ToString("F1", culture)} space_wait_ms={spaceWaitMs.ToString("F1", culture)} items={items} sites=({TakeSyncSites()}) fill_reads={Interlocked.Exchange(ref _queuedFillReads, 0)} fill_image_refusals={Interlocked.Exchange(ref _queuedFillImageRefusals, 0)}{thread.TakeItemSites()}";
     }
 
     private int _idleCommitQueued;
@@ -189,6 +199,41 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    // Host work that only orders GPU commands, queued like PostToWorker without holding the program
+    // resolutions of the draws after it. Every non-draw item held them: in Silent Hill's first room
+    // two in five items are a barrier or a fragment-write release, and the worker waited about 13% of
+    // its time for resolutions the gates kept from starting.
+    // SHARPEMU_METAL_V2_UNGATED_BARRIERS=0 holds the resolutions behind them again.
+    private static readonly bool UngatedBarriers =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UNGATED_BARRIERS") != "0";
+
+    // A write the command thread queues (a command-processor write, a fill or copy, an occlusion dump,
+    // an end-of-pipe label) names the only bytes it writes, so the draws after it resolve their
+    // programs without waiting for it either; a resolution that reads those bytes while the write is
+    // still queued is abandoned and done again on the worker (IsOwnedConcurrent).
+    // SHARPEMU_METAL_V2_UNGATED_WRITES=0 holds the resolutions behind them again.
+    private static readonly bool UngatedWrites =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UNGATED_WRITES") != "0";
+
+    private bool PostOrderingToWorker(Action action)
+    {
+        if (!OnCommandThread)
+        {
+            return false;
+        }
+
+        if (UngatedBarriers)
+        {
+            _commandThread!.PostOrdering(action);
+        }
+        else
+        {
+            _commandThread!.Post(action);
+        }
+
+        return true;
+    }
+
     // Host work whose result the stream needs: on the command thread it waits for the worker.
     private bool RunOnWorker(Action action,
         [System.Runtime.CompilerServices.CallerMemberName] string member = "",
@@ -233,6 +278,16 @@ internal sealed partial class MetalRenderHost
         return string.Join(",", top.Select(pair => $"{pair.Key}={pair.Value}"));
     }
 
+    // A polled word a queued DMA fill writes is the fill's word: the fill lands as a command-processor
+    // write, which is what the stream reads after it. Silent Hill fills a word and waits on it some
+    // 4000 times a second, and each wait ran the whole queue on the worker first, leaving the worker
+    // idle until the stream queued again. SHARPEMU_METAL_V2_QUEUED_FILL_READS=0 runs the queue first again.
+    private long _queuedFillReads;
+    private long _queuedFillImageRefusals;
+
+    private static readonly bool QueuedFillReads =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_QUEUED_FILL_READS") != "0";
+
     // A polled word (WAIT_REG_MEM) on the command thread, read here: as the stream wrote it when a
     // command-processor write still owes it, else from memory. A label still in flight reads as it was,
     // the wait fails and parks, and lands with the commit the idle stream asks for (RequestIdleCommit)
@@ -241,6 +296,17 @@ internal sealed partial class MetalRenderHost
     private bool ReadWaitOperandOnCommandThread(ulong address, Span<byte> destination, bool commitPendingWrite)
     {
         var size = (ulong)destination.Length;
+        if (QueuedFillReads && !_imageCache.MayOwn(address, size) && _commandThread!.TryReadQueuedFill(address, destination))
+        {
+            Interlocked.Increment(ref _queuedFillReads);
+            return true;
+        }
+
+        if (QueuedFillReads && _imageCache.MayOwn(address, size))
+        {
+            Interlocked.Increment(ref _queuedFillImageRefusals);
+        }
+
         _commandThread!.WaitForPendingRange(address, size);
         if (_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size))
         {

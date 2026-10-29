@@ -9,6 +9,58 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class ResourceMaterializationCacheTests
 {
+    [Theory]
+    [InlineData(0, 16, 32)]
+    [InlineData(32, 16, 0)]
+    [InlineData(16, 0, 32)]
+    public void RecordedReadOrderingPreservesDescriptorsAndFreshInvalidation(int first, int second, int third)
+    {
+        var plan = Extract(Program(
+            ScalarLoad(0, 0, 8, 4, first), ScalarLoad(8, 0, 12, 4, second), ScalarLoad(16, 0, 16, 4, third),
+            BufferLoad(24, 8), BufferLoad(32, 12), BufferLoad(40, 16), EndProgram(48)), userDataCount: 2);
+        var words = new uint[] { 0x2000, 0, 256, 0x20000, 0x4000, 0, 128, 0x20000, 0x6000, 0, 64, 0x20000 };
+        bool Read(ulong address, out uint word)
+        {
+            var index = (address - 0x1000) / 4;
+            word = index < (ulong)words.Length ? words[index] : 0;
+            return address >= 0x1000 && index < (ulong)words.Length;
+        }
+        var readable = true;
+        bool Resident(ulong address, Span<byte> bytes, bool clean)
+        {
+            if (!readable) return false;
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+            {
+                if (!Read(address + (ulong)offset, out var word)) return false;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes[offset..], word);
+            }
+            return true;
+        }
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = new uint[] { 0x1000, 0 }, ReadMemory = Read, ReadCleanMemory = Read, ReadResidentMemory = Resident,
+        };
+        var cache = new ResourceMaterializationCache();
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        for (var draw = 0; draw < 4; draw++)
+        {
+            // Reuse, descriptor/bounds change, and unreadable resident memory must all agree with a fresh walk.
+            if (draw == 2) { words[0] = 0x8000; words[2] = 8; }
+            if (draw == 3) readable = false;
+            var expected = new ResourceSnapshot();
+            var expectedSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref expected, ref expectedSpecialization, out _));
+            var hits = cache.Hits;
+            Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+            Assert.Equal(expected.Buffers.Length, snapshot.Buffers.Length);
+            for (var buffer = 0; buffer < expected.Buffers.Length; buffer++)
+                Assert.Equal(expected.Buffers[buffer], snapshot.Buffers[buffer]);
+            Assert.Equal(expected.FlattenedResourceTable, snapshot.FlattenedResourceTable);
+            Assert.Equal(hits + (draw == 1 ? 1 : 0), cache.Hits);
+        }
+    }
+
     private const ulong HeapBase = 0x1000;
 
     // A mask word, a two-entry index table and six 32-byte image records.

@@ -200,7 +200,11 @@ public static partial class Gen5MslTranslator
             if (_stage == Gen5MslStage.Mesh)
             {
                 _meshLdsDwords = MeshLdsDwordCount(request);
-                _meshInfo = BuildMeshInfo(request, _meshLdsDwords);
+                _meshInfo = BuildMeshInfo(request, _meshLdsDwords, Math.Min(options.MeshDeviceLdsThresholdBytes, 16384u),
+                    options.GeometryOutputCapacity);
+                _meshHotLds = PlanMeshHotLds();
+                if (_meshHotLds.Length != 0)
+                    _meshInfo = _meshInfo with { ThreadgroupMemoryBytes = MeshHotLdsWords * sizeof(uint) };
             }
 
             _computeLdsDwords = options.DispatchThreadgroupMemory
@@ -387,6 +391,16 @@ public static partial class Gen5MslTranslator
                     continue;
                 }
 
+                if (field.FieldKind == MslArgumentFieldKind.BufferPointers &&
+                    Enumerable.Range(0, (int)field.Count).Any(IsScalarConstantBuffer))
+                {
+                    // Keep the host's pointer array ABI: each pointer retains its id and
+                    // eight-byte slot, even when adjacent pointers have different types.
+                    for (var index = 0; index < field.Count; index++)
+                        source.AppendLine($"    {(IsScalarConstantBuffer(index) ? "constant" : "device")} uint* buffer_{index} [[id({field.FirstId + index})]];");
+                    continue;
+                }
+
                 var declaration = field.FieldKind switch
                 {
                     MslArgumentFieldKind.BufferPointers => $"array<device uint*, {field.Count}> {field.Name}",
@@ -482,9 +496,11 @@ public static partial class Gen5MslTranslator
             var request = _request;
             var layout = request.Bindings;
             var bufferCount = request.Resources.Info.Buffers.Count;
+            var splitBufferFields = Enumerable.Range(0, bufferCount).Any(IsScalarConstantBuffer);
             for (var index = 0; index < bufferCount; index++)
             {
-                source.AppendLine($"    device uint* b{index} = {ResourcesName}.buffers[{index}];");
+                var field = splitBufferFields ? $"buffer_{index}" : $"buffers[{index}]";
+                source.AppendLine($"    {(IsScalarConstantBuffer(index) ? "constant" : "device")} uint* b{index} = {ResourcesName}.{field};");
             }
 
             if (!_options.ElideByteBias)
@@ -569,8 +585,26 @@ public static partial class Gen5MslTranslator
             return (ShaderDataDword(layout.ShaderBaseDword), ShaderDataDword(layout.ShaderBaseDword + 1));
         }
 
-        private string LoadFlattenedWord(string slot) =>
-            $"({slot} < {ResourcesName}.flattened_table_words ? {ResourcesName}.flattened_table[{slot}] : 0u)";
+        private string LoadFlattenedWord(string slot)
+        {
+            // A slot fixed here is read without the select: the host pads the table it binds to
+            // FlattenedTableMinimumWords with zeros, which is what the select would have read.
+            if (_options.ConstantTableSlots && slot.Length > 1 && slot[^1] == 'u' &&
+                uint.TryParse(slot.AsSpan(0, slot.Length - 1), NumberStyles.None, CultureInfo.InvariantCulture, out var fixedSlot) &&
+                fixedSlot < MaxPaddedFlattenedTableWords)
+            {
+                _flattenedTableMinimumWords = Math.Max(_flattenedTableMinimumWords, fixedSlot + 1);
+                return $"{ResourcesName}.flattened_table[{slot}]";
+            }
+
+            return $"({slot} < {ResourcesName}.flattened_table_words ? {ResourcesName}.flattened_table[{slot}] : 0u)";
+        }
+
+        /// <summary>A fixed slot past this keeps the select, so no shader asks the host for a
+        /// table of more than 256 KB.</summary>
+        private const uint MaxPaddedFlattenedTableWords = 1u << 16;
+
+        private uint _flattenedTableMinimumWords;
 
         private static string FormatULong(ulong value) => $"0x{value.ToString("X", CultureInfo.InvariantCulture)}ul";
 
@@ -1278,6 +1312,47 @@ public static partial class Gen5MslTranslator
             string? deviceAddress = null;
             string? deviceSpan = null;
             string? deviceSpanValid = null;
+            string? scalarRun = null;
+
+            // The run of up to four dwords, starting at a multiple of four, that the dword at
+            // `component` loads with: every dword of it a plain read of the same bound buffer.
+            bool TryScalarBufferRun(int component, out (int First, int Count) run)
+            {
+                run = default;
+                if (!_options.VectorDwordLoads || !_options.RawDwordAccess || control.Glc)
+                {
+                    return false;
+                }
+
+                var first = component & ~3;
+                var count = Math.Min(4, instruction.Destinations.Count - first);
+                if (count < 2)
+                {
+                    return false;
+                }
+
+                uint? binding = null;
+                for (var index = first; index < first + count; index++)
+                {
+                    if (!request.Memory.TryGetIndex(instruction.Pc, (uint)index, out var memory))
+                    {
+                        return false;
+                    }
+
+                    var record = request.Memory[memory];
+                    if (record.PlanningOnly || record.Kind != MemoryResourceKind.ScalarBuffer || record.DeviceDescriptor ||
+                        record.Resource == MemoryAccessInfo.NoResource || (binding is { } known && known != record.Resource))
+                    {
+                        return false;
+                    }
+
+                    binding = record.Resource;
+                }
+
+                run = (first, count);
+                return true;
+            }
+
             for (var component = 0; component < instruction.Destinations.Count; component++)
             {
                 var destination = instruction.Destinations[component];
@@ -1339,6 +1414,22 @@ public static partial class Gen5MslTranslator
                     // Snapshot the V# before the first destination store: SDATA may overlap SBASE.
                     deviceDescriptor ??= DeviceDescriptorBounds(instruction.Sources[0].Value);
                     value = DeviceDescriptorWord(deviceDescriptor.Value, descriptorOffset, control.Glc);
+                }
+                else if (entry.Kind == MemoryResourceKind.ScalarBuffer &&
+                         TryScalarBufferRun(component, out var run))
+                {
+                    // A run of the load's dwords from one bound buffer, behind one bounds check
+                    // (Gen5MslCodegenOptions.VectorDwordLoads); every dword is read before the
+                    // first destination store, as the hardware does.
+                    if (run.First == component)
+                    {
+                        var bindingIndex = (int)entry.Resource;
+                        var byteOffset = unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint)));
+                        var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
+                        scalarRun = Temp("uint4", LoadDwords(bindingIndex, address, (uint)run.Count));
+                    }
+
+                    value = Temp("uint", $"{scalarRun}[{component - run.First}]");
                 }
                 else if (entry.Kind == MemoryResourceKind.ScalarBuffer)
                 {
@@ -1526,6 +1617,34 @@ public static partial class Gen5MslTranslator
                         : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_device_bytes({DeviceArguments}, {address}, {source}, {byteCount}u);");
                 }
+                else if (_options.DeviceAddressSpans && control.DwordCount > 1)
+                {
+                    // One page-table lookup for the whole record. A record inside one page is
+                    // contiguous host memory, so the dwords index off the one pointer; one that
+                    // crosses a page or is unmapped takes the per-dword stores.
+                    var spanValid = Temp("bool", "false");
+                    var span = Temp("device uint*", $"sharpemu_resolve_device_span({DeviceArguments}, {address}, {control.DwordCount * sizeof(uint)}u, {spanValid})");
+                    Line($"if ({spanValid})");
+                    Line("{");
+                    _indent++;
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line($"{span}[{index}] = v[{control.SourceVectorRegister + index}];");
+                    }
+
+                    _indent--;
+                    Line("}");
+                    Line("else");
+                    Line("{");
+                    _indent++;
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line($"sharpemu_store_device_dword({DeviceArguments}, {address} + {index * sizeof(uint)}ul, v[{control.SourceVectorRegister + index}]);");
+                    }
+
+                    _indent--;
+                    Line("}");
+                }
                 else
                 {
                     for (uint index = 0; index < control.DwordCount; index++)
@@ -1567,6 +1686,41 @@ public static partial class Gen5MslTranslator
                 StorePairLoad(
                     control.DestinationVectorRegister,
                     $"sharpemu_load_device_pair_coherent({DeviceArguments}, {aligned}, true, {aligned} + 4ul, true, {PairLockArguments})");
+                return true;
+            }
+
+            if (_options.DeviceAddressSpans && control.DwordCount > 1 && control.DestinationVectorRegister + control.DwordCount <= VectorRegisterFileCount)
+            {
+                // One page-table lookup for the whole record (GLOBAL_LOAD_DWORDX2-X4); see the
+                // store above. Every destination is written after the lookup, under EXEC.
+                var guarded = !_execKnownFull;
+                if (guarded)
+                {
+                    Line("if (exec)");
+                    Line("{");
+                    _indent++;
+                }
+
+                var spanValid = Temp("bool", "false");
+                var span = Temp("device uint*", $"sharpemu_resolve_device_span({DeviceArguments}, {aligned}, {control.DwordCount * sizeof(uint)}u, {spanValid})");
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var componentAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
+                    var spanWord = control.Glc
+                        ? $"atomic_load_explicit((device atomic_uint*)({span} + {index}), memory_order_relaxed)"
+                        : $"{span}[{index}]";
+                    StoreVector(
+                        control.DestinationVectorRegister + index,
+                        $"{spanValid} ? {spanWord} : sharpemu_load_device_dword{coherent}({DeviceArguments}, {componentAddress})",
+                        guardWithExec: false);
+                }
+
+                if (guarded)
+                {
+                    _indent--;
+                    Line("}");
+                }
+
                 return true;
             }
 
@@ -1828,7 +1982,7 @@ public static partial class Gen5MslTranslator
                         : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
                     var element = FormatUInt(byteCount == 1 ? 0xFFu : 0xFFFFu);
                     var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
-                    var word = ScratchWord(byteAddress);
+                    var word = ScratchAccessWord(control, byteAddress);
                     Line($"{word} = ({word} & ~({element} << {shift})) | (((({source}) & {element})) << {shift});");
                 }
                 else
@@ -1838,7 +1992,7 @@ public static partial class Gen5MslTranslator
                         var value = control.SourceIsScalar
                             ? ScalarExpression(control.SourceVectorRegister + index)
                             : $"v[{control.SourceVectorRegister + index}]";
-                        Line($"{ScratchWord(byteAddress, index * sizeof(uint))} = {value};");
+                        Line($"{ScratchAccessWord(control, byteAddress, index * sizeof(uint))} = {value};");
                     }
                 }
 
@@ -1858,7 +2012,7 @@ public static partial class Gen5MslTranslator
                 var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
                 var loaded = Temp(
                     "uint",
-                    $"({ScratchWord(byteAddress)} >> {shift}) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}");
+                    $"({ScratchAccessWord(control, byteAddress)} >> {shift}) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}");
                 if (signExtend)
                 {
                     loaded = Temp("uint", $"(uint)extract_bits(as_type<int>({loaded}), 0u, {loadBytes * 8}u)");
@@ -1875,7 +2029,7 @@ public static partial class Gen5MslTranslator
 
             for (uint index = 0; index < control.DwordCount; index++)
             {
-                StoreVector(destination + index, ScratchWord(byteAddress, index * sizeof(uint)));
+                StoreVector(destination + index, ScratchAccessWord(control, byteAddress, index * sizeof(uint)));
             }
 
             return true;

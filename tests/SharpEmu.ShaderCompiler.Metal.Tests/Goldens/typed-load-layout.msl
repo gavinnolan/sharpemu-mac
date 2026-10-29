@@ -444,11 +444,35 @@ struct Gen5StageResources
 
 // A raw dword load: the address truncates to the dword it lands in, which is what the
 // hardware does for S_BUFFER_LOAD_DWORD and BUFFER_LOAD_DWORD and what the SPIR-V
-// backend emits. Out of range reads zero.
+// backend emits. Out of range reads zero. The load is always issued, and a select discards
+// it for an index past the end: an index past the end reads the binding's last dword (its
+// first when it is empty, which the host still maps: the null buffer is 256 bytes, any other
+// binding a page-granular window). A branch around the load would split a shader into one
+// block per load, which the compiler cannot issue together.
 static inline uint sharpemu_load_dword(device uint* b, uint bytes, uint addr)
 {
     uint index = addr >> 2;
-    return index < (bytes >> 2) ? b[index] : 0u;
+    uint words = bytes >> 2;
+    uint last = max(words, 1u) - 1u;
+    uint value = b[index > last ? last : index];
+    return index < words ? value : 0u;
+}
+
+// Up to four consecutive raw dwords of an S_BUFFER_LOAD/BUFFER_LOAD_DWORDXn, each what
+// sharpemu_load_dword reads at addr + 4 * i, wrapping with the address as it does.
+template <int N>
+static inline uint4 sharpemu_load_dwords(device uint* b, uint bytes, uint addr)
+{
+    uint4 result = uint4(0u);
+    uint words = bytes >> 2;
+    uint last = max(words, 1u) - 1u;
+    for (int i = 0; i < N; i++)
+    {
+        uint index = ((addr >> 2) + (uint)i) & 0x3FFFFFFFu;
+        uint value = b[index > last ? last : index];
+        result[i] = index < words ? value : 0u;
+    }
+    return result;
 }
 
 // The dword at an aligned address with only its bytes past the binding's end zero. A format
@@ -749,7 +773,7 @@ static inline void sharpemu_note_step_cap(device atomic_uint* report)
     }
 }
 
-kernel void gen5_cs(
+[[max_total_threads_per_threadgroup(32)]] kernel void gen5_cs(
     constant Gen5StageResources& sharpemu_resources [[buffer(0)]],
     constant uint* sharpemu_push_data [[buffer(1)]],
     uint3 sharpemu_local_id [[thread_position_in_threadgroup]],

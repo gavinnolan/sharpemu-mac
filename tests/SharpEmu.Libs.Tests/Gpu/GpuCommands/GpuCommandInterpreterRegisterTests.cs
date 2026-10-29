@@ -120,6 +120,47 @@ public sealed class GpuCommandInterpreterRegisterTests
         Assert.Contains("range leaves the bank", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetContextRegister, 0x3FF, 1, 2)).Message);
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(8)]
+    public void DirectShaderRangeWithInvalidTailPreservesOnlyItsRawPrefix(int count)
+    {
+        var runner = new StreamRunner();
+        var before = runner.Interpreter.TypedRegisters.Snapshot();
+        var last = RegisterBankLayout.ShaderRegisterCount - 1;
+        runner.Interpreter.Registers.Shader[last] = 99;
+        var values = Enumerable.Repeat(0x5678u, count + 1).ToArray();
+        values[0] = last;
+        values[1] = 0x1234;
+        var error = runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetShaderRegister, values));
+        Assert.Contains("shader register range leaves the bank", error.Message);
+        Assert.Equal(0x1234u, runner.Interpreter.Registers.Shader[last]);
+        Assert.False(runner.Interpreter.Registers.Shader.ContainsKey(last + 1));
+        Assert.Same(before.Shader.Pixel, runner.Interpreter.TypedRegisters.Shader.Pixel);
+        Assert.Same(before.Shader.Vertex, runner.Interpreter.TypedRegisters.Shader.Vertex);
+        Assert.Same(before.Shader.Compute, runner.Interpreter.TypedRegisters.Shader.Compute);
+    }
+
+    [Fact]
+    public void RepeatedDirectShaderRangeUpdatesRawAndTypedValuesWithoutChangingSnapshots()
+    {
+        var runner = new StreamRunner();
+        var offset = ShaderRegisterOffset.SpiShaderUserDataPs0;
+        var values = new uint[] { offset, 1, 2, 3, 4, 5, 6, 7, 8 };
+        runner.Run(StreamRunner.Packet(PacketOpcode.SetShaderRegister, values));
+        var before = runner.Interpreter.TypedRegisters.Snapshot();
+        var keys = runner.Interpreter.Registers.Shader.Keys.ToArray();
+        for (var i = 1; i < values.Length; i++) values[i] += 20;
+        runner.Run(StreamRunner.Packet(PacketOpcode.SetShaderRegister, values));
+        Assert.Equal(keys, runner.Interpreter.Registers.Shader.Keys);
+        for (var i = 0; i < 8; i++)
+        {
+            Assert.Equal((uint)(i + 1), before.Shader.Pixel.UserScalars.Values[i]);
+            Assert.Equal((uint)(i + 21), runner.Interpreter.TypedRegisters.Shader.Pixel.UserScalars.Values[i]);
+            Assert.Equal((uint)(i + 21), runner.Interpreter.Registers.Shader[offset + (uint)i]);
+        }
+    }
+
     [Fact]
     public void DirectDepthWrites_ClearTheCompositeExtent()
     {

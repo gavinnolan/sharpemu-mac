@@ -74,6 +74,21 @@ public unsafe interface IDirectExecutionPlatform
     nint GetRuntimeRoutine(HostRuntimeFunction routine);
 
     /// <summary>
+    /// The host's clock entry points the emitted guest clock stubs call directly, so a clock read
+    /// does not cross into managed code. <paramref name="counter"/> is a no-argument SysV routine
+    /// returning a monotonic count in nanoseconds in RAX, on the same timebase as
+    /// <see cref="System.Diagnostics.Stopwatch"/>; <paramref name="clockGettime"/> is the C
+    /// <c>clock_gettime(clockid, timespec*)</c>. Returns false when the platform has no such
+    /// routines, and the clock imports then keep going through the managed exports.
+    /// </summary>
+    bool TryGetHostClockEntryPoints(out nint counter, out nint clockGettime)
+    {
+        counter = 0;
+        clockGettime = 0;
+        return false;
+    }
+
+    /// <summary>
     /// Makes a managed callback callable with the Win64 ABI the emitted call
     /// sites use. Identity where managed code already uses that ABI; a
     /// Win64-to-SysV thunk where it does not.

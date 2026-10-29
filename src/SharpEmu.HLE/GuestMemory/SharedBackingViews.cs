@@ -658,6 +658,58 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         }
     }
 
+    // Two TryWriteSingleView writes (first, then second) under one alias pin and one operation
+    // admission; each still brackets its own bytes with its own interval, so overlapping read watches
+    // are invalidated per range before that range's bytes land, as for separate writes. False, with
+    // nothing written, when either range has no single view or the admission is refused. As in
+    // TryWriteSingleView, a lost interval admission after the first range landed throws.
+    public bool TryWritePairSingleView(ulong firstAddress, ReadOnlySpan<byte> first, ulong secondAddress, ReadOnlySpan<byte> second)
+    {
+        if (first.IsEmpty || second.IsEmpty || (!SingleViewWriteFastPath && _backing?.ManagedWrites is not null))
+        {
+            return false;
+        }
+
+        if (ulong.MaxValue - firstAddress < (ulong)first.Length || ulong.MaxValue - secondAddress < (ulong)second.Length ||
+            !TryEnterAliasAccess())
+        {
+            return false;
+        }
+
+        try
+        {
+            var snapshot = Volatile.Read(ref _snapshot);
+            if (!TryFindAlias(snapshot, firstAddress, (ulong)first.Length, out var firstTarget) ||
+                !TryFindAlias(snapshot, secondAddress, (ulong)second.Length, out var secondTarget))
+            {
+                return false;
+            }
+
+            var interval = _backing?.BeginManagedWriteOperation() ?? default;
+            if (!HostManagedWriteIntervals.AllowsBytes(interval))
+            {
+                return false;
+            }
+
+            var succeeded = false;
+            try
+            {
+                CopyToCanonicalAlias(firstTarget, first);
+                CopyToCanonicalAlias(secondTarget, second);
+                succeeded = true;
+                return true;
+            }
+            finally
+            {
+                HostBackingObject.EndManagedWrite(interval, succeeded);
+            }
+        }
+        finally
+        {
+            ExitAliasAccess();
+        }
+    }
+
     // TryWriteSingleView with the bytes produced in place by fill instead of copied from a
     // source span: same alias pin, ordinary operation admission and per-chunk interval
     // (overlapping read watches are invalidated before fill runs), and false with fill

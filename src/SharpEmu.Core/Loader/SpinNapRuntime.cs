@@ -28,6 +28,7 @@ internal static unsafe class SpinNapRuntime
     public const string NapEnvironmentVariable = "SHARPEMU_SPIN_NAP_US";
     public const string GapEnvironmentVariable = "SHARPEMU_SPIN_NAP_GAP_US";
     public const string AbEnvironmentVariable = "SHARPEMU_SPIN_NAP_AB_S";
+    public const string WideShapesEnvironmentVariable = "SHARPEMU_SPIN_NAP_SHAPES";
     public const string LockedEnvironmentVariable = "SHARPEMU_SPIN_NAP_LOCKED";
     public const string LockedSitesEnvironmentVariable = "SHARPEMU_SPIN_NAP_LOCKED_SITES";
     public const string LockedDensityEnvironmentVariable = "SHARPEMU_SPIN_NAP_LOCKED_DENSITY_US";
@@ -83,6 +84,13 @@ internal static unsafe class SpinNapRuntime
 
     internal static bool IsEnabled =>
         !string.Equals(Environment.GetEnvironmentVariable(EnvironmentVariable), "0", StringComparison.Ordinal);
+
+    /// <summary>On by default (<c>SHARPEMU_SPIN_NAP_SHAPES=0</c> turns it off): the spin pass also patches
+    /// a <c>pause; jmp short</c> loop (taking the alignment nops after the jump) and loops in functions
+    /// whose jump table base is hoisted out of the loop or bounds-checked with a 64-bit compare. Without
+    /// it the pass leaves those pauses alone, so a pure spin-wait loop of that shape never naps.</summary>
+    internal static bool WideShapesEnabled =>
+        !string.Equals(Environment.GetEnvironmentVariable(WideShapesEnvironmentVariable), "0", StringComparison.Ordinal);
 
     /// <summary>Opt-in (<c>SHARPEMU_SPIN_NAP_LOCKED=1</c>): also instrument short backward loops
     /// that poll with <c>xchg mem</c> / <c>lock</c>-prefixed read-modify-write ops.</summary>

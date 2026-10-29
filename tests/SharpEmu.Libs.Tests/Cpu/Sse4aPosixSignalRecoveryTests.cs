@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Cpu.Emulation;
 using SharpEmu.Core.Cpu.Native;
@@ -19,7 +18,24 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
 {
     private readonly object? _previousBackend = FaultRecoveryBackend.GetValue(null);
 
-    public void Dispose() => FaultRecoveryBackend.SetValue(null, _previousBackend);
+    private DirectExecutionBackend? _backend;
+
+    public void Dispose()
+    {
+        _backend?.Dispose();
+        FaultRecoveryBackend.SetValue(null, _previousBackend);
+    }
+
+    private DirectExecutionBackend Backend()
+    {
+        if (_backend is null)
+        {
+            var modules = new ModuleManager();
+            modules.Freeze();
+            _backend = new DirectExecutionBackend(modules, installFaultHandling: false);
+        }
+        return _backend;
+    }
 
     private const int PosixSigIll = 4;
     private const int LinuxUcontextGregsOffset = 40;
@@ -119,7 +135,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         try
         {
             const ulong value = 0x1234_5678_9ABC_DEF0UL;
-            var frame = new FakeSignalFrame((ulong)code);
+            var frame = new FakeSignalFrame((ulong)code, Backend());
             frame.SetXmmLow(FxsaveXmm0Offset, value);
             var emulatedBefore = (long)EmulatedCounter.GetValue(null)!;
 
@@ -153,7 +169,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         {
             const ulong destination = 0x1111_2222_3333_4444UL;
             const ulong source = 0xAAAA_BBBB_CCCC_DDDDUL;
-            var frame = new FakeSignalFrame((ulong)code);
+            var frame = new FakeSignalFrame((ulong)code, Backend());
             frame.SetXmmLow(FxsaveXmm0Offset, destination);
             frame.SetXmmLow(FxsaveXmm1Offset, source);
 
@@ -180,7 +196,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         var code = AllocateProbeVisibleCode([0x66, 0x0F, 0x78, 0xC1, 0x28, 0x00]);
         try
         {
-            var frame = new FakeSignalFrame((ulong)code) { Accumulator = 0x1B86FD090 };
+            var frame = new FakeSignalFrame((ulong)code, Backend()) { Accumulator = 0x1B86FD090 };
             for (int registerIndex = 0; registerIndex < 16; registerIndex++)
             {
                 frame.SetXmmLow(FxsaveXmm0Offset + registerIndex * 16, (ulong)registerIndex);
@@ -221,7 +237,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         var code = AllocateProbeVisibleCode([0xF2, 0x0F, 0x78, 0xC0, 0x08, 0x08]);
         try
         {
-            var frame = new FakeSignalFrame((ulong)code);
+            var frame = new FakeSignalFrame((ulong)code, Backend());
             frame.SetXmmLow(FxsaveXmm0Offset, 0x10);
             frame.SetXmmLow(FxsaveXmm0Offset + 8, ulong.MaxValue);
             for (int registerIndex = 1; registerIndex < 16; registerIndex++)
@@ -264,7 +280,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         try
         {
             DirectExecutionFaultContext.VectorRegistersBridged = false;
-            var backend = RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
+            var backend = Backend();
             var contextRecord = stackalloc byte[0x4D0];
 
             var recovered = (bool)TryRecoverAmdCompat.Invoke(
@@ -288,8 +304,11 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         private readonly byte[] _machineContext = new byte[1032];
         private readonly bool _includeFloatingPointState;
 
-        public FakeSignalFrame(ulong instructionPointer, bool includeFloatingPointState = true)
+        private readonly DirectExecutionBackend _backend;
+
+        public FakeSignalFrame(ulong instructionPointer, DirectExecutionBackend backend, bool includeFloatingPointState = true)
         {
+            _backend = backend;
             _includeFloatingPointState = includeFloatingPointState;
             fixed (byte* userContext = _userContext)
             fixed (byte* machineContext = _machineContext)
@@ -362,7 +381,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
 
         public bool Dispatch()
         {
-            EnsureBridgeBackend();
+            EnsureBridgeBackend(_backend);
             fixed (byte* userContext = _userContext)
             fixed (byte* floatingPointState = _floatingPointState)
             fixed (byte* machineContext = _machineContext)
@@ -384,24 +403,12 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         }
     }
 
-    /// <summary>
-    /// The bridge only runs the recovery chain when a backend instance is
-    /// registered. The tests do not need any of the constructor's state (and must not run
-    /// it: it installs process-wide signal handlers), so register an uninitialized
-    /// instance - the SIGILL recovery path only touches static state.
-    /// </summary>
-    private static void EnsureBridgeBackend()
+    private static void EnsureBridgeBackend(DirectExecutionBackend backend)
     {
-        // Point the bridge at the shared recovery entries without installing
-        // the signal handlers, which is process-wide and cannot be undone.
+        // Use the shared entry points, but do not install irreversible process signal handlers.
         UseSharedRecoveryEntries!.Invoke(null, [(nint)(delegate* managed<void*, int>)&DirectExecutionBackend.SharedRawFaultRecovery,
             (nint)(delegate* managed<void*, int>)&DirectExecutionBackend.SharedFaultRecovery]);
-        if (FaultRecoveryBackend.GetValue(null) == null)
-        {
-            FaultRecoveryBackend.SetValue(
-                null,
-                RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend)));
-        }
+        FaultRecoveryBackend.SetValue(null, backend);
     }
 
     // Use the host allocator so Linux memory probes can read the instruction bytes.

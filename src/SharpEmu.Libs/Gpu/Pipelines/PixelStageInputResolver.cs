@@ -57,6 +57,43 @@ public static class PixelStageInputResolver
         return registers;
     }
 
+    // The semantics a pixel program's header declares are static, but the guest owns the table, so every
+    // draw still reads it. One read for all of them: this was one guest read per input (up to 32), each
+    // taking the memory read lock, to decode a few words.
+    private static uint CustomInterpolationMask(CpuContext context, RegisteredShader shader, uint semanticCount)
+    {
+        if (semanticCount == 0)
+        {
+            return 0;
+        }
+
+        Span<uint> words = stackalloc uint[PixelInputInfo.InterpolatorCount];
+        words = words[..(int)semanticCount];
+        if (!context.Memory.TryRead(shader.InputSemanticsAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words)))
+        {
+            // A word is unmapped: read them one at a time to name it.
+            for (var index = 0u; index < semanticCount; index++)
+            {
+                if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out words[(int)index]))
+                {
+                    throw GpuFatal.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
+                }
+            }
+        }
+
+        var customMask = 0u;
+        for (var index = 0; index < words.Length; index++)
+        {
+            var semantic = new ShaderInputSemantic(words[index]);
+            if (semantic.IsCustom && semantic.IsHalfFloat == 0)
+            {
+                customMask |= 1u << index;
+            }
+        }
+
+        return customMask;
+    }
+
     public static PixelInputInfo Resolve(
         CpuContext context,
         RegisteredShader shader,
@@ -69,21 +106,8 @@ public static class PixelStageInputResolver
         PixelInputArrays? reuse = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
-        var customMask = 0u;
         var semanticCount = Math.Min(Math.Min(shader.InputSemanticsCount, inputCount), (uint)PixelInputInfo.InterpolatorCount);
-        for (var index = 0u; index < semanticCount; index++)
-        {
-            if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out var word))
-            {
-                throw GpuFatal.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
-            }
-
-            var semantic = new ShaderInputSemantic(word);
-            if (semantic.IsCustom && semantic.IsHalfFloat == 0)
-            {
-                customMask |= 1u << (int)index;
-            }
-        }
+        var customMask = CustomInterpolationMask(context, shader, semanticCount);
 
         Span<uint> interpolators = stackalloc uint[PixelInputInfo.InterpolatorCount];
         for (var index = 0u; index < inputCount; index++)
@@ -136,11 +160,26 @@ public static class PixelStageInputResolver
             DepthExportFormat = shaderInterface.DepthExportFormat is var zFormat and > 0 and <= 9
                 ? (SharpEmu.ShaderCompiler.Gen5ColorExportFormat)zFormat
                 : null,
-            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
-                !control.StencilExportEnable && !control.MaskExportEnable,
+            EarlyDepth = TestsDepthBeforeShader(control),
             ExecuteOnNoop = control.ExecuteOnNoop,
         };
     }
+
+    // Whether the pixel function may declare [[early_fragment_tests]]: the guest tests depth before
+    // the shader AND skips the shader for a fragment that test rejects. That only changes what a
+    // shader with memory writes does (Metal already tests early for one without), and then it
+    // matters: the stores of a rejected fragment must happen exactly when the guest's do.
+    // - DEPTH_BEFORE_SHADER forces the test ahead of the shader whatever the other bits say
+    //   (Mesa RADV sets it with [earlydepthstencil] next to EXEC_ON_* = writes_memory).
+    // - Z_ORDER 1..3 (EARLY_Z_THEN_LATE_Z, RE_Z, EARLY_Z_THEN_RE_Z) test early too, but EXEC_ON_HIER_FAIL
+    //   and EXEC_ON_NOOP make the shader run for a rejected fragment, and then its stores happen:
+    //   those shaders stay on Metal's late order.
+    // - A shader that kills or exports depth, stencil or coverage is decided after it ran, and Metal
+    //   rejects depth or stencil outputs with the attribute.
+    internal static bool TestsDepthBeforeShader(in DepthShaderControlRegisters control) =>
+        !control.KillEnable && !control.DepthExportEnable && !control.StencilExportEnable && !control.MaskExportEnable &&
+        (control.DepthBeforeShader ||
+         (control.DepthExportOrder != 0 && !control.ExecuteOnHierFail && !control.ExecuteOnNoop));
 }
 
 // The arrays of the last pixel input resolved. Nothing writes a resolved input's arrays, and

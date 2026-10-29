@@ -84,11 +84,21 @@ public sealed unsafe class RemoteWaitTests
                 Thread.Sleep(30);
                 Volatile.Write(ref *word, 2);
             });
-            changer.Start();
+            // Include thread startup: a descheduled caller may resume only after
+            // the writer has already changed the word, making Poll return at once.
             var watch = Stopwatch.StartNew();
-            Assert.True(RemoteWait.Poll(word, 1, 10_000_000_000));
-            Assert.InRange(watch.ElapsedMilliseconds, 20, 2_000);
-            changer.Join();
+            changer.Start();
+            try
+            {
+                Assert.True(RemoteWait.Poll(word, 1, 10_000_000_000));
+                Assert.InRange(watch.ElapsedMilliseconds, 20, 2_000);
+                Assert.Equal(2u, Volatile.Read(ref *word));
+            }
+            finally
+            {
+                // An assertion failure must not free memory still owned by the writer.
+                changer.Join();
+            }
         }
         finally
         {

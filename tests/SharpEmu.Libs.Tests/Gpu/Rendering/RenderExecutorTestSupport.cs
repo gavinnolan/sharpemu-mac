@@ -567,6 +567,7 @@ internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetc
 // Hands back the configured programs and records every pipeline request.
 internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {
+    internal Action<VertexStageRegisters>? BeforeGraphicsResolve { get; set; }
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
     // Stands in for a backend with mesh pipelines (Metal); Vulkan leaves it false.
@@ -575,6 +576,8 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public bool MeshShadersSupported { get; set; }
 
     public uint MeshPrimitiveType { get; private set; }
+
+    public UserConfigRegisters? MeshUserConfig { get; private set; }
 
     public bool MeshDepthBound { get; private set; }
 
@@ -590,6 +593,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     {
         Calls.Add($"get_mesh_programs pixelActive={pixelActive}");
         MeshPrimitiveType = userConfig.PrimitiveType;
+        MeshUserConfig = userConfig;
         MeshDepthBound = depthBound;
         return Graphics;
     }
@@ -625,6 +629,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         bool depthAspectBound,
         bool stencilAspectBound = false)
     {
+        BeforeGraphicsResolve?.Invoke(vertex);
         Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
         ExportMappings.Add(targetExportMapping.ToArray());
         return Graphics;

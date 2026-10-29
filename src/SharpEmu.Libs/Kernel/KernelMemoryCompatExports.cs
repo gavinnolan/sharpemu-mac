@@ -28,7 +28,22 @@ public static partial class KernelMemoryCompatExports
     internal const FileShare GuestFileShare = FileShare.ReadWrite | FileShare.Delete;
     private const int WideCharSize = sizeof(ushort);
     private const int MemsetChunkSize = 16 * 1024;
+    // An in-place clear is handed to the memory in pieces of at most this size.
+    private const int MemsetInPlaceChunkSize = 256 * 1024 * 1024;
     private static readonly byte[] _zeroChunk = new byte[MemsetChunkSize];
+    // Clears at least this large fill the guest mapping in place; smaller ones stay on the staged path.
+    private const ulong InPlaceMemsetThreshold = 64 * 1024;
+    // SHARPEMU_MEMSET_INPLACE=0 sends every memset through the staged chunk loop again.
+    private static readonly bool InPlaceMemsetEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MEMSET_INPLACE"), "0", StringComparison.Ordinal);
+    // SHARPEMU_LOG_LIBC_ALLOC=1 traces every malloc/calloc/realloc/free; read once, not per call.
+    private static readonly bool LogLibcAllocations =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_LIBC_ALLOC"), "1", StringComparison.Ordinal);
+    private static readonly GuestSpanFill<byte> FillWithByte = static (value, destination) =>
+    {
+        destination.Fill(value);
+        return destination.Length;
+    };
     private const int O_WRONLY = 0x1;
     private const int O_RDWR = 0x2;
     private const int O_APPEND = 0x8;
@@ -453,9 +468,39 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        // A large clear fills the guest's host mapping in place (the same canonical alias the
+        // memcpy import copies through): a native vector fill with the same write tracking as
+        // TryWrite, instead of re-copying a staging chunk across it, which ran at a quarter of
+        // the speed of a guest-side fill. A range this memory cannot hand out in place, or a
+        // watched one, declines and the staged loop below writes the rest.
+        var filledInPlace = 0UL;
+        if (length >= InPlaceMemsetThreshold && InPlaceMemsetEnabled)
+        {
+            while (filledInPlace < length)
+            {
+                var take = (int)Math.Min(length - filledInPlace, MemsetInPlaceChunkSize);
+                if (!ctx.Memory.TryFillInPlace(
+                        destination + filledInPlace, take, value,
+                        FillWithByte,
+                        out var filled) ||
+                    filled <= 0)
+                {
+                    break;
+                }
+
+                filledInPlace += (ulong)filled;
+            }
+
+            if (filledInPlace == length)
+            {
+                ctx[CpuRegister.Rax] = destination;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+        }
+
         // Rent may hand back a larger array than requested; only the first chunkLength
         // bytes are filled, so the loop must cap at chunkLength rather than chunk.Length.
-        var chunkLength = (int)Math.Min(length, (ulong)MemsetChunkSize);
+        var chunkLength = (int)Math.Min(length - filledInPlace, (ulong)MemsetChunkSize);
         var chunk = value == 0 ? _zeroChunk : ArrayPool<byte>.Shared.Rent(chunkLength);
         if (value != 0)
         {
@@ -464,8 +509,8 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            var remaining = length;
-            var cursor = destination;
+            var remaining = length - filledInPlace;
+            var cursor = destination + filledInPlace;
             while (remaining > 0)
             {
                 var take = (int)Math.Min((ulong)chunkLength, remaining);
@@ -4670,7 +4715,7 @@ public static partial class KernelMemoryCompatExports
         ulong resultAddress = 0,
         int? errorCode = null)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_LIBC_ALLOC"), "1", StringComparison.Ordinal))
+        if (!LogLibcAllocations)
         {
             return;
         }

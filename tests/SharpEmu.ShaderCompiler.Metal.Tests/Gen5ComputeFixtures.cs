@@ -336,12 +336,16 @@ internal static class Gen5ComputeFixtures
 
     public static Gen5MslShader CompilePixelOrThrow(
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
-        Gen5ColorComponentMapping componentMapping = default)
+        Gen5ColorComponentMapping componentMapping = default,
+        bool pixelEarlyDepth = false,
+        bool pixelDepthExportEnable = false,
+        Gen5MslCodegenOptions? options = null)
     {
         var program = DecodeOrThrow(new Gen5ComputeFixture("pixel", PixelWords, 0, 0));
         var request = RequestOrThrow(program, ShaderStage.Pixel,
-            pixelOutputs: [new Gen5PixelOutputBinding(0, 0, outputKind, componentMapping)]);
-        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
+            pixelOutputs: [new Gen5PixelOutputBinding(0, 0, outputKind, componentMapping)],
+            pixelDepthExportEnable: pixelDepthExportEnable, pixelEarlyDepth: pixelEarlyDepth);
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options))
         {
             throw new InvalidOperationException($"[pixel] MSL request emit failed: {error}");
         }
@@ -373,6 +377,28 @@ internal static class Gen5ComputeFixtures
         ],
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 512);
+
+    // v1 = 3 * lane + 7; three constant-lane reads in a row: lanes 63 and 5 (one fused
+    // exchange) and lane 40 (its own).
+    public static readonly Gen5ComputeFixture Wave64ReadLaneTriple = new(
+        "wave64-readlane-triple",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xD7600000, 0x00017F01, // v_readlane_b32 s0, v1, 63
+            0xD7600001, 0x00010B01, // v_readlane_b32 s1, v1, 5
+            0xD7600002, 0x00015101, // v_readlane_b32 s2, v1, 40
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x7E060201,             // v_mov_b32 v3, s1
+            0x7E0A0202,             // v_mov_b32 v5, s2
+            0x34080084,             // v_lshlrev_b32 v4, 4, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:8
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
 
     private static readonly uint[] Wave64LaneSpillPark =
     [
@@ -782,7 +808,7 @@ internal static class Gen5ComputeFixtures
         bool pixelStencilExportEnable = false, bool pixelSampleMaskExportEnable = false,
         uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true, bool pixelGuestWave32 = false,
         uint meshPerVertexParameterMask = 0, IReadOnlyList<uint>? vertexInterpolants = null,
-        Gen5TessellationLaunch? tessellation = null)
+        Gen5TessellationLaunch? tessellation = null, bool pixelEarlyDepth = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -824,6 +850,7 @@ internal static class Gen5ComputeFixtures
             PixelDepthExportFormat = pixelDepthExportFormat,
             PixelStencilExportEnable = pixelStencilExportEnable,
             PixelSampleMaskExportEnable = pixelSampleMaskExportEnable,
+            PixelEarlyDepth = pixelEarlyDepth,
             Tessellation = tessellation,
         };
     }

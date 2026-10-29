@@ -209,13 +209,10 @@ public sealed class MetalCommandBufferPathLeakTests(ITestOutputHelper output) : 
         }
     }
 
-    private static (uint Blocks, ulong Bytes, ulong Footprint) Sample()
+    private static (long Blocks, ulong Bytes, ulong Footprint) Sample()
     {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-        malloc_zone_statistics(0, out var statistics);
-        return (statistics.BlocksInUse, statistics.SizeInUse, PhysFootprint());
+        var live = NativeHeap.Sample();
+        return (live.Blocks, live.Bytes, PhysFootprint());
     }
 
     private static void WriteHeap(string scene, string when)
@@ -236,19 +233,6 @@ public sealed class MetalCommandBufferPathLeakTests(ITestOutputHelper output) : 
         process.WaitForExit();
         File.WriteAllText(Path.Combine(directory, $"heap-{scene}-{when}.txt"), text + errors.Result);
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MallocStatistics
-    {
-        public uint BlocksInUse;
-        public nuint SizeInUse;
-        public nuint MaxSizeInUse;
-        public nuint SizeAllocated;
-    }
-
-    // Zone 0 is every zone: the sum over the default malloc zones.
-    [DllImport("/usr/lib/libSystem.dylib")]
-    private static extern void malloc_zone_statistics(nint zone, out MallocStatistics statistics);
 
     [DllImport("/usr/lib/libSystem.dylib")]
     private static extern uint mach_task_self();

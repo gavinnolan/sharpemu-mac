@@ -23,6 +23,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         internal GraphicsProgramInputs Inputs;
         internal GraphicsPrograms? Programs;
         internal object? Assumptions;
+        // The jobs submitted before this one.
+        internal long Index;
         // 0 queued, 1 resolved, 2 abandoned.
         internal volatile int State;
     }
@@ -34,7 +36,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private readonly IConcurrentResolveHost _concurrent;
     private readonly object _lock = new();
     private readonly Queue<Job> _queue = new();
-    private readonly Thread _thread;
+    private readonly SharpEmu.HLE.Host.HostHelperThread _thread;
     private int _outstanding;
     private long _finished;
     private long _executedGate;
@@ -44,16 +46,31 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // Set while the worker sleeps because of a pause, under _lock.
     private bool _waitingOnPause;
     private bool _running;
+    // The worker owns the head even while it releases the lock to wait for its gate.
+    private bool _workerClaimed;
+    private readonly bool _allowCallerResolution;
+    // Long bursts give the resolver useful lead; racing it for each head adds handoffs.
+    // Short queues are the query/barrier pattern where the renderer otherwise waits
+    // for a newly woken thread to resolve only a handful of jobs.
+    private const int MaximumCallerOutstanding = 8;
     private bool _stopping;
 
     public ParallelProgramPrefetch(RenderExecutor executor, IRenderHost host, IConcurrentResolveHost concurrent)
+        : this(executor, host, concurrent, concurrent.AllowsCallerResolution)
+    {
+    }
+
+    internal ParallelProgramPrefetch(RenderExecutor executor, IRenderHost host, IConcurrentResolveHost concurrent,
+        bool allowCallerResolution)
     {
         _executor = executor;
         _host = host;
         _fatal = host.Fatal;
         _concurrent = concurrent;
-        _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu program resolve" };
-        _thread.Start();
+        _allowCallerResolution = allowCallerResolution;
+        // The worker waits on this thread per draw: it runs at the worker's class, with the
+        // worker's stack, since it resolves what the worker would resolve itself.
+        _thread = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu program resolve", 16 * 1024 * 1024, Run);
     }
 
     // The job of the draw the render thread runs now; set around each deferred draw.
@@ -61,7 +78,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     public long Submitted { get; private set; }
 
-    // The worker waits on an empty queue (read and written under _lock).
+    // The worker waits for jobs or an active caller (read and written under _lock).
     private bool _idleForJobs;
 
     // What became of the jobs since the last TakeCounters: resolved, abandoned (the resolution threw),
@@ -84,7 +101,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // thread, draws are submitted ahead of the work before them, which may change what they read.
     public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false)
     {
-        var job = new Job(banks, gate, indexed);
+        var job = new Job(banks, gate, indexed) { Index = Submitted };
         lock (_lock)
         {
             _queue.Enqueue(job);
@@ -193,9 +210,20 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         Current = null;
-        var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-        WaitFor(job);
-        Interlocked.Add(ref _waitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+        // A completed job waits for nothing, so it reads no clock: almost every take in a
+        // well-prefetched burst is one, and two clock reads per draw were measurable.
+        if (job.State == 0)
+        {
+            var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            // Caller work is reported separately, not disguised as a shorter resolver wait.
+            // Keep long queues out of the claim routine's lock/finally frame.
+            if (!_allowCallerResolution || Volatile.Read(ref _outstanding) > MaximumCallerOutstanding || !TryResolveOnCaller(job))
+            {
+                WaitFor(job);
+                Interlocked.Add(ref _waitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+            }
+        }
+
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
         if (job.State != 1)
         {
@@ -254,6 +282,57 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
     }
 
+    // Claim only the untouched FIFO head. Never race a worker that already peeked at it,
+    // bypass a dependency gate, or resolve concurrently against shared pipeline caches.
+    internal bool TryResolveOnCaller(Job job)
+    {
+        if (!_allowCallerResolution || job.State != 0 || Volatile.Read(ref _outstanding) > MaximumCallerOutstanding ||
+            Volatile.Read(ref _running) || Volatile.Read(ref _workerClaimed))
+            return false;
+        lock (_lock)
+        {
+            if (_stopping || _paused || _running || _workerClaimed || job.State != 0 || _outstanding > MaximumCallerOutstanding ||
+                job.Gate > Volatile.Read(ref _executedGate) || !_queue.TryPeek(out var head) || !ReferenceEquals(head, job))
+                return false;
+            _queue.Dequeue();
+            _running = true;
+        }
+
+        var speculative = GpuFatal.ThrowOnFatal;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        GpuFatal.ThrowOnFatal = true;
+        try
+        {
+            ResolveCore(job);
+        }
+        finally
+        {
+            GpuFatal.ThrowOnFatal = speculative;
+            Interlocked.Add(ref _callerResolveTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            Interlocked.Increment(ref _callerResolves);
+            FinishJob(worker: false);
+        }
+        return true;
+    }
+
+    private long _callerResolves, _callerResolveTicks;
+
+    public (long Count, double Milliseconds) TakeCallerResolveCounters() =>
+        (Interlocked.Exchange(ref _callerResolves, 0),
+            Interlocked.Exchange(ref _callerResolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+
+    private void FinishJob(bool worker)
+    {
+        lock (_lock)
+        {
+            _outstanding--;
+            _finished++;
+            _running = false;
+            if (worker) _workerClaimed = false;
+            Monitor.PulseAll(_lock);
+        }
+    }
+
     private void Run()
     {
         GpuFatal.ThrowOnFatal = true;
@@ -262,7 +341,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             Job job;
             lock (_lock)
             {
-                while (_queue.Count == 0 && !_stopping)
+                while ((_queue.Count == 0 || _running) && !_stopping)
                 {
                     _idleForJobs = true;
                     Monitor.Wait(_lock);
@@ -275,6 +354,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 }
 
                 job = _queue.Peek();
+                _workerClaimed = true;
                 if (job.Gate > Volatile.Read(ref _executedGate))
                 {
                     // The gate usually opens within a few items: spin before sleeping.
@@ -316,14 +396,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 _running = true;
             }
 
-            Resolve(job);
-            lock (_lock)
+            try
             {
-                _outstanding--;
-                _finished++;
-                _running = false;
-                Monitor.PulseAll(_lock);
+                Resolve(job);
             }
+            finally { FinishJob(worker: true); }
         }
     }
 
@@ -346,9 +423,16 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
     }
 
+    /// <summary>The index of the job this thread resolves now, or -1.</summary>
+    [ThreadStatic]
+    private static long _resolvingJob;
+
+    public static long ResolvingJob => _resolvingJob - 1;
+
     private void ResolveCore(Job job)
     {
         _concurrent.BeginConcurrentResolve();
+        _resolvingJob = job.Index + 1;
         try
         {
             job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed);
@@ -368,6 +452,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             }
 
             job.State = 2;
+        }
+        finally
+        {
+            _resolvingJob = 0;
         }
     }
 

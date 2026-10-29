@@ -89,17 +89,27 @@ public static partial class ImageRequestBuilders
             return built;
         }
 
-        // A frame alternates between a few depth states (passes), which a one-entry memo missed
-        // and refilled with a new object each time; the slots are structs, as ColorTarget's are.
-        var memos = _depthTargetMemos ??= new DepthTargetSlot[DepthMemoCount];
-        ref var slot = ref memos[(int)((depthWords.ZReadBase >> 12) ^ (depthWords.ZWriteBase >> 12) ^ (depthWords.DepthControl * 31u)) & (DepthMemoCount - 1)];
-        if (slot.Valid && ReferenceEquals(slot.Device, device) && slot.Words.Equals(depthWords))
+        // Equal read/write bases are normal. XORing them at the same shift erased the address
+        // and made every target with the same depth control evict the preceding one. Mix distinct
+        // address bits, and retain four exact states per bucket for passes that share a surface.
+        var memos = _depthTargetMemos ??= new DepthTargetSlot[DepthMemoCount * DepthMemoWays];
+        var bucket = (int)((depthWords.ZReadBase >> 16) ^ (depthWords.ZReadBase >> 24) ^
+            (depthWords.ZWriteBase >> 20) ^ (depthWords.DepthControl * 31u)) & (DepthMemoCount - 1);
+        var start = bucket * DepthMemoWays;
+        for (var way = 0; way < DepthMemoWays; way++)
         {
-            return slot.Result;
+            ref var held = ref memos[start + way];
+            if (held.Valid && ReferenceEquals(held.Device, device) && held.Words.Equals(depthWords))
+            {
+                return held.Result;
+            }
         }
 
         var result = DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
-        slot = new DepthTargetSlot { Valid = true, Words = depthWords, Device = device, Result = result };
+        var next = _depthTargetMemoNext ??= new byte[DepthMemoCount];
+        var slot = start + next[bucket];
+        next[bucket] = (byte)((next[bucket] + 1) % DepthMemoWays);
+        memos[slot] = new DepthTargetSlot { Valid = true, Words = depthWords, Device = device, Result = result };
         return result;
     }
 
@@ -117,9 +127,13 @@ public static partial class ImageRequestBuilders
     }
 
     private const int DepthMemoCount = 8;
+    private const int DepthMemoWays = 4;
 
     [ThreadStatic]
     private static DepthTargetSlot[]? _depthTargetMemos;
+
+    [ThreadStatic]
+    private static byte[]? _depthTargetMemoNext;
 
     // Builds the source or destination image used by DB_RENDER_OVERRIDE depth/stencil copies.
     public static DepthTargetResolution? DepthTargetCopy(in DepthTargetWords depthWords, IImageFormatSupport device, bool writeBuffer) =>

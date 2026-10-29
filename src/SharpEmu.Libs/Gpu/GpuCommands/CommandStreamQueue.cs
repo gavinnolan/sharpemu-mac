@@ -92,6 +92,10 @@ public sealed class CommandStreamQueue
     private ulong _lastCompletedGpuTick;
     private int _doneCount;
     private int _pendingBoundaries;
+    // Boundaries queued by BeginDone and boundaries the worker finished or dropped; both only grow,
+    // and boundaries retire in queue order, so a ticket's wait is ticket - _boundariesRetired.
+    private long _boundaryTickets;
+    private long _boundariesRetired;
     private IdleOutcome _outcome = IdleOutcome.Completed;
     private Thread? _processingThread;
     private CommandSubmissionPreparation? _activePreparation;
@@ -297,7 +301,7 @@ public sealed class CommandStreamQueue
                     var remaining = deadline - Environment.TickCount64;
                     if (remaining <= 0)
                     { failure = new TimeoutException("Accepted command preparation did not reach a runnable-prefix boundary."); break; }
-                    Monitor.Wait(_gate, (int)Math.Min(remaining, 1000));
+                    WaitLocked((int)Math.Min(remaining, 1000));
                 }
                 failure ??= receipt.Failure ?? _preparationFailure;
                 if (failure is null && receipt.Status == CommandSubmissionPreparation.State.Failed)
@@ -485,7 +489,7 @@ public sealed class CommandStreamQueue
                 (ulong)submission.Kind, submission.DwordCount);
         }
 
-        Monitor.PulseAll(_gate);
+        PulseWaitersLocked();
     }
 
     public bool TryEnqueueControlBarrier(Action work, Action cancel)
@@ -500,13 +504,23 @@ public sealed class CommandStreamQueue
             }
 
             _controlBarriers.Enqueue(new ControlBarrier(_admissionOrdinal, work, cancel));
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
             return true;
         }
     }
 
     public IdleOutcome Done()
     {
+        var outcome = BeginDone(out var ticket);
+        return outcome == IdleOutcome.Completed && ticket != 0 ? WaitDone(ticket) : outcome;
+    }
+
+    // The ordering half of Done: marks the graphics pipe done and queues the frame boundary behind
+    // the accepted submissions. A nonzero ticket is the boundary for WaitDone; zero means there is
+    // nothing to wait for (the worker's own call, or a shutdown drain that already ran).
+    public IdleOutcome BeginDone(out long ticket)
+    {
+        ticket = 0;
         if (_processingThread == Thread.CurrentThread)
         {
             lock (_gate)
@@ -531,7 +545,7 @@ public sealed class CommandStreamQueue
                 // Shutdown: no slice will run a queued boundary, so drain as before.
                 while (_outcome == IdleOutcome.Completed && (_processing || _submissionCount != 0))
                 {
-                    Monitor.Wait(_gate);
+                    WaitLocked(Timeout.Infinite);
                 }
 
                 _doneCount++;
@@ -539,13 +553,24 @@ public sealed class CommandStreamQueue
             }
 
             _pendingBoundaries++;
+            ticket = ++_boundaryTickets;
             EnqueueLocked(new CommandSubmission(CommandSubmissionKind.FrameBoundary, 0, 0, 0, 0, null));
+            return IdleOutcome.Completed;
+        }
+    }
+
+    // The waiting half of Done: blocks while more than the allowed boundaries up to and including
+    // this ticket's are still ahead of the worker. A boundary queued after it does not extend the wait.
+    public IdleOutcome WaitDone(long ticket)
+    {
+        lock (_gate)
+        {
             var dsSuspend = DsTrace.Gpu && DsTrace.Armed;
-            var dsPending = _pendingBoundaries;
+            var dsPending = ticket - _boundariesRetired;
             var dsStarted = dsSuspend ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
-            while (_outcome == IdleOutcome.Completed && _pendingBoundaries > _boundariesInFlight)
+            while (_outcome == IdleOutcome.Completed && ticket - _boundariesRetired > _boundariesInFlight)
             {
-                Monitor.Wait(_gate);
+                WaitLocked(Timeout.Infinite);
             }
 
             if (dsSuspend)
@@ -569,7 +594,7 @@ public sealed class CommandStreamQueue
             while (_outcome == IdleOutcome.Completed &&
                    (_processing || _submissionCount != 0 || _controlBarriers.Count != 0))
             {
-                Monitor.Wait(_gate);
+                WaitLocked(Timeout.Infinite);
             }
 
             return _outcome;
@@ -580,7 +605,7 @@ public sealed class CommandStreamQueue
     {
         lock (_gate)
         {
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
     }
 
@@ -605,13 +630,90 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // Threads inside a wait on the gate (counted under it). Every waiter shares the one monitor: the
+    // worker for work, a frame boundary or a drain for completion, a preparation for its prefix.
+    private int _waiters;
+
+    // SHARPEMU_CP_QUEUE_PULSE=0 pulses every waiter on every state change again.
+    private static readonly bool ElidePulses = Environment.GetEnvironmentVariable("SHARPEMU_CP_QUEUE_PULSE") != "0";
+
+    // Caller holds the gate.
+    private void WaitLocked(int timeoutMilliseconds)
+    {
+        _waiters++;
+        try
+        {
+            Monitor.Wait(_gate, timeoutMilliseconds);
+        }
+        finally
+        {
+            _waiters--;
+        }
+    }
+
+    // Caller holds the gate. Wakes the threads parked on it: none when nobody waits (a busy worker,
+    // a producer with no frame boundary pending), a single pulse when one does, a broadcast only
+    // when several kinds of waiter could be parked. A waiter counted but already pulsed misses a
+    // second pulse and does not need it: it re-reads the state when it takes the gate.
+    private void PulseWaitersLocked()
+    {
+        if (!ElidePulses)
+        {
+            Monitor.PulseAll(_gate);
+        }
+        else if (_waiters == 1)
+        {
+            Monitor.Pulse(_gate);
+        }
+        else if (_waiters != 0)
+        {
+            Monitor.PulseAll(_gate);
+        }
+    }
+
+    // SHARPEMU_CP_WATCH_ADAPTIVE=0 keeps the fixed watch-interval poll.
+    private static readonly bool AdaptiveWatch = Environment.GetEnvironmentVariable("SHARPEMU_CP_WATCH_ADAPTIVE") != "0";
+
+    private const int WatchPollStartMicroseconds = 50;
+
+    // The current poll of a watched wait: starts short, so a store the CP waits for is noticed in
+    // microseconds, and doubles up to the watch interval while nothing changes. Reset when a re-read
+    // sees a change.
+    private int _watchPollMicroseconds = WatchPollStartMicroseconds;
+
+    // Caller holds the gate (once). One poll of a watched wait. Below the watch interval it releases
+    // the gate for a precise sleep, as Monitor.Wait cannot wait less than a millisecond: a submission
+    // enqueued meanwhile waits out the sleep (at most the poll, under the interval). At the interval
+    // it is a gate wait, which an enqueue cuts short.
+    private void WaitWatchIntervalLocked(long remainingMilliseconds)
+    {
+        var intervalMicroseconds = WatchIntervalMilliseconds * 1000;
+        var poll = _watchPollMicroseconds;
+        if (!AdaptiveWatch || poll >= intervalMicroseconds)
+        {
+            WaitLocked((int)Math.Min(remainingMilliseconds, WatchIntervalMilliseconds));
+            return;
+        }
+
+        _watchPollMicroseconds = Math.Min(poll * 2, intervalMicroseconds);
+        Monitor.Exit(_gate);
+        try
+        {
+            HostTiming.SleepMicroseconds(Math.Min(poll, remainingMilliseconds * 1000));
+        }
+        finally
+        {
+            Monitor.Enter(_gate);
+        }
+    }
+
     // Caller holds the gate. Sleeps up to the timeout, cut into watch intervals while a
     // parked head waits on a watched label, and returns early once a re-read woke one.
     private void WaitWatchingLocked(int timeoutMilliseconds)
     {
         if (WatchIntervalMilliseconds == 0 || !HasWatchedHeadLocked())
         {
-            Monitor.Wait(_gate, timeoutMilliseconds);
+            WaitLocked(timeoutMilliseconds);
             return;
         }
 
@@ -624,7 +726,7 @@ public sealed class CommandStreamQueue
                 return;
             }
 
-            Monitor.Wait(_gate, (int)Math.Min(remaining, WatchIntervalMilliseconds));
+            WaitWatchIntervalLocked(remaining);
             if (RecheckWatchedLocked())
             {
                 return;
@@ -685,6 +787,7 @@ public sealed class CommandStreamQueue
             }
 
             head.WatchedValue = value;
+            _watchPollMicroseconds = WatchPollStartMicroseconds;
             if (wait.Compares &&
                 (!Packets.WaitOperation.TryCompare(value, wait.Reference, wait.Mask, wait.Function, out var satisfied) || !satisfied))
             {
@@ -699,7 +802,7 @@ public sealed class CommandStreamQueue
         if (woke)
         {
             _wakeGeneration++;
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
 
         return woke;
@@ -721,12 +824,12 @@ public sealed class CommandStreamQueue
 
                 if (WatchIntervalMilliseconds != 0 && HasWatchedHeadLocked())
                 {
-                    Monitor.Wait(_gate, (int)Math.Min(remaining, WatchIntervalMilliseconds));
+                    WaitWatchIntervalLocked(remaining);
                     _ = RecheckWatchedLocked();
                 }
                 else
                 {
-                    Monitor.Wait(_gate, (int)remaining);
+                    WaitLocked((int)remaining);
                 }
             }
 
@@ -777,7 +880,7 @@ public sealed class CommandStreamQueue
         _activePreparation?.Resolve(CommandSubmissionPreparation.State.Failed, _preparationFailure);
         _activePreparation = null;
         _processing = false;
-        Monitor.PulseAll(_gate);
+        PulseWaitersLocked();
     }
 
     // A completed GPU tick can make a blocked memory wait ready. A flip slot or a
@@ -850,7 +953,7 @@ public sealed class CommandStreamQueue
         // wake, when there is anything to wake, follows it.
         lock (_labelGate)
         {
-            _pendingLabels[address] = (value, size, tick);
+            StorePendingLabelLocked(address, size, value, tick);
         }
 
         if (!_blockedHeadsPossible)
@@ -884,7 +987,7 @@ public sealed class CommandStreamQueue
         {
             for (var index = 0; index < count; index++)
             {
-                _pendingLabels[address + (ulong)index * strideBytes] = (value, sizeof(ulong), tick);
+                StorePendingLabelLocked(address + (ulong)index * strideBytes, sizeof(ulong), value, tick);
             }
         }
 
@@ -901,6 +1004,29 @@ public sealed class CommandStreamQueue
                 DsWakeSource.PendingLabel);
             LowerBlockedHintLocked();
         }
+    }
+
+    private void StorePendingLabelLocked(ulong address, int size, ulong value, ulong tick)
+    {
+        // The cache answers whole dwords/qwords. A partial replacement must not leave
+        // an older overlapping value eligible to satisfy a wait or a predicate.
+        // Unaligned/other-sized stores take the backend's ordered-memory path; dropping
+        // cached answers is conservative and keeps every cached start dword-aligned.
+        if ((address & 3) != 0 || size is not (sizeof(uint) or sizeof(ulong)))
+        {
+            _pendingLabels.Clear();
+            return;
+        }
+
+        if (address >= sizeof(uint) &&
+            _pendingLabels.TryGetValue(address - sizeof(uint), out var preceding) &&
+            preceding.Size == sizeof(ulong))
+            _pendingLabels.Remove(address - sizeof(uint));
+
+        if (size == sizeof(ulong) && address <= ulong.MaxValue - sizeof(uint))
+            _pendingLabels.Remove(address + sizeof(uint));
+
+        _pendingLabels[address] = (value, size, tick);
     }
 
     // Caller holds _gate.
@@ -1051,7 +1177,7 @@ public sealed class CommandStreamQueue
                 BlockedRetries++;
             }
 
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
     }
 
@@ -1095,7 +1221,7 @@ public sealed class CommandStreamQueue
                 PacketProfile.RecordRetryAll();
             }
 
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
     }
 
@@ -1196,7 +1322,7 @@ public sealed class CommandStreamQueue
 
         if (woke)
         {
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
     }
 
@@ -1275,7 +1401,7 @@ public sealed class CommandStreamQueue
                         foreach (var pendingQueue in _queues)
                             foreach (var pending in pendingQueue)
                                 pending.Preparation?.Resolve(CommandSubmissionPreparation.State.DeferredDependency);
-                    Monitor.PulseAll(_gate);
+                    PulseWaitersLocked();
                     return _submissionCount != 0 ? SliceResult.AllBlocked : SliceResult.NoWork;
                 }
 
@@ -1340,7 +1466,7 @@ public sealed class CommandStreamQueue
             lock (_gate)
             {
                 _processing = false;
-                Monitor.PulseAll(_gate);
+                PulseWaitersLocked();
             }
 
             return SliceResult.Completed;
@@ -1448,6 +1574,7 @@ public sealed class CommandStreamQueue
                 if (submission!.Kind == CommandSubmissionKind.FrameBoundary)
                 {
                     _pendingBoundaries--;
+                    _boundariesRetired++;
                     _doneCount++;
                 }
 
@@ -1463,7 +1590,7 @@ public sealed class CommandStreamQueue
             }
 
             _processing = false;
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
 
         if (submission!.QueueId == TraceQueueId)
@@ -1691,7 +1818,7 @@ public sealed class CommandStreamQueue
         {
             _accepting = false;
             _stopping = true;
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
     }
 
@@ -1763,6 +1890,7 @@ public sealed class CommandStreamQueue
                         if (dropped.Kind == CommandSubmissionKind.FrameBoundary)
                         {
                             _pendingBoundaries--;
+                            _boundariesRetired++;
                         }
                     }
 
@@ -1772,7 +1900,7 @@ public sealed class CommandStreamQueue
                 }
             }
 
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
     }
 
@@ -1786,7 +1914,7 @@ public sealed class CommandStreamQueue
             _activePreparation?.Resolve(CommandSubmissionPreparation.State.Failed, _preparationFailure);
             DropAllLocked();
             cancellations = CancelControlBarriersLocked();
-            Monitor.PulseAll(_gate);
+            PulseWaitersLocked();
         }
 
         foreach (var cancel in cancellations)
@@ -1994,5 +2122,6 @@ public sealed class CommandStreamQueue
 
         _submissionCount = 0;
         _pendingBoundaries = 0;
+        _boundariesRetired = _boundaryTickets;
     }
 }

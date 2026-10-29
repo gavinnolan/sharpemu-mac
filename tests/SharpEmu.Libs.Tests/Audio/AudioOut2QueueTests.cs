@@ -13,7 +13,7 @@ namespace SharpEmu.Libs.Tests.Audio;
 // The context queue the way Wwise drives it: Advance then a non-blocking Push for each grain the
 // queue level says is available.
 [Collection(AudioOutStateCollection.Name)]
-public sealed class AudioOut2QueueTests : IDisposable
+public sealed partial class AudioOut2QueueTests : IDisposable
 {
     private const ulong MemoryBase = 0x1_0000_0000;
     private const ulong ContextParamAddress = MemoryBase + 0x100;

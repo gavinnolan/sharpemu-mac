@@ -79,8 +79,12 @@ public sealed partial class GpuCommandInterpreter
             : source.Length >= sizeof(uint) ? BinaryPrimitives.ReadUInt32LittleEndian(source) : 0UL;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping))
         {
-            CommandProcessorWriteHistory.Record(QueueId, destination, source.Length,
-                source.Length == sizeof(uint) ? (uint)first : first, kind, deferred: true);
+            if (CommandProcessorWriteHistory.Enabled)
+            {
+                CommandProcessorWriteHistory.Record(QueueId, destination, source.Length,
+                    source.Length == sizeof(uint) ? (uint)first : first, kind, deferred: true);
+            }
+
             NotePendingBytes(destination, source);
         }
 
@@ -142,10 +146,13 @@ public sealed partial class GpuCommandInterpreter
 
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping))
         {
-            for (var index = 0; index < count; index++)
+            if (CommandProcessorWriteHistory.Enabled)
             {
-                CommandProcessorWriteHistory.Record(QueueId, destination + (ulong)index * strideBytes,
-                    sizeof(ulong), value, kind, deferred: true);
+                for (var index = 0; index < count; index++)
+                {
+                    CommandProcessorWriteHistory.Record(QueueId, destination + (ulong)index * strideBytes,
+                        sizeof(ulong), value, kind, deferred: true);
+                }
             }
 
             if (PendingQwordsRecorded is { } noteRun)
@@ -250,7 +257,11 @@ public sealed partial class GpuCommandInterpreter
     {
         var is64Bit = byteCount == sizeof(ulong);
         var value = is64Bit ? clock : (uint)clock;
-        CommandProcessorWriteHistory.Record(QueueId, destination, (int)byteCount, value, "COPY_DATA_CLOCK", deferred: true);
+        if (CommandProcessorWriteHistory.Enabled)
+        {
+            CommandProcessorWriteHistory.Record(QueueId, destination, (int)byteCount, value, "COPY_DATA_CLOCK", deferred: true);
+        }
+
         PendingLabelRecorded?.Invoke(destination, (int)byteCount, value);
         _lastWriteLength = 0;
         RecordHostEndOfPipe(new EndOfPipeWrite(
@@ -314,8 +325,12 @@ public sealed partial class GpuCommandInterpreter
             if (!destinationIsGds && DefersCommandProcessorWrites)
             {
                 var fill = (uint)sourceOrImmediate;
-                CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
-                    fill, "DMA_FILL", deferred: true);
+                if (CommandProcessorWriteHistory.Enabled)
+                {
+                    CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
+                        fill, "DMA_FILL", deferred: true);
+                }
+
                 if (byteCount <= MaxNotedPendingBytes && byteCount % sizeof(uint) == 0)
                 {
                     Span<uint> pattern = stackalloc uint[MaxNotedPendingBytes / sizeof(uint)];
@@ -328,7 +343,7 @@ public sealed partial class GpuCommandInterpreter
                 return;
             }
 
-            if (!destinationIsGds)
+            if (!destinationIsGds && CommandProcessorWriteHistory.Enabled)
             {
                 CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
                     (uint)sourceOrImmediate, "DMA_FILL", deferred: false);
@@ -354,7 +369,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var deferredCopy = !destinationIsGds && !sourceIsGds && DefersCommandProcessorWrites;
-        if (!destinationIsGds)
+        if (!destinationIsGds && CommandProcessorWriteHistory.Enabled)
         {
             // The value is the source's, read now for the record only: a copy may land later.
             ulong copied = 0;

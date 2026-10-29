@@ -335,6 +335,28 @@ public sealed unsafe partial class MetalSingleCopyTests(ITestOutputHelper output
         output.WriteLine(rig.SingleCopy.Describe());
     }
 
+    // The retile staging buffer is kept for the next restore instead of being allocated and released each
+    // time, and a restore from a reused (already written) buffer still returns exactly the guest's bytes.
+    [Fact]
+    public void RestoresReuseTheRetileStagingBufferAndStillReturnTheExactBytes()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var request = Request(rig.ImageAddress, GuestTileMode.Standard64KB);
+        var size = request.Description.Data.Size;
+        var bytes = Pattern(size, 90);
+        rig.Release(request, bytes, (int)(size / Chunk));
+        Assert.True(rig.Raw(rig.ImageAddress, size).All(static value => value == 0));
+        Assert.Equal(bytes, rig.Read(rig.ImageAddress, size));
+        Assert.Equal(bytes, rig.Raw(rig.ImageAddress, size));
+
+        // The release verifies through a retile and the host read restores through another: one buffer.
+        var (hits, misses) = rig.SingleCopy.RetilePoolCounts;
+        output.WriteLine($"retile pool hits={hits} misses={misses}");
+        Assert.Equal(1, misses);
+        Assert.Equal(1, hits);
+    }
+
     // A fill that covers a whole chunk (a file read into it) takes it over without a
     // retile; one that stops short gets the rest of its chunk back from the texture.
     [Fact]

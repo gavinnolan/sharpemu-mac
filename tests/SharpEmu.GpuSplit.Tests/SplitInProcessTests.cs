@@ -30,7 +30,7 @@ internal sealed class InProcessSplit : IDisposable
     private readonly GpuProcessClient _client;
     private readonly Thread _loop;
 
-    public InProcessSplit(Action<GuestGpuMemory>? beforeStart = null, TimeSpan? inputPoll = null)
+    public InProcessSplit(Action<GuestGpuMemory>? beforeStart = null, TimeSpan? inputPoll = null, IGuestImageStore? gpuStore = null)
     {
         Guest = new SharedGuestMemory();
         _server = MacOSHost.ServeGuestMemory(Guest.Export, Guest.Table.Region, out var service);
@@ -43,7 +43,7 @@ internal sealed class InProcessSplit : IDisposable
             ComposeBackend = environment =>
             {
                 Environment = environment;
-                environment.Memory.AttachStores(null, GpuStore);
+                environment.Memory.AttachStores(null, gpuStore ?? GpuStore);
                 return Backend;
             },
             ConfigureVideo = options => ConfiguredVideo = options,
@@ -161,6 +161,32 @@ public sealed unsafe class SplitInProcessTests
     }
 
     [MacOSFact]
+    public void ASplitFrameBoundaryIsOrderedOnTheRingAndWaitsOutsideIt()
+    {
+        using var split = new InProcessSplit();
+        var backend = split.Session.Backend;
+        backend.SubmitCommandStream(null!, queue: 0, address: 0x1000, dwordCount: 16, submissionId: 1, null);
+        backend.SubmitCommandStream(null!, queue: 0x20, address: 0x2000, dwordCount: 16, submissionId: 2, null);
+        split.Backend.BoundaryRelease.Reset();
+
+        // The ordering half only writes the record; the GPU side queues it behind both submissions.
+        Assert.Equal(IdleOutcome.Completed, backend.BeginSubmitDone(null!, out var wait));
+        Assert.NotNull(wait);
+        var waiter = Task.Run(wait!);
+
+        // A submission sent while the boundary is still waited on reaches the GPU side after it.
+        backend.SubmitCommandStream(null!, queue: 0x20, address: 0x3000, dwordCount: 16, submissionId: 3, null);
+        Wait.Until(() => split.Backend.Submissions.Count == 3, "the submission behind the boundary");
+        Assert.Contains("boundary 2", split.Backend.Calls);
+        Assert.False(waiter.IsCompleted);
+
+        split.Backend.BoundaryRelease.Set();
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(IdleOutcome.Completed, waiter.Result);
+        Assert.Contains("boundary-waited", split.Backend.Calls);
+    }
+
+    [MacOSFact]
     public void ExportFlipsAreAcceptedOrRefusedBack()
     {
         using var split = new InProcessSplit();
@@ -268,6 +294,44 @@ public sealed unsafe class SplitInProcessTests
     }
 
     [MacOSFact]
+    public void AReservedDisplayBufferCannotCrossBridgeInstances() => CheckReservationInvalidation(crossBridge: true);
+
+    [MacOSFact]
+    public void AReservedDisplayBufferCannotSurviveAnInterveningSlotLookup() => CheckReservationInvalidation(crossBridge: false);
+
+    private static void CheckReservationInvalidation(bool crossBridge)
+    {
+        using var split = new InProcessSplit();
+        var bridge = split.Host.VideoOut!;
+        var other = new RemoteVideoOutBridge(split.Host, "other-session", false);
+        Exception? failure = null;
+        var caller = new Thread(() =>
+        {
+            try
+            {
+                {
+                    split.GuestSide.Calls.Clear();
+                    Assert.Equal(0, bridge.TryReserveFlipRequest(1, 2, 1, 42, gpuQueued: true, out _));
+                    if (crossBridge)
+                        Assert.True(other.TryGetDisplayBufferInfo(1, 2, out _));
+                    else
+                        Assert.True(bridge.TryGetDisplayBufferInfo(1, 3, out _));
+                    Assert.True(bridge.TryGetDisplayBufferInfo(1, 2, out _));
+                    // Reservation plus both lookups must ask the guest for their own buffer.
+                    Assert.Equal(3, split.GuestSide.Calls.Count(call => call.StartsWith("buffer ", StringComparison.Ordinal)));
+                }
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        }) { IsBackground = true };
+        caller.Start();
+        Assert.True(caller.Join(20_000));
+        Assert.Null(failure);
+    }
+
+    [MacOSFact]
     public void TheGpuSideReachesTheGuestsVideoOutState()
     {
         using var split = new InProcessSplit();
@@ -286,6 +350,11 @@ public sealed unsafe class SplitInProcessTests
                 Assert.Equal(1100, bridge.NextFlipPresentTimestamp(77, 1000));
                 Assert.True(bridge.TryGetDisplayBufferInfo(1, 2, out var buffer));
                 Assert.Equal(new VideoOutExports.DisplayBufferInfo(0x5000, 0x8000_0000, 0, 1920, 1080, 1920, 3), buffer);
+                // The reservation carried that buffer, so no second call was made for it; the
+                // next lookup of the slot asks the guest again, and a flip that names a buffer
+                // is never released without a call to the guest.
+                Assert.True(bridge.TryGetDisplayBufferInfo(1, 2, out _));
+                Assert.False(bridge.ReleaseNoBufferFlip(2, 77));
                 Assert.Equal(2, bridge.GetFlipEventCount(77));
                 Assert.True(bridge.ReleaseNoBufferFlip(-1, 77));
                 Assert.True(bridge.IsFlipPresentationPending(77));
@@ -310,7 +379,7 @@ public sealed unsafe class SplitInProcessTests
         Assert.True(caller.Join(20_000));
         Assert.Null(failure);
         Assert.Equal(
-            new[] { "reserve 1 2 1 42", "done 1 2", "can 77 1000", "next 77 1000", "buffer 1 2", "events 77", "release -1 77", "pending 77" },
+            new[] { "reserve 1 2 1 42", "buffer 1 2", "done 1 2", "can 77 1000", "next 77 1000", "buffer 1 2", "events 77", "release -1 77", "pending 77" },
             split.GuestSide.Calls);
 
         bridge.SetSelectedGpuName("Apple M5 Pro");

@@ -52,16 +52,25 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
 {
     // The plan's base buffer count; Buffers beyond it are materialized candidates.
     public int BaseBufferCount { get; init; }
-    public List<BufferSpecialization> Buffers { get; init; } = [];
-    public List<ImageSpecialization> Images { get; init; } = [];
-    public List<BufferCandidateTableSpecialization> BufferCandidateTables { get; init; } = [];
-    public List<uint> ImageDescriptorGroups { get; init; } = [];
-    public List<uint> SamplerDescriptorGroups { get; init; } = [];
+    // The lists start empty on first read rather than in the constructor: every draw builds one
+    // of these with all of them set, and eager initializers allocated six lists it replaced.
+    public List<BufferSpecialization> Buffers { get => _buffers ??= []; init => _buffers = value; }
+    public List<ImageSpecialization> Images { get => _images ??= []; init => _images = value; }
+    public List<BufferCandidateTableSpecialization> BufferCandidateTables { get => _bufferCandidateTables ??= []; init => _bufferCandidateTables = value; }
+    public List<uint> ImageDescriptorGroups { get => _imageDescriptorGroups ??= []; init => _imageDescriptorGroups = value; }
+    public List<uint> SamplerDescriptorGroups { get => _samplerDescriptorGroups ??= []; init => _samplerDescriptorGroups = value; }
 
     // One entry per plan sampler, or none when every entry would be the default, so the
     // common case keeps the specialization (and the cache keys built from it) it had
     // before samplers were specialized.
-    public List<SamplerSpecialization> Samplers { get; init; } = [];
+    public List<SamplerSpecialization> Samplers { get => _samplers ??= []; init => _samplers = value; }
+
+    private List<BufferSpecialization>? _buffers;
+    private List<ImageSpecialization>? _images;
+    private List<BufferCandidateTableSpecialization>? _bufferCandidateTables;
+    private List<uint>? _imageDescriptorGroups;
+    private List<uint>? _samplerDescriptorGroups;
+    private List<SamplerSpecialization>? _samplers;
 
     public bool Equals(ResourceSpecialization? other) =>
         other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&

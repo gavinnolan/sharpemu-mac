@@ -100,8 +100,41 @@ public static class KernelExports
         var status = unchecked((int)ctx[CpuRegister.Rdi]);
         Console.Error.WriteLine($"[LOADER][INFO] exit(status={status})");
         GuestThreadExecution.RequestCurrentEntryExit("exit", status);
+        TerminateProcessForGuestExit(status);
         ctx[CpuRegister.Rax] = unchecked((ulong)status);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // exit()/_exit() end the whole process on the console. Unwinding only the calling
+    // thread left every other guest thread running and the emulator alive until the user
+    // stopped it. SHARPEMU_EXIT_TERMINATES=0 restores the old behaviour.
+    private static readonly bool _exitTerminatesProcess =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_EXIT_TERMINATES"), "0", StringComparison.Ordinal);
+
+    /// <summary>What a guest exit does to the host session; tests replace it.</summary>
+    internal static Action<int> GuestExitTermination = RequestHostSessionEnd;
+
+    private static void TerminateProcessForGuestExit(int status)
+    {
+        if (_exitTerminatesProcess)
+        {
+            GuestExitTermination(status);
+        }
+    }
+
+    private static void RequestHostSessionEnd(int status)
+    {
+        Console.Error.WriteLine($"[LOADER][INFO] guest exit(status={status}): ending the host session");
+        if (HostMainThread.IsAvailable)
+        {
+            // The command-line host: the same cooperative stop as SIGTERM (guest threads
+            // unwind, audio and the GPU worker drain, the window closes, the process exits).
+            VideoOut.VideoOutExports.NotifyHostInterrupt();
+            return;
+        }
+
+        // An embedding host (the GUI) owns the process and ends the session itself.
+        HostSessionControl.RequestShutdown("guest-exit");
     }
 
     [SysAbiExport(
@@ -217,7 +250,11 @@ public static class KernelExports
         LibraryName = "libKernel")]
     public static int UnderscoreExit(CpuContext ctx)
     {
-        _ = ctx;
+        var status = unchecked((int)ctx[CpuRegister.Rdi]);
+        Console.Error.WriteLine($"[LOADER][INFO] _exit(status={status})");
+        GuestThreadExecution.RequestCurrentEntryExit("_exit", status);
+        TerminateProcessForGuestExit(status);
+        ctx[CpuRegister.Rax] = unchecked((ulong)status);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

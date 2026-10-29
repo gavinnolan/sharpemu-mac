@@ -628,6 +628,13 @@ internal sealed class ShaderProgramCache
 
             if (!materialized)
             {
+                // Keep the draw's pointer inputs with the failure. A later draw or a
+                // shader dump made at compilation may carry entirely different user data.
+                Console.Error.WriteLine($"[GPU][RESOURCE_FAILURE_INPUTS] stage={source.Label} hash=0x{source.Hash:X16} " +
+                    $"shader=0x{source.Address:X16} code_bytes={source.CodeSize} user_data_base={source.UserDataBase} " +
+                    $"user_data=[{string.Join(",", source.UserData.Select(word => $"{word:X8}"))}]");
+                if (GpuCommands.GpuResourceOrigin.Enabled)
+                    GpuCommands.GpuResourceOrigin.ReportFailure(source, _host.TryReadResidentGuestBytes, Console.Error);
                 var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);
@@ -1591,7 +1598,7 @@ internal sealed class ShaderProgramCache
         CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
         var id = ++_nextProgramId;
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
-        var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask);
+        var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask, compiled.FlattenedTableMinimumWords);
         if (source.Stage != ShaderStage.Compute &&
             _host.GraphicsPrewarm is { } graphicsPrewarm &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var graphicsCapture))
@@ -1691,6 +1698,7 @@ internal sealed class ShaderProgramCache
                     PixelDepthExportFormat = info.DepthExportFormat,
                     PixelStencilExportEnable = info.StencilExportEnable,
                     PixelSampleMaskExportEnable = info.SampleMaskExportEnable,
+                    PixelEarlyDepth = info.EarlyDepth,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelFrontFaceAllBits = info.FrontFaceAllBits,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
@@ -2033,7 +2041,7 @@ internal sealed class ShaderProgramCache
         ProgramSourceEntry entry,
         SpecializedResourceInfo resources,
         BindingLayout layout,
-        ShaderCompileRequest request, uint? inputLocationMask)
+        ShaderCompileRequest request, uint? inputLocationMask, uint flattenedTableMinimumWords = 0)
     {
         var info = resources.Info;
         var buffers = new BufferResourceInfo[info.Buffers.Count];
@@ -2098,6 +2106,7 @@ internal sealed class ShaderProgramCache
             Resources = resources,
             Bindings = layout,
             CallRecordCallees = request.CallRecordCallees,
+            FlattenedTableMinimumWords = flattenedTableMinimumWords,
         };
     }
 }

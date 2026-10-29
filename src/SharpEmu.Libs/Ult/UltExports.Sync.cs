@@ -11,21 +11,28 @@ namespace SharpEmu.Libs.Ult;
 // and waits go through the scheduler's cooperative block.
 public static partial class UltExports
 {
-    private const string SyncWakeKey = "sceUlt:sync";
+    // Each mutex and queue has its own wake key, so a release readies only the threads parked
+    // on that object (and at most the one the release can satisfy) instead of re-testing every
+    // ULT waiter in the process. Condition waiters park on their mutex's key: a signal only
+    // marks them, and they complete by re-acquiring that mutex.
 
     // The work areas only have to look plausible; see WorkAreaHeaderSize.
     private const ulong WaitingQueuePerThread = 0x40;
     private const ulong WaitingQueuePerSyncObject = 0x40;
     private const ulong QueueDataPerQueueObject = 0x80;
 
-    private sealed class MutexState
+    private sealed class MutexState(ulong address)
     {
         public ulong Owner;
+
+        public string WakeKey { get; } = $"sceUlt:mutex:{address:X}";
     }
 
-    private sealed class ConditionWaiter
+    private sealed class ConditionWaiter(MutexState mutex)
     {
         public bool Signaled;
+
+        public MutexState Mutex { get; } = mutex;
     }
 
     private sealed class ConditionVariableState
@@ -33,9 +40,11 @@ public static partial class UltExports
         public LinkedList<ConditionWaiter> Waiters { get; } = new();
     }
 
-    private sealed class QueueState(ulong dataSize)
+    private sealed class QueueState(ulong address, ulong dataSize)
     {
         public ulong DataSize { get; } = dataSize;
+
+        public string WakeKey { get; } = $"sceUlt:queue:{address:X}";
 
         public Queue<byte[]> Items { get; } = new();
     }
@@ -204,7 +213,7 @@ public static partial class UltExports
         var name = ReadName(ctx, ctx[CpuRegister.Rsi]);
         lock (SyncGate)
         {
-            Mutexes[mutex] = new MutexState();
+            Mutexes[mutex] = new MutexState(mutex);
         }
 
         TraceUlt($"mutex_create: mutex=0x{mutex:X16} name='{name}'");
@@ -266,7 +275,7 @@ public static partial class UltExports
             }
         }
 
-        return BlockUntil(ctx, "sceUltMutexLock", () => TryAcquireMutex(state, self));
+        return BlockUntil(ctx, "sceUltMutexLock", state.WakeKey, () => TryAcquireMutex(state, self));
     }
 
     [SysAbiExport(
@@ -309,9 +318,10 @@ public static partial class UltExports
         }
 
         var self = CurrentSyncOwner();
+        MutexState? state;
         lock (SyncGate)
         {
-            if (!Mutexes.TryGetValue(mutex, out var state) || state.Owner != self)
+            if (!Mutexes.TryGetValue(mutex, out state) || state.Owner != self)
             {
                 return ctx.SetReturn(ErrorPermission, typeof(long));
             }
@@ -319,7 +329,7 @@ public static partial class UltExports
             state.Owner = 0;
         }
 
-        WakeSyncWaiters();
+        WakeSyncWaiters(state.WakeKey);
         return ctx.SetReturn(0, typeof(long));
     }
     
@@ -392,7 +402,7 @@ public static partial class UltExports
         }
 
         var self = CurrentSyncOwner();
-        var waiter = new ConditionWaiter();
+        ConditionWaiter waiter;
         MutexState mutexState;
         lock (SyncGate)
         {
@@ -401,17 +411,19 @@ public static partial class UltExports
                 return ctx.SetReturn(ErrorPermission, typeof(long));
             }
 
+            waiter = new ConditionWaiter(mutexState);
             GetConditionVariable(conditionVariable).Waiters.AddLast(waiter);
             mutexState.Owner = 0;
         }
 
-        WakeSyncWaiters();
+        WakeSyncWaiters(mutexState.WakeKey);
 
         // The wait completes once a signal has picked this waiter and the mutex could be re-acquired,
         // mirroring pthread_cond_wait.
         return BlockUntil(
             ctx,
             "sceUltConditionVariableWait",
+            mutexState.WakeKey,
             () => waiter.Signaled && TryAcquireMutex(mutexState, self));
     }
 
@@ -443,7 +455,8 @@ public static partial class UltExports
             return ctx.SetReturn(ErrorNull, typeof(long));
         }
 
-        var woke = false;
+        MutexState? signaledMutex = null;
+        List<MutexState>? moreMutexes = null;
         lock (SyncGate)
         {
             var waiters = GetConditionVariable(conditionVariable).Waiters;
@@ -451,7 +464,16 @@ public static partial class UltExports
             {
                 first.Value.Signaled = true;
                 waiters.RemoveFirst();
-                woke = true;
+                var waiterMutex = first.Value.Mutex;
+                if (signaledMutex is null)
+                {
+                    signaledMutex = waiterMutex;
+                }
+                else if (!ReferenceEquals(signaledMutex, waiterMutex) &&
+                         (moreMutexes is null || !moreMutexes.Contains(waiterMutex)))
+                {
+                    (moreMutexes ??= new List<MutexState>()).Add(waiterMutex);
+                }
                 if (!all)
                 {
                     break;
@@ -459,9 +481,18 @@ public static partial class UltExports
             }
         }
 
-        if (woke)
+        // Signaled waiters complete by taking their mutex: one per mutex can, the rest are
+        // readied by that mutex's unlocks.
+        if (signaledMutex is not null)
         {
-            WakeSyncWaiters();
+            WakeSyncWaiters(signaledMutex.WakeKey);
+            if (moreMutexes is not null)
+            {
+                foreach (var waiterMutex in moreMutexes)
+                {
+                    WakeSyncWaiters(waiterMutex.WakeKey);
+                }
+            }
         }
 
         return ctx.SetReturn(0, typeof(long));
@@ -489,7 +520,7 @@ public static partial class UltExports
         var name = ReadName(ctx, ctx[CpuRegister.Rsi]);
         lock (SyncGate)
         {
-            Queues[queue] = new QueueState(dataSize);
+            Queues[queue] = new QueueState(queue, dataSize);
         }
 
         TraceUlt($"queue_create: queue=0x{queue:X16} name='{name}' data_size=0x{dataSize:X}");
@@ -557,7 +588,7 @@ public static partial class UltExports
             state.Items.Enqueue(item);
         }
 
-        WakeSyncWaiters();
+        WakeSyncWaiters(state.WakeKey);
         return ctx.SetReturn(0, typeof(long));
     }
 
@@ -605,7 +636,7 @@ public static partial class UltExports
         }
 
         var memory = ctx.Memory;
-        return BlockUntil(ctx, "sceUltQueuePop", () => TryDequeueInto(memory, state, data));
+        return BlockUntil(ctx, "sceUltQueuePop", state.WakeKey, () => TryDequeueInto(memory, state, data));
     }
 
     private static bool TryDequeueInto(ICpuMemory memory, QueueState state, ulong destination)
@@ -640,7 +671,7 @@ public static partial class UltExports
     {
         if (!Mutexes.TryGetValue(mutex, out var state))
         {
-            state = new MutexState();
+            state = new MutexState(mutex);
             Mutexes[mutex] = state;
         }
 
@@ -664,6 +695,9 @@ public static partial class UltExports
         return handle != 0 ? handle : (ulong)(uint)Environment.CurrentManagedThreadId | (1UL << 63);
     }
 
+    // Ulthread joins keep one shared key and wake every joiner (several may join one ulthread).
+    private const string JoinWakeKey = "sceUlt:join";
+
     private static void WakeSyncWaiters()
     {
         lock (SyncGate)
@@ -671,10 +705,25 @@ public static partial class UltExports
             Monitor.PulseAll(SyncGate);
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(SyncWakeKey);
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(JoinWakeKey);
+    }
+
+    private static int BlockUntil(CpuContext ctx, string reason, Func<bool> tryComplete) =>
+        BlockUntil(ctx, reason, JoinWakeKey, tryComplete);
+
+    // Every release frees exactly one unit (one owner slot, one queue item), and a parked
+    // waiter's TryWake takes that unit, so readying the first satisfiable waiter is enough.
+    private static void WakeSyncWaiters(string wakeKey)
+    {
+        lock (SyncGate)
+        {
+            Monitor.PulseAll(SyncGate);
+        }
+
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(wakeKey, 1);
     }
     
-    private static int BlockUntil(CpuContext ctx, string reason, Func<bool> tryComplete)
+    private static int BlockUntil(CpuContext ctx, string reason, string wakeKey, Func<bool> tryComplete)
     {
         if (tryComplete())
         {
@@ -684,7 +733,7 @@ public static partial class UltExports
         if (GuestThreadExecution.RequestCurrentThreadBlock(
                 ctx,
                 reason,
-                SyncWakeKey,
+                wakeKey,
                 static () => 0,
                 tryComplete))
         {

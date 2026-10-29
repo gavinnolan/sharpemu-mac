@@ -108,6 +108,13 @@ public interface IGuestThreadScheduler
         WakeBlockedThreads(wakeKey) > 0;
 
     /// <summary>
+    /// Lock-free, possibly stale: whether the scheduler thread is executing a slice on a host
+    /// CPU right now (false while it is blocked, ready or parked). Unknown threads report true.
+    /// Used by contended locks to stop spinning on an owner that cannot release soon.
+    /// </summary>
+    bool IsGuestThreadExecuting(ulong threadHandle) => true;
+
+    /// <summary>
     /// Reports whether the current guest thread has an exception that waits for an import safe point.
     /// </summary>
     bool HasPendingGuestExceptionForCurrentThread();
@@ -235,59 +242,158 @@ public static class GuestThreadExecution
         public bool TryWake() => _tryWake();
     }
 
-    [ThreadStatic]
-    private static ulong _currentGuestThreadHandle;
+    /// <summary>
+    /// Every per-host-thread field of the guest execution state in one object.
+    /// </summary>
+    /// <remarks>
+    /// These used to be seventeen separate <c>[ThreadStatic]</c> fields, and the import gateway
+    /// touched a dozen of them on every guest call: a thread-static read is a TLS lookup, which
+    /// is not free under Rosetta, and the gateway pays it again for each field. One thread-static
+    /// holds the object, so a crossing resolves the thread's state once and reads plain fields.
+    /// </remarks>
+    internal sealed class ThreadState
+    {
+        public ulong GuestThreadHandle;
+        public ulong FiberAddress;
+        public string? PendingBlockReason;
+        public bool PendingBlockContinuationValid;
+        public GuestCpuContinuation PendingBlockContinuation;
+        public string? PendingBlockWakeKey;
+        public IGuestThreadBlockWaiter? PendingBlockWaiter;
+        public long PendingBlockDeadlineTimestamp;
+        public bool PendingEntryExit;
+        public ulong PendingEntryExitValue;
+        public string? PendingEntryExitReason;
+        public bool PendingContextTransfer;
+        public GuestCpuContinuation PendingContextTransferTarget;
+        public Action<bool>? ContextTransferCompletion;
+        public bool HasImportCallFrame;
+        public ulong ImportReturnRip;
+        public ulong ImportResumeRsp;
+        public ulong ImportReturnSlotAddress;
+
+        // Slots the native import gateway keeps per host thread. They live here so that a crossing
+        // resolves this object once instead of reading a thread-static for each of them.
+        public object? ImportCounterOwner;
+        public long NextImportDispatchIndex;
+        public long ImportDispatchBlockEnd;
+        public nint PreparedContextTransferStub;
+
+        /// <summary>
+        /// True when an import left a block, an entry exit or a context transfer pending. False for
+        /// almost every crossing, which then skips the three consume calls the gateway otherwise makes.
+        /// </summary>
+        public bool HasPendingDispatchOutcome =>
+            PendingBlockReason is not null || PendingEntryExit || PendingContextTransfer;
+
+        public GuestImportCallFrame EnterImportCallFrame(ulong returnRip, ulong resumeRsp, ulong returnSlotAddress)
+        {
+            var previous = new GuestImportCallFrame(
+                HasImportCallFrame,
+                ImportReturnRip,
+                ImportResumeRsp,
+                ImportReturnSlotAddress);
+            HasImportCallFrame = true;
+            ImportReturnRip = returnRip;
+            ImportResumeRsp = resumeRsp;
+            ImportReturnSlotAddress = returnSlotAddress;
+            return previous;
+        }
+
+        public void RestoreImportCallFrame(GuestImportCallFrame previous)
+        {
+            HasImportCallFrame = previous.IsValid;
+            ImportReturnRip = previous.ReturnRip;
+            ImportResumeRsp = previous.ResumeRsp;
+            ImportReturnSlotAddress = previous.ReturnSlotAddress;
+        }
+
+        public bool TryConsumeContextTransfer(out GuestCpuContinuation target)
+        {
+            target = PendingContextTransferTarget;
+            if (!PendingContextTransfer)
+            {
+                return false;
+            }
+
+            PendingContextTransfer = false;
+            PendingContextTransferTarget = default;
+            return true;
+        }
+
+        public bool TryConsumeEntryExit(out ulong value, out string reason)
+        {
+            value = PendingEntryExitValue;
+            reason = PendingEntryExitReason ?? string.Empty;
+            if (!PendingEntryExit)
+            {
+                return false;
+            }
+
+            PendingEntryExit = false;
+            PendingEntryExitValue = 0;
+            PendingEntryExitReason = null;
+            return true;
+        }
+
+        public bool TryConsumeThreadBlock(
+            out string reason,
+            out GuestCpuContinuation continuation,
+            out bool hasContinuation,
+            out string wakeKey,
+            out IGuestThreadBlockWaiter? waiter,
+            out long blockDeadlineTimestamp)
+        {
+            reason = PendingBlockReason ?? string.Empty;
+            if (string.IsNullOrEmpty(reason))
+            {
+                continuation = default;
+                hasContinuation = false;
+                wakeKey = string.Empty;
+                waiter = null;
+                blockDeadlineTimestamp = 0;
+                return false;
+            }
+
+            continuation = PendingBlockContinuation;
+            hasContinuation = PendingBlockContinuationValid;
+            wakeKey = PendingBlockWakeKey ?? reason;
+            waiter = PendingBlockWaiter;
+            blockDeadlineTimestamp = PendingBlockDeadlineTimestamp;
+            PendingBlockReason = null;
+            PendingBlockContinuation = default;
+            PendingBlockContinuationValid = false;
+            PendingBlockWakeKey = null;
+            PendingBlockWaiter = null;
+            PendingBlockDeadlineTimestamp = 0;
+            return true;
+        }
+
+        public void CompleteContextTransfer(bool succeeded)
+        {
+            // The target is only ever non-default while PendingContextTransfer is set, so with
+            // neither a pending transfer nor a completion armed there is nothing to clear - the
+            // common case, which used to zero the continuation on every crossing.
+            var completion = ContextTransferCompletion;
+            if (completion is null && !PendingContextTransfer)
+            {
+                return;
+            }
+
+            ContextTransferCompletion = null;
+            PendingContextTransfer = false;
+            PendingContextTransferTarget = default;
+            completion?.Invoke(succeeded);
+        }
+    }
 
     [ThreadStatic]
-    private static ulong _currentFiberAddress;
+    private static ThreadState? t_state;
 
-    [ThreadStatic]
-    private static string? _pendingBlockReason;
+    /// <summary>The calling host thread's guest execution state; created on first use.</summary>
+    internal static ThreadState State => t_state ?? CreateState();
 
-    [ThreadStatic]
-    private static bool _pendingBlockContinuationValid;
-
-    [ThreadStatic]
-    private static GuestCpuContinuation _pendingBlockContinuation;
-
-    [ThreadStatic]
-    private static string? _pendingBlockWakeKey;
-
-    [ThreadStatic]
-    private static IGuestThreadBlockWaiter? _pendingBlockWaiter;
-
-    [ThreadStatic]
-    private static long _pendingBlockDeadlineTimestamp;
-
-    [ThreadStatic]
-    private static bool _pendingEntryExit;
-
-    [ThreadStatic]
-    private static ulong _pendingEntryExitValue;
-
-    [ThreadStatic]
-    private static string? _pendingEntryExitReason;
-
-    [ThreadStatic]
-    private static bool _pendingContextTransfer;
-
-    [ThreadStatic]
-    private static GuestCpuContinuation _pendingContextTransferTarget;
-
-    [ThreadStatic]
-    private static Action<bool>? _contextTransferCompletion;
-
-    [ThreadStatic]
-    private static bool _hasCurrentImportCallFrame;
-
-    [ThreadStatic]
-    private static ulong _currentImportReturnRip;
-
-    [ThreadStatic]
-    private static ulong _currentImportResumeRsp;
-
-    [ThreadStatic]
-    private static ulong _currentImportReturnSlotAddress;
+    private static ThreadState CreateState() => t_state = new ThreadState();
 
     public static IGuestThreadScheduler? Scheduler { get; set; }
 
@@ -356,71 +462,75 @@ public static class GuestThreadExecution
         }
     }
 
-    public static bool IsGuestThread => _currentGuestThreadHandle != 0;
+    public static bool IsGuestThread => State.GuestThreadHandle != 0;
 
-    public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
+    public static ulong CurrentGuestThreadHandle => State.GuestThreadHandle;
 
-    public static bool HasPendingCurrentThreadBlock => _pendingBlockReason is not null;
+    public static bool HasPendingCurrentThreadBlock => State.PendingBlockReason is not null;
 
-    public static ulong CurrentFiberAddress => _currentFiberAddress;
+    public static ulong CurrentFiberAddress => State.FiberAddress;
 
     public static ulong EnterGuestThread(ulong threadHandle)
     {
+        var s = State;
         CompleteCurrentContextTransfer(false);
         GpuMemory.GpuMemoryAccessProfile.InitializeCurrentThread();
-        var previous = _currentGuestThreadHandle;
-        _currentGuestThreadHandle = threadHandle;
+        var previous = s.GuestThreadHandle;
+        s.GuestThreadHandle = threadHandle;
         GuestFastPath.BindGuestThread(threadHandle);
-        _pendingBlockReason = null;
-        _pendingBlockContinuationValid = false;
-        _pendingBlockContinuation = default;
-        _pendingBlockWakeKey = null;
-        _pendingBlockWaiter = null;
-        _pendingBlockDeadlineTimestamp = 0;
-        _pendingEntryExit = false;
-        _pendingEntryExitValue = 0;
-        _pendingEntryExitReason = null;
-        _pendingContextTransfer = false;
-        _pendingContextTransferTarget = default;
-        _hasCurrentImportCallFrame = false;
-        _currentImportReturnRip = 0;
-        _currentImportResumeRsp = 0;
-        _currentImportReturnSlotAddress = 0;
+        s.PendingBlockReason = null;
+        s.PendingBlockContinuationValid = false;
+        s.PendingBlockContinuation = default;
+        s.PendingBlockWakeKey = null;
+        s.PendingBlockWaiter = null;
+        s.PendingBlockDeadlineTimestamp = 0;
+        s.PendingEntryExit = false;
+        s.PendingEntryExitValue = 0;
+        s.PendingEntryExitReason = null;
+        s.PendingContextTransfer = false;
+        s.PendingContextTransferTarget = default;
+        s.HasImportCallFrame = false;
+        s.ImportReturnRip = 0;
+        s.ImportResumeRsp = 0;
+        s.ImportReturnSlotAddress = 0;
         return previous;
     }
 
     public static void RestoreGuestThread(ulong previousThreadHandle)
     {
+        var s = State;
         CompleteCurrentContextTransfer(false);
-        _currentGuestThreadHandle = previousThreadHandle;
+        s.GuestThreadHandle = previousThreadHandle;
         GuestFastPath.BindGuestThread(previousThreadHandle);
-        _pendingBlockReason = null;
-        _pendingBlockContinuationValid = false;
-        _pendingBlockContinuation = default;
-        _pendingBlockWakeKey = null;
-        _pendingBlockWaiter = null;
-        _pendingBlockDeadlineTimestamp = 0;
-        _pendingEntryExit = false;
-        _pendingEntryExitValue = 0;
-        _pendingEntryExitReason = null;
-        _pendingContextTransfer = false;
-        _pendingContextTransferTarget = default;
-        _hasCurrentImportCallFrame = false;
-        _currentImportReturnRip = 0;
-        _currentImportResumeRsp = 0;
-        _currentImportReturnSlotAddress = 0;
+        s.PendingBlockReason = null;
+        s.PendingBlockContinuationValid = false;
+        s.PendingBlockContinuation = default;
+        s.PendingBlockWakeKey = null;
+        s.PendingBlockWaiter = null;
+        s.PendingBlockDeadlineTimestamp = 0;
+        s.PendingEntryExit = false;
+        s.PendingEntryExitValue = 0;
+        s.PendingEntryExitReason = null;
+        s.PendingContextTransfer = false;
+        s.PendingContextTransferTarget = default;
+        s.HasImportCallFrame = false;
+        s.ImportReturnRip = 0;
+        s.ImportResumeRsp = 0;
+        s.ImportReturnSlotAddress = 0;
     }
 
     public static ulong EnterFiber(ulong fiberAddress)
     {
-        var previous = _currentFiberAddress;
-        _currentFiberAddress = fiberAddress;
+        var s = State;
+        var previous = s.FiberAddress;
+        s.FiberAddress = fiberAddress;
         return previous;
     }
 
     public static void RestoreFiber(ulong previousFiberAddress)
     {
-        _currentFiberAddress = previousFiberAddress;
+        var s = State;
+        s.FiberAddress = previousFiberAddress;
     }
 
     // A nested guest exception handler (delivered synchronously from
@@ -476,45 +586,47 @@ public static class GuestThreadExecution
 
     public static PendingBlockSnapshot SuspendPendingBlock()
     {
+        var s = State;
         var snapshot = new PendingBlockSnapshot(
-            _pendingBlockReason,
-            _pendingBlockContinuationValid,
-            _pendingBlockContinuation,
-            _pendingBlockWakeKey,
-            _pendingBlockWaiter,
-            _pendingBlockDeadlineTimestamp,
-            _pendingEntryExit,
-            _pendingEntryExitValue,
-            _pendingEntryExitReason,
-            _pendingContextTransfer,
-            _pendingContextTransferTarget);
-        _pendingBlockReason = null;
-        _pendingBlockContinuation = default;
-        _pendingBlockContinuationValid = false;
-        _pendingBlockWakeKey = null;
-        _pendingBlockWaiter = null;
-        _pendingBlockDeadlineTimestamp = 0;
-        _pendingEntryExit = false;
-        _pendingEntryExitValue = 0;
-        _pendingEntryExitReason = null;
-        _pendingContextTransfer = false;
-        _pendingContextTransferTarget = default;
+            s.PendingBlockReason,
+            s.PendingBlockContinuationValid,
+            s.PendingBlockContinuation,
+            s.PendingBlockWakeKey,
+            s.PendingBlockWaiter,
+            s.PendingBlockDeadlineTimestamp,
+            s.PendingEntryExit,
+            s.PendingEntryExitValue,
+            s.PendingEntryExitReason,
+            s.PendingContextTransfer,
+            s.PendingContextTransferTarget);
+        s.PendingBlockReason = null;
+        s.PendingBlockContinuation = default;
+        s.PendingBlockContinuationValid = false;
+        s.PendingBlockWakeKey = null;
+        s.PendingBlockWaiter = null;
+        s.PendingBlockDeadlineTimestamp = 0;
+        s.PendingEntryExit = false;
+        s.PendingEntryExitValue = 0;
+        s.PendingEntryExitReason = null;
+        s.PendingContextTransfer = false;
+        s.PendingContextTransferTarget = default;
         return snapshot;
     }
 
     public static void RestorePendingBlock(PendingBlockSnapshot snapshot)
     {
-        _pendingEntryExit = snapshot.EntryExitPending;
-        _pendingEntryExitValue = snapshot.EntryExitValue;
-        _pendingEntryExitReason = snapshot.EntryExitReason;
-        _pendingContextTransfer = snapshot.ContextTransferPending;
-        _pendingContextTransferTarget = snapshot.ContextTransferTarget;
-        _pendingBlockReason = snapshot.Reason;
-        _pendingBlockContinuationValid = snapshot.ContinuationValid;
-        _pendingBlockContinuation = snapshot.Continuation;
-        _pendingBlockWakeKey = snapshot.WakeKey;
-        _pendingBlockWaiter = snapshot.Waiter;
-        _pendingBlockDeadlineTimestamp = snapshot.DeadlineTimestamp;
+        var s = State;
+        s.PendingEntryExit = snapshot.EntryExitPending;
+        s.PendingEntryExitValue = snapshot.EntryExitValue;
+        s.PendingEntryExitReason = snapshot.EntryExitReason;
+        s.PendingContextTransfer = snapshot.ContextTransferPending;
+        s.PendingContextTransferTarget = snapshot.ContextTransferTarget;
+        s.PendingBlockReason = snapshot.Reason;
+        s.PendingBlockContinuationValid = snapshot.ContinuationValid;
+        s.PendingBlockContinuation = snapshot.Continuation;
+        s.PendingBlockWakeKey = snapshot.WakeKey;
+        s.PendingBlockWaiter = snapshot.Waiter;
+        s.PendingBlockDeadlineTimestamp = snapshot.DeadlineTimestamp;
     }
 
     public static bool RequestCurrentThreadBlock(string reason) => RequestCurrentThreadBlock(null, reason);
@@ -526,24 +638,25 @@ public static class GuestThreadExecution
         IGuestThreadBlockWaiter? waiter = null,
         long blockDeadlineTimestamp = 0)
     {
+        var s = State;
         if (!IsGuestThread)
         {
             return false;
         }
 
-        _pendingBlockReason = string.IsNullOrWhiteSpace(reason) ? "guest_thread_blocked" : reason;
-        _pendingBlockWakeKey = string.IsNullOrWhiteSpace(wakeKey) ? _pendingBlockReason : wakeKey;
-        _pendingBlockWaiter = waiter;
-        _pendingBlockDeadlineTimestamp = blockDeadlineTimestamp;
+        s.PendingBlockReason = string.IsNullOrWhiteSpace(reason) ? "guest_thread_blocked" : reason;
+        s.PendingBlockWakeKey = string.IsNullOrWhiteSpace(wakeKey) ? s.PendingBlockReason : wakeKey;
+        s.PendingBlockWaiter = waiter;
+        s.PendingBlockDeadlineTimestamp = blockDeadlineTimestamp;
         if (context is not null && TryCaptureCurrentBlockContinuation(context, out var continuation))
         {
-            _pendingBlockContinuation = continuation;
-            _pendingBlockContinuationValid = true;
+            s.PendingBlockContinuation = continuation;
+            s.PendingBlockContinuationValid = true;
         }
         else
         {
-            _pendingBlockContinuation = default;
-            _pendingBlockContinuationValid = false;
+            s.PendingBlockContinuation = default;
+            s.PendingBlockContinuationValid = false;
         }
 
         return true;
@@ -607,32 +720,14 @@ public static class GuestThreadExecution
         out bool hasContinuation,
         out string wakeKey,
         out IGuestThreadBlockWaiter? waiter,
-        out long blockDeadlineTimestamp)
-    {
-        reason = _pendingBlockReason ?? string.Empty;
-        if (string.IsNullOrEmpty(reason))
-        {
-            continuation = default;
-            hasContinuation = false;
-            wakeKey = string.Empty;
-            waiter = null;
-            blockDeadlineTimestamp = 0;
-            return false;
-        }
-
-        continuation = _pendingBlockContinuation;
-        hasContinuation = _pendingBlockContinuationValid;
-        wakeKey = _pendingBlockWakeKey ?? reason;
-        waiter = _pendingBlockWaiter;
-        blockDeadlineTimestamp = _pendingBlockDeadlineTimestamp;
-        _pendingBlockReason = null;
-        _pendingBlockContinuation = default;
-        _pendingBlockContinuationValid = false;
-        _pendingBlockWakeKey = null;
-        _pendingBlockWaiter = null;
-        _pendingBlockDeadlineTimestamp = 0;
-        return true;
-    }
+        out long blockDeadlineTimestamp) =>
+        State.TryConsumeThreadBlock(
+            out reason,
+            out continuation,
+            out hasContinuation,
+            out wakeKey,
+            out waiter,
+            out blockDeadlineTimestamp);
 
     public static long ComputeDeadlineTimestamp(TimeSpan timeout)
     {
@@ -699,83 +794,42 @@ public static class GuestThreadExecution
 
     public static void RequestCurrentEntryExit(string reason, ulong value)
     {
-        _pendingEntryExit = true;
-        _pendingEntryExitValue = value;
-        _pendingEntryExitReason = string.IsNullOrWhiteSpace(reason) ? "guest_entry_exit" : reason;
+        var s = State;
+        s.PendingEntryExit = true;
+        s.PendingEntryExitValue = value;
+        s.PendingEntryExitReason = string.IsNullOrWhiteSpace(reason) ? "guest_entry_exit" : reason;
     }
 
-    public static bool TryConsumeCurrentEntryExit(out ulong value, out string reason)
-    {
-        value = _pendingEntryExitValue;
-        reason = _pendingEntryExitReason ?? string.Empty;
-        if (!_pendingEntryExit)
-        {
-            return false;
-        }
-
-        _pendingEntryExit = false;
-        _pendingEntryExitValue = 0;
-        _pendingEntryExitReason = null;
-        return true;
-    }
+    public static bool TryConsumeCurrentEntryExit(out ulong value, out string reason) =>
+        State.TryConsumeEntryExit(out value, out reason);
 
     public static void RequestCurrentContextTransfer(GuestCpuContinuation target, Action<bool>? completion = null)
     {
-        _pendingContextTransferTarget = target;
-        _pendingContextTransfer = true;
-        _contextTransferCompletion = completion;
+        var s = State;
+        s.PendingContextTransferTarget = target;
+        s.PendingContextTransfer = true;
+        s.ContextTransferCompletion = completion;
     }
 
-    public static void CompleteCurrentContextTransfer(bool succeeded)
-    {
-        var completion = _contextTransferCompletion;
-        _contextTransferCompletion = null;
-        _pendingContextTransfer = false;
-        _pendingContextTransferTarget = default;
-        completion?.Invoke(succeeded);
-    }
+    public static void CompleteCurrentContextTransfer(bool succeeded) =>
+        State.CompleteContextTransfer(succeeded);
 
-    public static bool TryConsumeCurrentContextTransfer(out GuestCpuContinuation target)
-    {
-        target = _pendingContextTransferTarget;
-        if (!_pendingContextTransfer)
-        {
-            return false;
-        }
-
-        _pendingContextTransfer = false;
-        _pendingContextTransferTarget = default;
-        return true;
-    }
+    public static bool TryConsumeCurrentContextTransfer(out GuestCpuContinuation target) =>
+        State.TryConsumeContextTransfer(out target);
 
     public static GuestImportCallFrame EnterImportCallFrame(
         ulong returnRip,
         ulong resumeRsp,
-        ulong returnSlotAddress)
-    {
-        var previous = new GuestImportCallFrame(
-            _hasCurrentImportCallFrame,
-            _currentImportReturnRip,
-            _currentImportResumeRsp,
-            _currentImportReturnSlotAddress);
-        _hasCurrentImportCallFrame = true;
-        _currentImportReturnRip = returnRip;
-        _currentImportResumeRsp = resumeRsp;
-        _currentImportReturnSlotAddress = returnSlotAddress;
-        return previous;
-    }
+        ulong returnSlotAddress) =>
+        State.EnterImportCallFrame(returnRip, resumeRsp, returnSlotAddress);
 
-    public static void RestoreImportCallFrame(GuestImportCallFrame previous)
-    {
-        _hasCurrentImportCallFrame = previous.IsValid;
-        _currentImportReturnRip = previous.ReturnRip;
-        _currentImportResumeRsp = previous.ResumeRsp;
-        _currentImportReturnSlotAddress = previous.ReturnSlotAddress;
-    }
+    public static void RestoreImportCallFrame(GuestImportCallFrame previous) =>
+        State.RestoreImportCallFrame(previous);
 
     public static bool TryGetCurrentImportCallFrame(out GuestImportCallFrame frame)
     {
-        if (!_hasCurrentImportCallFrame)
+        var s = State;
+        if (!s.HasImportCallFrame)
         {
             frame = default;
             return false;
@@ -783,9 +837,9 @@ public static class GuestThreadExecution
 
         frame = new GuestImportCallFrame(
             true,
-            _currentImportReturnRip,
-            _currentImportResumeRsp,
-            _currentImportReturnSlotAddress);
+            s.ImportReturnRip,
+            s.ImportResumeRsp,
+            s.ImportReturnSlotAddress);
         return true;
     }
 }

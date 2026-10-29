@@ -51,13 +51,13 @@ public sealed partial class DirectExecutionBackend
 	private const int UnresolvedImportSampleKey = 0;
 	private int _il2CppExceptionDiagnosticCount;
 
-    [ThreadStatic]
-    private static nint _preparedContextTransferStub;
-
 	private static unsafe ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr, nint transferStubAddress)
 	{
         *(nint*)transferStubAddress = 0;
-        _preparedContextTransferStub = 0;
+        // One thread-static read for the whole crossing: everything the gateway keeps per host thread
+        // hangs off this object. A stub left by an abandoned crossing is cleared with it.
+        var threadState = GuestThreadExecution.State;
+        threadState.PreparedContextTransferStub = 0;
 		try
 		{
 			if (!(GCHandle.FromIntPtr(backendHandle).Target is DirectExecutionBackend directExecutionBackend))
@@ -70,14 +70,14 @@ public sealed partial class DirectExecutionBackend
 			if (DsTrace.Hle && DsTrace.Armed)
 			{
 				var traced = DispatchImportWithDsTrace(directExecutionBackend, importIndex, argPackPtr);
-				CompleteImportContextTransfer(transferStubAddress);
+				CompleteImportContextTransfer(threadState, transferStubAddress);
 				return traced;
 			}
 
 			if (_perfHleHistogram)
 			{
 				var profiledHle = DispatchImportWithProfile(directExecutionBackend, importIndex, argPackPtr);
-				CompleteImportContextTransfer(transferStubAddress);
+				CompleteImportContextTransfer(threadState, transferStubAddress);
 				return profiledHle;
 			}
 
@@ -88,7 +88,7 @@ public sealed partial class DirectExecutionBackend
 				{
 					var profiledResult = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 					directExecutionBackend.ClearActiveImportIndex();
-					CompleteImportContextTransfer(transferStubAddress);
+					CompleteImportContextTransfer(threadState, transferStubAddress);
 					return profiledResult;
 				}
 				finally
@@ -99,7 +99,7 @@ public sealed partial class DirectExecutionBackend
 
 			var result = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 			directExecutionBackend.ClearActiveImportIndex();
-			CompleteImportContextTransfer(transferStubAddress);
+			CompleteImportContextTransfer(threadState, transferStubAddress);
 			return result;
 		}
 		catch (Exception ex)
@@ -111,13 +111,13 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-    private static unsafe void CompleteImportContextTransfer(nint transferStubAddress)
+    private static unsafe void CompleteImportContextTransfer(GuestThreadExecution.ThreadState threadState, nint transferStubAddress)
     {
-        var stub = _preparedContextTransferStub;
-        _preparedContextTransferStub = 0;
+        var stub = threadState.PreparedContextTransferStub;
+        threadState.PreparedContextTransferStub = 0;
         // The transfer exit uses only the host stack after this publication.
         // Keep every read of the outgoing guest pack before this point.
-        GuestThreadExecution.CompleteCurrentContextTransfer(stub != 0);
+        threadState.CompleteContextTransfer(stub != 0);
         *(nint*)transferStubAddress = stub;
     }
 
@@ -491,7 +491,8 @@ public sealed partial class DirectExecutionBackend
 	{
 		// Any HLE entry ends this thread's polling streak in the spin-nap locked-op probe.
 		SharpEmu.Core.Loader.SpinNapRuntime.NoteHleEntry(argPackPtr);
-		long num = NextImportDispatchIndex();
+		var guestState = GuestThreadExecution.State;
+		long num = NextImportDispatchIndex(guestState);
 		if ((num & 0x3F) == 0)
 		{
 			MarkExecutionProgress();
@@ -506,6 +507,13 @@ public sealed partial class DirectExecutionBackend
 		{
 			LastError = $"Import dispatch index out of range: {importIndex}";
 			return 18446744071562199042uL;
+		}
+		// Every managed import path, including leaves, is a shutdown safe point.
+		// The full-path check below remains for a request racing this earlier check.
+		if (Volatile.Read(ref _forcedGuestExit) && TryEndGuestSliceForShutdown(argPackPtr))
+		{
+			cpuContext[CpuRegister.Rax] = 1uL;
+			return 1uL;
 		}
 		// By reference: the entry is 48 bytes of per-import classification that
 		// nothing here mutates, and copying it was pure cost on every guest call.
@@ -566,6 +574,18 @@ public sealed partial class DirectExecutionBackend
 			leafReturnRip = *(ulong*)(argPackPtr + 96);
 		}
 
+		if (importStubEntry.IsBuilderLeaf &&
+			TryDispatchBuilderLeaf(cpuContext, in importStubEntry, argPackPtr, num, out var builderResult))
+		{
+			if (traceLeaf)
+			{
+				TraceLeafImport(
+					in importStubEntry, num,
+					leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, builderResult);
+			}
+			return CompleteLeafImportShutdown(cpuContext, argPackPtr, builderResult);
+		}
+
 		// The leaf paths skip the rest of the gateway entirely, so they mark
 		// their own body: without this the profile charges a memcpy's whole cost
 		// to "transition" and hides the work it actually did.
@@ -586,7 +606,7 @@ public sealed partial class DirectExecutionBackend
 						in importStubEntry, num,
 						leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, hotMemoryResult);
 				}
-				return hotMemoryResult;
+				return CompleteLeafImportShutdown(cpuContext, argPackPtr, hotMemoryResult);
 			}
 		}
 
@@ -601,7 +621,7 @@ public sealed partial class DirectExecutionBackend
 					in importStubEntry, num,
 					leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, trivialResult);
 			}
-			return trivialResult;
+			return CompleteLeafImportShutdown(cpuContext, argPackPtr, trivialResult);
 		}
 
 		if (importStubEntry.IsLeaf)
@@ -622,7 +642,7 @@ public sealed partial class DirectExecutionBackend
 						in importStubEntry, num,
 						leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, leafResult);
 				}
-				return leafResult;
+				return CompleteLeafImportShutdown(cpuContext, argPackPtr, leafResult);
 			}
 		}
 
@@ -681,7 +701,7 @@ public sealed partial class DirectExecutionBackend
 			stackArg5);
 		ulong num7 = *(ulong*)(argPackPtr + 96);
 		var probeTarget = _probeImportReturnAddress != 0 && num7 == _probeImportReturnAddress;
-		var isGuestWorker = GuestThreadExecution.IsGuestThread;
+		var isGuestWorker = guestState.GuestThreadHandle != 0;
 		if (!IsLikelyReturnAddress(num7))
 		{
 			for (int i = 1; i <= 4; i++)
@@ -723,7 +743,9 @@ public sealed partial class DirectExecutionBackend
 		}
 		if (_activeGuestThreadState is { } activeGuestThreadState)
 		{
-			Interlocked.Increment(ref activeGuestThreadState.ImportCount);
+			// Only the host thread running this guest thread writes its count, so a plain increment
+			// is exact; readers use Interlocked.Read. The locked add was ~20 cycles per crossing.
+			activeGuestThreadState.ImportCount++;
 			activeGuestThreadState.LastImportRdi = value;
 			activeGuestThreadState.LastImportRsi = value2;
 			activeGuestThreadState.LastImportRdx = num3;
@@ -957,7 +979,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			OrbisGen2Result orbisGen2Result;
 			bool dispatchResolved = true;
-			var previousImportCallFrame = GuestThreadExecution.EnterImportCallFrame(
+			var previousImportCallFrame = guestState.EnterImportCallFrame(
 				num7,
 				(ulong)argPackPtr + 104uL,
 				ActiveGuestReturnSlotAddress);
@@ -995,7 +1017,7 @@ public sealed partial class DirectExecutionBackend
 			}
 			finally
 			{
-				GuestThreadExecution.RestoreImportCallFrame(previousImportCallFrame);
+				guestState.RestoreImportCallFrame(previousImportCallFrame);
 			}
 			if (Volatile.Read(ref _pendingGuestExceptionCount) != 0)
 			{
@@ -1061,86 +1083,91 @@ public sealed partial class DirectExecutionBackend
 				value8,
 				value,
 				value2);
-			if (GuestThreadExecution.TryConsumeCurrentContextTransfer(out var transferTarget))
+			// Almost no import leaves a context transfer, an entry exit or a block pending; one flag read
+			// replaces the three consume calls.
+			if (guestState.HasPendingDispatchOutcome)
 			{
-				if (DsTrace.Hle)
+				if (guestState.TryConsumeContextTransfer(out var transferTarget))
 				{
-					DsTrace.LastOutcome = 2;
-				}
-				var dsPrepStarted = DsTrace.Fiber ? Stopwatch.GetTimestamp() : 0;
-				if (!TryPrepareGuestContextTransfer(
-						transferTarget,
-						out var transferFrame,
-						out var transferStub,
-						out var transferError))
-				{
-					LastError = transferError ?? "failed to prepare guest context transfer";
-					ActiveForcedGuestExit = true;
-					cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
-					return cpuContext[CpuRegister.Rax];
-				}
-				if (DsTrace.Fiber)
-				{
-					DsFiber.OnTransferPrepared(cpuContext, dsPrepStarted);
-				}
+					if (DsTrace.Hle)
+					{
+						DsTrace.LastOutcome = 2;
+					}
+					var dsPrepStarted = DsTrace.Fiber ? Stopwatch.GetTimestamp() : 0;
+					if (!TryPrepareGuestContextTransfer(
+							transferTarget,
+							out var transferFrame,
+							out var transferStub,
+							out var transferError))
+					{
+						LastError = transferError ?? "failed to prepare guest context transfer";
+						ActiveForcedGuestExit = true;
+						cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
+						return cpuContext[CpuRegister.Rax];
+					}
+					if (DsTrace.Fiber)
+					{
+						DsFiber.OnTransferPrepared(cpuContext, dsPrepStarted);
+					}
 
-				if (_logFiber)
-				{
-					Console.Error.WriteLine(
-						$"[LOADER][TRACE] fiber.context-transfer rip=0x{transferTarget.Rip:X16} " +
-						$"rsp=0x{transferTarget.Rsp:X16} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
-						$"fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16}");
-				}
+					if (_logFiber)
+					{
+						Console.Error.WriteLine(
+							$"[LOADER][TRACE] fiber.context-transfer rip=0x{transferTarget.Rip:X16} " +
+							$"rsp=0x{transferTarget.Rsp:X16} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
+							$"fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16}");
+					}
 
-				if (_activeGuestThreadState is { } transferGuestThreadState)
-				{
-					Volatile.Write(ref transferGuestThreadState.LastImportRax, transferTarget.Rax);
-					Volatile.Write(ref transferGuestThreadState.LastImportResultValid, 1);
+					if (_activeGuestThreadState is { } transferGuestThreadState)
+					{
+						Volatile.Write(ref transferGuestThreadState.LastImportRax, transferTarget.Rax);
+						Volatile.Write(ref transferGuestThreadState.LastImportResultValid, 1);
+					}
+					guestState.PreparedContextTransferStub = transferStub;
+					return unchecked((ulong)transferFrame);
 				}
-				_preparedContextTransferStub = transferStub;
-				return unchecked((ulong)transferFrame);
-			}
-			if (GuestThreadExecution.TryConsumeCurrentEntryExit(out var exitValue, out var exitReason))
-			{
-				if (DsTrace.Hle)
+				if (guestState.TryConsumeEntryExit(out var exitValue, out var exitReason))
 				{
-					DsTrace.LastOutcome = 3;
+					if (DsTrace.Hle)
+					{
+						DsTrace.LastOutcome = 3;
+					}
+					if (TryCompleteGuestEntryToHostStub(argPackPtr, num, num7, importStubEntry.Nid, exitReason, exitValue))
+					{
+						cpuContext[CpuRegister.Rax] = exitValue;
+					}
+					else
+					{
+						LastError = $"Failed to complete guest entry after {importStubEntry.Nid}: missing host return sentinel";
+						cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
+					}
 				}
-				if (TryCompleteGuestEntryToHostStub(argPackPtr, num, num7, importStubEntry.Nid, exitReason, exitValue))
+				var consumedThreadBlock = guestState.TryConsumeThreadBlock(
+						out var blockReason,
+						out var blockContinuation,
+						out var hasBlockContinuation,
+						out var blockWakeKey,
+						out var blockWaiter,
+						out var blockDeadlineTimestamp);
+				if (consumedThreadBlock && (DsTrace.Hle || DsTrace.Sched))
 				{
-					cpuContext[CpuRegister.Rax] = exitValue;
+					NoteDsTraceBlockConsumed(in importStubEntry, num7, cpuContext, argPackPtr);
 				}
-				else
+				if (consumedThreadBlock &&
+					TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
 				{
-					LastError = $"Failed to complete guest entry after {importStubEntry.Nid}: missing host return sentinel";
-					cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
-				}
-			}
-			var consumedThreadBlock = GuestThreadExecution.TryConsumeCurrentThreadBlock(
-					out var blockReason,
-					out var blockContinuation,
-					out var hasBlockContinuation,
-					out var blockWakeKey,
-					out var blockWaiter,
-					out var blockDeadlineTimestamp);
-			if (consumedThreadBlock && (DsTrace.Hle || DsTrace.Sched))
-			{
-				NoteDsTraceBlockConsumed(in importStubEntry, num7, cpuContext, argPackPtr);
-			}
-			if (consumedThreadBlock &&
-				TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
-			{
-				if (hasBlockContinuation)
-				{
-					RegisterBlockedGuestThreadContinuation(
-						GuestThreadExecution.CurrentGuestThreadHandle,
-						blockContinuation,
-						blockWakeKey,
-						blockWaiter,
-						blockDeadlineTimestamp);
-				}
+					if (hasBlockContinuation)
+					{
+						RegisterBlockedGuestThreadContinuation(
+							GuestThreadExecution.CurrentGuestThreadHandle,
+							blockContinuation,
+							blockWakeKey,
+							blockWaiter,
+							blockDeadlineTimestamp);
+					}
 
-				cpuContext[CpuRegister.Rax] = 0uL;
+					cpuContext[CpuRegister.Rax] = 0uL;
+				}
 			}
 			if (flag || flag2 || flag3)
 			{
@@ -1821,6 +1848,7 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
+		var leafGuestState = GuestThreadExecution.State;
 		var arg0 = *(ulong*)argPackPtr;
 		var returnRip = *(ulong*)(argPackPtr + 96);
 		var leafStackPointer = (ulong)argPackPtr + 96UL;
@@ -1860,7 +1888,9 @@ public sealed partial class DirectExecutionBackend
 
 		if (_activeGuestThreadState is { } activeGuestThreadState)
 		{
-			Interlocked.Increment(ref activeGuestThreadState.ImportCount);
+			// Only the host thread running this guest thread writes its count, so a plain increment
+			// is exact; readers use Interlocked.Read. The locked add was ~20 cycles per crossing.
+			activeGuestThreadState.ImportCount++;
 			activeGuestThreadState.LastImportRdi = arg0;
 			activeGuestThreadState.LastImportRsi = *(ulong*)(argPackPtr + 8);
 			activeGuestThreadState.LastImportRdx = *(ulong*)(argPackPtr + 16);
@@ -1898,7 +1928,7 @@ public sealed partial class DirectExecutionBackend
 		}
 		else
 		{
-			var previousImportCallFrame = GuestThreadExecution.EnterImportCallFrame(
+			var previousImportCallFrame = leafGuestState.EnterImportCallFrame(
 				returnRip,
 				(ulong)argPackPtr + 104uL,
 				ActiveGuestReturnSlotAddress);
@@ -1913,7 +1943,7 @@ public sealed partial class DirectExecutionBackend
 			}
 			finally
 			{
-				GuestThreadExecution.RestoreImportCallFrame(previousImportCallFrame);
+				leafGuestState.RestoreImportCallFrame(previousImportCallFrame);
 			}
 		}
 		if (Volatile.Read(ref _pendingGuestExceptionCount) != 0)
@@ -1939,13 +1969,23 @@ public sealed partial class DirectExecutionBackend
 			}
 		}
 
-		var consumedThreadBlock = GuestThreadExecution.TryConsumeCurrentThreadBlock(
-				out var blockReason,
-				out var blockContinuation,
-				out var hasBlockContinuation,
-				out var blockWakeKey,
-				out var blockWaiter,
-				out var blockDeadlineTimestamp);
+		var consumedThreadBlock = false;
+		var blockReason = string.Empty;
+		var blockContinuation = default(GuestCpuContinuation);
+		var hasBlockContinuation = false;
+		var blockWakeKey = string.Empty;
+		IGuestThreadBlockWaiter? blockWaiter = null;
+		var blockDeadlineTimestamp = 0L;
+		if (leafGuestState.HasPendingDispatchOutcome)
+		{
+			consumedThreadBlock = leafGuestState.TryConsumeThreadBlock(
+				out blockReason,
+				out blockContinuation,
+				out hasBlockContinuation,
+				out blockWakeKey,
+				out blockWaiter,
+				out blockDeadlineTimestamp);
+		}
 		if (consumedThreadBlock && (DsTrace.Hle || DsTrace.Sched))
 		{
 			NoteDsTraceBlockConsumed(in importStubEntry, returnRip, cpuContext, argPackPtr);
@@ -1983,6 +2023,126 @@ public sealed partial class DirectExecutionBackend
 		return true;
 	}
 
+	// SHARPEMU_AGC_BUILDER_LEAF=0 sends every sceAgc builder through the full import path.
+	private static readonly bool _builderLeafEnabled = !string.Equals(
+		Environment.GetEnvironmentVariable("SHARPEMU_AGC_BUILDER_LEAF"), "0", StringComparison.Ordinal);
+
+	// The command-buffer builders a title calls thousands of times a frame. Each reads its
+	// arguments from registers (and, for a few, the first stack slots, which the leaf publishes
+	// through RSP), writes its packet into the guest command buffer and returns the packet's
+	// address. None blocks or yields. The one thing they can do that a leaf may not is call the
+	// buffer's "full" callback, which is guest code: a leaf runs them with
+	// CpuContext.DeclineGuestCallbacks set, so they back out before writing anything and the full
+	// path repeats the call. A builder that allocates in more than one step has to decline before
+	// its first step (see TryDeclineLeaf's callers); the ones listed here were checked for that.
+	internal static bool IsAgcBuilderLeafImport(string nid) =>
+		nid is
+			"q88lQ+GP5Yk" or // sceAgcDcbDrawIndex
+			"Yw0jKSqop+E" or // sceAgcDcbDrawIndexAuto
+			"B+aG9DUnTKA" or // sceAgcDcbDrawIndexOffset
+			"t1vNu082-jM" or // sceAgcDcbDrawIndexIndirect
+			"l4fM9K-Lyks" or // sceAgcDcbSetIndexBuffer
+			"8N2tmT3jmC8" or // sceAgcDcbSetIndexCount
+			"GIIW2J37e70" or // sceAgcDcbSetIndexSize
+			"tSBxhAPyytQ" or // sceAgcDcbSetNumInstances
+			"pFLArOT53+w" or // sceAgcDcbSetShRegisterDirect
+			"LHFXRrlTPD8" or // sceAgcDcbSetCxRegisterDirect
+			"w4-d0n60hdo" or // sceAgcDcbSetUcRegisterDirect
+			"BVFg3CWU6Eo" or // sceAgcDcbSetCfRegisterRangeDirect
+			"n2fD4A+pb+g" or // sceAgcCbSetShRegisterRangeDirect
+			"-HOOCn0JY48" or // sceAgcDcbSetShRegistersIndirect
+			"ZvwO9euwYzc" or // sceAgcDcbSetCxRegistersIndirect
+			"hvUfkUIQcOE" or // sceAgcDcbSetUcRegistersIndirect
+			"k3GhuSNmBLU" or // sceAgcCbDispatch
+			"CtB+A9-VxO0" or // sceAgcDcbDispatchIndirect
+			"j3EtxFkSIhQ" or // sceAgcAcbDispatchIndirect
+			"RmaJwLtc8rY" or // sceAgcDcbSetBaseIndirectArgs
+			"VmW0Tdpy420" or // sceAgcDcbWaitRegMem
+			"htn36gPnBk4" or // sceAgcAcbWaitRegMem
+			"i1jyy49AjXU" or // sceAgcDcbWriteData
+			"eZ4+17OQz4Q" or // sceAgcAcbWriteData
+			"aJf+j5yntiU" or // sceAgcDcbEventWrite
+			"cFazmnXpJOE" or // sceAgcAcbEventWrite
+			"57labkp+rSQ" or // sceAgcDcbAcquireMem
+			"KT-hTp-Ch14" or // sceAgcAcbAcquireMem
+			"wr23dPKyWc0";   // sceAgcCbReleaseMem
+
+	/// <summary>
+	/// Runs a command-buffer builder with the bookkeeping of a trivial leaf plus the stack pointer
+	/// (some builders read their seventh and later arguments from the guest stack), declining -
+	/// returning false with nothing written - when the builder would have to call the buffer's
+	/// guest callback or when anything that needs the full path is pending.
+	/// </summary>
+	private unsafe bool TryDispatchBuilderLeaf(
+		CpuContext cpuContext,
+		in ImportStubEntry importStubEntry,
+		nint argPackPtr,
+		long dispatchIndex,
+		out ulong result)
+	{
+		result = 0;
+		// The full path delivers pending guest exceptions at its safe point and ends a guest that
+		// is shutting down; the all-imports and filtered traces see only calls that take it.
+		if (!_builderLeafEnabled ||
+			_logAllImports ||
+			_profileGuestRip ||
+			!string.IsNullOrWhiteSpace(_importFilter) ||
+			Volatile.Read(ref _pendingGuestExceptionCount) != 0 ||
+			Volatile.Read(ref _forcedGuestExit) ||
+			importStubEntry.Export is not { } export ||
+			(export.Target & cpuContext.TargetGeneration) == 0)
+		{
+			return false;
+		}
+
+		cpuContext.Rip = importStubEntry.Address;
+		cpuContext[CpuRegister.Rdi] = *(ulong*)argPackPtr;
+		cpuContext[CpuRegister.Rsi] = *(ulong*)(argPackPtr + 8);
+		cpuContext[CpuRegister.Rdx] = *(ulong*)(argPackPtr + 16);
+		cpuContext[CpuRegister.Rcx] = *(ulong*)(argPackPtr + 24);
+		cpuContext[CpuRegister.R8] = *(ulong*)(argPackPtr + 32);
+		cpuContext[CpuRegister.R9] = *(ulong*)(argPackPtr + 40);
+		cpuContext[CpuRegister.Rsp] = (ulong)argPackPtr + 96uL;
+		cpuContext.ClearRaxWriteFlag();
+		cpuContext.GuestCallbackDeclined = false;
+		cpuContext.DeclineGuestCallbacks = true;
+		int returnValue;
+		ImportProfile.MarkBodyStart();
+		try
+		{
+			returnValue = export.Function(cpuContext);
+		}
+		finally
+		{
+			cpuContext.DeclineGuestCallbacks = false;
+			ImportProfile.MarkBodyEnd();
+		}
+
+		if (cpuContext.GuestCallbackDeclined)
+		{
+			cpuContext.GuestCallbackDeclined = false;
+			return false;
+		}
+
+		if (!cpuContext.WasRaxWritten)
+		{
+			cpuContext[CpuRegister.Rax] = unchecked((ulong)returnValue);
+		}
+
+		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK &&
+			ShouldLogImportResult(in importStubEntry, (OrbisGen2Result)returnValue, out var mutexOccurrence))
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Import#{dispatchIndex} result: {(OrbisGen2Result)returnValue} ({importStubEntry.Nid}) " +
+				$"rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} " +
+				$"ret=0x{*(ulong*)(argPackPtr + 96):X16}" +
+				(mutexOccurrence != 0 ? $" occurrence={mutexOccurrence}" : string.Empty));
+		}
+
+		result = cpuContext[CpuRegister.Rax];
+		return true;
+	}
+
 	private static readonly bool _disableTrivialLeafDispatch = string.Equals(
 		Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_TRIVIAL_LEAF"), "1", StringComparison.Ordinal);
 
@@ -2001,7 +2161,14 @@ public sealed partial class DirectExecutionBackend
 	// Every entry below was checked for those four properties - a poll that
 	// takes a host lock still qualifies, because the lock is the emulator's own
 	// and cannot park the guest thread.
+	// Queue-level reads only inspect the context/device counters and write two register-
+	// addressed outputs. They neither park the guest nor invoke guest callbacks. The
+	// dispatch benchmark removes the gateway allocation; =0 retains the full path.
+	private static readonly bool _audioQueueLeafEnabled =
+		Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_QUEUE_LEAF") != "0";
+
 	internal static bool IsTrivialLeafImport(string nid) =>
+		(_audioQueueLeafEnabled && nid is "R7d0F1g2qsU" or "Q8DZkKQ-SYc") ||
 		nid is
 			"0-KXaS70xy4" or // pthread_getspecific
 			"eoht7mQOCmo" or // scePthreadGetspecific
@@ -2326,18 +2493,18 @@ public sealed partial class DirectExecutionBackend
 			"kwGyyjohI50";   // sceKernelGetEventData
 	}
 
-	private long NextImportDispatchIndex()
+	private long NextImportDispatchIndex(GuestThreadExecution.ThreadState state)
 	{
-		if (!ReferenceEquals(_importCounterOwner, this) ||
-			_nextImportDispatchIndex >= _importDispatchBlockEnd)
+		if (!ReferenceEquals(state.ImportCounterOwner, this) ||
+			state.NextImportDispatchIndex >= state.ImportDispatchBlockEnd)
 		{
 			var blockEnd = Interlocked.Add(ref _importDispatchCount, ImportDispatchBlockSize);
-			_importCounterOwner = this;
-			_nextImportDispatchIndex = blockEnd - ImportDispatchBlockSize + 1;
-			_importDispatchBlockEnd = blockEnd + 1;
+			state.ImportCounterOwner = this;
+			state.NextImportDispatchIndex = blockEnd - ImportDispatchBlockSize + 1;
+			state.ImportDispatchBlockEnd = blockEnd + 1;
 		}
 
-		return _nextImportDispatchIndex++;
+		return state.NextImportDispatchIndex++;
 	}
 
 	private void TraceImportFrameChain(CpuContext context, long dispatchIndex)
@@ -2363,6 +2530,20 @@ public sealed partial class DirectExecutionBackend
 
 			frame = next;
 		}
+	}
+
+	// A stop can arrive while a leaf body runs. Only ordinary guest returns may
+	// be redirected here: preserve already prepared exits, blocks and context transfers.
+	// Failed redirects retain the existing behavior; this is not a quiescence fence.
+	private unsafe ulong CompleteLeafImportShutdown(CpuContext context, nint argPackPtr, ulong result)
+	{
+		if (!Volatile.Read(ref _forcedGuestExit)) return result;
+		var state = GuestThreadExecution.State;
+		if (ActiveGuestThreadYieldRequested || state.HasPendingDispatchOutcome || state.PreparedContextTransferStub != 0)
+			return result;
+		if (!TryEndGuestSliceForShutdown(argPackPtr)) return result;
+		context[CpuRegister.Rax] = 1uL;
+		return 1uL;
 	}
 
 	// Returns the import straight to the host entry stub, which ends this guest slice.

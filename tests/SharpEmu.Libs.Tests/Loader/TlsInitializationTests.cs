@@ -74,6 +74,39 @@ public sealed class TlsInitializationTests
         }
     }
 
+    [Fact]
+    public void ResolvedAddressCacheFollowsSeedingRegistrationAndReset()
+    {
+        try
+        {
+            GuestTlsTemplate.Reset();
+            var offset1 = GuestTlsTemplate.RegisterModule(1, new byte[8], 0x20, 0x10);
+            var context = new CpuContext(new FakeCpuMemory(0x10000, 0x20000), Generation.Gen5) { FsBase = 0x20000 };
+            GuestTlsTemplate.SeedThreadBlock(context, 0x20000);
+            Assert.Equal(0x20000UL - offset1 + 4, GuestTlsTemplate.ResolveAddress(context, 1, 4));
+            Assert.Equal(0x20000UL - offset1 + 4, GuestTlsTemplate.ResolveAddress(context, 1, 4)); // cached
+            Assert.Equal(0UL, GuestTlsTemplate.ResolveAddress(context, 1, 0x20)); // past the block
+
+            // A module registered after the thread was seeded gets a lazily allocated block...
+            var offset2 = GuestTlsTemplate.RegisterModule(2, new byte[8], 0x20, 0x10);
+            var dynamic2 = GuestTlsTemplate.ResolveAddress(context, 2, 0);
+            Assert.NotEqual(0UL, dynamic2);
+            Assert.NotEqual(0x20000UL - offset2, dynamic2);
+            Assert.Equal(dynamic2 + 8, GuestTlsTemplate.ResolveAddress(context, 2, 8));
+
+            // ...and re-seeding the thread block moves it into static TLS: no stale cached block.
+            GuestTlsTemplate.SeedThreadBlock(context, 0x20000);
+            Assert.Equal(0x20000UL - offset2, GuestTlsTemplate.ResolveAddress(context, 2, 0));
+
+            GuestTlsTemplate.Reset();
+            Assert.Equal(0UL, GuestTlsTemplate.ResolveAddress(context, 1, 4));
+        }
+        finally
+        {
+            GuestTlsTemplate.Reset();
+        }
+    }
+
     [Theory]
     [InlineData(0x21UL, 0x20UL, 0x500UL)]
     [InlineData(8UL, 0x20UL, 0x2000UL)]

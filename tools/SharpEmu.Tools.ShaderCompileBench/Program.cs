@@ -15,6 +15,9 @@ using SharpEmu.Libs.Gpu.Pipelines;
 // Arguments are key=value:
 //   dir=<copy of pipeline_cache/<title>/metal-v2>  (required; the list loader prunes files)
 //   mode=translate|compute|libraries               (default compute)
+//   mode=gpu  synthetic GPU-time benchmark of every translated shader (see GpuBench.cs)
+//   mode=gpureport csv=<gpu-*.csv,...> out=<dir>   ranking and variant A/B tables (GpuBenchReport.cs)
+//   mode=analysis hash=<comma-separated hex hashes> reports graphics IR opportunities only
 //   workers=4 tworkers=4 priority=normal|below limit=0 order=list|bigfirst
 //   salt=<text>  prefixes every source with a comment, so the front end misses its cache
 //   opt=default|size  lang=3.2|4.0  pipeline=1|0  csv=<file>  dumpmsl=<dir>
@@ -71,6 +74,11 @@ internal static class Program
             return 0;
         }
 
+        if (Arg("mode", "") == "gpureport")
+        {
+            return GpuBenchReport.Run(Arg);
+        }
+
         var dir = Arg("dir", "");
         if (dir.Length == 0)
         {
@@ -81,6 +89,11 @@ internal static class Program
         MetalNative.EnsureFrameworksLoaded();
         var device = MetalNative.MTLCreateSystemDefaultDevice();
         var mode = Arg("mode", "compute");
+        if (mode == "gpu")
+        {
+            return GpuBench.Run(dir, Arg);
+        }
+
         var listener = Arg("alloctypes", "") == "1" ? new AllocTypeListener() : null;
         var limit = int.Parse(Arg("limit", "0"), CultureInfo.InvariantCulture);
         var rows = new List<Row>();
@@ -91,6 +104,7 @@ internal static class Program
             var items = list.LoadedComputes();
             Console.Error.WriteLine($"computes={items.Count}");
             MetalGpuBackend.Register();
+            MetalRenderHost.ApplyTranslationSwitches();
             var compiler = SharpEmu.Libs.Gpu.GuestGpu.Current;
             // The learned device data loads change the MSL; seed them as a start of the title would.
             if (Arg("loads", "") is { Length: > 0 } loads)
@@ -160,6 +174,10 @@ internal static class Program
         {
             return Derivation.ComputeMatch(dir, Arg);
         }
+        else if (mode == "analysis")
+        {
+            return Observation.Analyze(dir, Arg);
+        }
         else if (mode == "graphics")
         {
             return GraphicsMatch(dir);
@@ -225,8 +243,13 @@ internal static class Program
     {
         MetalGpuBackend.Register();
         var compiler = SharpEmu.Libs.Gpu.GuestGpu.Current;
-        // The runtime turns mip statistics on with its command stream (MetalRenderHost.LodStatistics).
-        SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.RecordMipStatistics = Arg("mipstats", "1") == "1";
+        // A portable specialization has erased its stride/format. Reproduce the runtime
+        // switches, or those erased values get baked into the offline translation.
+        MetalRenderHost.ApplyTranslationSwitches();
+        if (_args.ContainsKey("mipstats"))
+        {
+            SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.RecordMipStatistics = Arg("mipstats", "1") == "1";
+        }
         if (Arg("loads", "") is { Length: > 0 } loads)
         {
             var learned = MetalDeviceDataLoadsStore.Load(Path.Combine(dir, loads), out _);

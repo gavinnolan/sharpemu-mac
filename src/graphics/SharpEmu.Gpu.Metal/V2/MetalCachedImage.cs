@@ -110,6 +110,29 @@ internal sealed class MetalCachedImage : IDisposable
     public MetalImageEpochs? Epochs { get; set; }
 
     /// <summary>
+    /// The split GPU process's pending-writeback summary (MetalImageCache.PendingWritebacks), which
+    /// holds this image's pages while it is GPU-modified. Set while the image is in the cache;
+    /// setting it moves the claim, and null drops it.
+    /// </summary>
+    public IPendingWritebackPages? PendingWritebacks
+    {
+        get => _pendingWritebacks;
+        set
+        {
+            ReleasePendingWriteback();
+            _pendingWritebacks = value;
+            if (_gpuModified)
+            {
+                ClaimPendingWriteback();
+            }
+        }
+    }
+
+    private IPendingWritebackPages? _pendingWritebacks;
+    private ulong _pendingAddress;
+    private ulong _pendingSize;
+
+    /// <summary>
     /// Moves wherever this image bumps a count of <see cref="Epochs"/> (and where the cache changes
     /// its metadata): a memo of a binding of this image alone is stale once it moved.
     /// </summary>
@@ -226,7 +249,8 @@ internal sealed class MetalCachedImage : IDisposable
     /// <summary>
     /// Set when an image that writes this depth image's stencil bytes takes them over: the
     /// next time this image binds, its stencil plane is copied from that image on the
-    /// device, and the depth plane its texture holds stays as it is.
+    /// device, and the depth plane its texture holds stays as it is. The image may still be
+    /// GPU-modified for its depth plane; its writeback then leaves the stencil bytes alone.
     /// </summary>
     public bool StencilPlaneStale { get; set; }
 
@@ -255,11 +279,54 @@ internal sealed class MetalCachedImage : IDisposable
         Texture != 0 && source.Texture != 0 &&
         _stencilSourceTexture == source.Texture && _stencilSourceVersion == source.ContentVersion;
 
+    // The other direction, on the 8-bit image over a depth image's stencil bytes: the depth
+    // texture its last device copy came from, that image's version then, and this image's
+    // own version once the copy landed.
+    private nint _stencilCopySourceTexture;
+    private long _stencilCopySourceVersion;
+    private long _stencilCopyOwnVersion;
+
+    /// <summary>Records that this texture now holds a device copy of the depth image's stencil plane as it is.</summary>
+    public void NoteStencilCopyOf(MetalCachedImage depth)
+    {
+        _stencilCopySourceTexture = depth.Texture;
+        _stencilCopySourceVersion = depth.ContentVersion;
+        _stencilCopyOwnVersion = ContentVersion;
+    }
+
+    /// <summary>
+    /// True while neither this texture nor the depth image has changed since the last
+    /// stencil copy out of it: a copy now would write the same texels.
+    /// </summary>
+    public bool StillHoldsStencilCopyOf(MetalCachedImage depth) =>
+        !_cpuDirty && Texture != 0 && depth.Texture != 0 &&
+        _stencilCopySourceTexture == depth.Texture &&
+        _stencilCopySourceVersion == depth.ContentVersion &&
+        _stencilCopyOwnVersion == ContentVersion;
+
     public ImageDescription Description;
 
     public MetalTextureShape Shape { get; private set; }
 
-    public nint Texture { get; private set; }
+    // Every texture this image refers to is counted in MetalTileViews, which keeps the
+    // tiler's integer view of it until the last image lets go of the texture.
+    public nint Texture
+    {
+        get => _texture;
+        private set
+        {
+            if (_texture == value)
+            {
+                return;
+            }
+
+            MetalTileViews.Reference(value);
+            MetalTileViews.Unreference(_texture);
+            _texture = value;
+        }
+    }
+
+    private nint _texture;
 
     /// <summary>
     /// The guest mip level the texture's level 0 holds. Zero for the whole chain; above zero
@@ -674,6 +741,8 @@ internal sealed class MetalCachedImage : IDisposable
         var wasModified = _gpuModified;
         var wasDirty = _cpuDirty;
         var wasPublished = PublishedEnd > PublishedStart;
+        // Claimed before the image is GPU-modified: the guest process never sees it so unclaimed.
+        ClaimPendingWriteback();
         _gpuModified = true;
         _cpuDirty = false;
         DirtyStart = 0;
@@ -740,6 +809,7 @@ internal sealed class MetalCachedImage : IDisposable
     {
         var wasModified = _gpuModified;
         _gpuModified = false;
+        ReleasePendingWriteback();
         PublishedStart = 0;
         PublishedEnd = 0;
         if (wasModified)
@@ -762,6 +832,29 @@ internal sealed class MetalCachedImage : IDisposable
             MarkCpuDirty(MetalImageDirtyCause.CpuWrite);
             ClearGpuModified();
         }
+    }
+
+    private void ClaimPendingWriteback()
+    {
+        if (_pendingSize != 0 || _pendingWritebacks is not { } pending || ImageDescription.IsEmptyRange(Description.Data))
+        {
+            return;
+        }
+
+        _pendingAddress = Description.Data.Address;
+        _pendingSize = Description.Data.Size;
+        pending.Add(_pendingAddress, _pendingSize);
+    }
+
+    private void ReleasePendingWriteback()
+    {
+        if (_pendingSize == 0)
+        {
+            return;
+        }
+
+        _pendingWritebacks!.Remove(_pendingAddress, _pendingSize);
+        _pendingSize = 0;
     }
 
     /// <summary>
@@ -1098,12 +1191,15 @@ internal sealed class MetalCachedImage : IDisposable
     public void ReplaceTexture(nint texture, in MetalTextureShape shape)
     {
         ReleaseViews();
-        if (Texture != 0)
+        // The old texture's tiler view goes before the texture does, so a texture made
+        // later at the same handle never finds it.
+        var old = Texture;
+        Texture = texture;
+        if (old != 0)
         {
-            MetalNative.SendVoid(Texture, SelRelease);
+            MetalNative.SendVoid(old, SelRelease);
         }
 
-        Texture = texture;
         Shape = shape;
         Sparse = null;
         NoteContentChanged();
@@ -1133,10 +1229,11 @@ internal sealed class MetalCachedImage : IDisposable
 
         _disposed = true;
         ReleaseViews();
-        if (Texture != 0)
+        var texture = Texture;
+        Texture = 0;
+        if (texture != 0)
         {
-            MetalNative.SendVoid(Texture, SelRelease);
-            Texture = 0;
+            MetalNative.SendVoid(texture, SelRelease);
         }
     }
 }

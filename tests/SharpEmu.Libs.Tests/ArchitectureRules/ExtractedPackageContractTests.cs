@@ -73,15 +73,22 @@ public sealed class ExtractedPackageContractTests
 
     [Theory]
     [MemberData(nameof(Packages))]
-    public void ExtractedPackagesGrantInternalAccessOnlyToTests(string directory, string assembly)
+    public void ExtractedPackagesGrantInternalAccessOnlyToTestsAndApprovedBenchmarks(string directory, string assembly)
     {
         var project = XDocument.Load(RepoPath($"{directory}/{assembly}.csproj"));
-        // Friends are test assemblies only: the shared Libs suite, or the
-        // package's own dedicated test project (e.g. SharpEmu.Gpu.Metal.Tests), plus the
-        // offline shader-compile benchmark, which times internal compiler phases.
+        // Keep friend access limited to tests and named offline benchmarks.
+        // PerfAudit exercises Metal's internal resource paths; it does not need
+        // friend access to the other extracted packages.
+        var allowedFriends = new List<string>
+        {
+            "SharpEmu.Libs.Tests", $"{assembly}.Tests", $"{assembly}.LeakTests",
+            "SharpEmu.Tools.ShaderCompileBench",
+        };
+        if (assembly == "SharpEmu.Gpu.Metal")
+            allowedFriends.Add("SharpEmu.Tools.PerfAudit");
+
         foreach (var friend in project.Descendants("InternalsVisibleTo"))
-            Assert.Contains(friend.Attribute("Include")!.Value,
-                new[] { "SharpEmu.Libs.Tests", $"{assembly}.Tests", $"{assembly}.LeakTests", "SharpEmu.Tools.ShaderCompileBench" });
+            Assert.Contains(friend.Attribute("Include")!.Value, allowedFriends);
     }
 
     [Theory]

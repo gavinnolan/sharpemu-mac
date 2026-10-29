@@ -89,6 +89,10 @@ internal sealed class MetalGpuWriteRanges
         // here: which of two overlapping writes in one submission lands last.
         public ulong Sequence;
         public MetalGpuWriteOrigin Origin;
+
+        // The write-fence value signalled after every write this record covers, or zero when
+        // only the end of its command buffer says it landed (MetalRenderHost.WriteFences).
+        public ulong Fence;
     }
 
     private Record[] _records = new Record[64];
@@ -151,6 +155,7 @@ internal sealed class MetalGpuWriteRanges
             Version++;
             var sequence = ++_sequence;
             var end = address + size;
+            InvalidateClean(address, end);
             NoteNewest(address, end, serial);
             if (origin == MetalGpuWriteOrigin.EndOfPipeLabel)
             {
@@ -177,6 +182,8 @@ internal sealed class MetalGpuWriteRanges
                 }
 
                 candidate.Sequence = sequence;
+                // The new write is not behind the fence the record had.
+                candidate.Fence = 0;
                 return sequence;
             }
 
@@ -544,6 +551,111 @@ internal sealed class MetalGpuWriteRanges
         return found;
     }
 
+    // 256-byte granules no live record or label overlaps, kept for the stream's reads: the
+    // command stream asks about every packet and register table it reads, thousands a frame,
+    // and the records' 2 MiB buckets and the label pages cannot tell a read next to a
+    // scattered label from one far from any, so the answer was a walk of them all (Silent Hill:
+    // the top self-time item of its GPU worker). Live records leave only by Retire and Clear,
+    // which can only make a granule cleaner, and arrive only through Note (its range's granules
+    // are dropped there) or merge in FoldOldest (everything is dropped), so a granule kept here
+    // has no overlapping record whatever serial the next query completes. The unbounded serial
+    // is not part of it: PendingSerial reads that for every query. Worker thread only, like Note.
+    // SHARPEMU_METAL_V2_WRITE_CLEAN_MEMO=0 walks the records for every query again.
+    private static readonly bool CleanMemoEnabled =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_WRITE_CLEAN_MEMO");
+    private const int CleanGranuleShift = 8;
+    private const int CleanSlotBits = 10;
+    // A query wider than this many granules is not looked up.
+    private const ulong MaxCleanGranules = 16;
+    private readonly ulong[] _cleanGranules = new ulong[1 << CleanSlotBits];
+
+    // The slot holds the granule plus one, so an empty one matches no granule.
+    private static int CleanSlot(ulong granule) => (int)((granule * 0x9E3779B97F4A7C15UL) >> (64 - CleanSlotBits));
+
+    private void InvalidateClean(ulong address, ulong end)
+    {
+        var first = address >> CleanGranuleShift;
+        var last = (end - 1) >> CleanGranuleShift;
+        if (last - first >= MaxCleanGranules)
+        {
+            Array.Clear(_cleanGranules);
+            return;
+        }
+
+        for (var granule = first; granule <= last; granule++)
+        {
+            ref var slot = ref _cleanGranules[CleanSlot(granule)];
+            if (slot == granule + 1)
+            {
+                slot = 0;
+            }
+        }
+    }
+
+    // True when no live record or label overlaps [address, end): every granule it touches is
+    // known clean, or the one walk of the granule-aligned span finds nothing, which makes them so.
+    private bool TryAnswerCleanGranules(ulong address, ulong end)
+    {
+        var first = address >> CleanGranuleShift;
+        var last = (end - 1) >> CleanGranuleShift;
+        if (last - first >= MaxCleanGranules || last >= ulong.MaxValue >> CleanGranuleShift)
+        {
+            return false;
+        }
+
+        var known = true;
+        for (var granule = first; granule <= last; granule++)
+        {
+            if (_cleanGranules[CleanSlot(granule)] != granule + 1)
+            {
+                known = false;
+                break;
+            }
+        }
+
+        if (known)
+        {
+            return true;
+        }
+
+        if (AnyLiveOverlap(first << CleanGranuleShift, (last + 1) << CleanGranuleShift))
+        {
+            return false;
+        }
+
+        for (var granule = first; granule <= last; granule++)
+        {
+            _cleanGranules[CleanSlot(granule)] = granule + 1;
+        }
+
+        return true;
+    }
+
+    private bool AnyLiveOverlap(ulong address, ulong end)
+    {
+        var records = RecordsMayCover(address, end) ? _count : 0;
+        for (var index = 0; index < records; index++)
+        {
+            ref var record = ref _records[index];
+            if (record.End > address && record.Start < end)
+            {
+                return true;
+            }
+        }
+
+        var labels = LabelPagesMayCover(address, end) ? _labelCount : 0;
+        for (var index = 0; index < labels; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.End > address && label.Start < end)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public bool MayCover(ulong address, ulong size) =>
         _unboundedSerial != 0 ||
         ((_count != 0 || _labelCount != 0) && size != 0 && address < _boundsEnd && _boundsStart < address + size);
@@ -561,6 +673,10 @@ internal sealed class MetalGpuWriteRanges
         if (pending != 0)
         {
             LastMatch = (0, ulong.MaxValue, pending, MetalGpuWriteOrigin.Unbounded);
+        }
+        else if (CleanMemoEnabled && TryAnswerCleanGranules(address, end))
+        {
+            return 0;
         }
 
         var records = RecordsMayCover(address, end) ? _count : 0;
@@ -587,6 +703,76 @@ internal sealed class MetalGpuWriteRanges
         }
 
         return pending;
+    }
+
+    /// <summary>
+    /// A write fence with this value is encoded after every write recorded so far in
+    /// <paramref name="serial"/>: each of its records without a fence takes this one. Labels and
+    /// unbounded writes keep waiting for the serial.
+    /// </summary>
+    public void StampFence(ulong serial, ulong fence)
+    {
+        BeginMutation();
+        try
+        {
+            for (var index = 0; index < _count; index++)
+            {
+                ref var record = ref _records[index];
+                if (record.Serial == serial && record.Fence == 0)
+                {
+                    record.Fence = fence;
+                }
+            }
+        }
+        finally
+        {
+            EndMutation();
+        }
+    }
+
+    /// <summary>
+    /// The write fence after which every write over the range recorded in <paramref name="serial"/>
+    /// (the newest pending serial over it, as <see cref="PendingSerial"/> returned) has landed, or
+    /// zero when one of them has no fence: a label, an unbounded write, or a record noted since.
+    /// Writes of older serials are not covered; the caller waits for those serials.
+    /// </summary>
+    public ulong WriteFence(ulong address, ulong size, ulong serial)
+    {
+        if (size == 0 || serial == 0 || address > ulong.MaxValue - size || _unboundedSerial >= serial)
+        {
+            return 0;
+        }
+
+        var end = address + size;
+        var fence = 0UL;
+        var records = RecordsMayCover(address, end) ? _count : 0;
+        for (var index = 0; index < records; index++)
+        {
+            ref var record = ref _records[index];
+            if (record.Serial < serial || record.End <= address || record.Start >= end)
+            {
+                continue;
+            }
+
+            if (record.Serial > serial || record.Fence == 0)
+            {
+                return 0;
+            }
+
+            fence = Math.Max(fence, record.Fence);
+        }
+
+        var labels = LabelPagesMayCover(address, end) ? _labelCount : 0;
+        for (var index = 0; index < labels; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.Serial >= serial && label.End > address && label.Start < end)
+            {
+                return 0;
+            }
+        }
+
+        return fence;
     }
 
     /// <summary>
@@ -978,6 +1164,7 @@ internal sealed class MetalGpuWriteRanges
                 }
 
                 last.Sequence = Math.Max(last.Sequence, current.Sequence);
+                last.Fence = 0;
 
                 last.End = Math.Max(last.End, current.End);
                 folded[^1] = last;
@@ -997,6 +1184,8 @@ internal sealed class MetalGpuWriteRanges
         }
 
         _count = kept + tail;
+        // A merged record spans the gaps between the ones it took in.
+        Array.Clear(_cleanGranules);
         _recordBuckets.Clear();
         _wideRecords.Clear();
         Array.Clear(_bucketHashCounts);

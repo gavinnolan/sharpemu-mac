@@ -298,12 +298,12 @@ public sealed class MetalShaderObjectCostTests(ITestOutputHelper output)
 
     private void Report(
         string label,
-        (uint Blocks, ulong Bytes, ulong Footprint) baseline,
-        (uint Blocks, ulong Bytes, ulong Footprint) libraries,
-        (uint Blocks, ulong Bytes, ulong Footprint) functions,
-        (uint Blocks, ulong Bytes, ulong Footprint) pipelines,
-        (uint Blocks, ulong Bytes, ulong Footprint) pipelinesReleased,
-        (uint Blocks, ulong Bytes, ulong Footprint) released) =>
+        (long Blocks, ulong Bytes, ulong Footprint) baseline,
+        (long Blocks, ulong Bytes, ulong Footprint) libraries,
+        (long Blocks, ulong Bytes, ulong Footprint) functions,
+        (long Blocks, ulong Bytes, ulong Footprint) pipelines,
+        (long Blocks, ulong Bytes, ulong Footprint) pipelinesReleased,
+        (long Blocks, ulong Bytes, ulong Footprint) released) =>
         Output(
             label, Count,
             ("libraries", baseline, libraries),
@@ -312,7 +312,7 @@ public sealed class MetalShaderObjectCostTests(ITestOutputHelper output)
             ("pipelines released", pipelines, pipelinesReleased),
             ("all released", pipelines, released));
 
-    private void Output(string label, int count, params (string Phase, (uint Blocks, ulong Bytes, ulong Footprint) From, (uint Blocks, ulong Bytes, ulong Footprint) To)[] phases)
+    private void Output(string label, int count, params (string Phase, (long Blocks, ulong Bytes, ulong Footprint) From, (long Blocks, ulong Bytes, ulong Footprint) To)[] phases)
     {
         var text = new StringBuilder(label);
         foreach (var (phase, from, to) in phases)
@@ -339,26 +339,11 @@ public sealed class MetalShaderObjectCostTests(ITestOutputHelper output)
         return true;
     }
 
-    private static (uint Blocks, ulong Bytes, ulong Footprint) Sample()
+    private static (long Blocks, ulong Bytes, ulong Footprint) Sample()
     {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-        malloc_zone_statistics(0, out var statistics);
-        return (statistics.BlocksInUse, statistics.SizeInUse, PhysFootprint());
+        var live = NativeHeap.Sample();
+        return (live.Blocks, live.Bytes, PhysFootprint());
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MallocStatistics
-    {
-        public uint BlocksInUse;
-        public nuint SizeInUse;
-        public nuint MaxSizeInUse;
-        public nuint SizeAllocated;
-    }
-
-    [DllImport("/usr/lib/libSystem.dylib")]
-    private static extern void malloc_zone_statistics(nint zone, out MallocStatistics statistics);
 
     [DllImport("/usr/lib/libSystem.dylib")]
     private static extern uint mach_task_self();

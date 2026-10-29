@@ -31,6 +31,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     bool IConcurrentResolveHost.ResolvesConcurrently => ParallelResolve;
 
+    // Small unclaimed queues can resolve on the drawing thread without a worker wakeup.
+    // Component gains and ordering/device checks justify the default; the Silent Hill
+    // comparison was flat. Set SHARPEMU_METAL_V2_CALLER_RESOLVE=0 for the worker-only path.
+    private static readonly bool CallerResolve =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CALLER_RESOLVE") != "0";
+
+    bool IConcurrentResolveHost.AllowsCallerResolution => CallerResolve;
+
     void IConcurrentResolveHost.BeginConcurrentResolve() => BeginConcurrentResolve();
 
     object IConcurrentResolveHost.EndConcurrentResolve() => EndConcurrentResolve();
@@ -45,7 +53,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // a completion that reaches an entry point from another thread leaves the draws to it.
     private void DrainDraws([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
-        if (_translation is { HasPendingDraws: true } translation && _relay.IsGpuQueueThread)
+        if (_translation is { HasPendingDraws: true, IsDraining: false } translation && _relay.IsGpuQueueThread)
         {
             _drains++;
             if (MetalV2Diagnostics.CountDrainCallers)
@@ -117,12 +125,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         }
 
         var (resolved, abandoned, taken, refused, waitMs) = prefetch.TakeCounters();
+        var (callerResolves, callerMs) = prefetch.TakeCallerResolveCounters();
         var drains = Interlocked.Exchange(ref _drains, 0);
         var deferredBarriers = Interlocked.Exchange(ref _deferredBarriers, 0);
         var operandReadsKept = Interlocked.Exchange(ref _operandReadsKept, 0);
         var drained = Interlocked.Exchange(ref _drainedDraws, 0);
         return $"resolved={resolved} abandoned={abandoned} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
-            $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} {own}{TakeDrainCallers()}";
+            $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} {own}{TakeDrainCallers()}";
     }
 
     internal enum ConcurrentQuery : byte
@@ -268,13 +278,21 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return true;
     }
 
+    // A write the command thread queued ahead of the draw being resolved, still waiting for the worker,
+    // is checked first: the worker records a write's ownership before it lets go of the queued range,
+    // so the range found gone means the ownership below is already there.
     private bool IsOwnedConcurrent(ConcurrentQuery query, ulong address, ulong size) =>
+        PendingCommandWriteHolds(address, size) ||
         _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ||
         (query == ConcurrentQuery.Word && IsGpuWritePendingConcurrent(address, size)) ||
         (_cpOverlay.Count != 0 &&
             _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None) ||
         (_labelOverlay.Count != 0 &&
             _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None);
+
+    private bool PendingCommandWriteHolds(ulong address, ulong size) =>
+        _commandThread is { } thread && ParallelProgramPrefetch.ResolvingJob is var job and >= 0 &&
+        thread.PendingRangeHolds(job, address, size);
 
     // The shared event's value, read from any thread: CompletedSerial also notes it in the worker's
     // completion state.

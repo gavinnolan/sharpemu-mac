@@ -51,6 +51,19 @@ internal sealed class MetalStagedRangeCache
     internal static readonly bool Enabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGED_CACHE") != "0";
 
+    // SHARPEMU_METAL_V2_STAGED_CACHE_PARTIAL=0 stales a whole entry on any guest store, as before.
+    // Otherwise a store into a large entry marks only its own pages, and the next bind copies those.
+    internal static readonly bool PartialDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGED_CACHE_PARTIAL") != "0";
+
+    // Below this an entry is cheaper to copy whole than to fault page by page.
+    public const ulong PartialMinBytes = 1024 * 1024;
+
+    // More dirty pages than this and the entry is being rewritten wholesale: it is staled whole, and
+    // for the next PartialHoldStagings stagings its first store drops the watch over all of it.
+    public const int MaxDirtyPages = 32;
+    public const int PartialHoldStagings = 8;
+
     public enum VerifyKind
     {
         Off,
@@ -204,8 +217,32 @@ internal sealed class MetalStagedRangeCache
         public bool Removed;
         internal uint QueryEpoch;
 
+        // Guest stores into single pages of a large entry (see MetalStagedRangeCache.TryMarkPages): the pages
+        // are dirty, and their watch is gone, while the rest of the entry stays current and watched.
+        // A bit per page counted from the page holding Address. Under the cache lock.
+        internal ulong[]? DirtyPages;
+        internal int DirtyPageCount;
+
+        // The bytes of the staging may not be what guest memory holds on the pages no store touched:
+        // the entry is staged whole next time. True until its first staging completes a watch.
+        public bool NeedsWholeStage = true;
+
+        // Stagings left in which a store drops the whole watch rather than one page of it.
+        internal int PartialHold;
+
+        // What the worker copies between Acquire and the bind: only the pages that were stored into.
+        internal RefillPlan? Plan;
+
         public bool Overlaps(ulong address, ulong size) =>
             address < Address + Size && Address < address + size;
+    }
+
+    /// <summary>The part of an entry <see cref="MetalStagedRangeCache.RefillDirty"/> copies.</summary>
+    internal sealed class RefillPlan
+    {
+        // Byte ranges of the entry, ascending and disjoint.
+        public readonly List<(ulong Offset, ulong Length)> DirtyRuns = new();
+        public ulong DirtyBytes;
     }
 
     private readonly IStagedRangeBackend _backend;
@@ -228,11 +265,26 @@ internal sealed class MetalStagedRangeCache
     private long _evictions;
     private readonly long[] _invalidations = new long[5];
 
-    public MetalStagedRangeCache(IStagedRangeBackend backend, ulong budgetBytes)
+    private readonly bool _partial;
+    private long _partialRefills;
+    private long _partialDirtyBytes;
+    private long _partialSavedBytes;
+    private long _partialFallbacks;
+
+    public MetalStagedRangeCache(IStagedRangeBackend backend, ulong budgetBytes, bool? partial = null)
     {
         _backend = backend;
         _budget = budgetBytes;
+        _partial = partial ?? PartialDefault;
     }
+
+    /// <summary>
+    /// Refills of only the stored-into pages of a large entry, the guest bytes they copied, the bytes
+    /// of the entry that were not copied, and the stores that staled an entry whole instead.
+    /// </summary>
+    public (long Refills, long GuestBytes, long SavedBytes, long Fallbacks) PartialCounters =>
+        (Interlocked.Read(ref _partialRefills), Interlocked.Read(ref _partialDirtyBytes),
+            Interlocked.Read(ref _partialSavedBytes), Interlocked.Read(ref _partialFallbacks));
 
     public ulong CacheBytes
     {
@@ -358,12 +410,20 @@ internal sealed class MetalStagedRangeCache
             // buffers go back to the pool when that submission completes, and this entry
             // gets new ones.
             var inFlight = current.LastUseSerial > _completedSerial;
+
+            // Stores that touched a few pages of a large entry left the rest current and watched: only
+            // those pages are copied again, in place. An in-flight entry is staged whole into new buffers.
+            var refill = existing is not null && !inFlight && CanRefillPartially(current, needPristine);
             if (inFlight)
             {
                 RetireBuffers(current, current.LastUseSerial);
             }
 
-            DropWatch(current);
+            if (!refill)
+            {
+                DropWatch(current);
+            }
+
             if (!needPristine && current.PristineBuffer is { } stalePristine)
             {
                 // Its bytes are from before this staging, and nothing reads it unless a written binding does.
@@ -413,11 +473,26 @@ internal sealed class MetalStagedRangeCache
                 Index(current);
             }
 
+            Interlocked.Increment(ref _misses);
+            if (refill)
+            {
+                var plan = BeginRefill(current);
+                current.Plan = plan;
+                Interlocked.Add(ref _stagedBytes, (long)plan.DirtyBytes);
+                entry = current;
+                return false;
+            }
+
+            current.Plan = null;
             current.WatchBegin = address;
             current.WatchEnd = address + size;
             _backend.AddWatch(address, size);
+            current.NeedsWholeStage = false;
+            if (current.PartialHold > 0)
+            {
+                current.PartialHold--;
+            }
 
-            Interlocked.Increment(ref _misses);
             Interlocked.Add(ref _stagedBytes, (long)size);
             entry = current;
             return false;
@@ -445,6 +520,7 @@ internal sealed class MetalStagedRangeCache
             if (entry.StaleOnClean)
             {
                 entry.StaleOnClean = false;
+                entry.NeedsWholeStage = true;
                 Volatile.Write(ref entry.Stale, 1);
                 DropWatch(entry);
             }
@@ -597,6 +673,18 @@ internal sealed class MetalStagedRangeCache
                     continue;
                 }
 
+                if (reason is Reason.Fault or Reason.Precise && TryMarkPages(entry, begin, length))
+                {
+                    // Only the pages the store touched are behind guest memory.
+                    if (Interlocked.Exchange(ref entry.Stale, 1) == 0)
+                    {
+                        Interlocked.Increment(ref _invalidations[(int)reason]);
+                    }
+
+                    continue;
+                }
+
+                entry.NeedsWholeStage = true;
                 if (Interlocked.Exchange(ref entry.Stale, 1) == 0)
                 {
                     Interlocked.Increment(ref _invalidations[(int)reason]);
@@ -608,6 +696,155 @@ internal sealed class MetalStagedRangeCache
 
         return found;
     }
+
+    private static ulong PageBase(Entry entry) => entry.Address & ~(WatchPageBytes - 1);
+
+    private static int PageCount(Entry entry) =>
+        (int)(((entry.Address + entry.Size + WatchPageBytes - 1) & ~(WatchPageBytes - 1)) - PageBase(entry)) /
+        (int)WatchPageBytes;
+
+    private bool CanRefillPartially(Entry entry, bool needPristine) =>
+        _partial && entry.Size >= PartialMinBytes && !entry.Removed && !entry.NeedsWholeStage && !entry.Dirty &&
+        !entry.StaleOnClean && entry.WatchEnd != 0 && entry.DirtyPageCount > 0 &&
+        Volatile.Read(ref entry.Stale) != 0 && entry.StagingBuffer is not null &&
+        (!needPristine || entry.PristineBuffer is not null);
+
+    // Caller holds the lock. A guest store into [begin, begin + length) of a large entry: its pages are
+    // marked dirty and lose their watch (the store may land once it is gone), the others stay watched.
+    // False when the entry is too small, its stores come too many pages at a time (then it is staled
+    // whole, and for a while a store drops all of it), or this cache does not track pages.
+    private bool TryMarkPages(Entry entry, ulong begin, ulong length)
+    {
+        if (!_partial || entry.Size < PartialMinBytes || entry.NeedsWholeStage || entry.PartialHold > 0 ||
+            entry.WatchEnd == 0 || entry.Removed)
+        {
+            return false;
+        }
+
+        var entryBase = PageBase(entry);
+        var pageCount = PageCount(entry);
+        var lo = Math.Max(begin & ~(WatchPageBytes - 1), entryBase);
+        var hi = Math.Min((begin + length + WatchPageBytes - 1) & ~(WatchPageBytes - 1), entryBase + (ulong)pageCount * WatchPageBytes);
+        if (hi <= lo)
+        {
+            return true;
+        }
+
+        var first = (int)((lo - entryBase) / WatchPageBytes);
+        var last = (int)((hi - entryBase) / WatchPageBytes);
+        var bits = entry.DirtyPages ??= new ulong[(pageCount + 63) / 64];
+        var fresh = 0;
+        for (var page = first; page < last; page++)
+        {
+            if ((bits[page / 64] & (1UL << (page % 64))) == 0)
+            {
+                fresh++;
+            }
+        }
+
+        if (entry.DirtyPageCount + fresh > MaxDirtyPages)
+        {
+            Interlocked.Increment(ref _partialFallbacks);
+            entry.PartialHold = PartialHoldStagings;
+            return false;
+        }
+
+        for (var page = first; page < last;)
+        {
+            if ((bits[page / 64] & (1UL << (page % 64))) != 0)
+            {
+                page++;
+                continue;
+            }
+
+            var runStart = page;
+            while (page < last && (bits[page / 64] & (1UL << (page % 64))) == 0)
+            {
+                bits[page / 64] |= 1UL << (page % 64);
+                page++;
+            }
+
+            entry.DirtyPageCount += page - runStart;
+            _backend.RemoveWatch(entryBase + (ulong)runStart * WatchPageBytes, (ulong)(page - runStart) * WatchPageBytes);
+        }
+
+        return true;
+    }
+
+    // Caller holds the lock. Rewatches the dirty pages, clears them, and lists their bytes for the copy.
+    private RefillPlan BeginRefill(Entry entry)
+    {
+        var plan = new RefillPlan();
+        var entryBase = PageBase(entry);
+        var pageCount = PageCount(entry);
+        var bits = entry.DirtyPages!;
+        for (var page = 0; page < pageCount;)
+        {
+            if ((bits[page / 64] & (1UL << (page % 64))) == 0)
+            {
+                page++;
+                continue;
+            }
+
+            var runStart = page;
+            while (page < pageCount && (bits[page / 64] & (1UL << (page % 64))) != 0)
+            {
+                page++;
+            }
+
+            // Watched before the copy reads the bytes, like a whole staging: a store that lands from
+            // here on marks the page again.
+            var runAddress = entryBase + (ulong)runStart * WatchPageBytes;
+            var runBytes = (ulong)(page - runStart) * WatchPageBytes;
+            _backend.AddWatch(runAddress, runBytes);
+            var from = Math.Max(runAddress, entry.Address) - entry.Address;
+            var to = Math.Min(runAddress + runBytes, entry.Address + entry.Size) - entry.Address;
+            plan.DirtyRuns.Add((from, to - from));
+            plan.DirtyBytes += to - from;
+        }
+
+        Array.Clear(bits);
+        entry.DirtyPageCount = 0;
+        return plan;
+    }
+
+    /// <summary>
+    /// Copies what <see cref="Acquire"/> left to copy, from the worker, after the entry was acquired and
+    /// before its buffer is recorded: guest bytes for the pages stored into. Returns false when there is no partial plan, which means the
+    /// whole entry is to be read from guest memory.
+    /// </summary>
+    internal unsafe bool RefillDirty(Entry entry, GuestReader read)
+    {
+        var plan = entry.Plan;
+        if (plan is null)
+        {
+            return false;
+        }
+
+        entry.Plan = null;
+        var size = checked((int)entry.Size);
+        var staging = new Span<byte>((void*)entry.StagingBuffer!.Contents, size);
+        var pristine = entry.PristineBuffer is { } p && entry.Pristine.IsValid
+            ? new Span<byte>((void*)p.Contents, size)
+            : default;
+        foreach (var (offset, length) in plan.DirtyRuns)
+        {
+            var piece = staging.Slice((int)offset, (int)length);
+            read(entry.Address + offset, piece);
+            if (!pristine.IsEmpty)
+            {
+                piece.CopyTo(pristine.Slice((int)offset, (int)length));
+            }
+        }
+
+        Interlocked.Increment(ref _partialRefills);
+        Interlocked.Add(ref _partialDirtyBytes, (long)plan.DirtyBytes);
+        Interlocked.Add(ref _partialSavedBytes, (long)(entry.Size - plan.DirtyBytes));
+        return true;
+    }
+
+    /// <summary>Reads guest memory at an absolute address, as staging does.</summary>
+    public delegate void GuestReader(ulong address, Span<byte> destination);
 
     // Caller holds the lock. The entries whose bytes overlap [address, address + size) among those on the pages.
     private List<Entry> Collect(ulong first, ulong lastExclusive, ulong address, ulong size)
@@ -729,6 +966,7 @@ internal sealed class MetalStagedRangeCache
     {
         if (entry.WatchEnd == 0)
         {
+            ClearDirtyPages(entry);
             return;
         }
 
@@ -736,7 +974,44 @@ internal sealed class MetalStagedRangeCache
         var length = entry.WatchEnd - begin;
         entry.WatchBegin = 0;
         entry.WatchEnd = 0;
-        _backend.RemoveWatch(begin, length);
+        if (entry.DirtyPageCount == 0)
+        {
+            _backend.RemoveWatch(begin, length);
+            return;
+        }
+
+        // Pages that stores marked lost their watch already: only the others still hold one.
+        var entryBase = PageBase(entry);
+        var pageCount = PageCount(entry);
+        var bits = entry.DirtyPages!;
+        for (var page = 0; page < pageCount;)
+        {
+            if ((bits[page / 64] & (1UL << (page % 64))) != 0)
+            {
+                page++;
+                continue;
+            }
+
+            var runStart = page;
+            while (page < pageCount && (bits[page / 64] & (1UL << (page % 64))) == 0)
+            {
+                page++;
+            }
+
+            _backend.RemoveWatch(entryBase + (ulong)runStart * WatchPageBytes, (ulong)(page - runStart) * WatchPageBytes);
+        }
+
+        ClearDirtyPages(entry);
+    }
+
+    private static void ClearDirtyPages(Entry entry)
+    {
+        if (entry.DirtyPages is { } bits)
+        {
+            Array.Clear(bits);
+        }
+
+        entry.DirtyPageCount = 0;
     }
 
     private void RetireBuffers(Entry entry, ulong retireAfter)

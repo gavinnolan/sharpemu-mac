@@ -2714,6 +2714,42 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
         }
     }
 
+    // SHARPEMU_PAIR_WRITE=0 sends every pair through two ordinary writes.
+    private static readonly bool PairWriteEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_PAIR_WRITE") != "0";
+
+    // Two writes as TryWriteCore's lock-free single-view path does them, under one alias pin and one
+    // write admission, with one pass of the hooks:
+    // - the pre-write hooks run for each range before any byte lands, as they do for each write;
+    // - both ranges land, first then second, and only then does the landed hook run for both:
+    //   one full barrier, ordering both new byte ranges before the page state of either is read.
+    //   It is the barrier of two MarkCpuWriteLanded calls, which each order their own bytes (and
+    //   the earlier ones') before their read, so no read of GPU-interest state moves ahead of bytes
+    //   it has to see;
+    // - anything the single-view path would refuse (a range with no single view, a refused
+    //   admission, an armed GuestWriteWatch) declines with nothing written, and the two
+    //   ordinary writes run instead.
+    public bool TryWritePair(ulong firstAddress, ReadOnlySpan<byte> first, ulong secondAddress, ReadOnlySpan<byte> second)
+    {
+        if (PairWriteEnabled && !first.IsEmpty && !second.IsEmpty && !GuestWriteWatch.Armed && !_disposed &&
+            _backedSpace is { } backed)
+        {
+            GuestImageWriteTracker.NotifyManagedWrite(firstAddress, (ulong)first.Length);
+            GuestImageWriteTracker.NotifyManagedWrite(secondAddress, (ulong)second.Length);
+            GuestGpuMemoryHook.MarkCpuWrite(firstAddress, (ulong)first.Length);
+            GuestGpuMemoryHook.MarkCpuWrite(secondAddress, (ulong)second.Length);
+            if (backed.TryWritePairSingleView(firstAddress, first, secondAddress, second))
+            {
+                GuestGpuMemoryHook.MarkCpuWriteLanded(firstAddress, (ulong)first.Length, secondAddress, (ulong)second.Length);
+                GuestImageWriteTracker.TraceManagedDirtyCompletion(firstAddress, (ulong)first.Length);
+                GuestImageWriteTracker.TraceManagedDirtyCompletion(secondAddress, (ulong)second.Length);
+                return true;
+            }
+        }
+
+        return TryWrite(firstAddress, first) && TryWrite(secondAddress, second);
+    }
+
     // In-place counterpart of TryWriteCore's lock-free single-view path: fill writes the
     // canonical alias of a backed range directly. The alias is not the guest-visible
     // mapping, so guest page guards cannot fault the fill (exactly as for the memcpy

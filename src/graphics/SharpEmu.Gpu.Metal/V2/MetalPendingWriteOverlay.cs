@@ -54,24 +54,55 @@ internal sealed class MetalPendingWriteOverlay
         public ulong Serial;
         public ulong Sequence;
         public byte[]? Baseline;
+        // The bytes a later write covers: a bit per byte for an entry of up to 64 bytes (a dword, a qword, a
+        // label: all of them in practice), so a partial forget allocates nothing; a flag array for a longer one.
+        public ulong DeadMask;
         public bool[]? Dead;
         public bool Removed;
 
         public ulong End => Address + (ulong)Bytes.Length;
+
+        public bool IsDead(ulong offset) =>
+            Dead is null ? offset < 64 && ((DeadMask >> (int)offset) & 1) != 0 : Dead[offset];
+
+        public void MarkDead(int start, int count)
+        {
+            if (Bytes.Length <= 64)
+            {
+                DeadMask |= (count == 64 ? ulong.MaxValue : (1UL << count) - 1) << start;
+                return;
+            }
+
+            (Dead ??= new bool[Bytes.Length]).AsSpan(start, count).Fill(true);
+        }
     }
+
+    // SHARPEMU_METAL_V2_OVERLAY_FORGET_VERSION=0 moves the version on every forget again, as before.
+    private static readonly bool ForgetBumpsOnlyOnChange =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_OVERLAY_FORGET_VERSION");
 
     // A command-processor write is almost always a dword or a qword, and one entry with its
     // byte array per write was garbage the worker made at every draw's occlusion dump. Entries
     // of up to MaxPooledBytes are kept, by size, once they have left the page lists and the
     // order queue, and reused by the next write of that size. Guarded by the gate.
     private const int MaxPooledBytes = 16;
-    private const int MaxPooledPerSize = 256;
+    // A frame can retire thousands of occlusion-dump writes together. A 256-entry pool
+    // discarded most of that burst, allocating entries and byte arrays again next frame.
+    // Bound the total across sizes, rather than multiplying the limit by every size bin.
+    internal const int MaxPooledEntries = 8192;
     private readonly Stack<Entry>[] _spareEntries = [new(), new(), new(), new(), new()];
+    private int _spareEntryCount;
+
+    internal int SpareEntryCount
+    {
+        get { lock (_gate) return _spareEntryCount; }
+    }
 
     private Entry RentEntry(int length)
     {
         if (length <= MaxPooledBytes && (length & 3) == 0 && _spareEntries[length >> 2] is { Count: > 0 } spare)
         {
+            _spareEntryCount--;
             return spare.Pop();
         }
 
@@ -83,15 +114,17 @@ internal sealed class MetalPendingWriteOverlay
     {
         var length = entry.Bytes.Length;
         if (length == 0 || length > MaxPooledBytes || (length & 3) != 0 ||
-            _spareEntries[length >> 2].Count >= MaxPooledPerSize)
+            _spareEntryCount >= MaxPooledEntries)
         {
             return;
         }
 
         entry.Baseline = null;
         entry.Dead = null;
+        entry.DeadMask = 0;
         entry.Removed = false;
         _spareEntries[length >> 2].Push(entry);
+        _spareEntryCount++;
     }
 
     /// <summary>Entries not yet dropped. Zero is the fast path every read checks first.</summary>
@@ -196,6 +229,27 @@ internal sealed class MetalPendingWriteOverlay
     public void Forget(ulong address, ulong size)
     {
         Interlocked.Increment(ref _version);
+        ForgetCore(address, size);
+    }
+
+    /// <summary>
+    /// <see cref="Forget"/> for a store the GPU write ranges are told of right after (so their own version
+    /// moves for it): this overlay's version moves only when an entry stopped speaking for some of the
+    /// range. A forget that finds nothing there leaves what a read through the overlay answers as it was,
+    /// and a cache keyed on the version need not drop what it holds on every dump.
+    /// </summary>
+    public void ForgetRecordedWrite(ulong address, ulong size)
+    {
+        if (!ForgetBumpsOnlyOnChange)
+        {
+            Interlocked.Increment(ref _version);
+        }
+
+        ForgetCore(address, size);
+    }
+
+    private void ForgetCore(ulong address, ulong size)
+    {
         if (size == 0 || Count == 0 || !MayOverlap(address, size))
         {
             return;
@@ -317,7 +371,7 @@ internal sealed class MetalPendingWriteOverlay
                 var end = Math.Min(address + size, entry.End);
                 for (var at = start; at < end; at++)
                 {
-                    if (entry.Dead is null || !entry.Dead[at - entry.Address])
+                    if (!entry.IsDead(at - entry.Address))
                     {
                         destination[(int)(at - address)] = entry.Bytes[at - entry.Address];
                     }
@@ -506,7 +560,7 @@ internal sealed class MetalPendingWriteOverlay
             var end = Math.Min(address + size, entry.End);
             for (var at = start; at < end; at++)
             {
-                if (entry.Dead is null || !entry.Dead[at - entry.Address])
+                if (!entry.IsDead(at - entry.Address))
                 {
                     covered[at - address] = true;
                     Any = true;
@@ -538,14 +592,17 @@ internal sealed class MetalPendingWriteOverlay
         {
             var start = Math.Max(address, entry.Address);
             var end = Math.Min(address + size, entry.End);
+            // After the change, under the gate: a version a reader sees moved came with the entry's new state.
             if (start <= entry.Address && end >= entry.End)
             {
                 owner.RemoveLocked(entry);
-                return;
+            }
+            else
+            {
+                entry.MarkDead((int)(start - entry.Address), (int)(end - start));
             }
 
-            entry.Dead ??= new bool[entry.Bytes.Length];
-            entry.Dead.AsSpan((int)(start - entry.Address), (int)(end - start)).Fill(true);
+            Interlocked.Increment(ref owner._version);
         }
     }
 

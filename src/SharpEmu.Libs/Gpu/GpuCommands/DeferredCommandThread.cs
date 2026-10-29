@@ -17,7 +17,7 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 // The command stream is interpreted on its own thread, which hands its work to the render thread
 // in stream order. Draws, dispatches, barriers, completions and the interpreter's own stores are
 // queued; a callback that returns a result waits for the render thread to run everything before it.
-public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
+public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 {
     // The thread runs this far ahead of the render thread at most: enough to keep it busy, and
     // no more, since a GPU round trip (a readback, a label wait) waits for everything queued.
@@ -36,6 +36,9 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     {
         public Kind Kind;
         public bool IsDraw;
+        // Orders GPU commands and changes nothing a program resolution reads: the draws after it
+        // resolve without waiting for it, as they do behind a draw.
+        public bool Ungated;
         public AgcExports.DeferredWork? Work;
         public Action? Action;
         public ulong Address;
@@ -44,6 +47,12 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         public ulong RangeSize;
         // Resolution jobs submitted before this non-draw item; they finish before it runs.
         public long JobsBefore;
+        // A range item that stores this word over its whole range (PostFill).
+        public bool IsFill;
+        public uint FillValue;
+        // An end-of-pipe label: the GPU writes it once the work before it retires, so a read on the
+        // stream's thread finds the bytes as they are until then (PostLabel).
+        public bool IsLabel;
         public bool Sync;
         public volatile bool Done;
         public Exception? Failure;
@@ -56,6 +65,10 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     // Wakes the thread that runs the queued items (the backend's render or GPU worker thread).
     private readonly Action _wakeConsumer;
     private readonly Thread _thread;
+    private readonly bool _useHostQos;
+    private SharpEmu.HLE.Host.HostHelperThread? _helperThread;
+    private int _producerThreadId;
+    private int _started;
     private readonly object _lock = new();
     private List<Item> _incoming = new();
     private List<Item> _draining = new();
@@ -88,17 +101,33 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         ICpuMemory memory,
         Action<AgcExports.DeferredWork> runDeferred,
         ParallelProgramPrefetch? prefetch,
-        Action wakeConsumer)
+        Action wakeConsumer,
+        bool useHostQos = false,
+        bool? recycleAsyncItems = null)
     {
         _wakeConsumer = wakeConsumer;
         _queue = queue;
         _memory = memory;
         _runDeferred = runDeferred;
         _prefetch = prefetch;
+        _useHostQos = useHostQos;
+        if (recycleAsyncItems ?? RecycleAsyncItemsEnabled)
+            _recycledItems = new Item?[MaxOutstanding];
         _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu command stream" };
     }
 
-    public void Start() => _thread.Start();
+    public void Start()
+    {
+        if (Interlocked.Exchange(ref _started, 1) != 0)
+            throw new ThreadStateException("The command thread has already started.");
+        if (_useHostQos)
+            _helperThread = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu command stream", 16 * 1024 * 1024, Run);
+        else
+            _thread.Start();
+    }
+
+    /// <summary>Whether the producer was created with its requested native QoS class.</summary>
+    public bool HasHostQos => _helperThread?.HasQos == true;
 
     // The producer's side since the last TakeCounters: synchronous calls, their wait, the wait for
     // room in the queue, and the items handed over.
@@ -119,9 +148,45 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     /// </summary>
     public Action? ProducerIdle { get; set; }
 
-    public bool IsProducerThread => Environment.CurrentManagedThreadId == _thread.ManagedThreadId;
+    public bool IsProducerThread => Environment.CurrentManagedThreadId == Volatile.Read(ref _producerThreadId);
 
     public long Gate => _enqueuedNonDraw;
+
+    // SHARPEMU_CTHREAD_ITEM_SITES=1: the non-draw items by kind and source, in the PERF line.
+    private static readonly bool CountItemSites =
+        Environment.GetEnvironmentVariable("SHARPEMU_CTHREAD_ITEM_SITES") == "1";
+
+    private readonly Dictionary<string, long> _itemSites = new();
+
+    private void NoteItemSite(Item item)
+    {
+        var name = item.Kind switch
+        {
+            Kind.Deferred => item.Work?.GetType().Name ?? "deferred",
+            Kind.Write => "write",
+            _ => (item.Sync ? "run:" : item.RangeSize != 0 ? "range:" : item.Ungated ? "ordering:" : "post:") + (item.Action?.Method.Name ?? "?"),
+        };
+        lock (_itemSites)
+        {
+            System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_itemSites, name, out _)++;
+        }
+    }
+
+    public string TakeItemSites()
+    {
+        if (!CountItemSites)
+        {
+            return string.Empty;
+        }
+
+        lock (_itemSites)
+        {
+            var top = string.Join(",", _itemSites.Where(pair => !pair.Key.StartsWith("drain:")).OrderByDescending(pair => pair.Value).Take(12).Select(pair => $"{pair.Key}={pair.Value}"));
+            var drains = string.Join(",", _itemSites.Where(pair => pair.Key.StartsWith("drain:")).OrderByDescending(pair => pair.Value).Take(8).Select(pair => $"{pair.Key}={pair.Value}"));
+            _itemSites.Clear();
+            return $" items_by=({top}) drains_by=({drains})";
+        }
+    }
 
     public bool HasWork => Volatile.Read(ref _outstanding) != 0 || _failure is not null;
 
@@ -131,14 +196,34 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         set => _consumerIdle = value;
     }
 
-    public bool IsAlive => _thread.IsAlive;
+    public bool IsAlive => _helperThread is { } helper ? !helper.Join(TimeSpan.Zero) : _thread.IsAlive;
 
     // The producer side, on the command stream thread.
 
-    public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw) =>
-        Enqueue(new Item { Kind = Kind.Deferred, Work = work, IsDraw = isDraw });
+    public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw)
+    {
+        var item = RentAsyncItem(Kind.Deferred);
+        item.Work = work;
+        item.IsDraw = isDraw;
+        Enqueue(item);
+    }
 
-    public void Post(Action action) => Enqueue(new Item { Kind = Kind.Call, Action = action });
+    public void Post(Action action)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.Action = action;
+        Enqueue(item);
+    }
+
+    // A host call that only orders GPU commands (a barrier, a pass end): the resolutions of the
+    // draws after it are not held for it.
+    public void PostOrdering(Action action)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.Action = action;
+        item.Ungated = true;
+        Enqueue(item);
+    }
 
     public void Run(Action action)
     {
@@ -159,7 +244,9 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     public void PostWrite(ulong address, ReadOnlySpan<byte> data)
     {
-        var item = new Item { Kind = Kind.Write, Address = address, Data = data.ToArray() };
+        var item = RentAsyncItem(Kind.Write);
+        item.Address = address;
+        item.Data = data.ToArray();
         lock (_writeLock)
         {
             _pendingWrites.Enqueue(item);
@@ -170,9 +257,17 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     }
 
     // A fill or copy the render thread runs in order; reads of its destination wait for it.
-    public void PostRange(Action action, ulong address, ulong size)
+    // An ungated one writes nothing but its range: the draws after it resolve their programs
+    // without waiting for it, and a resolution that reads the range while it is still queued is
+    // abandoned instead (PendingRangeHolds).
+    public void PostRange(Action action, ulong address, ulong size, bool ungated = false)
     {
-        var item = new Item { Kind = Kind.Call, Action = action, Address = address, RangeSize = size };
+        var item = RentAsyncItem(Kind.Call);
+        item.Action = action;
+        item.Address = address;
+        item.RangeSize = size;
+        item.Ungated = ungated && size != 0;
+        item.JobsBefore = _prefetch?.Submitted ?? 0;
         if (size != 0)
         {
             lock (_writeLock)
@@ -185,12 +280,163 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         Enqueue(item);
     }
 
+    // An end-of-pipe label write: it holds the range only for the program resolutions after it
+    // (PendingRangeHolds); the stream's own reads do not wait for it, as the label lands later.
+    public void PostLabel(Action action, ulong address, ulong size, bool ungated = false)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.IsLabel = size != 0;
+        item.Action = action;
+        item.Address = address;
+        item.RangeSize = size;
+        item.Ungated = ungated && size != 0;
+        item.JobsBefore = _prefetch?.Submitted ?? 0;
+        if (size != 0)
+        {
+            lock (_writeLock)
+            {
+                _pendingRanges.Add(item);
+                _pendingRangeCount = _pendingRanges.Count;
+            }
+        }
+
+        Enqueue(item);
+    }
+
+    // A fill the worker stages as a command-processor write of one repeated word: a read of bytes it
+    // covers, with nothing queued after it over them, is answered from the word without waiting.
+    public void PostFill(Action action, ulong address, ulong size, uint value, bool ungated = false)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.IsFill = size != 0;
+        item.FillValue = value;
+        item.Action = action;
+        item.Address = address;
+        item.RangeSize = size;
+        item.Ungated = ungated && size != 0;
+        item.JobsBefore = _prefetch?.Submitted ?? 0;
+        if (size != 0)
+        {
+            lock (_writeLock)
+            {
+                _pendingRanges.Add(item);
+                _pendingRangeCount = _pendingRanges.Count;
+            }
+        }
+
+        Enqueue(item);
+    }
+
+    /// <summary>
+    /// The bytes as the stream wrote them when the last queued range item over them is a fill that
+    /// covers them all and no queued store overlaps them; false otherwise. Command stream thread.
+    /// </summary>
+    public bool TryReadQueuedFill(ulong address, Span<byte> destination)
+    {
+        if (Volatile.Read(ref _pendingRangeCount) == 0 || destination.IsEmpty)
+        {
+            return false;
+        }
+
+        var size = (ulong)destination.Length;
+        lock (_writeLock)
+        {
+            Item? last = null;
+            foreach (var pending in _pendingRanges)
+            {
+                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                {
+                    last = pending;
+                }
+            }
+
+            if (last is not { IsFill: true } fill ||
+                address < fill.Address || address + size > fill.Address + fill.RangeSize)
+            {
+                return false;
+            }
+
+            foreach (var write in _pendingWrites)
+            {
+                if (address < write.Address + (ulong)write.Data!.Length && write.Address < address + size)
+                {
+                    return false;
+                }
+            }
+
+            Span<byte> word = stackalloc byte[sizeof(uint)];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(word, fill.FillValue);
+            var phase = (int)((address - fill.Address) % sizeof(uint));
+            for (var index = 0; index < destination.Length; index++)
+            {
+                destination[index] = word[(phase + index) % sizeof(uint)];
+            }
+
+            return true;
+        }
+    }
+
     // Runs every queued item when one of them is a fill or copy into this range.
     public void WaitForPendingRange(ulong address, ulong size)
     {
         if (_pendingRangeCount != 0 && OverlapsPendingRange(address, size))
         {
+            if (CountItemSites)
+            {
+                NoteDrainSite(address, size);
+            }
+
             Run(static () => { });
+        }
+    }
+
+    /// <summary>
+    /// Whether an ungated range item queued before resolution job <paramref name="job"/> (its index
+    /// among the submitted jobs) still has to write bytes in the range. Any thread.
+    /// </summary>
+    public bool PendingRangeHolds(long job, ulong address, ulong size)
+    {
+        if (Volatile.Read(ref _pendingRangeCount) == 0)
+        {
+            return false;
+        }
+
+        lock (_writeLock)
+        {
+            foreach (var pending in _pendingRanges)
+            {
+                if (pending.Ungated && pending.JobsBefore <= job &&
+                    address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // Which read drained the queue, and which queued item held the bytes (SHARPEMU_CTHREAD_ITEM_SITES=1).
+    private void NoteDrainSite(ulong address, ulong size)
+    {
+        var holder = "?";
+        lock (_writeLock)
+        {
+            foreach (var pending in _pendingRanges)
+            {
+                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                {
+                    holder = $"{pending.Action?.Method.Name ?? "?"}:fill={pending.IsFill}:+{pending.RangeSize}";
+                }
+            }
+        }
+
+        var frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+        var callers = string.Join("<", frames.Take(4).Select(frame => frame.GetMethod()?.Name ?? "?"));
+        var name = $"drain:{callers}@{holder}/{size}";
+        lock (_itemSites)
+        {
+            System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_itemSites, name, out _)++;
         }
     }
 
@@ -200,7 +446,7 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         {
             foreach (var pending in _pendingRanges)
             {
-                if (address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
                 {
                     return true;
                 }
@@ -275,7 +521,7 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     private void Enqueue(Item item)
     {
         ThrowIfFailed();
-        if (!item.IsDraw)
+        if (!item.IsDraw && !item.Ungated)
         {
             item.JobsBefore = _prefetch?.Submitted ?? 0;
             _enqueuedNonDraw++;
@@ -283,6 +529,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
             {
                 NoteItemKind(item);
             }
+        }
+
+        if (CountItemSites && !item.IsDraw)
+        {
+            NoteItemSite(item);
         }
 
         Interlocked.Increment(ref _itemsEnqueued);
@@ -416,6 +667,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 }
             }
 
+            // Execute has removed pending write/range references, and the consumer has finished
+            // reading the item. Synchronous callers still own their result, so never recycle them.
+            if (!item.Sync)
+                RecycleAsyncItem(item);
+
             betweenItems();
             if (ran >= maxItems || ((ran & 31) == 0 && Stopwatch.GetTimestamp() >= deadline))
             {
@@ -434,7 +690,12 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
             return;
         }
 
-        _prefetch?.WaitFinished(item.JobsBefore);
+        // A write still waits for the resolutions before it: they read the bytes as they were.
+        if (!item.Ungated || item.RangeSize != 0)
+        {
+            _prefetch?.WaitFinished(item.JobsBefore);
+        }
+
         try
         {
             switch (item.Kind)
@@ -461,7 +722,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         }
         finally
         {
-            _executedNonDraw++;
+            if (!item.Ungated)
+            {
+                _executedNonDraw++;
+            }
+
             if (item.RangeSize != 0)
             {
                 lock (_writeLock)
@@ -471,7 +736,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 }
             }
 
-            _prefetch?.AdvanceGate(_executedNonDraw);
+            if (!item.Ungated)
+            {
+                _prefetch?.AdvanceGate(_executedNonDraw);
+            }
+
             if (item.Sync)
             {
                 item.Done = true;
@@ -514,10 +783,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         _stopping = true;
         _queue.Wake();
         var deadline = Stopwatch.GetTimestamp() + 5 * Stopwatch.Frequency;
-        while (_thread.IsAlive && Stopwatch.GetTimestamp() < deadline)
+        while (IsAlive && Stopwatch.GetTimestamp() < deadline)
         {
             runItems();
-            _thread.Join(1);
+            if (_helperThread is { } helper) helper.Join(TimeSpan.FromMilliseconds(1));
+            else _thread.Join(1);
         }
 
         runItems();
@@ -525,6 +795,9 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     private void Run()
     {
+        // A native helper can enter before Start has returned its wrapper. Publish
+        // identity from the body, rather than depending on that wrapper assignment.
+        Volatile.Write(ref _producerThreadId, Environment.CurrentManagedThreadId);
         try
         {
             var lastProgress = Stopwatch.GetTimestamp();

@@ -95,6 +95,22 @@ public static class AudioOut2Exports
     private static readonly bool _asyncPushNeverWaits = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_ASYNC_PUSH"), "0", StringComparison.Ordinal);
 
+    // A thread that has just read a full queue (no free slot) cannot get a different answer before the
+    // next slot frees, so its next timed event-flag wait is held until then, or until the flag is set.
+    // Wwise's audio thread polls the queue level and then waits on an event flag with a zero timeout;
+    // without this it re-polls the full queue millions of times a second. SHARPEMU_AUDIO_OUT2_IDLE_WAIT=0
+    // restores the zero-timeout poll.
+    private static readonly bool _idleQueueWait = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_IDLE_WAIT"), "0", StringComparison.Ordinal);
+
+    // Longest a full queue holds one wait, as WaitForDeviceSlot's longest sleep does.
+    private const long IdleQueueWaitCapMicroseconds = 50_000;
+
+    // Per guest thread: when the queue this thread last read as full gets a free slot (Stopwatch
+    // ticks), 0 when its last read found a free slot or the wait it covers has been taken.
+    [ThreadStatic]
+    private static long _queueFullUntilTimestamp;
+
     // libSceAudioOut2 has its own error space (0x80268xxx);
     // the generic ORBIS_GEN2_* codes are not what a title compares against.
     private const int AudioOut2ErrorInvalidParam = unchecked((int)0x8026_8001);
@@ -125,6 +141,12 @@ public static class AudioOut2Exports
     {
         private readonly object _paceGate = new();
         private long _nextAdvanceTimestamp;
+
+        // Serialises the grains of this context (they share the ports' spare PCM buffers and must reach
+        // the host stream in order). Submitting holds it across the host stream's pacing wait, which can
+        // sleep up to a quarter of a second for ring space, so it is per context: one global gate made
+        // two contexts on two threads wait out each other's sleeps.
+        public readonly object SubmitGate = new();
 
         public ContextState(ulong handle, uint frequency, uint grainSamples, uint queueDepth, IHostAudioStream? backend)
         {
@@ -168,6 +190,28 @@ public static class AudioOut2Exports
             var ahead = Volatile.Read(ref _nextAdvanceTimestamp) - Stopwatch.GetTimestamp();
 
             return ahead <= 0 ? 0 : (uint)Math.Min((ahead + GrainTicks - 1) / GrainTicks, QueueDepth);
+        }
+
+        // Stopwatch ticks until the queue has a free slot again, 0 when it already has one: the later
+        // of the clock's and the device's, because the level reports the larger of the two.
+        public long QueueFullTicks(bool includeDevice)
+        {
+            var ticks = Volatile.Read(ref _nextAdvanceTimestamp) - Stopwatch.GetTimestamp() -
+                (GrainTicks * Math.Max((long)QueueDepth - 1, 0));
+            if (includeDevice && DevicePaced && DeviceBackend is { } backend)
+            {
+                var queuedMilliseconds = backend.QueuedMilliseconds;
+                if (queuedMilliseconds >= 0)
+                {
+                    var overMilliseconds = queuedMilliseconds - DeviceSlotFreeMilliseconds;
+                    if (overMilliseconds > 0)
+                    {
+                        ticks = Math.Max(ticks, (long)Math.Ceiling(overMilliseconds * Stopwatch.Frequency / 1000.0));
+                    }
+                }
+            }
+
+            return Math.Max(ticks, 0);
         }
 
         public double DeviceSlotFreeMilliseconds =>
@@ -294,7 +338,6 @@ public static class AudioOut2Exports
     private static string PrimaryBackendName = "none";
     private static string SecondaryBackendName = "none";
     private static ulong PrimaryContextHandle;
-    private static readonly object HostSubmitGate = new();
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
     private static int _chatEnabled;
 
@@ -704,6 +747,13 @@ public static class AudioOut2Exports
         // full queue every update and block in Push while holding its audio lock.
         var hasContext = Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var context);
         var queued = hasContext ? QueuedGrains(context!) : 0u;
+        if (_idleQueueWait && _asyncPushNeverWaits)
+        {
+            _queueFullUntilTimestamp = hasContext && queued >= context!.QueueDepth
+                ? Stopwatch.GetTimestamp() + context.QueueFullTicks(includeDevice: true)
+                : 0;
+        }
+
         Span<byte> level = stackalloc byte[sizeof(uint)];
         if (outLevelAddress != 0)
         {
@@ -1457,6 +1507,32 @@ public static class AudioOut2Exports
             : microseconds;
     }
 
+    /// <summary>
+    /// Lengthens a timed event-flag wait taken right after a queue-level read that found no free slot
+    /// to the time until a slot frees (at most 50 ms), once per read. A wait the flag ends early is
+    /// unaffected; a wait that is already longer is kept.
+    /// </summary>
+    internal static uint IdleQueueWaitMicroseconds(uint requestedMicroseconds)
+    {
+        var until = _queueFullUntilTimestamp;
+        if (until == 0)
+        {
+            return requestedMicroseconds;
+        }
+
+        _queueFullUntilTimestamp = 0;
+        var remaining = until - Stopwatch.GetTimestamp();
+        if (remaining <= 0)
+        {
+            return requestedMicroseconds;
+        }
+
+        var microseconds = Math.Min(
+            (long)Math.Ceiling(remaining * 1_000_000.0 / Stopwatch.Frequency),
+            IdleQueueWaitCapMicroseconds);
+        return microseconds > requestedMicroseconds ? (uint)microseconds : requestedMicroseconds;
+    }
+
     private static void WaitForDeviceSlot(ContextState context)
     {
         var backend = ResolveContextBackend(context, out _);
@@ -1573,7 +1649,7 @@ public static class AudioOut2Exports
             return false;
         }
 
-        lock (HostSubmitGate)
+        lock (context.SubmitGate)
         {
             var mix = ArrayPool<float>.Shared.Rent(frames * 2);
             var output = ArrayPool<byte>.Shared.Rent(frames * AudioPcmConversion.OutputFrameSize);

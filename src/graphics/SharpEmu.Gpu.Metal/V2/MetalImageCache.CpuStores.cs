@@ -187,6 +187,10 @@ internal sealed partial class MetalImageCache
     // otherwise for every image on their pages, as a fault does.
     private StoreFallback? PublishBeforeCpuStoreLocked(ulong address, ulong size, bool managedWrite, bool exact)
     {
+        if (AliasTransitionsEnabled && managedWrite && exact && WritebackFenceEnabled)
+        {
+            DiscardFullyOverwrittenByCpuLocked(address, size);
+        }
         if (!PublishBeforeStore || !WritebackFenceEnabled || !HasGpuWrittenImageLocked(address, size, exact))
         {
             return null;
@@ -301,6 +305,12 @@ internal sealed partial class MetalImageCache
 
     // A free request filled with the GPU-written images over the range, at most a request's
     // worth; the next round takes the rest. Null when every request is in use.
+    // SHARPEMU_METAL_V2_STORE_TRACE=<lines> names the GPU-written images guest stores wait for.
+    private static readonly int StoreTraceLines =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STORE_TRACE"), out var lines) ? lines : 0;
+
+    private static int _storeTraced;
+
     private StoreRequest? RequestStorePublishLocked(ulong address, ulong size, bool exact)
     {
         StoreRequest? request = null;
@@ -321,9 +331,18 @@ internal sealed partial class MetalImageCache
         var count = 0;
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: !exact))
         {
-            if (count < MaxImagesPerStoreRequest && _slots.TryGet(imageIdentifier) is { IsGpuModified: true })
+            if (count < MaxImagesPerStoreRequest && _slots.TryGet(imageIdentifier) is { IsGpuModified: true } image)
             {
                 request.Images[count++] = imageIdentifier;
+                if (StoreTraceLines > 0 && Interlocked.Increment(ref _storeTraced) <= StoreTraceLines)
+                {
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][STORE] store=0x{address:X}+0x{size:X} exact={exact} " +
+                        $"image=0x{image.Description.Data.Address:X}+0x{image.Description.Data.Size:X} " +
+                        $"stencil=0x{image.Description.Stencil.Address:X}+0x{image.Description.Stencil.Size:X} " +
+                        $"{image.Description.PixelFormat} {image.Description.Extent.Width}x{image.Description.Extent.Height} " +
+                        $"stale={image.StencilPlaneStale}");
+                }
             }
         }
 

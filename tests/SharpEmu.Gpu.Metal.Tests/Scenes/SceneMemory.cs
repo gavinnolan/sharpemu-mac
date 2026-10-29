@@ -29,13 +29,37 @@ internal sealed class SceneAddressSpace : IGuestAddressSpace
 internal sealed unsafe class SceneMemory : IGuestBackedSpace, ICpuMemory, IDisposable
 {
     public const ulong Base = 0x2_0000_0000;
-    public const ulong Size = 64 * 1024 * 1024;
-    private readonly void* _block = NativeMemory.AlignedAlloc((nuint)Size, 16384);
+    // SHARPEMU_SCENE_MEMORY_MB=<n> sizes the block (64 by default). A larger one is mapped anonymously, so the
+    // pages a scene never touches cost nothing, and it spans as many guest windows as a title's address table does.
+    private const ulong DefaultSize = 64 * 1024 * 1024;
+    public static readonly ulong Size =
+        (ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SCENE_MEMORY_MB"), out var megabytes) && megabytes > 64 ? megabytes * 1024 * 1024 : DefaultSize);
+    private readonly void* _block = Size > DefaultSize ? Map(Size) : NativeMemory.AlignedAlloc((nuint)Size, 16384);
     private ulong _next = Base;
 
-    public SceneMemory() => NativeMemory.Clear(_block, (nuint)Size);
+    [DllImport("libSystem.dylib", EntryPoint = "mmap")]
+    private static extern nint mmap(nint address, nuint length, int protection, int flags, int descriptor, long offset);
 
-    public void Dispose() => NativeMemory.AlignedFree(_block);
+    [DllImport("libSystem.dylib", EntryPoint = "munmap")]
+    private static extern int munmap(nint address, nuint length);
+
+    private static void* Map(ulong size)
+    {
+        // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON.
+        var block = mmap(0, (nuint)size, 3, 0x1002, -1, 0);
+        return block == -1 ? throw new InvalidOperationException($"Scene memory of 0x{size:X} bytes could not be mapped.") : (void*)block;
+    }
+
+    public SceneMemory()
+    {
+        if (Size <= DefaultSize) NativeMemory.Clear(_block, (nuint)Size);
+    }
+
+    public void Dispose()
+    {
+        if (Size > DefaultSize) munmap((nint)_block, (nuint)Size);
+        else NativeMemory.AlignedFree(_block);
+    }
 
     /// <summary>Hands out guest memory from a bump allocator.</summary>
     public ulong Allocate(ulong size, ulong alignment = 256)

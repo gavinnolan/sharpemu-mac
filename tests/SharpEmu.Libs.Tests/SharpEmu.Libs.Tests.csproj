@@ -11,6 +11,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="../../tools/SharpEmu.Tools.PerfAudit/DarwinThreadCpuClock.cs" Link="Benchmarks/DarwinThreadCpuClock.cs" />
     <ProjectReference Include="../../src/adapters/SharpEmu.Fonts.Skia/SharpEmu.Fonts.Skia.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />

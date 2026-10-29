@@ -1,6 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text.Json;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
@@ -15,6 +19,54 @@ namespace SharpEmu.Libs.Tests.Gpu.GpuCommands.Registers;
 public sealed class RegisterWriteTableTests
 {
     private const ulong PacketAddress = 0x1_0000_1000;
+
+    [Theory]
+    [InlineData(SpiShaderUserDataPs0, 32u)]
+    [InlineData(SpiShaderUserDataGs0, 32u)]
+    [InlineData(SpiShaderUserDataHs0, 32u)]
+    [InlineData(ComputeUserData0, 16u)]
+    public void DirectScalarBatchPreservesKindsCountAndSnapshotsAtTheStageBoundary(uint first, uint capacity)
+    {
+        static UserScalarRegisters Scalars(RegisterBanks banks, uint first) => first switch
+        {
+            SpiShaderUserDataPs0 => banks.Shader.Pixel.UserScalars,
+            SpiShaderUserDataGs0 => banks.Shader.Vertex.GeometryUserScalars,
+            SpiShaderUserDataHs0 => banks.Shader.Vertex.HullUserScalars,
+            ComputeUserData0 => banks.Shader.Compute.UserScalars,
+            _ => throw new InvalidOperationException(),
+        };
+
+        var banks = NewBanks();
+        banks.UserDataMarker = UserScalarKind.Region;
+        Assert.Equal(2u, WriteShader(banks, first + capacity - 2, 17, 19));
+        var before = banks.Snapshot();
+        var original = Scalars(before, first);
+        Assert.Equal(capacity, original.Count);
+        Assert.Equal(17u, original.Values[(int)capacity - 2]);
+        Assert.Equal(19u, original.Values[(int)capacity - 1]);
+        Assert.Equal(UserScalarKind.Region, original.Kinds[(int)capacity - 2]);
+        Assert.Equal(UserScalarKind.Region, original.Kinds[(int)capacity - 1]);
+        Assert.Equal(0u, original.Values[(int)capacity - 3]);
+        Assert.Equal(UserScalarKind.Unknown, banks.UserDataMarker);
+
+        WriteShader(banks, first + capacity - 2, 23);
+        var current = Scalars(banks, first);
+        Assert.NotSame(original, current);
+        Assert.Equal(capacity, current.Count);
+        Assert.Equal(23u, current.Values[(int)capacity - 2]);
+        Assert.Equal(UserScalarKind.Unknown, current.Kinds[(int)capacity - 2]);
+        Assert.Equal(19u, current.Values[(int)capacity - 1]);
+        Assert.Equal(UserScalarKind.Region, current.Kinds[(int)capacity - 1]);
+        Assert.Equal(17u, original.Values[(int)capacity - 2]);
+        Assert.Equal(UserScalarKind.Region, original.Kinds[(int)capacity - 2]);
+
+        banks.UserDataMarker = UserScalarKind.Region;
+        var error = Assert.Throws<InvalidOperationException>(() => WriteShader(banks, first + capacity - 1, 29, 31));
+        Assert.Contains("outside the stage window", error.Message);
+        Assert.Equal(19u, Scalars(banks, first).Values[(int)capacity - 1]);
+        Assert.Equal(capacity, Scalars(banks, first).Count);
+        Assert.Equal(UserScalarKind.Region, banks.UserDataMarker);
+    }
 
     [Fact]
     public void GeometryUserDataPointerPreservesBothWordsAndSubmissionCopy()
@@ -224,6 +276,77 @@ public sealed class RegisterWriteTableTests
         Assert.True(counter.IsCounterEnabled);
         Assert.Equal(0x20u, counter.AddressBytes);
         Assert.Equal(0u, banks.UserConfig.OrderedAppend.Counters[0].Counter);
+    }
+
+    [Fact]
+    public void UserConfigCopyOwnsEveryOrderedAppendCounter()
+    {
+        var source = new UserConfigRegisters { PrimitiveType = 6, IndexOffset = 37, ObjectId = 41 };
+        source.OrderedAppend.Control = 5;
+        for (var i = 0; i < OrderedAppendRegisters.CounterCount; i++)
+            source.OrderedAppend.Counters[i] = new() { Counter = (uint)i + 11, Address = (uint)i + 101 };
+        var copy = source.Copy();
+        Assert.NotSame(source.OrderedAppend, copy.OrderedAppend);
+        Assert.NotSame(source.OrderedAppend.Counters, copy.OrderedAppend.Counters);
+        Assert.Equal(source.OrderedAppend.Counters, copy.OrderedAppend.Counters);
+        Assert.Equal((6u, 37u, 41u, 5u),
+            (copy.PrimitiveType, copy.IndexOffset, copy.ObjectId, copy.OrderedAppend.Control));
+
+        source.OrderedAppend.Control = 3;
+        copy.PrimitiveType = 4;
+        for (var i = 0; i < OrderedAppendRegisters.CounterCount; i++)
+        {
+            source.OrderedAppend.Counters[i].Counter = 0;
+            copy.OrderedAppend.Counters[i].Address = 0;
+            Assert.Equal((uint)i + 11, copy.OrderedAppend.Counters[i].Counter);
+            Assert.Equal((uint)i + 101, source.OrderedAppend.Counters[i].Address);
+        }
+        Assert.Equal(5u, copy.OrderedAppend.Control);
+        Assert.Equal(6u, source.PrimitiveType);
+    }
+
+    [Fact]
+    public void MeasureOrderedAppendCopiesWhenRequested()
+    {
+        var output = Environment.GetEnvironmentVariable("SHARPEMU_ORDERED_APPEND_BENCH_OUTPUT");
+        if (string.IsNullOrEmpty(output)) return;
+        const int count = 100000;
+        var source = new OrderedAppendRegisters { Control = 5 };
+        source.Counters[5] = new() { Counter = 17, Address = 23 };
+        var rows = new List<object>();
+        foreach (var baseline in new[] { true, false }) ExerciseOrderedAppendCopies(source, baseline, 10000);
+        for (var trial = 0; trial < 9; trial++)
+        foreach (var baseline in trial % 2 == 0 ? new[] { true, false } : new[] { false, true })
+        {
+            var bytes = GC.GetAllocatedBytesForCurrentThread();
+            var start = Stopwatch.GetTimestamp();
+            var checksum = ExerciseOrderedAppendCopies(source, baseline, count);
+            var duration = Stopwatch.GetElapsedTime(start);
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - bytes;
+            Assert.Equal(45UL * count, checksum);
+            rows.Add(new { baseline, trial, checksum, nsPerCopy = duration.TotalNanoseconds / count,
+                bytesPerCopy = (double)allocated / count });
+        }
+        File.WriteAllText(output, JsonSerializer.Serialize(new {
+            architecture = RuntimeInformation.ProcessArchitecture.ToString(), rows },
+            new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong ExerciseOrderedAppendCopies(OrderedAppendRegisters source, bool baseline, int count)
+    {
+        ulong checksum = 0;
+        for (var i = 0; i < count; i++)
+        {
+            // Exact former copy body: its public constructor allocates an array before replacement.
+            var copy = baseline
+                ? new OrderedAppendRegisters { Control = source.Control,
+                    Counters = (OrderedAppendCounter[])source.Counters.Clone() }
+                : source.Copy();
+            checksum += copy.Control + copy.Counters[5].Counter + copy.Counters[5].Address;
+            GC.KeepAlive(copy);
+        }
+        return checksum;
     }
 
     [Fact]

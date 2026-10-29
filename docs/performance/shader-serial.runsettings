@@ -1,0 +1,10 @@
+<!-- Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later -->
+<RunSettings>
+  <xUnit>
+    <ParallelizeTestCollections>false</ParallelizeTestCollections>
+    <MaxParallelThreads>1</MaxParallelThreads>
+    <DiagnosticMessages>true</DiagnosticMessages>
+    <LongRunningTestSeconds>60</LongRunningTestSeconds>
+  </xUnit>
+</RunSettings>

@@ -334,6 +334,102 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         }
     }
 
+    // An image store that records what it is told about, with every page of [interestStart, interestEnd) of interest.
+    private sealed class RecordingImageStore(ulong interestStart, ulong interestEnd) : IGuestImageStore
+    {
+        public List<(ulong Address, ulong Size)> Precise { get; } = [];
+
+        public List<(ulong Address, ulong Size)> Landed { get; } = [];
+
+        private bool Interested(ulong address, ulong size) => address < interestEnd && interestStart < address + size;
+
+        public bool MarkCpuWrite(ulong address, ulong size) => false;
+
+        public bool MarkPreciseCpuWrite(ulong address, ulong size)
+        {
+            if (Interested(address, size)) Precise.Add((address, size));
+            return false;
+        }
+
+        public bool MarkCpuWriteLanded(ulong address, ulong size)
+        {
+            if (!Interested(address, size)) return false;
+            Landed.Add((address, size));
+            return true;
+        }
+
+        public void Unregister(ulong address, ulong size) { }
+    }
+
+    [NativePageProtectionFact]
+    public void AWritePairLandsBothRangesAndTheStoresHearOfThemAsOfTwoWrites()
+    {
+        if (!Supported) return;
+        const GuestPageProtection readWrite = GuestPageProtection.Read | GuestPageProtection.Write;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var view = Hold(memory, host);
+        Assert.True(memory.TryMapBacked(view, Segment, 0, readWrite, out _));
+        using var gpu = new GuestGpuMemory(memory);
+        gpu.Register(view, Segment, readWrite);
+        // The packet's page is of interest to the GPU side; the cursor's is not.
+        var cursor = view + 0x10;
+        var packet = view + 0x2000;
+        var store = new RecordingImageStore(packet & ~0xFFFUL, (packet & ~0xFFFUL) + 0x1000);
+        gpu.AttachStores(null, store);
+        GuestGpuMemoryHook.Attach(gpu);
+        try
+        {
+            var cursorBytes = BitConverter.GetBytes(0x1122334455667788UL);
+            var packetBytes = Enumerable.Range(1, 40).Select(value => (byte)(value * 3)).ToArray();
+            Assert.True(memory.TryWritePair(cursor, cursorBytes, packet, packetBytes));
+
+            var readBack = new byte[8];
+            Assert.True(memory.TryRead(cursor, readBack));
+            Assert.Equal(cursorBytes, readBack);
+            var packetBack = new byte[40];
+            Assert.True(memory.TryRead(packet, packetBack));
+            Assert.Equal(packetBytes, packetBack);
+            Assert.Equal([(packet, 40UL)], store.Precise);
+            Assert.Equal([(packet, 40UL)], store.Landed);
+
+            // Both ranges of interest: each is heard of, the first one first.
+            store.Landed.Clear();
+            var wide = new RecordingImageStore(view, view + Segment);
+            gpu.AttachStores(null, wide);
+            Assert.True(memory.TryWritePair(cursor, cursorBytes, packet, packetBytes));
+            Assert.Equal([(cursor, 8UL), (packet, 40UL)], wide.Landed);
+
+            // A range outside every registered span is not heard of, and the pair still writes.
+            var outside = memory.AllocateAt(0, 0x4000, false);
+            Assert.NotEqual(0UL, outside);
+            wide.Landed.Clear();
+            Assert.True(memory.TryWritePair(cursor, cursorBytes, outside, packetBytes));
+            Assert.Equal([(cursor, 8UL)], wide.Landed);
+            var outsideBack = new byte[40];
+            Assert.True(memory.TryRead(outside, outsideBack));
+            Assert.Equal(packetBytes, outsideBack);
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+    }
+
+    [NativePageProtectionFact]
+    public void AWritePairFailsWhenEitherRangeIsUnmapped()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var view = Hold(memory, host);
+        Assert.True(memory.TryMapBacked(view, Segment, 0, GuestPageProtection.Read | GuestPageProtection.Write, out _));
+        var bytes = new byte[8];
+        Assert.False(memory.TryWritePair(view, bytes, 0x10, bytes));
+        Assert.False(memory.TryWritePair(0x10, bytes, view, bytes));
+        Assert.True(memory.TryWritePair(view, bytes, view + 8, bytes));
+    }
+
     [Fact]
     public void MixedCopyWithProtectedPrivateMemoryDoesNotUpgradeUnderTheReadLock()
     {

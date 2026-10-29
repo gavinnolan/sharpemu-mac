@@ -38,17 +38,21 @@ internal static partial class MetalNative
         uint threadsPerThreadgroup,
         uint iterations,
         out BenchmarkResult result,
-        out string error)
+        out string error,
+        IReadOnlyList<DeviceTable>? tables = null,
+        nuint? mathMode = null,
+        bool groupSizeIsMultipleOfWidth = false)
     {
         result = default;
-        if (!TryCompileLibrary(shader.Source, out var library, out error))
+        if (!TryCompileLibrary(shader.Source, out var library, out error, mathMode))
         {
             return false;
         }
 
         var buffer = SharedBuffer(bufferContents);
         var stepReport = SharedBuffer(new byte[sizeof(uint)]);
-        if (buffer == 0 || stepReport == 0)
+        var pairLocks = SharedBuffer(new byte[Gen5MslArgumentLayout.PairLockTableWords * sizeof(uint)]);
+        if (buffer == 0 || stepReport == 0 || pairLocks == 0)
         {
             error = "failed to create the data buffers";
             return false;
@@ -58,7 +62,9 @@ internal static partial class MetalNative
             shader.ArgumentLayout!,
             SendULong(buffer, Selector("gpuAddress")),
             (uint)bufferContents.Length,
-            SendULong(stepReport, Selector("gpuAddress")));
+            SendULong(stepReport, Selector("gpuAddress")),
+            tables,
+            SendULong(pairLocks, Selector("gpuAddress")));
         var argumentBuffer = SharedBuffer(arguments);
         var pushBuffer = SharedBuffer(pushData.Length == 0 ? new byte[4] : pushData);
         if (argumentBuffer == 0 || pushBuffer == 0)
@@ -74,15 +80,9 @@ internal static partial class MetalNative
             return false;
         }
 
-        nint nsError = 0;
-        var pipeline = Send(
-            Device.Value,
-            Selector("newComputePipelineStateWithFunction:error:"),
-            function,
-            ref nsError);
+        var pipeline = NewBenchmarkPipeline(function, groupSizeIsMultipleOfWidth, out error);
         if (pipeline == 0)
         {
-            error = $"pipeline creation failed: {DescribeError(nsError)}";
             return false;
         }
 
@@ -121,6 +121,15 @@ internal static partial class MetalNative
                 (nuint)Gen5MslArgumentLayout.PushDataBufferIndex);
             SendUseResource(encoder, Selector("useResource:usage:"), buffer, ReadWriteUsage);
             SendUseResource(encoder, Selector("useResource:usage:"), stepReport, ReadWriteUsage);
+            SendUseResource(encoder, Selector("useResource:usage:"), pairLocks, ReadWriteUsage);
+            SendUseResource(encoder, Selector("useResource:usage:"), SharedTable.Value, ReadWriteUsage);
+            foreach (var table in tables ?? [])
+            {
+                foreach (var resident in (nint[])[table.Buffer, .. table.Residents])
+                {
+                    SendUseResource(encoder, Selector("useResource:usage:"), resident, ReadWriteUsage);
+                }
+            }
             for (var iteration = 0u; iteration < iterations; iteration++)
             {
                 SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), groups, threads);
@@ -152,11 +161,121 @@ internal static partial class MetalNative
         return true;
     }
 
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial nint SendComputeDescriptor(
+        nint receiver, nint selector, nint descriptor, nuint options, nint reflection, ref nint error);
+
+    // A compute pipeline the way the emulator makes one, or through a descriptor that
+    // declares the threadgroup size a multiple of the SIMD width.
+    private static nint NewBenchmarkPipeline(nint function, bool groupSizeIsMultipleOfWidth, out string error)
+    {
+        error = string.Empty;
+        nint nsError = 0;
+        nint pipeline;
+        if (groupSizeIsMultipleOfWidth)
+        {
+            var descriptor = Send(Send(objc_getClass("MTLComputePipelineDescriptor"), Selector("alloc")), Selector("init"));
+            SendVoid(descriptor, Selector("setComputeFunction:"), function);
+            SendVoidBool(descriptor, Selector("setThreadGroupSizeIsMultipleOfThreadExecutionWidth:"), true);
+            pipeline = SendComputeDescriptor(
+                Device.Value, Selector("newComputePipelineStateWithDescriptor:options:reflection:error:"), descriptor, 0, 0, ref nsError);
+        }
+        else
+        {
+            pipeline = Send(Device.Value, Selector("newComputePipelineStateWithFunction:error:"), function, ref nsError);
+        }
+
+        if (pipeline == 0)
+        {
+            error = $"pipeline creation failed: {DescribeError(nsError)}";
+        }
+
+        return pipeline;
+    }
+
+    /// <summary>Compiles and times a hand-written kernel with one buffer at indices 0 and 1,
+    /// the same way as <see cref="TryBenchmark"/> (warm-up, then the best of five).</summary>
+    public static bool TryBenchmarkKernel(
+        string source,
+        string entryPoint,
+        byte[] bufferContents,
+        uint threadgroups,
+        uint threadsPerThreadgroup,
+        uint iterations,
+        out double gpuMilliseconds,
+        out uint maxThreads,
+        out string error,
+        bool groupSizeIsMultipleOfWidth = false)
+    {
+        gpuMilliseconds = 0;
+        maxThreads = 0;
+        if (!TryCompileLibrary(source, out var library, out error))
+        {
+            return false;
+        }
+
+        var function = Send(library, Selector("newFunctionWithName:"), NsString(entryPoint));
+        if (function == 0)
+        {
+            error = $"entry point '{entryPoint}' not found";
+            return false;
+        }
+
+        var pipeline = NewBenchmarkPipeline(function, groupSizeIsMultipleOfWidth, out error);
+        var buffer = SharedBuffer(bufferContents);
+        var queue = Send(Device.Value, Selector("newCommandQueue"));
+        if (pipeline == 0 || buffer == 0 || queue == 0)
+        {
+            error = error.Length != 0 ? error : "failed to create the buffer or queue";
+            return false;
+        }
+
+        maxThreads = (uint)SendULong(pipeline, Selector("maxTotalThreadsPerThreadgroup"));
+        var best = double.MaxValue;
+        for (var pass = 0; pass < 6; pass++)
+        {
+            var commandBuffer = Send(queue, Selector("commandBuffer"));
+            var encoder = Send(commandBuffer, Selector("computeCommandEncoder"));
+            SendVoid(encoder, Selector("setComputePipelineState:"), pipeline);
+            SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), buffer, 0, 0);
+            SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), buffer, 0, 1);
+            for (var iteration = 0u; iteration < iterations; iteration++)
+            {
+                SendDispatch(
+                    encoder,
+                    Selector("dispatchThreadgroups:threadsPerThreadgroup:"),
+                    new MtlSize { Width = threadgroups, Height = 1, Depth = 1 },
+                    new MtlSize { Width = threadsPerThreadgroup, Height = 1, Depth = 1 });
+            }
+
+            SendVoid(encoder, Selector("endEncoding"));
+            SendVoid(commandBuffer, Selector("commit"));
+            SendVoid(commandBuffer, Selector("waitUntilCompleted"));
+            var commandError = Send(commandBuffer, Selector("error"));
+            if (commandError != 0)
+            {
+                error = "GPU execution failed: " + DescribeError(commandError);
+                return false;
+            }
+
+            if (pass != 0)
+            {
+                best = Math.Min(best, (SendDouble(commandBuffer, Selector("GPUEndTime")) -
+                    SendDouble(commandBuffer, Selector("GPUStartTime"))) * 1000.0);
+            }
+        }
+
+        gpuMilliseconds = best;
+        return true;
+    }
+
     private static byte[] BuildArgumentBuffer(
         Gen5MslArgumentLayout layout,
         ulong bufferAddress,
         uint bufferBytes,
-        ulong stepReportAddress)
+        ulong stepReportAddress,
+        IReadOnlyList<DeviceTable>? tables = null,
+        ulong pairLocksAddress = 0)
     {
         var arguments = new byte[Math.Max(layout.ByteSize, 8)];
         foreach (var field in layout.Fields)
@@ -175,6 +294,19 @@ internal static partial class MetalNative
                         break;
                     case MslArgumentFieldKind.StepReport:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), stepReportAddress);
+                        break;
+                    case MslArgumentFieldKind.PairLocks:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), pairLocksAddress);
+                        break;
+                    case MslArgumentFieldKind.Pointer:
+                        BitConverter.TryWriteBytes(
+                            arguments.AsSpan((int)field.ByteOffset),
+                            FindTable(tables, field.Kind) is { } table ? SendULong(table.Buffer, Selector("gpuAddress")) : SharedTableAddress());
+                        break;
+                    case MslArgumentFieldKind.Word:
+                        BitConverter.TryWriteBytes(
+                            arguments.AsSpan((int)field.ByteOffset),
+                            FindTable(tables, field.Kind) is { } counted ? counted.Count : SharedTableDwords);
                         break;
                 }
             }

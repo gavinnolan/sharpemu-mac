@@ -31,7 +31,9 @@ public sealed partial class MetalImageTransferTests
         description.Pitch = 16;
         description.Type = GuestImageType.Color3D;
         description.Extent = new GpuExtent3D(16, 8, 4);
-        var image = new MetalCachedImage(in description, in shape, texture);
+        // The harness and cached image each own a reference; dispose the image first.
+        MetalNative.SendVoid(texture, MetalNative.Selector("retain"));
+        using var image = new MetalCachedImage(in description, in shape, texture);
 
         // One slice of the volume, as the colour-target builder describes it.
         var slice = new ImageViewDescription(

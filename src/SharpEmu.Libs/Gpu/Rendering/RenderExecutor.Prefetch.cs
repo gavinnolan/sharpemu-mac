@@ -71,6 +71,10 @@ public interface IConcurrentResolveHost
     // so it can be turned on and off at run time.
     bool ResolvesConcurrently => true;
 
+    // Opt-in: the host's speculative-read context may also run on the drawing thread.
+    // The queue still permits only one resolution at a time, including that caller.
+    bool AllowsCallerResolution => false;
+
     // On the resolving thread, around one resolution.
     void BeginConcurrentResolve();
 
@@ -137,8 +141,9 @@ public sealed partial class RenderExecutor
         if (UsesMeshExecution(banks))
         {
             var userConfig = banks.UserConfig;
-            if (inputs.Indexed && userConfig.PrimitiveType is
-                (uint)GuestPrimitiveType.TriangleList or (uint)GuestPrimitiveType.TriangleStrip)
+            // Indexed strips are expanded to lists. Lists already have the right topology;
+            // the pipeline resolver only reads these banks, so they need no private copy.
+            if (inputs.Indexed && userConfig.PrimitiveType == (uint)GuestPrimitiveType.TriangleStrip)
             {
                 userConfig = userConfig.Copy();
                 userConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;

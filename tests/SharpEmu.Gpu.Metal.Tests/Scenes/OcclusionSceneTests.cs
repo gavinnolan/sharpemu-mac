@@ -8,9 +8,10 @@ namespace SharpEmu.Gpu.Metal.Tests.Scenes;
 
 /// <summary>
 /// Occlusion queries (PIXEL_PIPE_STAT_DUMP begin/end pairs) and zpass predication
-/// (SET_PREDICATION + the packet predicate bit). What must hold is that a predicate built from
-/// real dump pairs never drops a draw whose query saw samples, whichever command buffer or queue
-/// carried the dumps; DeviceOcclusionSceneTests checks the counts themselves.
+/// (SET_PREDICATION + the packet predicate bit). This suite explicitly tests the conservative fallback: every
+/// pair reads as visible, so occluded draws are never culled. That costs time, not pixels;
+/// what must hold is that a predicate built from real dump pairs never drops a draw whose
+/// query saw samples, whichever command buffer or queue carried the dumps.
 /// </summary>
 public sealed class OcclusionSceneTests(ITestOutputHelper output) : SceneTestBase(output)
 {
@@ -19,6 +20,44 @@ public sealed class OcclusionSceneTests(ITestOutputHelper output) : SceneTestBas
     private const ulong Ready = 1UL << 63;
     private const uint Red = 0xFF0000FF;
     private const uint Green = 0xFF00FF00;
+
+    [Fact]
+    public void HardwareAuditDistinguishesHiddenDrawsWithoutChangingGuestQueries()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        rig.Host.NativeOcclusionEnabled = false;
+        rig.Host.OcclusionAuditEnabled = true;
+        var depth = new DepthRig(rig, Size, Size, 3);
+        var pm4 = depth.Pm4;
+        var occluder = depth.State().DepthControl(true, true, CompareFunc.Always);
+        occluder.Context[Cx.DbCountControl] = 0;
+        depth.Draw(occluder, depth.Full(0.25f, 1, 0, 0));
+        var query = Query(rig);
+        Begin(pm4, query);
+        var tested = depth.State().DepthControl(true, false, CompareFunc.Less);
+        tested.Context[Cx.DbCountControl] = 1u << 8;
+        depth.Draw(tested, depth.Full(0.75f, 0, 1, 0));
+        End(pm4, query);
+        depth.Draw(tested, depth.Full(0.1f, 0, 1, 0));
+        rig.Submit(pm4);
+        var totals = rig.Host.OcclusionAuditTotals;
+        Assert.Equal(2, totals.Groups);
+        Assert.Equal(1, totals.ZeroGroups);
+        Assert.Equal((ulong)(Size * Size), totals.Samples);
+        Assert.Equal(0, totals.Skipped);
+        var words = rig.Read<ulong>(query, DepthBlocks * 2);
+        Assert.True((words[1] & ~Ready) > (words[0] & ~Ready));
+
+        // Recycled buffers and later submissions cannot expose stale visible counts.
+        var hidden = new ScenePm4();
+        rig.DrawMesh(hidden, tested, depth.Full(0.75f, 1, 0, 0));
+        rig.Submit(hidden);
+        totals = rig.Host.OcclusionAuditTotals;
+        Assert.Equal(3, totals.Groups);
+        Assert.Equal(2, totals.ZeroGroups);
+        Assert.Equal((ulong)(Size * Size), totals.Samples);
+    }
 
     private sealed class Scene
     {
@@ -43,6 +82,7 @@ public sealed class OcclusionSceneTests(ITestOutputHelper output) : SceneTestBas
     private Scene? Create()
     {
         var rig = CreateRig();
+        if (rig is not null) rig.Host.NativeOcclusionEnabled = false;
         return rig is null ? null : new Scene { Rig = rig, Target = rig.ColorTarget(Size, Size) };
     }
 

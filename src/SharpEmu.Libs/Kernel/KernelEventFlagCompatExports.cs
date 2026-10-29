@@ -341,6 +341,11 @@ public static class KernelEventFlagCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        if (timeoutAddress != 0)
+        {
+            timeoutUsec = Audio.AudioOut2Exports.IdleQueueWaitMicroseconds(timeoutUsec);
+        }
+
         var deadline = timeoutAddress != 0 ? GuestTime.DeadlineAfterMicroseconds(timeoutUsec) : 0;
         EventFlagWaiter? waiter = null;
         ulong observed;
