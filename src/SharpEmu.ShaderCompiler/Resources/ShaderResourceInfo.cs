@@ -129,6 +129,13 @@ public sealed class SamplerResource
     // whatever the texture's format, so the emitter decodes what the host sampled.
     public bool ForceDegamma { get; set; }
 
+    // The paired S#'s FILTER_MODE (word 0, bits 30:29: 1 minimum, 2 maximum) when it filters linearly: the hardware
+    // returns the per-component minimum or maximum of the texels its filter weighs, which no host sampler does.
+    public uint Reduction { get; set; }
+
+    // Set when that sampler's mip filter is linear: the reduction spans the two levels a trilinear filter reads.
+    public bool ReductionAcrossLevels { get; set; }
+
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
 

@@ -142,6 +142,11 @@ public static partial class ResourceMaterializer
     private const long BindlessMemoWordBudget = 32L << 20;
     private static long BindlessMemoWords;
     private static readonly Dictionary<(ulong Address, ulong Entries, bool R128, uint DynamicOffsetBase, uint RecordStride), BindlessTableMemo> BindlessMemos = [];
+
+    // SHARPEMU_TRACE_BINDLESS_TABLES=1: each V#-described table's reach - the V#, its offset and record stride, the key
+    // bound and the entries enumerated - so a table cut short can be told from one the guest made small.
+    private static readonly bool TraceBindlessTables =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_BINDLESS_TABLES") == "1";
     private static readonly Lock BindlessMemoGate = new();
 
     // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
@@ -303,6 +308,14 @@ public static partial class ResourceMaterializer
                         var readable = RuntimeValueEvaluator.EvaluateSources(plan, [limitSource], cleanInputs, [], evaluateTable: false,
                             out var bounds, out _);
                         var bound = readable ? bounds[0].Dwords[0] : 0u;
+                        if (readable && directCandidates[^1].Counter is { } lastCounter &&
+                            CounterWithinLimit(lastCounter + 1, bound, indirect.DirectLimitInclusive, indirect.DirectLimitSigned) &&
+                            Interlocked.Increment(ref LoopBoundWarnings) <= 8)
+                        {
+                            Console.Error.WriteLine(
+                                $"[SHADER][WARN] A counted loop reads records past its {directCandidates.Count} candidates: hash=0x{plan.Hash:X16} " +
+                                $"image={imageIndex} bound={bound}; the later records read the first record's image.");
+                        }
                         for (var candidateIndex = 0; candidateIndex < reached.Length; candidateIndex++)
                         {
                             reached[candidateIndex] = directCandidates[candidateIndex].Counter is not { } counter ||
@@ -660,17 +673,6 @@ public static partial class ResourceMaterializer
 
     private static readonly HashSet<uint> NulledSampledFormats = new();
 
-    private static void ReportNulledSampledFormat(uint format)
-    {
-        lock (NulledSampledFormats)
-        {
-            if (NulledSampledFormats.Add(format))
-            {
-                Console.Error.WriteLine($"[GPU][WARN] A sampled image descriptor uses unsupported format {format}; it is bound as a null texture.");
-            }
-        }
-    }
-
     // Whether a compare access reads a mipmapped image, and so compares in the shader (see BuildSpecialization).
     // SHARPEMU_TRACE_MIPMAPPED_COMPARE=1 names each such program and image once.
     private static readonly bool TracesMipmappedCompare = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_MIPMAPPED_COMPARE") == "1";
@@ -695,6 +697,17 @@ public static partial class ResourceMaterializer
         }
 
         return true;
+    }
+
+    private static void ReportNulledSampledFormat(uint format)
+    {
+        lock (NulledSampledFormats)
+        {
+            if (NulledSampledFormats.Add(format))
+            {
+                Console.Error.WriteLine($"[GPU][WARN] A sampled image descriptor uses unsupported format {format}; it is bound as a null texture.");
+            }
+        }
     }
 
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>
@@ -723,6 +736,7 @@ public static partial class ResourceMaterializer
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_NULL_DESCRIPTORS") == "1";
 
     private static readonly HashSet<(ulong, int)> TracedInvalidDescriptors = [];
+    private static int LoopBoundWarnings;
     private static readonly HashSet<ulong> TracedZeroNeighbourhoods = [];
 
     private static void TraceInvalidDescriptor(ShaderResourcePlan plan, int imageIndex, uint[] words)
@@ -1103,6 +1117,12 @@ public static partial class ResourceMaterializer
         var entries = size > indirect.TableOffset ? (size - indirect.TableOffset + recordStride - 1) / recordStride : 0;
         if (indirect.KeyBound != 0)
             entries = Math.Min(entries, indirect.KeyBound);
+        if (TraceBindlessTables)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][BINDLESS-TABLE] V#=[{string.Join(",", words.Select(word => word.ToString("X8")))}] size=0x{size:X} " +
+                $"tableOffset=0x{indirect.TableOffset:X} recordStride={recordStride} keyBound={indirect.KeyBound} entries={entries}");
+        }
 
         if (baseAddress > AddressMask - indirect.TableOffset)
             return false;
@@ -1573,8 +1593,13 @@ public static partial class ResourceMaterializer
             var axes = (words[0] & 0x7) == MirrorOnceBorder ? 1u : 0u;
             axes |= ((words[0] >> 3) & 0x7) == MirrorOnceBorder ? 2u : 0u;
             axes |= ((words[0] >> 6) & 0x7) == MirrorOnceBorder ? 4u : 0u;
+            // A min/max filter mode reduces only a footprint of several texels: a point filter reads one.
+            var reduction = (words[0] >> 29) & 0x3;
+            var linear = ((words[2] >> 20) & 0x1) != 0 || ((words[2] >> 22) & 0x1) != 0;
+            reduction = reduction is 1 or 2 && linear ? reduction : 0;
             specialized[index] = new SamplerSpecialization(
-                (int)(words[2] << 18) >> 18, axes, axes != 0 ? words[3] >> 30 : 0, (words[0] & (1u << 20)) != 0);
+                (int)(words[2] << 18) >> 18, axes, axes != 0 ? words[3] >> 30 : 0, (words[0] & (1u << 20)) != 0,
+                reduction, reduction != 0 && ((words[2] >> 26) & 0x3) == 2);
             any |= specialized[index] != default;
         }
 
@@ -2603,6 +2628,8 @@ public static partial class ResourceMaterializer
                 info.Samplers[index].MirrorOnceBorderAxes = specialization.Samplers[index].MirrorOnceBorderAxes;
                 info.Samplers[index].BorderColorType = specialization.Samplers[index].BorderColorType;
                 info.Samplers[index].ForceDegamma = specialization.Samplers[index].ForceDegamma;
+                info.Samplers[index].Reduction = specialization.Samplers[index].Reduction;
+                info.Samplers[index].ReductionAcrossLevels = specialization.Samplers[index].ReductionAcrossLevels;
             }
         }
 
