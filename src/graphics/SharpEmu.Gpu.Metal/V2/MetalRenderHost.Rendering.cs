@@ -2400,7 +2400,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public void EmitGlobalBarrier()
     {
-        if (PostToWorker(EmitGlobalBarrier))
+        if (PostOrderingToWorker(EmitGlobalBarrier))
         {
             return;
         }

@@ -23,6 +23,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         internal GraphicsProgramInputs Inputs;
         internal GraphicsPrograms? Programs;
         internal object? Assumptions;
+        // The jobs submitted before this one.
+        internal long Index;
         // 0 queued, 1 resolved, 2 abandoned.
         internal volatile int State;
     }
@@ -99,7 +101,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // thread, draws are submitted ahead of the work before them, which may change what they read.
     public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false)
     {
-        var job = new Job(banks, gate, indexed);
+        var job = new Job(banks, gate, indexed) { Index = Submitted };
         lock (_lock)
         {
             _queue.Enqueue(job);
@@ -421,9 +423,16 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
     }
 
+    /// <summary>The index of the job this thread resolves now, or -1.</summary>
+    [ThreadStatic]
+    private static long _resolvingJob;
+
+    public static long ResolvingJob => _resolvingJob - 1;
+
     private void ResolveCore(Job job)
     {
         _concurrent.BeginConcurrentResolve();
+        _resolvingJob = job.Index + 1;
         try
         {
             job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed);
@@ -443,6 +452,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             }
 
             job.State = 2;
+        }
+        finally
+        {
+            _resolvingJob = 0;
         }
     }
 

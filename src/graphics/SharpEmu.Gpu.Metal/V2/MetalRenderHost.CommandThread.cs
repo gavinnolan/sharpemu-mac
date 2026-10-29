@@ -95,7 +95,7 @@ internal sealed partial class MetalRenderHost
 
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         var (runs, runWaitMs, spaceWaitMs, items) = thread.TakeCounters();
-        return $"runs={runs} run_wait_ms={runWaitMs.ToString("F1", culture)} space_wait_ms={spaceWaitMs.ToString("F1", culture)} items={items} sites=({TakeSyncSites()})";
+        return $"runs={runs} run_wait_ms={runWaitMs.ToString("F1", culture)} space_wait_ms={spaceWaitMs.ToString("F1", culture)} items={items} sites=({TakeSyncSites()}){thread.TakeItemSites()}";
     }
 
     private int _idleCommitQueued;
@@ -196,6 +196,41 @@ internal sealed partial class MetalRenderHost
         }
 
         _commandThread!.Post(action);
+        return true;
+    }
+
+    // Host work that only orders GPU commands, queued like PostToWorker without holding the program
+    // resolutions of the draws after it. Every non-draw item held them: in Silent Hill's first room
+    // two in five items are a barrier or a fragment-write release, and the worker waited about 13% of
+    // its time for resolutions the gates kept from starting.
+    // SHARPEMU_METAL_V2_UNGATED_BARRIERS=0 holds the resolutions behind them again.
+    private static readonly bool UngatedBarriers =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UNGATED_BARRIERS") != "0";
+
+    // A write the command thread queues (a command-processor write, a fill or copy, an occlusion dump,
+    // an end-of-pipe label) names the only bytes it writes, so the draws after it resolve their
+    // programs without waiting for it either; a resolution that reads those bytes while the write is
+    // still queued is abandoned and done again on the worker (IsOwnedConcurrent).
+    // SHARPEMU_METAL_V2_UNGATED_WRITES=0 holds the resolutions behind them again.
+    private static readonly bool UngatedWrites =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UNGATED_WRITES") != "0";
+
+    private bool PostOrderingToWorker(Action action)
+    {
+        if (!OnCommandThread)
+        {
+            return false;
+        }
+
+        if (UngatedBarriers)
+        {
+            _commandThread!.PostOrdering(action);
+        }
+        else
+        {
+            _commandThread!.Post(action);
+        }
+
         return true;
     }
 

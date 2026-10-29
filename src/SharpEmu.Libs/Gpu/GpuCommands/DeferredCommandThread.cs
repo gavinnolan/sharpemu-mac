@@ -36,6 +36,9 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     {
         public Kind Kind;
         public bool IsDraw;
+        // Orders GPU commands and changes nothing a program resolution reads: the draws after it
+        // resolve without waiting for it, as they do behind a draw.
+        public bool Ungated;
         public AgcExports.DeferredWork? Work;
         public Action? Action;
         public ulong Address;
@@ -143,6 +146,41 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     public long Gate => _enqueuedNonDraw;
 
+    // SHARPEMU_CTHREAD_ITEM_SITES=1: the non-draw items by kind and source, in the PERF line.
+    private static readonly bool CountItemSites =
+        Environment.GetEnvironmentVariable("SHARPEMU_CTHREAD_ITEM_SITES") == "1";
+
+    private readonly Dictionary<string, long> _itemSites = new();
+
+    private void NoteItemSite(Item item)
+    {
+        var name = item.Kind switch
+        {
+            Kind.Deferred => item.Work?.GetType().Name ?? "deferred",
+            Kind.Write => "write",
+            _ => (item.Sync ? "run:" : item.RangeSize != 0 ? "range:" : item.Ungated ? "ordering:" : "post:") + (item.Action?.Method.Name ?? "?"),
+        };
+        lock (_itemSites)
+        {
+            System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_itemSites, name, out _)++;
+        }
+    }
+
+    public string TakeItemSites()
+    {
+        if (!CountItemSites)
+        {
+            return string.Empty;
+        }
+
+        lock (_itemSites)
+        {
+            var top = string.Join(",", _itemSites.OrderByDescending(pair => pair.Value).Take(12).Select(pair => $"{pair.Key}={pair.Value}"));
+            _itemSites.Clear();
+            return $" items_by=({top})";
+        }
+    }
+
     public bool HasWork => Volatile.Read(ref _outstanding) != 0 || _failure is not null;
 
     // Read by the render loop before it waits, so a queued item wakes it.
@@ -167,6 +205,16 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     {
         var item = RentAsyncItem(Kind.Call);
         item.Action = action;
+        Enqueue(item);
+    }
+
+    // A host call that only orders GPU commands (a barrier, a pass end): the resolutions of the
+    // draws after it are not held for it.
+    public void PostOrdering(Action action)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.Action = action;
+        item.Ungated = true;
         Enqueue(item);
     }
 
@@ -202,12 +250,17 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     }
 
     // A fill or copy the render thread runs in order; reads of its destination wait for it.
-    public void PostRange(Action action, ulong address, ulong size)
+    // An ungated one writes nothing but its range: the draws after it resolve their programs
+    // without waiting for it, and a resolution that reads the range while it is still queued is
+    // abandoned instead (PendingRangeHolds).
+    public void PostRange(Action action, ulong address, ulong size, bool ungated = false)
     {
         var item = RentAsyncItem(Kind.Call);
         item.Action = action;
         item.Address = address;
         item.RangeSize = size;
+        item.Ungated = ungated && size != 0;
+        item.JobsBefore = _prefetch?.Submitted ?? 0;
         if (size != 0)
         {
             lock (_writeLock)
@@ -227,6 +280,32 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         {
             Run(static () => { });
         }
+    }
+
+    /// <summary>
+    /// Whether an ungated range item queued before resolution job <paramref name="job"/> (its index
+    /// among the submitted jobs) still has to write bytes in the range. Any thread.
+    /// </summary>
+    public bool PendingRangeHolds(long job, ulong address, ulong size)
+    {
+        if (Volatile.Read(ref _pendingRangeCount) == 0)
+        {
+            return false;
+        }
+
+        lock (_writeLock)
+        {
+            foreach (var pending in _pendingRanges)
+            {
+                if (pending.Ungated && pending.JobsBefore <= job &&
+                    address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private bool OverlapsPendingRange(ulong address, ulong size)
@@ -283,10 +362,15 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     private void Enqueue(Item item)
     {
         ThrowIfFailed();
-        if (!item.IsDraw)
+        if (!item.IsDraw && !item.Ungated)
         {
             item.JobsBefore = _prefetch?.Submitted ?? 0;
             _enqueuedNonDraw++;
+        }
+
+        if (CountItemSites && !item.IsDraw)
+        {
+            NoteItemSite(item);
         }
 
         Interlocked.Increment(ref _itemsEnqueued);
@@ -443,7 +527,12 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
             return;
         }
 
-        _prefetch?.WaitFinished(item.JobsBefore);
+        // A write still waits for the resolutions before it: they read the bytes as they were.
+        if (!item.Ungated || item.RangeSize != 0)
+        {
+            _prefetch?.WaitFinished(item.JobsBefore);
+        }
+
         try
         {
             switch (item.Kind)
@@ -470,7 +559,11 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         }
         finally
         {
-            _executedNonDraw++;
+            if (!item.Ungated)
+            {
+                _executedNonDraw++;
+            }
+
             if (item.RangeSize != 0)
             {
                 lock (_writeLock)
@@ -480,7 +573,11 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 }
             }
 
-            _prefetch?.AdvanceGate(_executedNonDraw);
+            if (!item.Ungated)
+            {
+                _prefetch?.AdvanceGate(_executedNonDraw);
+            }
+
             if (item.Sync)
             {
                 item.Done = true;

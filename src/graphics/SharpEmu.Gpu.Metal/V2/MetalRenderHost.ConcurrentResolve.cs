@@ -278,13 +278,21 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return true;
     }
 
+    // A write the command thread queued ahead of the draw being resolved, still waiting for the worker,
+    // is checked first: the worker records a write's ownership before it lets go of the queued range,
+    // so the range found gone means the ownership below is already there.
     private bool IsOwnedConcurrent(ConcurrentQuery query, ulong address, ulong size) =>
+        PendingCommandWriteHolds(address, size) ||
         _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ||
         (query == ConcurrentQuery.Word && IsGpuWritePendingConcurrent(address, size)) ||
         (_cpOverlay.Count != 0 &&
             _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None) ||
         (_labelOverlay.Count != 0 &&
             _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None);
+
+    private bool PendingCommandWriteHolds(ulong address, ulong size) =>
+        _commandThread is { } thread && ParallelProgramPrefetch.ResolvingJob is var job and >= 0 &&
+        thread.PendingRangeHolds(job, address, size);
 
     // The shared event's value, read from any thread: CompletedSerial also notes it in the worker's
     // completion state.

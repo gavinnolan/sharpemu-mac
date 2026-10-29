@@ -284,7 +284,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         if (OnCommandThread)
         {
-            _commandThread!.PostRange(() => FillBuffer(address, size, value, isGds), address, isGds ? 0 : size);
+            _commandThread!.PostRange(() => FillBuffer(address, size, value, isGds), address, isGds ? 0 : size, UngatedWrites);
             return;
         }
 
@@ -325,7 +325,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (OnCommandThread)
         {
             _commandThread!.PostRange(
-                () => CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds), destination, destinationIsGds ? 0 : size);
+                () => CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds), destination, destinationIsGds ? 0 : size, UngatedWrites);
             return;
         }
 
@@ -416,7 +416,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (OnCommandThread)
         {
             var queued = write;
-            _commandThread!.Post(() =>
+            // A label writes its destination and nothing else a program resolution reads.
+            var labelBytes = write.Destination == 0 ? 0UL : (ulong)EndOfPipeLabelBytes(write.Kind);
+            _commandThread!.PostRange(() =>
             {
                 if (PendingLabelsVisible && EndOfPipeLabelBytes(queued.Kind) != 0)
                 {
@@ -424,7 +426,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 }
 
                 RecordEndOfPipe(in queued);
-            });
+            }, write.Destination, labelBytes == 0 ? 0 : Math.Max(sizeof(ulong), labelBytes), UngatedWrites);
             return;
         }
 
@@ -980,7 +982,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // Reads overlapping this queued write wait until the worker installed
             // its overlay. Unrelated packets can continue; prefetch's non-draw gate
             // still orders future resource reads after the write.
-            _commandThread!.PostRange(() => RecordCommandProcessorWrite(address, queued, kind), address, (ulong)queued.Length);
+            _commandThread!.PostRange(() => RecordCommandProcessorWrite(address, queued, kind), address, (ulong)queued.Length, UngatedWrites);
         }
         else
         {
@@ -1117,7 +1119,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 (count == 1 || strideBytes <= (ulong.MaxValue - address - sizeof(ulong)) / (ulong)(count - 1)))
             {
                 var size = (ulong)(count - 1) * strideBytes + sizeof(ulong);
-                _commandThread!.PostRange(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind), address, size);
+                _commandThread!.PostRange(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind), address, size, UngatedWrites);
             }
             else
             {
@@ -1291,7 +1293,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private const ulong MaxStagedCommandProcessorFillBytes = 4096;
 
     private void PostFillBufferInOrder(ulong address, ulong size, uint value) =>
-        _commandThread!.PostRange(() => FillBufferInOrder(address, size, value), address, size);
+        _commandThread!.PostRange(() => FillBufferInOrder(address, size, value), address, size, UngatedWrites);
 
     /// <summary>A DMA fill of guest memory that lands in record order with the labels.</summary>
     public void FillBufferInOrder(ulong address, ulong size, uint value)
@@ -1325,7 +1327,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         if (OnCommandThread)
         {
-            _commandThread!.PostRange(() => CopyBufferInOrder(destination, source, size), destination, size);
+            _commandThread!.PostRange(() => CopyBufferInOrder(destination, source, size), destination, size, UngatedWrites);
             return;
         }
 
@@ -2584,7 +2586,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void ReleaseShaderWrites()
     {
         // Ordered behind the draws before it, and nothing the stream waits for: queued, not waited on.
-        if (PostToWorker(_releaseShaderWrites ??= ReleaseShaderWrites))
+        if (PostOrderingToWorker(_releaseShaderWrites ??= ReleaseShaderWrites))
         {
             return;
         }

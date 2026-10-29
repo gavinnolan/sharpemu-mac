@@ -239,7 +239,7 @@ internal sealed partial class MetalRenderHost
 
     private void PostOcclusionDump(int queueId, ulong address, uint instanceMask, uint strideBytes) =>
         _commandThread!.PostRange(() => DumpOcclusionCounterNow(queueId, address, instanceMask, strideBytes), address,
-            DumpRangeBytes(instanceMask, strideBytes));
+            DumpRangeBytes(instanceMask, strideBytes), UngatedWrites);
 
     private bool DumpOcclusionCounter(int queueId, ulong address, uint instanceMask, uint strideBytes, bool defer)
     {
