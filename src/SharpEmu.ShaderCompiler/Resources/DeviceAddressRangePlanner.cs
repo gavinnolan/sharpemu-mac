@@ -26,7 +26,9 @@ public sealed record DeviceAddressRangePlan(
 // give (Direct: the four words evaluate as they are), or through a pointer at one of a few
 // values the program can only compute (Offsets), or at a counted loop's induction, offset =
 // BaseOffset + index * Stride for index = Initial, Initial + Step, ... while the loop's guard
-// against Limit holds. Words are the V#'s four scalar reads.
+// against Limit holds. Words are the V#'s four scalar reads. With a RecordTable the V# is one
+// field of a buffer of records the program indexes with a value it cannot follow: offset =
+// index * RecordStride + FirstImmediate for every record the buffer holds.
 public sealed record DeviceDescriptorTablePlan(
     bool Direct,
     ScalarValue? TableLow,
@@ -39,7 +41,9 @@ public sealed record DeviceDescriptorTablePlan(
     uint Step,
     ScalarValue? Limit,
     bool LimitInclusive,
-    IReadOnlyList<ScalarValue> Words);
+    IReadOnlyList<ScalarValue> Words,
+    ScalarValue? RecordTable = null,
+    uint RecordStride = 0);
 
 // Bounds every device-address handle after tracking. The pass is optional: an
 // unplannable handle never fails the plan, it is reported for the hosts to decide.
@@ -51,6 +55,9 @@ public static class DeviceAddressRangePlanner
     // The most descriptors a table's loop may select for one draw before its stores are left
     // unbounded again.
     public const int MaxDescriptorTableEntries = 64;
+
+    // The most records a record table may hold for one draw before its stores are left unbounded.
+    public const int MaxRecordTableEntries = 1024;
 
     // A store through a V# loaded from guest memory goes through the device-address page table,
     // and no handle range says where: the hosts record it as a store to all of guest memory, and
@@ -137,6 +144,11 @@ public static class DeviceAddressRangePlanner
             return true;
         }
 
+        if (RecordTableStores && TryPlanRecordTable(plan, handle, out table, out reason))
+        {
+            return true;
+        }
+
         // Every dword is one read through the same pointer at the same run-time offset, at the
         // consecutive immediates one dwordx4 load gives its components.
         ScalarValue? address = null;
@@ -185,11 +197,12 @@ public static class DeviceAddressRangePlanner
 
         // A handful of values computed from constants alone (selects of lane conditions).
         var values = new HashSet<uint>();
-        if (TryEnumerateValues(offset!, values, []) && values.Count != 0)
+        if (TryEnumerateValues(offset!, values, [], plan.Graph) && values.Count != 0)
         {
             table = new DeviceDescriptorTablePlan(
                 false, address.Operands[0], address.Operands[1], firstImmediate, [.. values.Order()], 0, 0, 0, 0, null, false, words);
-            reason = $"offsets {string.Join(",", values.Order().Select(value => $"0x{value:X}"))}";
+            reason = $"offsets {string.Join(",", values.Order().Select(value => $"0x{value:X}"))}" +
+                (TraceDescriptorTables ? $" from {Describe(offset!, 0)}" : string.Empty);
             return true;
         }
 
@@ -251,6 +264,138 @@ public static class DeviceAddressRangePlanner
         return true;
     }
 
+    // Ghost of Tsushima's Hi-Z culler (csA43A27DF) stores visibility through the V# at +0x190 of
+    // the 504-byte record each wave picks with v_readlane, s_buffer_load_dwordx4 s[60:63], s[44:47],
+    // s8 offset:0x190, under phis of the loop over its lanes' records. The index is lost, but the
+    // record buffer is the draw's: every V# it can pick is one of its records', so the stores are
+    // recorded against those buffers instead of all of guest memory (a quarter of the GPU worker's
+    // time went to the waits that caused in its gorge).
+    // SHARPEMU_RECORD_TABLE_STORES=0 leaves such stores unbounded again.
+    private static readonly bool RecordTableStores =
+        Environment.GetEnvironmentVariable("SHARPEMU_RECORD_TABLE_STORES") != "0";
+
+    private static bool TryPlanRecordTable(
+        ShaderResourcePlan plan, ScalarValue handle, out DeviceDescriptorTablePlan table, out string? reason)
+    {
+        table = null!;
+        reason = null;
+        ScalarValue? records = null;
+        var recordStride = 0u;
+        long firstImmediate = 0;
+        var words = new ScalarValue[4];
+        for (var word = 0; word < 4; word++)
+        {
+            var leaves = new List<ScalarValue>();
+            if (!CollectPhiLeaves(handle.Operands[word], leaves, []) || leaves.Count == 0)
+            {
+                reason = $"record word {word}: phis too deep";
+                return false;
+            }
+
+            foreach (var leaf in leaves)
+            {
+                if (leaf.Kind != ScalarValueKind.ScalarBufferWord || (uint)leaf.MemoryIndex >= (uint)plan.Memory.Count ||
+                    leaf.Operands[0] is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } buffer ||
+                    !TrySplitRecordOffset(leaf.Operands[1], out var stride, out var fieldOffset))
+                {
+                    reason = $"record word {word} is {leaf.Kind}, not a buffer read at an index times a stride";
+                    return false;
+                }
+
+                var memory = plan.Memory[leaf.MemoryIndex];
+                var immediate = (long)unchecked((int)memory.Offset) + fieldOffset;
+                if (memory.Kind != MemoryResourceKind.ScalarBuffer || memory.DataBits != 32 || memory.DataDwords != 1)
+                {
+                    reason = $"record word {word} reads {memory.Kind} {memory.DataBits}x{memory.DataDwords}";
+                    return false;
+                }
+
+                if (records is null)
+                {
+                    if (word != 0 || stride < 4 * sizeof(uint) || immediate < 0 ||
+                        !buffer.Operands.All(part => IsDrawUniform(plan, part, []) &&
+                            plan.ValidateRuntimeValue(part, out var controlDependent) && !controlDependent))
+                    {
+                        reason = "record buffer not evaluable for a draw";
+                        return false;
+                    }
+
+                    records = buffer;
+                    recordStride = stride;
+                    firstImmediate = immediate;
+                }
+                else if (!plan.Graph.Equivalent(records, buffer) || stride != recordStride ||
+                    immediate != firstImmediate + word * sizeof(uint))
+                {
+                    reason = $"record word {word} is not the next dword of one record field";
+                    return false;
+                }
+            }
+
+            words[word] = leaves[0];
+        }
+
+        table = new DeviceDescriptorTablePlan(
+            false, null, null, firstImmediate, null, 0, 0, 0, 0, null, false, words, records, recordStride);
+        reason = $"record table, stride 0x{recordStride:X} field 0x{firstImmediate:X}";
+        return true;
+    }
+
+    // The values a phi tree merges; undefined ones are lanes that do not run the access.
+    private static bool CollectPhiLeaves(ScalarValue value, List<ScalarValue> leaves, HashSet<ScalarValue> visiting)
+    {
+        if (value.Kind == ScalarValueKind.Undefined)
+        {
+            return true;
+        }
+
+        if (value.Kind != ScalarValueKind.Phi)
+        {
+            if (!leaves.Contains(value))
+            {
+                leaves.Add(value);
+            }
+
+            return leaves.Count <= MaxDescriptorTableEntries;
+        }
+
+        if (!visiting.Add(value))
+        {
+            return true;
+        }
+
+        return value.Operands.All(operand => CollectPhiLeaves(operand, leaves, visiting));
+    }
+
+    // offset = index * stride (+ a constant field offset), index not a constant.
+    private static bool TrySplitRecordOffset(ScalarValue offset, out uint stride, out long fieldOffset)
+    {
+        stride = 0;
+        fieldOffset = 0;
+        if (offset is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.IAdd32 } &&
+            (offset.Operands[0].IsConstant || offset.Operands[1].IsConstant))
+        {
+            fieldOffset = offset.Operands[1].IsConstant ? offset.Operands[1].ConstantU32 : offset.Operands[0].ConstantU32;
+            offset = offset.Operands[1].IsConstant ? offset.Operands[0] : offset.Operands[1];
+        }
+
+        if (offset is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.IMul32 } &&
+            offset.Operands[0].IsConstant != offset.Operands[1].IsConstant)
+        {
+            stride = offset.Operands[0].IsConstant ? offset.Operands[0].ConstantU32 : offset.Operands[1].ConstantU32;
+            return stride != 0;
+        }
+
+        if (offset is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.ShiftLeft32 } &&
+            !offset.Operands[0].IsConstant && offset.Operands[1].IsConstant && offset.Operands[1].ConstantU32 < 32)
+        {
+            stride = 1u << (int)offset.Operands[1].ConstantU32;
+            return true;
+        }
+
+        return false;
+    }
+
     // A value every lane of every invocation of the draw computes alike: built only from user
     // data, the shader base, resource-table words, constants and memory read at such addresses.
     // A first lane, a select or a loop-carried phi can differ between invocations.
@@ -286,7 +431,19 @@ public static class DeviceAddressRangePlanner
     // Every value a 32-bit expression of constants can take, through selects, phis and the first
     // lane of a vector value; false when something else feeds it or there are more than
     // MaxDescriptorTableEntries. An undefined operand is a lane that does not run the access.
-    private static bool TryEnumerateValues(ScalarValue value, HashSet<uint> values, HashSet<ScalarValue> visiting)
+    // Under a first lane, a select on that lane's active mask - how a vector write keeps an
+    // inactive lane's old value - can only take its written arm: the first lane is an active
+    // one. Ghost of Tsushima's tile classifier (cs9260AE70) picks its list V# as
+    // [s0:s1 + 0x20 + bucket * 16] for buckets 0-4; the old values of the registers it reused
+    // added 0x70 and 0x90, and the V# at 0x70 spans the whole 664 MB render-target heap, which
+    // every dispatch then wrote back and invalidated.
+    // SHARPEMU_FIRST_LANE_ACTIVE_ARMS=0 enumerates both arms of such selects again.
+    private static readonly bool FirstLaneActiveArms =
+        Environment.GetEnvironmentVariable("SHARPEMU_FIRST_LANE_ACTIVE_ARMS") != "0";
+
+    private static bool TryEnumerateValues(
+        ScalarValue value, HashSet<uint> values, HashSet<ScalarValue> visiting, ScalarValueGraph? graph = null,
+        ScalarValue? active = null)
     {
         if (value.IsConstant)
         {
@@ -309,18 +466,26 @@ public static class DeviceAddressRangePlanner
             switch (value.Kind)
             {
                 case ScalarValueKind.Select when value.Operands.Length == 3:
-                    return TryEnumerateValues(value.Operands[1], values, visiting) && TryEnumerateValues(value.Operands[2], values, visiting);
+                    if (FirstLaneActiveArms && active is not null && graph is not null && graph.Equivalent(value.Operands[0], active))
+                    {
+                        return TryEnumerateValues(value.Operands[1], values, visiting, graph, active);
+                    }
+
+                    return TryEnumerateValues(value.Operands[1], values, visiting, graph, active) &&
+                        TryEnumerateValues(value.Operands[2], values, visiting, graph, active);
                 case ScalarValueKind.Phi:
-                    return value.Operands.All(operand => TryEnumerateValues(operand, values, visiting));
+                    return value.Operands.All(operand => TryEnumerateValues(operand, values, visiting, graph, active));
                 case ScalarValueKind.FirstLane when value.Operands.Length != 0:
-                    return TryEnumerateValues(value.Operands[0], values, visiting);
+                    return TryEnumerateValues(value.Operands[0], values, visiting, graph,
+                        value.Operands.Length > 1 ? value.Operands[1] : active);
                 case ScalarValueKind.Operation when value.Operands.Length == 2 && value.Operation is
                     ScalarOperation.IAdd32 or ScalarOperation.ISub32 or ScalarOperation.IMul32 or ScalarOperation.ShiftLeft32 or
                     ScalarOperation.ShiftRightLogical32 or ScalarOperation.And32 or ScalarOperation.Or32:
                 {
                     var left = new HashSet<uint>();
                     var right = new HashSet<uint>();
-                    if (!TryEnumerateValues(value.Operands[0], left, visiting) || !TryEnumerateValues(value.Operands[1], right, visiting))
+                    if (!TryEnumerateValues(value.Operands[0], left, visiting, graph, active) ||
+                        !TryEnumerateValues(value.Operands[1], right, visiting, graph, active))
                     {
                         return false;
                     }
@@ -394,6 +559,11 @@ public static class DeviceAddressRangePlanner
             return true;
         }
 
+        if (table.RecordTable is { } recordTable)
+        {
+            return TryEvaluateRecordTable(hash, evaluator, table, recordTable, ranges);
+        }
+
         if (table.TableLow is null || table.TableHigh is null ||
             !evaluator.EvaluateWide(table.TableLow, out var low) || !evaluator.EvaluateWide(table.TableHigh, out var high))
         {
@@ -445,6 +615,77 @@ public static class DeviceAddressRangePlanner
 
         return true;
     }
+
+    // Reads the V# field of every record the buffer holds. Records tend to share their target
+    // buffer or lie side by side in one, so overlapping and adjacent ranges are merged.
+    private static bool TryEvaluateRecordTable(
+        ulong hash, RuntimeValueEvaluator evaluator, DeviceDescriptorTablePlan table, ScalarValue recordTable,
+        List<DeviceAddressRange> ranges)
+    {
+        if (!evaluator.TryEvaluateRawBase(recordTable, ScalarValueKind.ScalarBufferWord, out var recordBase, out var recordHigh,
+                out var recordWords))
+        {
+            return TraceTableFailure(hash, "record buffer");
+        }
+
+        var bufferStride = ((uint)recordHigh >> 16) & 0x3FFFu;
+        var bytes = bufferStride == 0 ? (ulong)(uint)recordWords : (ulong)bufferStride * (uint)recordWords;
+        var fieldEnd = (ulong)table.FirstImmediate + 4 * sizeof(uint);
+        var count = bytes >= fieldEnd ? (bytes - fieldEnd) / table.RecordStride + 1 : 0;
+        if (count > MaxRecordTableEntries)
+        {
+            return TraceTableFailure(hash, $"{count} records");
+        }
+
+        Span<ulong> words = stackalloc ulong[4];
+        var found = new List<DeviceAddressRange>((int)count);
+        for (var entry = 0ul; entry < count; entry++)
+        {
+            for (var word = 0; word < 4; word++)
+            {
+                if (!evaluator.ReadRawWord(ScalarValueKind.ScalarBufferWord, recordBase, recordHigh, (uint)(entry * table.RecordStride),
+                        recordWords, table.FirstImmediate + word * sizeof(uint), false, out words[word], table.Words[word]))
+                {
+                    return TraceTableFailure(hash, $"record {entry} word {word}");
+                }
+            }
+
+            AddDescriptorRange(words, found);
+        }
+
+        found.Sort(static (left, right) => left.Base.CompareTo(right.Base));
+        var merged = 0;
+        for (var index = 1; index < found.Count; index++)
+        {
+            var last = found[merged];
+            var next = found[index];
+            if (next.Base <= last.Base + last.Size)
+            {
+                found[merged] = last with { Size = Math.Max(last.Size, next.Base + next.Size - last.Base) };
+            }
+            else
+            {
+                found[++merged] = next;
+            }
+        }
+
+        if (TraceDescriptorTables && Interlocked.Increment(ref _tracedRecordTables) <= 16)
+        {
+            Console.Error.WriteLine(
+                $"[DD-TABLE] hash=0x{hash:X16} record table 0x{recordBase:X}: {count} records -> " +
+                $"{(found.Count == 0 ? 0 : merged + 1)} ranges " +
+                string.Join(", ", found.Take(found.Count == 0 ? 0 : Math.Min(merged + 1, 8)).Select(static range => $"0x{range.Base:X}+0x{range.Size:X}")));
+        }
+
+        for (var index = 0; found.Count != 0 && index <= merged; index++)
+        {
+            ranges.Add(found[index] with { Handle = (uint)ranges.Count });
+        }
+
+        return true;
+    }
+
+    private static int _tracedRecordTables;
 
     // The bytes a buffer V# reaches, added as a written range. A swizzled V#, or one that adds
     // the thread id, interleaves its records in groups of up to 64, so it reaches to the end of

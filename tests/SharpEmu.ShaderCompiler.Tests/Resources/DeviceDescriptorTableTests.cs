@@ -173,6 +173,68 @@ public sealed class DeviceDescriptorTableTests
             written.Select(range => (range.Base, range.Size)).ToArray());
     }
 
+    private const ulong Records = 0x2000;
+    private const uint RecordBytes = 504;
+    private const int RecordField = 0x190;
+
+    // Ghost of Tsushima's Hi-Z culler: s[8:11] = [s0:s1] (a buffer of 504-byte records); s12 = a lane's
+    // record index (v_readlane); s13 = s12 * 504; s[4:7] = s_buffer_load_dwordx4 s[8:11], s13 offset:0x190; store.
+    private static Gen5ShaderProgram RecordProgram() => Program(
+        ScalarLoad(0, 0, destination: 8, count: 4),
+        ReadLane(8, 12, 1, 0),
+        Sop2(16, "SMulI32", 13, Gen5Operand.Scalar(12), Operand(RecordBytes)),
+        ScalarBufferLoad(24, 8, destination: 4, count: 4, immediateOffset: RecordField, dynamicOffsetRegister: 13),
+        BufferStore(32, 4),
+        EndProgram(40));
+
+    private static TestWordMemory RecordMemory(uint records)
+    {
+        var memory = new TestWordMemory { Base = Table, Words = new uint[0x800] };
+        memory.At(Table) = (uint)Records;
+        memory.At(Table + 8) = records * RecordBytes;
+        void Descriptor(uint record, uint address, uint stride, uint count)
+        {
+            var at = Records + record * RecordBytes + RecordField;
+            memory.At(at) = address;
+            memory.At(at + 4) = stride << 16;
+            memory.At(at + 8) = count;
+        }
+
+        Descriptor(0, 0x10_0000, 4, 256);
+        Descriptor(1, 0x10_0400, 4, 256);
+        Descriptor(2, 0x30_0000, 0, 0x80);
+        return memory;
+    }
+
+    [Fact]
+    public void RecordFieldAtALostIndex_ReadsEveryRecord()
+    {
+        var plan = Extract(RecordProgram());
+
+        var table = Assert.Single(plan.DeviceDescriptorTables);
+        Assert.False(plan.UnplannedDeviceDescriptorWrites);
+        Assert.NotNull(table.RecordTable);
+        Assert.Equal(RecordBytes, table.RecordStride);
+        Assert.Equal(RecordField, table.FirstImmediate);
+        var written = Written(DeviceAddressRangePlanner.Evaluate(plan, Inputs([(uint)Table, 0], RecordMemory(3).Read)));
+        Assert.All(written, range => Assert.True(range.Planned));
+        // The first two records' buffers touch, so they are one range.
+        Assert.Equal(
+            [(0x10_0000ul, 0x800ul), (0x30_0000ul, 0x80ul)],
+            written.Select(range => (range.Base, range.Size)).ToArray());
+    }
+
+    [Fact]
+    public void RecordTablePastTheCap_StaysUnplanned()
+    {
+        var plan = Extract(RecordProgram());
+        var memory = RecordMemory(3);
+        memory.At(Table + 8) = (DeviceAddressRangePlanner.MaxRecordTableEntries + 1) * RecordBytes;
+
+        var written = Assert.Single(Written(DeviceAddressRangePlanner.Evaluate(plan, Inputs([(uint)Table, 0], memory.Read))));
+        Assert.False(written.Planned);
+    }
+
     // s10 = user data word 2 (a bin index the draw fixes); s12 = s10 * 32; s[4:7] = [s0:s1 + s12]; store.
     private static Gen5ShaderProgram DrawIndexedProgram() => Program(
         Sop2(0, "SMulI32", 12, Gen5Operand.Scalar(2), Operand(32)),
