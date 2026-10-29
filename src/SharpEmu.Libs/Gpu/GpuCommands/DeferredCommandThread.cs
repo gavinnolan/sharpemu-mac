@@ -47,6 +47,12 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         public ulong RangeSize;
         // Resolution jobs submitted before this non-draw item; they finish before it runs.
         public long JobsBefore;
+        // A range item that stores this word over its whole range (PostFill).
+        public bool IsFill;
+        public uint FillValue;
+        // An end-of-pipe label: the GPU writes it once the work before it retires, so a read on the
+        // stream's thread finds the bytes as they are until then (PostLabel).
+        public bool IsLabel;
         public bool Sync;
         public volatile bool Done;
         public Exception? Failure;
@@ -175,9 +181,10 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
         lock (_itemSites)
         {
-            var top = string.Join(",", _itemSites.OrderByDescending(pair => pair.Value).Take(12).Select(pair => $"{pair.Key}={pair.Value}"));
+            var top = string.Join(",", _itemSites.Where(pair => !pair.Key.StartsWith("drain:")).OrderByDescending(pair => pair.Value).Take(12).Select(pair => $"{pair.Key}={pair.Value}"));
+            var drains = string.Join(",", _itemSites.Where(pair => pair.Key.StartsWith("drain:")).OrderByDescending(pair => pair.Value).Take(8).Select(pair => $"{pair.Key}={pair.Value}"));
             _itemSites.Clear();
-            return $" items_by=({top})";
+            return $" items_by=({top}) drains_by=({drains})";
         }
     }
 
@@ -273,11 +280,112 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         Enqueue(item);
     }
 
+    // An end-of-pipe label write: it holds the range only for the program resolutions after it
+    // (PendingRangeHolds); the stream's own reads do not wait for it, as the label lands later.
+    public void PostLabel(Action action, ulong address, ulong size, bool ungated = false)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.IsLabel = size != 0;
+        item.Action = action;
+        item.Address = address;
+        item.RangeSize = size;
+        item.Ungated = ungated && size != 0;
+        item.JobsBefore = _prefetch?.Submitted ?? 0;
+        if (size != 0)
+        {
+            lock (_writeLock)
+            {
+                _pendingRanges.Add(item);
+                _pendingRangeCount = _pendingRanges.Count;
+            }
+        }
+
+        Enqueue(item);
+    }
+
+    // A fill the worker stages as a command-processor write of one repeated word: a read of bytes it
+    // covers, with nothing queued after it over them, is answered from the word without waiting.
+    public void PostFill(Action action, ulong address, ulong size, uint value, bool ungated = false)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.IsFill = size != 0;
+        item.FillValue = value;
+        item.Action = action;
+        item.Address = address;
+        item.RangeSize = size;
+        item.Ungated = ungated && size != 0;
+        item.JobsBefore = _prefetch?.Submitted ?? 0;
+        if (size != 0)
+        {
+            lock (_writeLock)
+            {
+                _pendingRanges.Add(item);
+                _pendingRangeCount = _pendingRanges.Count;
+            }
+        }
+
+        Enqueue(item);
+    }
+
+    /// <summary>
+    /// The bytes as the stream wrote them when the last queued range item over them is a fill that
+    /// covers them all and no queued store overlaps them; false otherwise. Command stream thread.
+    /// </summary>
+    public bool TryReadQueuedFill(ulong address, Span<byte> destination)
+    {
+        if (Volatile.Read(ref _pendingRangeCount) == 0 || destination.IsEmpty)
+        {
+            return false;
+        }
+
+        var size = (ulong)destination.Length;
+        lock (_writeLock)
+        {
+            Item? last = null;
+            foreach (var pending in _pendingRanges)
+            {
+                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                {
+                    last = pending;
+                }
+            }
+
+            if (last is not { IsFill: true } fill ||
+                address < fill.Address || address + size > fill.Address + fill.RangeSize)
+            {
+                return false;
+            }
+
+            foreach (var write in _pendingWrites)
+            {
+                if (address < write.Address + (ulong)write.Data!.Length && write.Address < address + size)
+                {
+                    return false;
+                }
+            }
+
+            Span<byte> word = stackalloc byte[sizeof(uint)];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(word, fill.FillValue);
+            var phase = (int)((address - fill.Address) % sizeof(uint));
+            for (var index = 0; index < destination.Length; index++)
+            {
+                destination[index] = word[(phase + index) % sizeof(uint)];
+            }
+
+            return true;
+        }
+    }
+
     // Runs every queued item when one of them is a fill or copy into this range.
     public void WaitForPendingRange(ulong address, ulong size)
     {
         if (_pendingRangeCount != 0 && OverlapsPendingRange(address, size))
         {
+            if (CountItemSites)
+            {
+                NoteDrainSite(address, size);
+            }
+
             Run(static () => { });
         }
     }
@@ -308,13 +416,37 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         return false;
     }
 
+    // Which read drained the queue, and which queued item held the bytes (SHARPEMU_CTHREAD_ITEM_SITES=1).
+    private void NoteDrainSite(ulong address, ulong size)
+    {
+        var holder = "?";
+        lock (_writeLock)
+        {
+            foreach (var pending in _pendingRanges)
+            {
+                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                {
+                    holder = $"{pending.Action?.Method.Name ?? "?"}:fill={pending.IsFill}:+{pending.RangeSize}";
+                }
+            }
+        }
+
+        var frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+        var callers = string.Join("<", frames.Take(4).Select(frame => frame.GetMethod()?.Name ?? "?"));
+        var name = $"drain:{callers}@{holder}/{size}";
+        lock (_itemSites)
+        {
+            System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_itemSites, name, out _)++;
+        }
+    }
+
     private bool OverlapsPendingRange(ulong address, ulong size)
     {
         lock (_writeLock)
         {
             foreach (var pending in _pendingRanges)
             {
-                if (address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
                 {
                     return true;
                 }

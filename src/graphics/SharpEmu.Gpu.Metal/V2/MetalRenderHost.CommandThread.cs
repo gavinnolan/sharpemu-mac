@@ -95,7 +95,7 @@ internal sealed partial class MetalRenderHost
 
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         var (runs, runWaitMs, spaceWaitMs, items) = thread.TakeCounters();
-        return $"runs={runs} run_wait_ms={runWaitMs.ToString("F1", culture)} space_wait_ms={spaceWaitMs.ToString("F1", culture)} items={items} sites=({TakeSyncSites()}){thread.TakeItemSites()}";
+        return $"runs={runs} run_wait_ms={runWaitMs.ToString("F1", culture)} space_wait_ms={spaceWaitMs.ToString("F1", culture)} items={items} sites=({TakeSyncSites()}) fill_reads={Interlocked.Exchange(ref _queuedFillReads, 0)} fill_image_refusals={Interlocked.Exchange(ref _queuedFillImageRefusals, 0)}{thread.TakeItemSites()}";
     }
 
     private int _idleCommitQueued;
@@ -278,6 +278,16 @@ internal sealed partial class MetalRenderHost
         return string.Join(",", top.Select(pair => $"{pair.Key}={pair.Value}"));
     }
 
+    // A polled word a queued DMA fill writes is the fill's word: the fill lands as a command-processor
+    // write, which is what the stream reads after it. Silent Hill fills a word and waits on it some
+    // 4000 times a second, and each wait ran the whole queue on the worker first, leaving the worker
+    // idle until the stream queued again. SHARPEMU_METAL_V2_QUEUED_FILL_READS=0 runs the queue first again.
+    private long _queuedFillReads;
+    private long _queuedFillImageRefusals;
+
+    private static readonly bool QueuedFillReads =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_QUEUED_FILL_READS") != "0";
+
     // A polled word (WAIT_REG_MEM) on the command thread, read here: as the stream wrote it when a
     // command-processor write still owes it, else from memory. A label still in flight reads as it was,
     // the wait fails and parks, and lands with the commit the idle stream asks for (RequestIdleCommit)
@@ -286,6 +296,17 @@ internal sealed partial class MetalRenderHost
     private bool ReadWaitOperandOnCommandThread(ulong address, Span<byte> destination, bool commitPendingWrite)
     {
         var size = (ulong)destination.Length;
+        if (QueuedFillReads && !_imageCache.MayOwn(address, size) && _commandThread!.TryReadQueuedFill(address, destination))
+        {
+            Interlocked.Increment(ref _queuedFillReads);
+            return true;
+        }
+
+        if (QueuedFillReads && _imageCache.MayOwn(address, size))
+        {
+            Interlocked.Increment(ref _queuedFillImageRefusals);
+        }
+
         _commandThread!.WaitForPendingRange(address, size);
         if (_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size))
         {

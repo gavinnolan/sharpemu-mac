@@ -418,7 +418,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             var queued = write;
             // A label writes its destination and nothing else a program resolution reads.
             var labelBytes = write.Destination == 0 ? 0UL : (ulong)EndOfPipeLabelBytes(write.Kind);
-            _commandThread!.PostRange(() =>
+            _commandThread!.PostLabel(() =>
             {
                 if (PendingLabelsVisible && EndOfPipeLabelBytes(queued.Kind) != 0)
                 {
@@ -1292,8 +1292,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // host fast path, which writes as parsed, is what the ordered path leaves out.
     private const ulong MaxStagedCommandProcessorFillBytes = 4096;
 
-    private void PostFillBufferInOrder(ulong address, ulong size, uint value) =>
-        _commandThread!.PostRange(() => FillBufferInOrder(address, size, value), address, size, UngatedWrites);
+    private void PostFillBufferInOrder(ulong address, ulong size, uint value)
+    {
+        if (size <= MaxStagedCommandProcessorFillBytes && size % sizeof(uint) == 0)
+        {
+            _commandThread!.PostFill(() => FillBufferInOrder(address, size, value), address, size, value, UngatedWrites);
+        }
+        else
+        {
+            _commandThread!.PostRange(() => FillBufferInOrder(address, size, value), address, size, UngatedWrites);
+        }
+    }
 
     /// <summary>A DMA fill of guest memory that lands in record order with the labels.</summary>
     public void FillBufferInOrder(ulong address, ulong size, uint value)

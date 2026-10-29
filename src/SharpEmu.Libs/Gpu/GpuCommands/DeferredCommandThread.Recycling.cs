@@ -73,6 +73,9 @@ public sealed partial class DeferredCommandThread
         item.Failure = null;
         item.IsDraw = false;
         item.Ungated = false;
+        item.IsFill = false;
+        item.IsLabel = false;
+        item.FillValue = 0;
         item.Address = 0;
         item.RangeSize = 0;
         item.JobsBefore = 0;

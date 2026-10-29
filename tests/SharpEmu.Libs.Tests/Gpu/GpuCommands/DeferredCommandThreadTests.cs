@@ -134,6 +134,52 @@ public sealed class DeferredCommandThreadTests
         }
     }
 
+    [Fact]
+    public void AQueuedFillAnswersReadsOfTheBytesItCoversUntilAWriteQueuedAfterItOverlaps()
+    {
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host);
+        var producer = new DeferredCommandThread(queue, host.Memory, _ => { }, null, () => { }, false);
+        using var queued = new ManualResetEventSlim();
+        var inside = new byte[4];
+        var shifted = new byte[2];
+        bool readInside = false, readShifted = false, readPartial = true, readCovered = true, readBehindLabel = false;
+        Assert.True(queue.TryEnqueueControlBarrier(() =>
+        {
+            producer.PostFill(() => { }, 0x1000, 0x10, 0x44332211u, ungated: true);
+            readInside = producer.TryReadQueuedFill(0x1004, inside);
+            readShifted = producer.TryReadQueuedFill(0x1001, shifted);
+            readPartial = producer.TryReadQueuedFill(0x100E, new byte[4]);
+            producer.PostLabel(() => { }, 0x1000, 0x8, ungated: true);
+            readBehindLabel = producer.TryReadQueuedFill(0x1000, new byte[4]);
+            producer.PostRange(() => { }, 0x1008, 0x4, ungated: true);
+            readCovered = producer.TryReadQueuedFill(0x1008, new byte[4]);
+            queued.Set();
+        }, () => { }));
+        producer.Start();
+        try
+        {
+            Assert.True(queued.Wait(TimeSpan.FromSeconds(10)));
+            Assert.True(readInside);
+            Assert.Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 }, inside);
+            Assert.True(readShifted);
+            Assert.Equal(new byte[] { 0x22, 0x33 }, shifted);
+            Assert.False(readPartial);
+            Assert.True(readBehindLabel);
+            Assert.False(readCovered);
+            Assert.True(SpinWait.SpinUntil(() =>
+            {
+                producer.RunBatch(long.MaxValue, 64, () => { });
+                return !producer.TryReadQueuedFill(0x1000, new byte[4]);
+            }, TimeSpan.FromSeconds(10)));
+            producer.ThrowIfFailed();
+        }
+        finally
+        {
+            producer.Stop(() => producer.RunBatch(long.MaxValue, 64, () => { }));
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
