@@ -1252,7 +1252,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             // A colour twin sampled through the depth texture: a same-format view, whose
             // swizzle needs no usage the depth texture lacks.
-            return image.GetOrCreateView(depthView, out resourceId, sameFormatSwizzle: true);
+            return image.GetOrCreateView(depthView, out resourceId);
         }
 
         EnsureViewUsageLocked(image, in request.View);

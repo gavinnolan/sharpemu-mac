@@ -488,7 +488,8 @@ internal sealed class MetalCachedImage : IDisposable
     /// The texture usage a view needs that the texture may lack: pixel-format-view for a
     /// view of another format, unless the two formats are only the sRGB and linear
     /// variants of one format, which Metal views without it; and for a component swizzle,
-    /// which this cache only makes on a texture that has it.
+    /// which this cache makes on a texture that has it (a texture it cannot promote, such as
+    /// a compressed one, still gets a same-format swizzled view: GetOrCreateView).
     /// </summary>
     public ulong UsageNeededFor(in ImageViewDescription requested)
     {
@@ -891,12 +892,7 @@ internal sealed class MetalCachedImage : IDisposable
     }
 
     /// <summary>The view for a request, with its cached gpuResourceID.</summary>
-    /// <param name="sameFormatSwizzle">
-    /// The view keeps the texture's format, and its swizzle is made without the
-    /// pixel-format-view usage: Metal gives a depth texture a same-format swizzled view
-    /// without it (MetalImageCache.DepthTwin.cs).
-    /// </param>
-    public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId, bool sameFormatSwizzle = false)
+    public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ImageViewLookup);
         resourceId = 0;
@@ -924,16 +920,18 @@ internal sealed class MetalCachedImage : IDisposable
         if (viewable && MetalGuestFormats.HasSrgbTwin((MtlPixelFormat)Shape.PixelFormat))
         {
             // A compressed texture has the view usage only for its sRGB/linear twin (see
-            // MetalImageTransfer.UsageOf); any other format or a swizzle stays unviewed, as
-            // before, since Metal raises on a reinterpretation it does not allow.
-            identitySwizzle = true;
+            // MetalImageTransfer.UsageOf); any other format stays unviewed, as before, since
+            // Metal raises on a reinterpretation it does not allow. The twin keeps its swizzle.
             viewable = viewFormat == Shape.PixelFormat ||
                 MetalGuestFormats.AreSrgbTwins((MtlPixelFormat)Shape.PixelFormat, (MtlPixelFormat)viewFormat);
         }
 
-        if (!viewable && !identitySwizzle && !(sameFormatSwizzle && viewFormat == Shape.PixelFormat))
+        // A view that keeps the texture's format may swizzle without the usage (checked under
+        // API validation for depth, BC1/BC4/BC5 and R8): a BC4 mask whose T# replicates R reads
+        // zero in G and B otherwise, which blanks every material layer a shader masks with .g.
+        if (!viewable && !identitySwizzle && viewFormat != Shape.PixelFormat)
         {
-            // Metal raises on a swizzled view of a texture without the usage, so the view
+            // Metal raises on a swizzled reinterpretation of a texture without the usage, so the view
             // reads the components in the texture's own order, and that is reported. The report's
             // key is formatted on every bind, so this image remembers the one it last asked about.
             if (!SwizzleWarningAsked(requested.Mapping))
