@@ -7,7 +7,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 namespace SharpEmu.Gpu.Metal.V2;
 
 /// <summary>
-/// SHARPEMU_METAL_V2_COMMAND_THREAD=1: the command stream is interpreted on a thread of its own
+/// The command stream is interpreted on a thread of its own
 /// (DeferredCommandThread, the Vulkan presenter's command thread), and the GPU worker runs what it
 /// hands over in stream order - the translation's deferred draws and dispatches, and the host calls
 /// the stream makes. The worker no longer reads packets or writes registers: Grand Theft Auto V spent
@@ -19,11 +19,15 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// before it (Run). Command memory is read on the command thread itself unless something the worker
 /// records may own the bytes. A deferred dispatch cannot suspend its packet, so the worker waits for
 /// a compute pipeline's compile in this mode (SupportsPipelineSuspend).
+///
+/// On by default: in Silent Hill's first room the worker sheds the packets and register writes and
+/// the title runs at about 25 fps instead of 23. SHARPEMU_METAL_V2_COMMAND_THREAD=0 interprets the
+/// stream on the worker again.
 /// </summary>
 internal sealed partial class MetalRenderHost
 {
     internal static readonly bool CommandThreadEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD") != "0";
 
     private static readonly bool CommandThreadQosEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD_QOS") == "1";
