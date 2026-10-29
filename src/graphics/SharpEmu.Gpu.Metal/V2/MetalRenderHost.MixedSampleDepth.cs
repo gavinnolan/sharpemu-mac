@@ -86,6 +86,38 @@ internal sealed partial class MetalRenderHost
 
     private nint _mixedDepthLibrary;
     private readonly Dictionary<(ulong Format, uint Samples), nint> _mixedDepthPipelines = [];
+
+    // The proxy's one sample lies at the pixel centre, so a two-sample pass into such a depth target puts its sample 0
+    // there too: the depth a mixed pass tests through the proxy is then the depth the multisampled pass wrote. Ghost of
+    // Tsushima's pampas prepass writes the checkerboard depth with two samples and its G-buffer pass tests EQUAL
+    // against it; with Metal's default pattern (sample 0 at 0.75, 0.75) every sloped plume card came out at another
+    // depth at the centre, failed EQUAL and stayed black, and the write-back moved the depth of the passes after it.
+    // SHARPEMU_METAL_V2_CENTRE_SAMPLE=0 keeps the default pattern.
+    private static readonly bool CentresFirstDepthSample = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CENTRE_SAMPLE") != "0";
+    private static readonly nint SelSetSamplePositions = MetalNative.Selector("setSamplePositions:count:");
+    private static readonly nint SelProgrammableSamplePositions = MetalNative.Selector("areProgrammableSamplePositionsSupported");
+    private bool? _programmableSamplePositions;
+
+    private unsafe void CentreFirstDepthSample(nint descriptor, uint passSamples, nint depthTexture)
+    {
+        if (!CentresFirstDepthSample || passSamples != 2 || depthTexture == 0 || depthTexture == _mixedDepthProxy)
+        {
+            return;
+        }
+
+        _programmableSamplePositions ??= MetalNative.SendBool(_device, SelProgrammableSamplePositions);
+        if (_programmableSamplePositions != true)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "sample-positions",
+                "The device has no programmable sample positions: two-sample depth keeps sample 0 off the pixel centre the mixed-sample proxy reads.");
+            return;
+        }
+
+        // MTLSamplePosition is two floats; sample 1 keeps the default pattern's diagonal from sample 0.
+        var positions = stackalloc float[4] { 0.5f, 0.5f, 0.25f, 0.25f };
+        MetalV2Native.SendVoidArray(descriptor, SelSetSamplePositions, (nint)positions, 2);
+    }
     private nint _mixedDepthStencilState;
     private readonly Dictionary<(ulong Format, uint Width, uint Height), nint> _mixedDepthProxies = [];
     private readonly Dictionary<nint, nint> _mixedStencilViews = [];

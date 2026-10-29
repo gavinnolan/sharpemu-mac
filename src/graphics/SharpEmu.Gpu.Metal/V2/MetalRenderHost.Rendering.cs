@@ -1133,6 +1133,7 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetArrayLength, state.Layers);
             }
 
+            CentreFirstDepthSample(descriptor, state.Samples, depthTexture);
             _tinyPass = IsTinyPass(in state);
             if (PpProbe && _tinyPass)
             {
