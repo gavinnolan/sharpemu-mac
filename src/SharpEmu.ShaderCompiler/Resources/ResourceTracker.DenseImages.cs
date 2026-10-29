@@ -11,6 +11,20 @@ public sealed partial class ResourceTracker
     private const uint MaxDenseIndirectImageEntries = 4096;
     private const uint MaxRecordStride = 0x10000;
 
+    // An offset as the value it adds a constant to, and that constant (zero when it adds none).
+    private static (ScalarValue Core, uint Constant) SplitAddedConstant(ScalarValue offset)
+    {
+        if (offset.Kind == ScalarValueKind.Operation && offset.Operation == ScalarOperation.IAdd32 && offset.Operands.Length == 2)
+        {
+            if (offset.Operands[1].IsConstant)
+                return (offset.Operands[0], offset.Operands[1].ConstantU32);
+            if (offset.Operands[0].IsConstant)
+                return (offset.Operands[1], offset.Operands[0].ConstantU32);
+        }
+
+        return (offset, 0);
+    }
+
     // An image descriptor read from a table at a key-scaled offset: S_LOAD_DWORDX8 from an
     // address pair, or S_BUFFER_LOAD_DWORDX8 through a V# that describes the table. The host
     // enumerates the table's entries and the shader selects among them by the offset it reads at.
@@ -53,6 +67,7 @@ public sealed partial class ResourceTracker
 
             var offset = read.Operands[1];
             uint extra = 0;
+            long? signedExtra = null;
             if (based is null)
             {
                 based = offset;
@@ -79,13 +94,22 @@ public sealed partial class ResourceTracker
                 }
 
                 if (!_graph.Equivalent(inner, based))
-                    return false;
+                {
+                    // Two loads of one descriptor at offsets with the same scaled key and their own constants:
+                    // Ghost of Tsushima's tiled resolve jobs take a record's sampler and the first half of its
+                    // texture in one 8-dword load at key*536+0x80, and the second half at key*536+0xA0.
+                    var (basedCore, basedConstant) = SplitAddedConstant(based);
+                    if (!_graph.Equivalent(inner, basedCore))
+                        return false;
+                    signedExtra = (long)extra - basedConstant;
+                }
             }
 
             var componentOffset = checked((uint)dword * sizeof(uint));
-            if ((ulong)extra + memory.Offset < componentOffset)
+            var immediateWide = (signedExtra ?? extra) + memory.Offset - componentOffset;
+            if (immediateWide < 0 || immediateWide > uint.MaxValue)
                 return false;
-            var immediate = extra + memory.Offset - componentOffset;
+            var immediate = (uint)immediateWide;
             if (dword == 0)
                 tableImmediate = immediate;
             else if (immediate != tableImmediate)
@@ -166,8 +190,11 @@ public sealed partial class ResourceTracker
             }
         }
 
+        // The value graph merges a register's live ranges at joins, so a descriptor dword whose register a
+        // waterfall loop reuses as a lane mask on another path seems to feed that mask; the walk of the
+        // register along the control flow settles whether anything but an image reads what was loaded.
         foreach (var read in reads)
-            if (!UsesOnly(read, [handle]))
+            if (!UsesOnly(read, [handle]) && !HasOnlyImageConsumers(_plan.Memory[read.MemoryIndex], handle))
                 return false;
 
         uint heapSourceIndex;

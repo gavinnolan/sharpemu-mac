@@ -201,6 +201,42 @@ internal static class BufferCandidateTablePlanner
         bool exitGuards = false) =>
         TryProveInductionBound(plan, index, out initial, out step, out limit, out inclusive, out _, exitGuards, signedGuards: false);
 
+    // The counter's start and step alone, for a loop whose bound the branch conditions do not tie to this phi (they were
+    // recorded against the counter's earlier version in a nested loop).
+    internal static bool TryProveInductionStep(ScalarValue index, out ScalarValue initial, out uint step)
+    {
+        initial = null!;
+        step = 0;
+        if (index.Kind != ScalarValueKind.Phi)
+        {
+            return false;
+        }
+
+        ScalarValue? found = null;
+        var initialCount = 0;
+        foreach (var operand in index.Operands)
+        {
+            if (operand is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.IAdd32 } &&
+                (ReferenceEquals(operand.Operands[0], index) || ForwardsIndex(operand.Operands[0], index)) && operand.Operands[1].IsConstant)
+            {
+                step = operand.Operands[1].ConstantU32;
+            }
+            else if (!ReferenceEquals(operand, index))
+            {
+                found = operand;
+                initialCount++;
+            }
+        }
+
+        if (step == 0 || initialCount != 1 || found is null)
+        {
+            return false;
+        }
+
+        initial = found;
+        return true;
+    }
+
     // With signedGuards a signed comparison bounds the counter as well (s_cmp_lt_i32 against an int count, a C for
     // loop); signedLimit then tells the caller to order the counter and the bound as signed values, which a bound
     // below zero (a loop that never runs) needs.
@@ -225,17 +261,21 @@ internal static class BufferCandidateTablePlanner
             return false;
         }
 
+        // An inner loop carries the counter through a phi that only merges it with itself, and the increment at the
+        // outer latch adds to that phi: it is the counter.
+        bool IsIndex(ScalarValue value) => ReferenceEquals(value, index) || ForwardsIndex(value, index);
+
         ScalarValue? found = null;
         var initialCount = 0;
         foreach (var operand in index.Operands)
         {
             if (operand.Kind == ScalarValueKind.Operation && operand.Operation == ScalarOperation.IAdd32)
             {
-                if (ReferenceEquals(operand.Operands[0], index) && operand.Operands[1].IsConstant)
+                if (IsIndex(operand.Operands[0]) && operand.Operands[1].IsConstant)
                 {
                     step = operand.Operands[1].ConstantU32;
                 }
-                else if (ReferenceEquals(operand.Operands[1], index) && operand.Operands[0].IsConstant)
+                else if (IsIndex(operand.Operands[1]) && operand.Operands[0].IsConstant)
                 {
                     step = operand.Operands[0].ConstantU32;
                 }
@@ -419,24 +459,58 @@ internal static class BufferCandidateTablePlanner
 
     // The guard compares either the induction value itself or its next value; both bound
     // the same executed set, so a one-step add of the phi is accepted.
+    // Whether a phi only passes the counter on: every operand, through the phis between them, is the counter itself or
+    // one of those phis - an inner loop's copy of the outer loop's counter, which the increment at the outer latch reads.
+    internal static bool ForwardsIndex(ScalarValue value, ScalarValue index)
+    {
+        if (value.Kind != ScalarValueKind.Phi || ReferenceEquals(value, index))
+        {
+            return false;
+        }
+
+        var visited = new HashSet<ScalarValue> { value };
+        var pending = new Stack<ScalarValue>(value.Operands);
+        while (pending.TryPop(out var operand))
+        {
+            if (ReferenceEquals(operand, index) || !visited.Add(operand))
+            {
+                continue;
+            }
+
+            if (operand.Kind != ScalarValueKind.Phi || visited.Count > 64)
+            {
+                return false;
+            }
+
+            foreach (var inner in operand.Operands)
+            {
+                pending.Push(inner);
+            }
+        }
+
+        return true;
+    }
+
     private static bool MatchesIndex(ShaderResourcePlan plan, ScalarValue operand, ScalarValue index, uint step)
     {
-        if (plan.Graph.Equivalent(operand, index))
+        if (plan.Graph.Equivalent(operand, index) || ForwardsIndex(operand, index))
         {
             return true;
         }
+
+        bool IsIndex(ScalarValue value) => plan.Graph.Equivalent(value, index) || ForwardsIndex(value, index);
 
         if (operand.Kind != ScalarValueKind.Operation || operand.Operation != ScalarOperation.IAdd32)
         {
             return false;
         }
 
-        if (plan.Graph.Equivalent(operand.Operands[0], index) && operand.Operands[1].IsConstant)
+        if (IsIndex(operand.Operands[0]) && operand.Operands[1].IsConstant)
         {
             return operand.Operands[1].ConstantU32 == step;
         }
 
-        if (plan.Graph.Equivalent(operand.Operands[1], index) && operand.Operands[0].IsConstant)
+        if (IsIndex(operand.Operands[1]) && operand.Operands[0].IsConstant)
         {
             return operand.Operands[0].ConstantU32 == step;
         }

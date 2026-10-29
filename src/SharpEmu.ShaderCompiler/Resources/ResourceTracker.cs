@@ -700,9 +700,11 @@ public sealed partial class ResourceTracker
         return InternSource(source);
     }
 
+    private static readonly bool DeepShapes = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DEEP_SHAPES") == "1";
+
     private string DescribeValueShape(ScalarValue value, int depth = 0)
     {
-        if (depth >= 4)
+        if (depth >= (DeepShapes ? 9 : 4))
         {
             return $"{value.Kind}#{value.Id}";
         }
@@ -722,6 +724,11 @@ public sealed partial class ResourceTracker
         if (value.Kind == ScalarValueKind.Undefined && _graph.TryGetUndefinedOrigin(value, out var origin))
         {
             return $"Undefined#{value.Id}({origin.Opcode}@0x{origin.Pc:X})";
+        }
+
+        if (DeepShapes && value.Operands.Length != 0)
+        {
+            return $"{value.Kind}#{value.Id}({string.Join(',', value.Operands.Select(operand => DescribeValueShape(operand, depth + 1)))})";
         }
 
         return $"{value.Kind}#{value.Id}";
@@ -1544,7 +1551,8 @@ public sealed partial class ResourceTracker
 
             if (TryMakeIndirectImage(handle, memory.Pc, out var plan) ||
                 TryMakeDenseIndirectImage(handle, memory.Pc, out plan) ||
-                TryMakeDirectImage(handle, out plan))
+                TryMakeDirectImage(handle, out plan) ||
+                TryMakeChainedDirectImage(handle, out plan))
             {
                 _indirectImages.Add(plan);
             }
