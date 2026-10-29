@@ -451,7 +451,39 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // Comparing texel pitches skipped every such read, and the pool kept stale tiles.
     internal static bool SameTexelLayout(in ImageDescription a, in ImageDescription b) =>
         a.TileMode == b.TileMode && a.BytesPerBlock == b.BytesPerBlock &&
-        (ulong)a.BlockExtent.Width * a.BytesPerBlock == (ulong)b.BlockExtent.Width * b.BytesPerBlock;
+        ((ulong)a.BlockExtent.Width * a.BytesPerBlock == (ulong)b.BlockExtent.Width * b.BytesPerBlock ||
+         IsOneLevelOf(in a, in b) || IsOneLevelOf(in b, in a));
+
+    // A one-level image placed where a later level of a mip chain starts in one of its layers, with that level's rows,
+    // is that level: Ghost of Tsushima's probe encoder writes each BC6H level of its 256x256 cube faces through an
+    // R32G32B32A32Uint image of the level's blocks (mip 1 is 32x32 at +0x2000 of each face). Set against the chain's
+    // first level, every level past it read as a mismatch, the sampled cube kept an empty mip 1, and the menu katana
+    // reflected black.
+    private static bool IsOneLevelOf(in ImageDescription level, in ImageDescription chain)
+    {
+        if (level.Resources.Levels != 1 || chain.Resources.Levels < 2 || chain.Resources.Layers == 0 ||
+            level.Data.Address < chain.Data.Address || level.Data.End > chain.Data.End ||
+            chain.Data.Size % chain.Resources.Layers != 0)
+        {
+            return false;
+        }
+
+        var sliceStride = chain.Data.Size / chain.Resources.Layers;
+        var delta = level.Data.Address - chain.Data.Address;
+        var shift = chain.IsBlock ? 2 : 0;
+        for (var mip = 1; mip < (int)chain.Resources.Levels; mip++)
+        {
+            var layout = chain.MipLayout[mip];
+            var start = layout.Offset + layout.TailOffset;
+            if (layout.Size != 0 && delta >= start && (delta - start) % sliceStride == 0 &&
+                (ulong)(layout.Pitch >> shift) * chain.BytesPerBlock == (ulong)level.BlockExtent.Width * level.BytesPerBlock)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Makes this image the one that agrees with guest memory, against every other
