@@ -38,16 +38,12 @@ public static partial class AgcExports
 
         var hasAddress = (eventType & ~1u) == 0x38;
         var packetDwords = hasAddress ? 4u : 2u;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItEventWrite, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, hasAddress ? eventType | 0x100u : eventType & 0x3Fu))
+        Span<uint> packet = stackalloc uint[4]
         {
-            return ReturnPointer(ctx, 0);
-        }
-
-        if (hasAddress &&
-            (!TryWriteUInt32(ctx, commandAddress + 8, (uint)eventAddress & ~7u) ||
-             !TryWriteUInt32(ctx, commandAddress + 12, (uint)(eventAddress >> 32))))
+            Pm4(packetDwords, ItEventWrite, 0), hasAddress ? eventType | 0x100u : eventType & 0x3Fu,
+            (uint)eventAddress & ~7u, (uint)(eventAddress >> 32),
+        };
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, packet[..(int)packetDwords]))
         {
             return ReturnPointer(ctx, 0);
         }

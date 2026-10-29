@@ -147,6 +147,18 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
         return result;
     }
 
+    public bool TryWritePair(ulong firstAddress, ReadOnlySpan<byte> first, ulong secondAddress, ReadOnlySpan<byte> second)
+    {
+        var result = _inner.TryWritePair(firstAddress, first, secondAddress, second);
+        if (!result)
+        {
+            // Diagnostic only: the pair does not say which of its writes failed.
+            LastFailure = new CpuMemoryAccessFailure(firstAddress, first.Length, isWrite: true);
+        }
+
+        return result;
+    }
+
     public bool TryCompare(
         ulong virtualAddress,
         ReadOnlySpan<byte> expected,

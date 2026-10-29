@@ -60,7 +60,9 @@ public sealed partial class MetalImageTransferTests
             pixelFormat, Mtl.TextureType2D, 64, 64, 1, 1, 1, 1,
             (ulong)MetalImageTransfer.UsageOf(description, (MtlPixelFormat)pixelFormat));
         var texture = harness.Texture(shape);
-        var image = new MetalCachedImage(in description, in shape, texture);
+        // The harness and cached image each own a reference; dispose the image first.
+        MetalNative.SendVoid(texture, MetalNative.Selector("retain"));
+        using var image = new MetalCachedImage(in description, in shape, texture);
 
         var request = new ImageViewDescription(
             viewFormat, GpuImageViewType.Type2D, GpuImageAspect.ColorBit, 0, 1, 0, 1, default, GpuImageUsage.SampledBit);

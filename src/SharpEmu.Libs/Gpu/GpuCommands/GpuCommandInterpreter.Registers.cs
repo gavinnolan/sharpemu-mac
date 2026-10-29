@@ -154,7 +154,20 @@ public sealed partial class GpuCommandInterpreter
             Registers.Shader[offset + index] = payload[1 + (int)index];
         }
 
-        return RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count)) + 1;
+        var consumed = RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count));
+        if (GpuResourceOrigin.Enabled)
+        {
+            // The direct writer applied the whole packet before this historical state is sampled.
+            for (var register = GpuResourceOrigin.PointerLow; register <= GpuResourceOrigin.PointerHigh; register++)
+            {
+                if (register < offset || register - offset >= consumed) continue;
+                var entry = register - offset;
+                GpuResourceOrigin.Record(QueueId, SubmitId, in packet, false,
+                    packet.PacketAddress + 8 + (ulong)entry * sizeof(uint), register, register,
+                    payload[1 + (int)entry], entry, count, TypedRegisters);
+            }
+        }
+        return consumed + 1;
     }
 
     internal uint SetUserConfigRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
@@ -246,8 +259,10 @@ public sealed partial class GpuCommandInterpreter
         if (bank == RegisterBank.Context && ScissorTrace.Instance is { Active: true } scissorTrace)
             scissorTrace.RegisterTable(TypedRegisters, SubmitId, QueueId, in packet, tableAddress, count);
 
-        Span<byte> tableBlock = stackalloc byte[entriesPerBlock * entryBytes];
-        Span<byte> beforeSynchronization = stackalloc byte[entriesPerBlock * entryBytes];
+        // Both are zeroed when allocated: a table is usually a few dozen entries, so the block is sized
+        // to it, and the unsynchronized copy exists only for the table trace.
+        Span<byte> tableBlock = stackalloc byte[(int)Math.Min(count, (uint)entriesPerBlock) * entryBytes];
+        Span<byte> beforeSynchronization = TraceRegisterTables ? stackalloc byte[entriesPerBlock * entryBytes] : default;
         for (var index = 0u; index < count; index++)
         {
             var blockEntry = (int)(index % entriesPerBlock);
@@ -320,6 +335,9 @@ public sealed partial class GpuCommandInterpreter
 
                     Registers.Shader[offset] = value;
                     RegisterWriteTable.WriteShaderEntry(TypedRegisters, offset, value, tableAddress);
+                    if (GpuResourceOrigin.Enabled && offset >= GpuResourceOrigin.PointerLow && offset <= GpuResourceOrigin.PointerHigh)
+                        GpuResourceOrigin.Record(QueueId, SubmitId, in packet, true,
+                            tableAddress + (ulong)index * entryBytes + sizeof(uint), offset, rawOffset, value, index, count, TypedRegisters);
                     break;
                 case RegisterBank.UserConfig:
                     if (offset == RegisterBankLayout.UserConfigNop)

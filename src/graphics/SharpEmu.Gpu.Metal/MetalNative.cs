@@ -4,6 +4,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.ShaderCompiler.Metal;
 
 namespace SharpEmu.Gpu.Metal;
 
@@ -278,16 +279,36 @@ internal static partial class MetalNative
 
     /// <summary>
     /// The compile options every translated-guest MSL library is built with: fast
-    /// math off, because the translated GCN float semantics do not survive it, an
-    /// explicit language version so MSL 3.1+ features are available, and invariance
-    /// preserved, so a [[position, invariant]] output is computed the same way in every
-    /// program (a depth-EQUAL pass against a prepass depends on it).
+    /// math off, because the translated GCN float semantics do not survive it, with the
+    /// relaxed math mode on top (<see cref="MslMathMode"/>: contraction and reassociation
+    /// allowed, NaN and infinity kept, library functions precise), an explicit language
+    /// version so MSL 3.1+ features are available, and invariance preserved, so a
+    /// [[position, invariant]] output is computed the same way in every program (a
+    /// depth-EQUAL pass against a prepass depends on it).
     /// </summary>
     public static void ApplyMslCompileOptions(nint options)
     {
         SendVoidBool(options, Selector("setFastMathEnabled:"), false);
+        ApplyMslMathMode(options, MslMathMode.Default);
         SendVoidBool(options, Selector("setPreserveInvariance:"), true);
         SetMslLanguageVersion(options);
+    }
+
+    /// <summary>Sets the math mode on a compile options object; a driver without the
+    /// MSL 3.2 math-mode selectors keeps the safe mode setFastMathEnabled: false asked for.</summary>
+    public static void ApplyMslMathMode(nint options, nuint mode)
+    {
+        if (mode == MslMathMode.Safe ||
+            !SendBool(options, Selector("respondsToSelector:"), Selector("setMathMode:")))
+        {
+            return;
+        }
+
+        SendVoidNUInt(options, Selector("setMathMode:"), mode);
+        if (SendBool(options, Selector("respondsToSelector:"), Selector("setMathFloatingPointFunctions:")))
+        {
+            SendVoidNUInt(options, Selector("setMathFloatingPointFunctions:"), MslMathMode.FunctionsPrecise);
+        }
     }
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

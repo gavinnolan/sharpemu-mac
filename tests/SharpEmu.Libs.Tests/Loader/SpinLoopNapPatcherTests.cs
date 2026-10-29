@@ -341,6 +341,188 @@ public sealed unsafe class SpinLoopNapPatcherTests
         }
     }
 
+    // do { dec ecx ; jz exit ; pause ; jmp short loop ; <alignment nop> } : the compiled shape of `while (!flag) pause;`.
+    // The jump is 4 bytes with the pause, one short of the 5-byte patch jump, so the pass takes the nop after it.
+    private static byte[] PauseJmpLoop() =>
+    [
+        0xB9, 0x04, 0x00, 0x00, 0x00, // 0: mov ecx, 4
+        0xFF, 0xC9,                   // 5: loop: dec ecx
+        0x74, 0x07,                   // 7: jz exit (next ip 9, +7 -> 16)
+        0xF3, 0x90,                   // 9: pause
+        0xEB, 0xF8,                   // 11: jmp short loop (next ip 13, -8 -> 5)
+        0x0F, 0x1F, 0x00,             // 13: nop dword [rax] (alignment padding)
+        0xB8, 0x44, 0x33, 0x22, 0x11, // 16: exit: mov eax, 0x11223344
+        0xC3,                         // 21: ret
+    ];
+
+    [Fact]
+    public void PatchesAPauseJmpLoopByTakingTheAlignmentNopsAfterTheJump()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var image = SpinImage.Create(PauseJmpLoop());
+        Assert.Equal(1, image.Result.PauseSites);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0, image.Result.UnrelocatableSites);
+        Assert.Equal(0xE9, image.ReadByte(9)); // the pause is now a jmp into the trampoline
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void LeavesAPauseJmpLoopAloneWhenTheShapeSwitchIsOff()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var _ = EnvironmentVariableScope.Set(SpinNapRuntime.WideShapesEnvironmentVariable, "0");
+        using var image = SpinImage.Create(PauseJmpLoop());
+        Assert.Equal(0, image.Result.PatchedSites);
+        Assert.Equal(1, image.Result.UnrelocatableSites);
+        Assert.Equal(0xF3, image.ReadByte(9));
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void DoesNotTakeABranchTargetAsLoopPadding()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // The same loop, but the exit branch lands on the nop that follows the jump: it is live code, not padding.
+        byte[] function =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00, // 0: mov ecx, 4
+            0xFF, 0xC9,                   // 5: loop: dec ecx
+            0x74, 0x04,                   // 7: jz 13 (next ip 9, +4)
+            0xF3, 0x90,                   // 9: pause
+            0xEB, 0xF8,                   // 11: jmp short loop
+            0x0F, 0x1F, 0x00,             // 13: nop dword [rax] (a branch target)
+            0xB8, 0x44, 0x33, 0x22, 0x11, // 16: mov eax, 0x11223344
+            0xC3,                         // 21: ret
+        ];
+
+        using var image = SpinImage.Create(function);
+        Assert.Equal(0, image.Result.PatchedSites);
+        Assert.Equal(0xF3, image.ReadByte(9));
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    private const int HoistedTableOffset = 0x2000;
+    private const int HoistedPauseOffset = 40;
+
+    // switch (kind) inside a spin loop, as clang -O2 compiles it: the table base is hoisted out of the loop into
+    // a callee-saved register, and the bounds check is a 64-bit compare of the zero-extended selector. The
+    // dispatch is only recognised by the wide-shape rule. `clobberAfterEpiloguePop` adds a second write of r12
+    // (a mov after the pop), which must make the pass distrust the hoisted base.
+    private static (byte[] Code, byte[] Table) HoistedSwitchSpinLoop(bool clobberAfterEpiloguePop = false)
+    {
+        var code = new List<byte>();
+        code.AddRange([0x41, 0x54]);                                // push r12
+        var tableLoad = code.Count;
+        code.AddRange([0x4C, 0x8D, 0x25, 0, 0, 0, 0]);              // lea r12, [rip + table]
+        code.AddRange([0xB9, 0x03, 0x00, 0x00, 0x00]);              // mov ecx, 3
+        var loop = code.Count;
+        code.AddRange([0xB8, 0x01, 0x00, 0x00, 0x00]);              // loop: mov eax, 1   (the selector)
+        code.AddRange([0x48, 0x83, 0xF8, 0x01]);                    // cmp rax, 1
+        var boundsBranch = code.Count;
+        code.AddRange([0x77, 0x00]);                                // ja exit
+        code.AddRange([0x49, 0x63, 0x04, 0x84]);                    // movsxd rax, [r12 + rax*4]
+        code.AddRange([0x4C, 0x01, 0xE0]);                          // add rax, r12
+        code.AddRange([0xFF, 0xE0]);                                // jmp rax
+        var case0 = code.Count;
+        var case0Jump = code.Count;
+        code.AddRange([0xEB, 0x00]);                                // case 0: jmp short exit
+        var case1 = code.Count;
+        code.AddRange([0xFF, 0xC9]);                                // case 1: dec ecx
+        var exitBranch = code.Count;
+        code.AddRange([0x74, 0x00]);                                // jz exit
+        var pause = code.Count;
+        code.AddRange([0xF3, 0x90]);                                // pause
+        code.AddRange([0xEB, unchecked((byte)(loop - (code.Count + 2)))]);     // jmp short loop
+        code.AddRange([0x0F, 0x1F, 0x00]);                          // nop dword [rax]
+        var exit = code.Count;
+        code.AddRange([0xB8, 0x44, 0x33, 0x22, 0x11]);              // exit: mov eax, 0x11223344
+        code.AddRange([0x41, 0x5C]);                                // pop r12 (epilogue)
+        if (clobberAfterEpiloguePop)
+        {
+            code.AddRange([0x45, 0x31, 0xE4]);                      // xor r12d, r12d
+        }
+
+        code.Add(0xC3);                                             // ret
+        code[boundsBranch + 1] = (byte)(exit - (boundsBranch + 2));
+        code[case0Jump + 1] = (byte)(exit - (case0Jump + 2));
+        code[exitBranch + 1] = (byte)(exit - (exitBranch + 2));
+        var bytes = code.ToArray();
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(tableLoad + 3), HoistedTableOffset - (tableLoad + 7));
+        Assert.Equal(HoistedPauseOffset, pause);
+        var table = new byte[2 * sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(table.AsSpan(0), case0 - HoistedTableOffset);
+        BinaryPrimitives.WriteInt32LittleEndian(table.AsSpan(4), case1 - HoistedTableOffset);
+        return (bytes, table);
+    }
+
+    [Fact]
+    public void PatchesASpinLoopInAFunctionWithAHoistedJumpTableBase()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var (code, table) = HoistedSwitchSpinLoop();
+        using var image = SpinImage.Create(code, readOnlyData: (HoistedTableOffset, table));
+        Assert.Equal(1, image.Result.PauseSites);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0xE9, image.ReadByte(HoistedPauseOffset));
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void LeavesTheSpinLoopAloneWhenTheHoistedTableRegisterIsWrittenAgain()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var (code, table) = HoistedSwitchSpinLoop(clobberAfterEpiloguePop: true);
+        using var image = SpinImage.Create(code, readOnlyData: (HoistedTableOffset, table));
+        Assert.Equal(0, image.Result.PatchedSites);
+        Assert.Equal(1, image.Result.UnrelocatableSites);
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void LeavesTheSpinLoopAloneWhenTheShapeSwitchIsOff()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var _ = EnvironmentVariableScope.Set(SpinNapRuntime.WideShapesEnvironmentVariable, "0");
+        var (code, table) = HoistedSwitchSpinLoop();
+        using var image = SpinImage.Create(code, readOnlyData: (HoistedTableOffset, table));
+        Assert.Equal(0, image.Result.PatchedSites);
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    private sealed class EnvironmentVariableScope : IDisposable
+    {
+        private readonly string _name;
+        private readonly string? _previous;
+
+        private EnvironmentVariableScope(string name, string? previous)
+        {
+            _name = name;
+            _previous = previous;
+        }
+
+        public static EnvironmentVariableScope Set(string name, string value)
+        {
+            var scope = new EnvironmentVariableScope(name, Environment.GetEnvironmentVariable(name));
+            Environment.SetEnvironmentVariable(name, value);
+            return scope;
+        }
+
+        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
+    }
+
     private sealed class SpinImage : IDisposable
     {
         private const ulong ImageSize = 0x10000;
@@ -362,7 +544,7 @@ public sealed unsafe class SpinLoopNapPatcherTests
         public GuestRedZonePatcher.SpinPatchResult Result { get; }
 
         public static SpinImage Create(byte[] function, bool locked = false, byte[]? lockedProbe = null,
-            ulong reserveAt = 0, ulong reservedSize = 0)
+            ulong reserveAt = 0, ulong reservedSize = 0, (ulong Offset, byte[] Bytes)? readOnlyData = null)
         {
             var memory = new PhysicalVirtualMemory();
             const ulong holeSize = 0x4000000;
@@ -378,12 +560,17 @@ public sealed unsafe class SpinLoopNapPatcherTests
             BinaryPrimitives.WriteUInt32LittleEndian(exceptionFrameHeader.AsSpan(12), 1);
             BinaryPrimitives.WriteUInt64LittleEndian(exceptionFrameHeader.AsSpan(16), imageBase);
             Assert.True(memory.TryWrite(imageBase + 0x1000, exceptionFrameHeader));
-            ProgramHeader[] headers =
-            [
+            var headers = new List<ProgramHeader>
+            {
                 CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
                     0, (ulong)function.Length),
                 CreateProgramHeader(ProgramHeaderType.GnuEhFrame, ProgramHeaderFlags.Read, 0x1000, (ulong)exceptionFrameHeader.Length),
-            ];
+            };
+            if (readOnlyData is { } table)
+            {
+                Assert.True(memory.TryWrite(imageBase + table.Offset, table.Bytes));
+                headers.Add(CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read, table.Offset, (ulong)table.Bytes.Length));
+            }
 
             GuestRedZonePatcher.SpinNapArena? arena = null;
             if (reservedSize != 0)

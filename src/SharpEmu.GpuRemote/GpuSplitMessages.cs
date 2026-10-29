@@ -377,6 +377,21 @@ public struct BarrierRequest
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public struct FrameBoundaryMessage
+{
+    /// <summary>A's number for the boundary; the matching <see cref="FrameBoundaryWaitRequest"/> names it.</summary>
+    public ulong Ticket;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct FrameBoundaryWaitRequest
+{
+    /// <summary>Split records A had written once the boundary was on the ring.</summary>
+    public ulong Barrier;
+    public ulong Ticket;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public struct IdleOutcomeResponse
 {
     /// <summary>The <c>IdleOutcome</c> value.</summary>
@@ -489,6 +504,12 @@ public struct ReserveFlipResponse
     /// <summary>A's <c>IsHdrOutputRequested</c> after the reservation.</summary>
     public uint HdrRequested;
     public ulong RequestId;
+
+    /// <summary>
+    /// The display buffer the flip names, read with the reservation so the GPU process does not
+    /// ask for it in a second call (<see cref="DisplayBufferResponse.Found"/> is zero when none).
+    /// </summary>
+    public DisplayBufferResponse Buffer;
 }
 
 [StructLayout(LayoutKind.Sequential)]

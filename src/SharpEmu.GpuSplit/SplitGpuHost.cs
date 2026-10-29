@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Versioning;
 using System.Text;
@@ -47,6 +48,13 @@ public sealed record SplitGpuHostOptions
 
     /// <summary>How often the window's input (<see cref="HostWindowInput"/>) is checked for changes; zero sends none.</summary>
     public TimeSpan InputPollInterval { get; init; } = TimeSpan.FromMilliseconds(4);
+
+    /// <summary>
+    /// The input thread waits for a change instead of polling every <see cref="InputPollInterval"/>
+    /// (which then only spaces consecutive messages). SHARPEMU_SPLIT_INPUT_POLL=1 turns it off.
+    /// </summary>
+    public bool InputWakeOnChange { get; init; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_INPUT_POLL") != "1";
 }
 
 /// <summary>What the backend is composed over in the GPU process.</summary>
@@ -103,6 +111,8 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
     private SplitSharedState? _state;
     private readonly object _barrierGate = new();
     private readonly ConcurrentDictionary<ulong, WorkerBracket> _brackets = new();
+    // Frame boundaries the ring thread queued, by A's ticket, until A's wait call takes them.
+    private readonly ConcurrentDictionary<ulong, (IdleOutcome Outcome, Func<IdleOutcome>? Wait)> _frameBoundaries = new();
     private SplitGuestMemory? _guestMemory;
     private RemoteGuestAddressSpace? _space;
     private GuestGpuMemory? _memory;
@@ -258,6 +268,20 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 _options.ConfigureVideo?.Invoke(SplitConvert.FromWire(GpuSplitWire.Read<VideoOptionsWire>(payload)));
                 break;
 
+            case GpuRemoteMessage.FrameBoundary:
+            {
+                // In ring order, behind the submissions A sent before it; A's wait call collects it.
+                // A session shutting down leaves the whole SubmitDone (its worker teardown) to the call thread.
+                var message = GpuSplitWire.Read<FrameBoundaryMessage>(payload);
+                var space = _space!;
+                Func<IdleOutcome>? wait = () => backend.SubmitDone(space);
+                var outcome = HostSessionControl.IsShutdownRequested
+                    ? IdleOutcome.Completed
+                    : backend.BeginSubmitDone(space, out wait);
+                _frameBoundaries[message.Ticket] = (outcome, wait);
+                break;
+            }
+
             default:
                 Report($"Ignoring split record type {type} ({payload.Length} bytes).");
                 break;
@@ -291,7 +315,10 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             _ = _guestMemory.Replica.Sync(start.ViewLogSequence);
             _space = new RemoteGuestAddressSpace(
                 _guestMemory.Mirror, _guestMemory.Translator, _guestMemory.Replica, _guestMemory.ChunkBytes,
-                _guestMemory.ObjectBytes, this, _state);
+                _guestMemory.ObjectBytes, this, _state)
+            {
+                PendingWritebacks = PendingWritebackPages.Enabled ? new PendingWritebackPages(_state) : null,
+            };
             _memory = new GuestGpuMemory(_space);
             _bridge = new RemoteVideoOutBridge(this, titleId, start.HdrRequested != 0);
             if (_options.InstallGlobals)
@@ -438,6 +465,22 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                     }
 
                     var outcome = _backend!.SubmitDone(_space!);
+                    return GpuSplitWire.Write(response, new IdleOutcomeResponse { Outcome = (int)outcome });
+                }
+
+                case GpuRemoteSyncOpcode.WaitFrameBoundary:
+                {
+                    var call = GpuSplitWire.Read<FrameBoundaryWaitRequest>(request);
+                    if (!WaitForRecords(call.Barrier, LongWait) ||
+                        !_frameBoundaries.TryRemove(call.Ticket, out var boundary))
+                    {
+                        status = GpuSplitStatus.Failed;
+                        return 0;
+                    }
+
+                    var outcome = boundary.Outcome == IdleOutcome.Completed && boundary.Wait is { } wait
+                        ? wait()
+                        : boundary.Outcome;
                     return GpuSplitWire.Write(response, new IdleOutcomeResponse { Outcome = (int)outcome });
                 }
 
@@ -725,7 +768,9 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
         where TResponse : unmanaged
     {
         response = default;
-        if (!CallGuest(opcode, GpuSplitWire.Bytes(in request), out var answer, out var length))
+        // The answer's size is the response type's, so it fits the stack: no buffer per call.
+        Span<byte> answer = stackalloc byte[Unsafe.SizeOf<TResponse>()];
+        if (!CallGuest(opcode, GpuSplitWire.Bytes(in request), answer, out var length))
         {
             return false;
         }
@@ -743,6 +788,18 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
     internal bool CallGuest(GpuRemoteReverseOpcode opcode, ReadOnlySpan<byte> request, out byte[] response, out int length)
     {
         response = Array.Empty<byte>();
+        var buffer = new byte[_channel.ReverseSyncCalls.PayloadCapacity];
+        if (!CallGuest(opcode, request, buffer, out length))
+        {
+            return false;
+        }
+
+        response = buffer;
+        return true;
+    }
+
+    private bool CallGuest(GpuRemoteReverseOpcode opcode, ReadOnlySpan<byte> request, Span<byte> response, out int length)
+    {
         length = 0;
         if (t_onRingThread)
         {
@@ -750,8 +807,7 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             return false;
         }
 
-        var buffer = new byte[_channel.ReverseSyncCalls.PayloadCapacity];
-        var result = _channel.ReverseSyncCalls.Call((uint)opcode, request, buffer, out length, out var code, ReverseTimeoutNanoseconds);
+        var result = _channel.ReverseSyncCalls.Call((uint)opcode, request, response, out length, out var code, ReverseTimeoutNanoseconds);
         if (result != SyncCallStatus.Completed || code != GpuSplitStatus.Ok)
         {
             if (result != SyncCallStatus.PeerExited)
@@ -762,7 +818,6 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             return false;
         }
 
-        response = buffer;
         return true;
     }
 
@@ -797,6 +852,8 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
 
     private const int ReplicaFollowMilliseconds = 100;
 
+    private static readonly TimeSpan IdleCheck = TimeSpan.FromMilliseconds(250);
+
     private void StartInputPoll()
     {
         if (_options.InputPollInterval <= TimeSpan.Zero)
@@ -811,18 +868,42 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
     // The window lives here; the guest process's pad and keyboard exports read its state there.
     private unsafe void PollInput()
     {
+        // The thread sleeps on the input state's change signal instead of waking every interval to
+        // look: a change goes out at once when the last message is at least one interval old and
+        // otherwise at the interval's end (the old poll's rate and worst case, coalescing a burst of
+        // events into one message), and an idle window costs a wake-up per IdleCheck, only to see
+        // whether the peer is still there. SHARPEMU_SPLIT_INPUT_POLL=1 keeps the fixed-interval poll.
         var interval = _options.InputPollInterval;
         var sent = long.MinValue;
+        var lastSend = Stopwatch.GetTimestamp() - Stopwatch.Frequency;
         Span<int> keys = stackalloc int[InputMessage.MaxKeys];
         while (!_stopping && _channel.IsPeerAlive)
         {
-            Thread.Sleep(interval);
+            if (_options.InputWakeOnChange)
+            {
+                if (!HostWindowInput.WaitForChange(sent, IdleCheck))
+                {
+                    continue;
+                }
+
+                var sinceLast = Stopwatch.GetElapsedTime(lastSend);
+                if (sinceLast < interval)
+                {
+                    Thread.Sleep(interval - sinceLast);
+                }
+            }
+            else
+            {
+                Thread.Sleep(interval);
+            }
+
             var version = HostWindowInput.Version;
             if (version == sent)
             {
                 continue;
             }
 
+            lastSend = Stopwatch.GetTimestamp();
             sent = version;
             var count = HostWindowInput.CopyState(keys, out var focused, out var gamepad, out var name);
             var message = new InputMessage

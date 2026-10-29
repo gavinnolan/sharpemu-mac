@@ -28,6 +28,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
     private readonly VertexTableMetadataCache _vertexTables = new();
+    // The content hashes of the shaders that declare none, so a draw does not hash their code again.
+    private readonly ShaderIdentityMemo _identities = new();
     // The last user data array of each graphics stage, kept under _resolveGate.
     private uint[]? _vertexUserData;
     private uint[]? _pixelUserData;
@@ -38,8 +40,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // Nothing writes a resolved draw's arrays.
     private Gen5PixelOutputBinding[] _lastBoundOutputs = [];
     private readonly PixelInputArrays _pixelInputArrays = new();
-    private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
-    private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _gate = new();
     // The options of each stage's lookup, refilled under _gate (StageCompileOptions.Detached).
@@ -47,9 +49,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly StageCompileOptions _pixelOptions = StageCompileOptions.CreateReusable();
     private readonly StageCompileOptions _computeOptions = StageCompileOptions.CreateReusable();
     private readonly StageCompileOptions _hullOptions = StageCompileOptions.CreateReusable();
-    // The pipeline maps: a lookup takes this lock or _gate, an addition both; a cached draw so does
-    // not wait for the program preparation a resolving thread holds _gate for.
-    private readonly object _pipelineGate = new();
+    // The pipeline maps are concurrent: a lookup takes no lock, so a cached draw does not wait for the
+    // program preparation a resolving thread holds _gate for, and an addition holds _gate.
     private readonly bool _strictShaders = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
     private readonly bool _skipRayTracing = Environment.GetEnvironmentVariable("SHARPEMU_SKIP_RT") == "1";
     private readonly HashSet<(ShaderStage Stage, ulong Hash, uint CodeSize)> _reportedShaderSkips = [];
@@ -187,7 +188,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             _host.SynchronizeShaderCode(address, sizeBytes);
         }
 
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, ranges, label);
+        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, ranges, label, _identities);
         var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, ref userDataMemo);
         if (stage == ShaderStage.Mesh && registered.IsFused)
         {
@@ -219,7 +220,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
     // the program, decode and materialization caches it updates are used under this lock only.
-    // A pipeline lookup takes _pipelineGate instead, so it does not wait for a resolution.
+    // A pipeline lookup takes no lock, so it does not wait for a resolution.
     private readonly object _resolveGate = new();
 
     public GraphicsPrograms GetGraphicsPrograms(
@@ -467,13 +468,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 throw GpuFatal.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
             }
 
+            // Each bound target is resolved once for the draw: the three questions below ask about the same
+            // targets, and every resolution hands back a request of several hundred bytes.
+            Span<uint> boundSlots = stackalloc uint[(int)ContextRegisters.ColorTargetCount];
+            Span<GpuExtent2D> boundExtents = stackalloc GpuExtent2D[(int)ContextRegisters.ColorTargetCount];
+            var boundCount = ResolveBoundSlots(context, boundSlots, boundExtents);
+            boundSlots = boundSlots[..boundCount];
+            boundExtents = boundExtents[..boundCount];
             dropUnwritten = depthBound ||
-                LeavesSingleDualSourceTarget(context, targetExportMapping, pixelProgram.PixelColorExportMasks) ||
-                UnwrittenTargetBoundsRenderArea(context, targetExportMapping, pixelProgram.PixelColorExportMasks);
+                LeavesSingleDualSourceTarget(context, targetExportMapping, pixelProgram.PixelColorExportMasks, boundSlots) ||
+                UnwrittenTargetBoundsRenderArea(context, targetExportMapping, pixelProgram.PixelColorExportMasks, boundSlots, boundExtents);
             Span<byte> outputModes = stackalloc byte[PixelInputInfo.TargetCount];
             Span<ColorComponentMap> outputMappings = stackalloc ColorComponentMap[PixelInputInfo.TargetCount];
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
-                outputModes, outputMappings);
+                boundSlots, outputModes, outputMappings);
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount,
                 depthAspectBound, stencilAspectBound, _pixelInputArrays);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
@@ -632,18 +640,23 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
     // was rebuilt with LINQ on every draw.
-    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, uint[]> InterpolatedAttributeCache = new();
+    private sealed record PixelProgramAnalysis(uint[] Attributes, uint PerVertexAttributes);
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, PixelProgramAnalysis> InterpolatedAttributeCache = new();
 
     internal uint[] GetPixelAttributes(Gen5ShaderProgram program) => InterpolatedAttributesOf(program);
 
-    internal static uint[] InterpolatedAttributesOf(Gen5ShaderProgram program) =>
-        InterpolatedAttributeCache.GetValue(program, static program => program.Instructions
-            .Select(static instruction => instruction.Control)
-            .OfType<Gen5InterpolationControl>()
-            .Select(static control => control.Attribute)
-            .Distinct()
-            .Order()
-            .ToArray());
+    internal static uint[] InterpolatedAttributesOf(Gen5ShaderProgram program) => PixelAnalysisOf(program).Attributes;
+
+    private static PixelProgramAnalysis PixelAnalysisOf(Gen5ShaderProgram program) =>
+        InterpolatedAttributeCache.GetValue(program, static program => new PixelProgramAnalysis(
+            program.Instructions.Select(static instruction => instruction.Control)
+                .OfType<Gen5InterpolationControl>()
+                .Select(static control => control.Attribute)
+                .Distinct().Order().ToArray(),
+            // Empty controls map each input to itself: this is the instruction-only
+            // attribute mask. Draw controls still map those attributes on every use.
+            Gen5PixelInputMapping.PerVertexParameterMask(program, [])));
 
     // One past the highest parameter location the pixel program reads, resolved as its translator does.
     internal static uint ReadVertexOutputCount(ReadOnlySpan<uint> attributes, PixelInputInfo info)
@@ -685,23 +698,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // attachments alike (RenderExecutor.DropUnwrittenColorTargets): unwrittenExportMasks is the
     // pixel program's export mask then, null otherwise.
     private Gen5PixelOutputBinding[] ResolveBoundTargets(ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        uint? unwrittenExportMasks, Span<byte> outputModes, Span<ColorComponentMap> outputMappings)
+        uint? unwrittenExportMasks, ReadOnlySpan<uint> boundSlots, Span<byte> outputModes, Span<ColorComponentMap> outputMappings)
     {
         var outputs = _boundOutputs;
         outputs.Clear();
         var location = 0u;
-        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        foreach (var slot in boundSlots)
         {
-            if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
-            {
-                continue;
-            }
-
-            if (ColorTargetResolver.Resolve(context, slot, 0, ignoreTargetMask: false, out _) is null)
-            {
-                continue;
-            }
-
             if (unwrittenExportMasks is { } exportMasks &&
                 RenderExecutor.IsUnwrittenColorTarget(context, slot, targetExportMapping[(int)slot], exportMasks))
             {
@@ -863,16 +866,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private bool LeavesSingleDualSourceTarget(
         ContextRegisters context,
         ReadOnlySpan<ColorComponentMap> mappingBySlot,
-        uint pixelColorExportMasks)
+        uint pixelColorExportMasks,
+        ReadOnlySpan<uint> boundSlots)
     {
-        // Most draws blend no target with source alpha; skip resolving their targets.
+        // Most draws blend no target with source alpha.
         if (!_host.SupportsDualSourceBlend || !AnyTargetBlendsWithSourceAlpha(context))
         {
             return false;
         }
 
-        Span<uint> boundSlots = stackalloc uint[(int)ContextRegisters.ColorTargetCount];
-        boundSlots = boundSlots[..BoundColorSlots(context, boundSlots)];
         if (boundSlots.Length < 2)
         {
             return false;
@@ -908,10 +910,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private static bool UnwrittenTargetBoundsRenderArea(
         ContextRegisters context,
         ReadOnlySpan<ColorComponentMap> mappingBySlot,
-        uint pixelColorExportMasks)
+        uint pixelColorExportMasks,
+        ReadOnlySpan<uint> boundSlots,
+        ReadOnlySpan<GpuExtent2D> boundExtents)
     {
-        Span<uint> boundSlots = stackalloc uint[(int)ContextRegisters.ColorTargetCount];
-        boundSlots = boundSlots[..BoundColorSlots(context, boundSlots)];
         if (boundSlots.Length < 2)
         {
             return false;
@@ -919,14 +921,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         uint writtenWidth = 0, writtenHeight = 0;
         uint unwrittenWidth = uint.MaxValue, unwrittenHeight = uint.MaxValue;
-        foreach (var slot in boundSlots)
+        for (var index = 0; index < boundSlots.Length; index++)
         {
-            if (ColorTargetResolver.Resolve(context, slot, 0, ignoreTargetMask: false, out _) is not { } resolution)
-            {
-                continue;
-            }
-
-            var extent = resolution.Extent;
+            var slot = boundSlots[index];
+            var extent = boundExtents[index];
             if (RenderExecutor.IsUnwrittenColorTarget(context, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
             {
                 unwrittenWidth = Math.Min(unwrittenWidth, extent.Width);
@@ -942,8 +940,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return writtenWidth > unwrittenWidth || writtenHeight > unwrittenHeight;
     }
 
-    // The slots ResolveBoundTargets considers bound, before any are dropped as unwritten.
-    private static int BoundColorSlots(ContextRegisters context, Span<uint> slots)
+    // The slots with a color target, and their extents, before any are dropped as unwritten.
+    // Each target is resolved here and nowhere else in the lookup.
+    private static int ResolveBoundSlots(ContextRegisters context, Span<uint> slots, Span<GpuExtent2D> extents)
     {
         var count = 0;
         for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
@@ -953,12 +952,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 continue;
             }
 
-            if (ColorTargetResolver.Resolve(context, slot, 0, ignoreTargetMask: false, out _) is null)
+            if (ColorTargetResolver.Resolve(context, slot, 0, ignoreTargetMask: false, out _) is not { } resolution)
             {
                 continue;
             }
 
-            slots[count++] = slot;
+            slots[count] = slot;
+            extents[count++] = resolution.Extent;
         }
 
         return count;
@@ -1255,12 +1255,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
         var lodStatistics = pixelInput is not null && _host.PixelPipelinesFollowLodStatistics && MipStatistics.TitleUsesCounters;
         lookup.LodStatistics = lodStatistics;
-        lock (_pipelineGate)
+        if (_graphicsPipelines.TryGetValue(lookup, out handle))
         {
-            if (_graphicsPipelines.TryGetValue(lookup, out handle))
-            {
-                return true;
-            }
+            return true;
         }
 
         var description = BuildGraphicsDescription(
@@ -1294,10 +1291,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 return false;
             }
 
-            lock (_pipelineGate)
-            {
-                _graphicsPipelines.Add(key, created);
-            }
+            _graphicsPipelines[key] = created;
 
             ShaderCacheCounters.CountGraphicsPipeline();
             handle = created;
@@ -1593,12 +1587,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
-        lock (_pipelineGate)
+        if (_computePipelines.TryGetValue(key, out var existing))
         {
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                return cached;
-            }
+            return existing;
         }
 
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
@@ -1616,10 +1607,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             var created = _host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = program, Stage = stage });
-            lock (_pipelineGate)
-            {
-                _computePipelines.Add(key, created);
-            }
+            _computePipelines[key] = created;
 
             ShaderCacheCounters.CountComputePipeline();
             return created;
@@ -1637,13 +1625,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
-        lock (_pipelineGate)
+        if (_computePipelines.TryGetValue(key, out var existing))
         {
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                handle = cached;
-                return true;
-            }
+            handle = existing;
+            return true;
         }
 
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
@@ -1663,10 +1648,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 return false;
             }
 
-            lock (_pipelineGate)
-            {
-                _computePipelines.Add(key, created);
-            }
+            _computePipelines[key] = created;
 
             ShaderCacheCounters.CountComputePipeline();
             handle = created;

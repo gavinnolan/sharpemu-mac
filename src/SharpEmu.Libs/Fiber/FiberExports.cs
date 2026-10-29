@@ -53,7 +53,16 @@ public static class FiberExports
     private static int _contextSizeCheck;
     private static readonly bool TraceEnabled = Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER") == "1";
 
-    private static readonly object _fiberGate = new();
+    // A fiber's state word and saved continuation are guarded by the lock of that fiber's stripe,
+    // so switches on different workers between different fibers do not serialise on one gate.
+    // A switch locks only its target: the source is the calling thread's current fiber (state Run),
+    // which no other thread may run or change until the transfer commits it to Idle under the
+    // source's own stripe (PendingFiberTransfer.Complete). _threadStates entries are per thread.
+    // SHARPEMU_FIBER_GLOBAL_GATE=1 maps every fiber to one stripe (the old single gate).
+    private const int FiberLockStripes = 64;
+    private static readonly bool _fiberGlobalGate =
+        Environment.GetEnvironmentVariable("SHARPEMU_FIBER_GLOBAL_GATE") == "1";
+    private static readonly object[] _fiberLocks = CreateFiberLocks();
     private static readonly ConcurrentDictionary<ulong, FiberContinuation> _continuations = new();
     private static readonly ConcurrentDictionary<ulong, FiberStackRange> _stackRanges = new();
     private static readonly ConcurrentDictionary<ulong, FiberThreadState> _threadStates = new();
@@ -79,15 +88,31 @@ public static class FiberExports
         private void Complete(bool succeeded)
         {
             var commitFailed = false;
-            lock (_fiberGate)
+            if (succeeded && Source != 0)
             {
-                if (succeeded && Source != 0 &&
-                    !TryWriteUInt32(Context, Source + FiberStateOffset, FiberStateIdle))
+                // Publishing Idle makes the source runnable by other threads; its continuation
+                // was stored before the transfer, so a runner that sees Idle under this stripe
+                // also sees the continuation.
+                lock (FiberLock(Source))
                 {
-                    succeeded = false;
-                    commitFailed = true;
+                    if (!TryWriteUInt32(Context, Source + FiberStateOffset, FiberStateIdle))
+                    {
+                        succeeded = false;
+                        commitFailed = true;
+                    }
                 }
-                if (!succeeded)
+            }
+            if (!succeeded)
+            {
+                // Rollback (rare): hold both fibers' stripes, taken in stripe order.
+                var first = FiberLockIndex(Source);
+                var second = FiberLockIndex(Target);
+                if (second < first)
+                {
+                    (first, second) = (second, first);
+                }
+                lock (_fiberLocks[first])
+                lock (_fiberLocks[second])
                 {
                     if (ResumeArgumentAddress != 0)
                         _ = TryWriteUInt64(Context, ResumeArgumentAddress, PreviousResumeArgument);
@@ -114,14 +139,42 @@ public static class FiberExports
         RunFiberSelfChecks();
     }
 
+    private static object[] CreateFiberLocks()
+    {
+        var locks = new object[FiberLockStripes];
+        for (var i = 0; i < locks.Length; i++)
+        {
+            locks[i] = new object();
+        }
+
+        return locks;
+    }
+
+    // Fiber objects are 8-aligned guest structures; mix the address so neighbours spread.
+    private static int FiberLockIndex(ulong fiber) =>
+        _fiberGlobalGate ? 0 : (int)((fiber >> 3) * 0x9E3779B97F4A7C15UL >> 58) & (FiberLockStripes - 1);
+
+    private static object FiberLock(ulong fiber) => _fiberLocks[FiberLockIndex(fiber)];
+
     public static void ResetRuntimeState()
     {
-        lock (_fiberGate)
+        foreach (var gate in _fiberLocks)
+        {
+            Monitor.Enter(gate);
+        }
+        try
         {
             _continuations.Clear();
             _stackRanges.Clear();
             _threadStates.Clear();
             Volatile.Write(ref _contextSizeCheck, 0);
+        }
+        finally
+        {
+            for (var i = _fiberLocks.Length - 1; i >= 0; i--)
+            {
+                Monitor.Exit(_fiberLocks[i]);
+            }
         }
     }
 
@@ -331,7 +384,7 @@ public static class FiberExports
         var threadKey = GetThreadKey(ctx);
         FiberThreadState threadState;
         ulong previousResumeArgument = 0;
-        lock (_fiberGate)
+        lock (FiberLock(fiberAddress))
         {
             _continuations[fiberAddress] = new FiberContinuation(
                 CaptureContinuation(ctx, frame.ReturnRip, frame.ResumeRsp, frame.ReturnSlotAddress),
@@ -652,23 +705,37 @@ public static class FiberExports
         GuestCpuContinuation transferTarget;
         var resumed = false;
         FiberContinuation targetContinuation = default;
-        FiberThreadState? priorThreadState = null;
         var threadKey = GetThreadKey(ctx);
         ulong previousResumeArgument = 0;
+        // Everything that belongs to the calling thread is read before the target's lock:
+        // its _threadStates entry, its register state and its current (source) fiber, whose
+        // state only this thread changes while it runs.
+        _threadStates.TryGetValue(threadKey, out var priorThreadState);
+        var callerContinuation = new FiberContinuation(
+            CaptureContinuation(ctx, frame.ReturnRip, frame.ResumeRsp, frame.ReturnSlotAddress),
+            outArgumentAddress);
+        if (previousFiber != 0 &&
+            (!TryReadUInt32(ctx, previousFiber + FiberStateOffset, out var previousState) ||
+             previousState != FiberStateRun))
+        {
+            return SetReturn(ctx, FiberErrorState);
+        }
         // Monitor enter/exit spelled out so DSTRACE can time the gate wait;
         // with DSTRACE off EnterGate is Monitor.Enter.
-        DsFiber.EnterGate(_fiberGate);
+        var fiberLock = FiberLock(fiber);
+        DsFiber.EnterGate(fiberLock);
         try
         {
-            _threadStates.TryGetValue(threadKey, out priorThreadState);
-            if (!TryReadFiberFields(ctx, fiber, out fields))
+            // Only the state word can change under another thread (a concurrent run of the same
+            // fiber); the other fields were read above and are the guest's to keep stable.
+            if (!TryReadUInt32(ctx, fiber + FiberStateOffset, out var targetState))
             {
                 return SetReturn(ctx, FiberErrorInvalid);
             }
-            if (fields.State != FiberStateIdle)
+            if (targetState != FiberStateIdle)
             {
                 if (TraceEnabled)
-                    TraceFiber($"run-state-error reason={reason} fiber=0x{fiber:X16} state=0x{fields.State:X8}");
+                    TraceFiber($"run-state-error reason={reason} fiber=0x{fiber:X16} state=0x{targetState:X8}");
                 return SetReturn(ctx, FiberErrorState);
             }
 
@@ -677,14 +744,11 @@ public static class FiberExports
                 targetContinuation = savedContinuation;
                 resumed = true;
             }
-            var callerContinuation = new FiberContinuation(
-                CaptureContinuation(ctx, frame.ReturnRip, frame.ResumeRsp, frame.ReturnSlotAddress),
-                outArgumentAddress);
 
             if (!resumed)
             {
-                var rootStackTop = _threadStates.TryGetValue(threadKey, out var existingThreadState)
-                    ? existingThreadState.RootContinuation.Context.Rsp
+                var rootStackTop = priorThreadState is not null
+                    ? priorThreadState.RootContinuation.Context.Rsp
                     : callerContinuation.Context.Rsp;
                 if (!TryCreateInitialContinuation(
                         ctx,
@@ -705,12 +769,6 @@ public static class FiberExports
 
             if (previousFiber != 0)
             {
-                if (!TryReadUInt32(ctx, previousFiber + FiberStateOffset, out var previousState) ||
-                    previousState != FiberStateRun)
-                {
-                    return SetReturn(ctx, FiberErrorState);
-                }
-
                 _continuations[previousFiber] = callerContinuation;
             }
             else
@@ -756,7 +814,7 @@ public static class FiberExports
         }
         finally
         {
-            Monitor.Exit(_fiberGate);
+            Monitor.Exit(fiberLock);
         }
 
         _ = GuestThreadExecution.EnterFiber(fiber);

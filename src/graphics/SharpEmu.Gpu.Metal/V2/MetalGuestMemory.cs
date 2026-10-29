@@ -1032,7 +1032,125 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             $"alias_contiguous={contiguous} start_alias=0x{startAlias:X16} end_alias=0x{endAlias:X16}.");
     }
 
+    // SHARPEMU_METAL_V2_WINDOW_MEMO=0 takes the window lock and places the range on every resolve.
+    private static readonly bool WindowMemoEnabled =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_WINDOW_MEMO");
+
+    // Verify mode (SHARPEMU_METAL_V2_WINDOW_MEMO=1 or SHARPEMU_PERF_VERIFY=1): every resolve also takes
+    // the full path and the two answers must agree.
+    private static readonly bool WindowMemoVerify =
+        SharpEmu.ShaderCompiler.PerfSwitches.Verify("SHARPEMU_METAL_V2_WINDOW_MEMO");
+
+    /// <summary>
+    /// A resolve is answered from the window it last placed a range in. Within one submission a
+    /// window a resolve touched is pinned: its cuts do not move, so every later range inside it
+    /// places into the same window, and the single-copy bookkeeping the full path does (restoring
+    /// released chunks, filling holes, refusing a stale window) has nothing left to do for it while
+    /// the trap version holds. Reads of the backing stay per call, so a remapped range never
+    /// resolves from here.
+    /// </summary>
+    private sealed class WindowMemoEntry(
+        MetalWindowPartition.Window window, ulong coverStart, ulong coverEnd, ulong serial, long partitionVersion,
+        long trapVersion)
+    {
+        public readonly MetalWindowPartition.Window Window = window;
+
+        // The backing offsets the entry answers for: the whole window when no hole or stale
+        // window could be under any of it, else only the range that was placed.
+        public readonly ulong CoverStart = coverStart;
+        public readonly ulong CoverEnd = coverEnd;
+        public readonly ulong Serial = serial;
+        public readonly long PartitionVersion = partitionVersion;
+        public readonly long TrapVersion = trapVersion;
+        public readonly nint Buffer = window.Buffer;
+    }
+
+    private readonly WindowMemoEntry?[] _windowMemo = new WindowMemoEntry?[8];
+    private int _windowMemoNext;
+    private long _windowMemoHits;
+    private long _windowMemoMisses;
+
+    /// <summary>Resolves answered from the window memo, and those that took the full path.</summary>
+    internal (long Hits, long Misses) WindowMemoCounts =>
+        (Volatile.Read(ref _windowMemoHits), Volatile.Read(ref _windowMemoMisses));
+
+    private bool TryResolveWindowFromMemo(ulong offset, ulong size, out MetalGuestRange resolved)
+    {
+        resolved = default;
+        if (Trap is not null || (_singleCopy is { } singleCopy && singleCopy.AnyReleased(offset, size)))
+        {
+            return false;
+        }
+
+        var serial = Volatile.Read(ref _submissionSerial);
+        var partitionVersion = _partition.Version;
+        var trapVersion = Volatile.Read(ref _trapVersion);
+        var memo = _windowMemo;
+        for (var index = 0; index < memo.Length; index++)
+        {
+            if (Volatile.Read(ref memo[index]) is not { } entry ||
+                entry.Serial != serial || offset < entry.CoverStart || offset > entry.CoverEnd ||
+                size > entry.CoverEnd - offset || entry.PartitionVersion != partitionVersion ||
+                entry.TrapVersion != trapVersion || entry.Window.Buffer != entry.Buffer)
+            {
+                continue;
+            }
+
+            var windowOffset = offset - entry.Window.Start;
+            resolved = new MetalGuestRange(entry.Buffer, windowOffset, size, entry.Window.GpuAddress + windowOffset);
+            Interlocked.Increment(ref _windowMemoHits);
+            return true;
+        }
+
+        return false;
+    }
+
+    // Caller holds _windowLock, right after the full path placed the range and pinned its window.
+    private void PublishWindowMemoLocked(MetalWindowPartition.Window window, ulong offset, ulong size)
+    {
+        if (Trap is not null || window.Buffer == 0)
+        {
+            return;
+        }
+
+        var whole = (_holes is null || _holeCount == 0) && _staleWindows.Count == 0;
+        var coverStart = whole ? window.Start : offset;
+        var coverEnd = whole ? window.End : offset + size;
+        var version = _partition.Version;
+        foreach (var held in _windowMemo)
+        {
+            if (held is not null && ReferenceEquals(held.Window, window) && held.Serial == _submissionSerial &&
+                held.PartitionVersion == version && held.TrapVersion == _trapVersion && held.Buffer == window.Buffer &&
+                held.CoverStart <= coverStart && held.CoverEnd >= coverEnd)
+            {
+                return;
+            }
+        }
+
+        var slot = (int)((uint)Interlocked.Increment(ref _windowMemoNext) % (uint)_windowMemo.Length);
+        Volatile.Write(
+            ref _windowMemo[slot],
+            new WindowMemoEntry(window, coverStart, coverEnd, _submissionSerial, version, _trapVersion));
+    }
+
     private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn = true)
+    {
+        var ok = TryResolveWindowCore(gpuVa, size, out resolved, warn, WindowMemoEnabled);
+        if (WindowMemoVerify && WindowMemoEnabled)
+        {
+            var fullOk = TryResolveWindowCore(gpuVa, size, out var full, warn: false, useMemo: false);
+            if (ok != fullOk || (ok && resolved != full))
+            {
+                throw GpuFatal.Fatal(
+                    $"A memoised window resolve disagrees with the full path: address=0x{gpuVa:X16} size=0x{size:X} " +
+                    $"memo={ok}:{resolved} full={fullOk}:{full}.");
+            }
+        }
+
+        return ok;
+    }
+
+    private bool TryResolveWindowCore(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn, bool useMemo)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GuestWindowResolve);
         resolved = default;
@@ -1055,6 +1173,16 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         var offset = alias - _aliasBase;
+        if (useMemo)
+        {
+            if (TryResolveWindowFromMemo(offset, size, out resolved))
+            {
+                return true;
+            }
+
+            Interlocked.Increment(ref _windowMemoMisses);
+        }
+
         // A released chunk gets its bytes back before any window names it (single-copy textures).
         RestoreSingleCopyRange(offset, size);
         MetalWindowPartition.Window window;
@@ -1103,11 +1231,25 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             EnsureBuffer(window);
             window.LastUsedSerial = _submissionSerial;
             _pinnedWindows.Add(window.Id);
+            if (useMemo)
+            {
+                PublishWindowMemoLocked(window, offset, size);
+            }
         }
 
         if (_touchedWindows.Add(window.Id))
         {
-            _residentDirty = true;
+            if (ResidentAppendEnabled && !_residentDirty && _residencySet == 0 && window.Buffer != 0)
+            {
+                // A first touch adds one buffer to a list that is otherwise current: put it on the end
+                // (ResidentVersion holds, ResidentBuffers grows) instead of rebuilding every window's
+                // entry, which a submission touching a few hundred windows did a few hundred times.
+                Append(ref _submissionResidentBuffers, ref _submissionResidentCount, window.Buffer);
+            }
+            else
+            {
+                _residentDirty = true;
+            }
         }
 
         var windowOffset = offset - window.Start;
@@ -1445,6 +1587,14 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     {
         get
         {
+            // The table lives until quiescent disposal. Publish its address only after
+            // zeroing and residency registration; subsequent draws need no monitor.
+            var published = Volatile.Read(ref _pairLockTableGpuAddress);
+            if (published != 0)
+            {
+                return published;
+            }
+
             lock (_pairLockTableLock)
             {
                 if (_pairLockTable == 0)
@@ -1458,8 +1608,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
                     AddResident(buffer);
                     CommitResidency();
-                    _pairLockTableGpuAddress = gpuAddress;
                     _pairLockTable = buffer;
+                    Volatile.Write(ref _pairLockTableGpuAddress, gpuAddress);
                 }
 
                 return _pairLockTableGpuAddress;
@@ -1659,6 +1809,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             if (_residentDirty)
             {
                 _residentDirty = false;
+                _residentVersion++;
                 _submissionResidentCount = 0;
                 lock (_windowLock)
                 {
@@ -1686,6 +1837,19 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             return _submissionResidentBuffers.AsSpan(0, _submissionResidentCount);
         }
     }
+
+    // SHARPEMU_METAL_V2_RESIDENT_APPEND=0 rebuilds the list on every first touch of a window, as before.
+    private static readonly bool ResidentAppendEnabled =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_RESIDENT_APPEND");
+
+    /// <summary>
+    /// Changes whenever <see cref="ResidentBuffers"/> is rebuilt: while it holds, the list at any later
+    /// read starts with the list of an earlier one (a window touched since only adds to its end).
+    /// Read after the list, which is what rebuilds it.
+    /// </summary>
+    public long ResidentVersion => _residentVersion;
+
+    private long _residentVersion;
 
     private static void Append(ref nint[] buffers, ref int count, nint buffer)
     {

@@ -43,6 +43,7 @@ internal static partial class MetalNative
         error = string.Empty;
         var options = Send(Send(objc_getClass("MTLCompileOptions"), Selector("alloc")), Selector("init"));
         SendVoidBool(options, Selector("setFastMathEnabled:"), false);
+        ApplyMathMode(options, MslMathMode.Default);
         SendVoidUInt(options, Selector("setLanguageVersion:"), languageVersion);
         nint nsError = 0;
         library = Send(Device.Value, Selector("newLibraryWithSource:options:error:"), NsString(source), options, ref nsError);

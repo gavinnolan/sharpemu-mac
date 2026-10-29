@@ -65,16 +65,39 @@ public sealed class RegisterBanks
     private bool _computeShared;
     private bool _userConfigShared;
 
+    // The last snapshot, handed out again while no writer has prepared a write since: its parts are
+    // still the live ones, so a second copy would be the same banks in another object. A snapshot is
+    // read-only, so sharing one between draws changes nothing a draw can see. The live banks'
+    // draw-time markers are not covered by the write hooks, so they are compared.
+    // SHARPEMU_REGISTER_SNAPSHOT_REUSE=0 takes a fresh snapshot every time.
+    private static readonly bool SnapshotReuseEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_REGISTER_SNAPSHOT_REUSE") != "0";
+
+    private RegisterBanks? _lastSnapshot;
+
+    // Raised by every writer hook below; lowered when a snapshot is taken.
+    private bool _writtenSinceSnapshot = true;
+
     // A read-only copy that shares every part with the live banks until they next write it: a
     // deferred draw takes one per draw, and between draws only a few parts change.
     public RegisterBanks Snapshot()
     {
+        if (!_writtenSinceSnapshot && _lastSnapshot is { } last &&
+            last.CompositeDepthSizeXy == CompositeDepthSizeXy &&
+            last.UserDataMarker == UserDataMarker &&
+            last.IndexTypeAndSize == IndexTypeAndSize)
+        {
+            return last;
+        }
+
         var snapshot = new RegisterBanks(Fatal, Context, Shader.ShareStages(), UserConfig)
         {
             CompositeDepthSizeXy = CompositeDepthSizeXy,
             UserDataMarker = UserDataMarker,
             IndexTypeAndSize = IndexTypeAndSize,
         };
+        _lastSnapshot = SnapshotReuseEnabled ? snapshot : null;
+        _writtenSinceSnapshot = false;
         _contextShared = _vertexShared = _pixelShared = _computeShared = _userConfigShared = true;
         _pixelScalarsShared = _hullScalarsShared = _geometryScalarsShared = _legacyVertexScalarsShared = _exportScalarsShared = _computeScalarsShared = true;
         return snapshot;
@@ -83,6 +106,7 @@ public sealed class RegisterBanks
     // Called by the register writers before they store into a part.
     public void PrepareContextWrite()
     {
+        _writtenSinceSnapshot = true;
         if (_contextShared)
         {
             Context = Context.ShallowCopy();
@@ -109,6 +133,7 @@ public sealed class RegisterBanks
 
     private void OwnContext(ContextRegisters context)
     {
+        _writtenSinceSnapshot = true;
         Context = context;
         _contextShared = false;
         SetContextPartsShared(false);
@@ -251,6 +276,7 @@ public sealed class RegisterBanks
 
     public void PrepareUserConfigWrite()
     {
+        _writtenSinceSnapshot = true;
         if (_userConfigShared)
         {
             UserConfig = UserConfig.Copy();
@@ -278,6 +304,7 @@ public sealed class RegisterBanks
     // compute range, compute from there.
     public void PrepareShaderWrite(uint offset, uint count)
     {
+        _writtenSinceSnapshot = true;
         var last = offset + Math.Max(count, 1) - 1;
         if (offset < ShaderRegisterOffset.SpiShaderPgmLoVs)
         {
@@ -346,6 +373,7 @@ public sealed class RegisterBanks
 
     public void Reset()
     {
+        _writtenSinceSnapshot = true;
         _contextShared = _vertexShared = _pixelShared = _computeShared = _userConfigShared = false;
         _pixelScalarsShared = _hullScalarsShared = _geometryScalarsShared = _legacyVertexScalarsShared = _exportScalarsShared = _computeScalarsShared = false;
         OwnContext(new ContextRegisters());

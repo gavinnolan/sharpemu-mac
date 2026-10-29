@@ -121,6 +121,7 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
     private static readonly nint SelRetain = MetalNative.Selector("retain");
     private static readonly nint SelRelease = MetalNative.Selector("release");
     private static readonly nint SelContents = MetalNative.Selector("contents");
+    private static readonly nint SelLength = MetalNative.Selector("length");
     private static readonly nint SelNewBuffer = MetalNative.Selector("newBufferWithLength:options:");
 
     /// <summary>Timings and caps; the defaults are the protocol's, tests shorten them.</summary>
@@ -237,6 +238,81 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
     private readonly ConcurrentQueue<ulong> _unwatch = new();
 
     private readonly object _gpuLock = new();
+
+    // SHARPEMU_SINGLE_COPY_RETILE_POOL=0 allocates and releases a staging buffer per retile, as before.
+    private static readonly bool PoolRetileStaging =
+        Environment.GetEnvironmentVariable("SHARPEMU_SINGLE_COPY_RETILE_POOL") != "0";
+
+    // Retile staging buffers kept for the next retile: a restore runs on the faulting guest thread, and a
+    // fresh shared buffer costs the allocation and its first-touch page faults every time. A retile only
+    // needs the bytes it fills and the texture writes, so any buffer at least as large will do.
+    private const int RetilePoolMaxBuffers = 4;
+    private const ulong RetilePoolMaxBytes = 256UL * 1024 * 1024;
+    private const ulong RetileClassBytes = 1024 * 1024;
+    private readonly List<(nint Buffer, ulong Capacity)> _retilePool = new();
+    private ulong _retilePoolBytes;
+    private long _retilePoolHits;
+    private long _retilePoolMisses;
+
+    /// <summary>Retile staging buffers taken from the pool, and those created, since the start.</summary>
+    internal (long Hits, long Misses) RetilePoolCounts =>
+        (Interlocked.Read(ref _retilePoolHits), Interlocked.Read(ref _retilePoolMisses));
+
+    // The smallest pooled buffer that holds the run, or a new one of the run's size class.
+    private nint TakeRetileStaging(ulong bytes)
+    {
+        if (PoolRetileStaging)
+        {
+            lock (_retilePool)
+            {
+                var best = -1;
+                for (var index = 0; index < _retilePool.Count; index++)
+                {
+                    if (_retilePool[index].Capacity >= bytes &&
+                        (best < 0 || _retilePool[index].Capacity < _retilePool[best].Capacity))
+                    {
+                        best = index;
+                    }
+                }
+
+                if (best >= 0)
+                {
+                    var taken = _retilePool[best].Buffer;
+                    _retilePoolBytes -= _retilePool[best].Capacity;
+                    _retilePool.RemoveAt(best);
+                    Interlocked.Increment(ref _retilePoolHits);
+                    return taken;
+                }
+            }
+        }
+
+        Interlocked.Increment(ref _retilePoolMisses);
+        var capacity = PoolRetileStaging
+            ? (bytes + RetileClassBytes - 1) / RetileClassBytes * RetileClassBytes
+            : bytes;
+        return MetalNative.SendNewBuffer(_device, SelNewBuffer, (nuint)capacity, 0);
+    }
+
+    // Keeps the buffer for the next retile, or releases it when the pool is full.
+    private void ReleaseRetileStaging(nint staging)
+    {
+        if (PoolRetileStaging && staging != 0)
+        {
+            var capacity = (ulong)MetalV2Native.SendValue(staging, SelLength);
+            lock (_retilePool)
+            {
+                if (!_disposed && _retilePool.Count < RetilePoolMaxBuffers &&
+                    _retilePoolBytes + capacity <= RetilePoolMaxBytes)
+                {
+                    _retilePool.Add((staging, capacity));
+                    _retilePoolBytes += capacity;
+                    return;
+                }
+            }
+        }
+
+        MetalNative.SendVoid(staging, SelRelease);
+    }
     private long _lastScan;
     private bool _stopped;
     private bool _disposed;
@@ -871,7 +947,7 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
             }
             finally
             {
-                MetalNative.SendVoid(staging, SelRelease);
+                ReleaseRetileStaging(staging);
             }
         }
         finally
@@ -993,7 +1069,7 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
         lock (_gpuLock)
         {
             using var pool = MetalAutoreleasePool.Enter();
-            var staging = MetalNative.SendNewBuffer(_device, SelNewBuffer, (nuint)((runSize + 3) & ~3UL), 0);
+            var staging = TakeRetileStaging((runSize + 3) & ~3UL);
             if (staging == 0)
             {
                 throw GpuFatal.Fatal($"Single-copy textures could not allocate 0x{runSize:X} bytes of retile staging.");
@@ -1508,7 +1584,7 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
                 }
                 finally
                 {
-                    MetalNative.SendVoid(staging, SelRelease);
+                    ReleaseRetileStaging(staging);
                 }
             }
         }
@@ -1750,7 +1826,7 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
                     }
                     finally
                     {
-                        MetalNative.SendVoid(staging, SelRelease);
+                        ReleaseRetileStaging(staging);
                     }
                 }
             }
@@ -2040,6 +2116,17 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
         foreach (var record in records)
         {
             ReleaseTexture(record);
+        }
+
+        lock (_retilePool)
+        {
+            foreach (var (buffer, _) in _retilePool)
+            {
+                MetalNative.SendVoid(buffer, SelRelease);
+            }
+
+            _retilePool.Clear();
+            _retilePoolBytes = 0;
         }
 
         lock (_gpuLock)

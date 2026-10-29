@@ -163,6 +163,17 @@ public static class GuestGpuMemoryHook
         current.MarkCpuWriteLanded(address, size);
     }
 
+    // Two managed writes that have both landed (see ICpuMemory.TryWritePair).
+    public static void MarkCpuWriteLanded(ulong firstAddress, ulong firstSize, ulong secondAddress, ulong secondSize)
+    {
+        if (_current is not { } current)
+        {
+            return;
+        }
+
+        current.MarkCpuWriteLanded(firstAddress, firstSize, secondAddress, secondSize);
+    }
+
     // Shutdown can skip disposal. Report the counts once for each attached session.
     public static bool TryTakeShutdownSummary(out string summary)
     {

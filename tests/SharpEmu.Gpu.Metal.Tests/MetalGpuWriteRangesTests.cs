@@ -1,5 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using System.Diagnostics;
+using System.Text.Json;
 using SharpEmu.Gpu.Metal.V2;
 using Xunit;
 
@@ -402,6 +404,45 @@ public sealed class MetalGpuWriteRangesTests
         }
     }
 
+
+    // A write fence covers a read only when every write over its bytes in the serial it waits
+    // for was stamped: a write noted after the stamp, a merge into a stamped record, a label, an
+    // unbounded write or a newer serial over the bytes each sends the read back to the serial.
+    [Fact]
+    public void AWriteFenceCoversOnlyWritesStampedBeforeIt()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        ranges.Note(0x1_0000, 0x100, serial: 4);
+        ranges.Note(0x10_0000, 0x100, serial: 5);
+        ranges.Note(0x20_0000, 0x100, serial: 5);
+        Assert.Equal(0UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+
+        ranges.StampFence(serial: 5, fence: 1);
+        Assert.Equal(1UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+        // The older serial's record is the caller's to wait for, not the fence's.
+        Assert.Equal(1UL, ranges.WriteFence(0x1_0000, 0x10_0000, serial: 5));
+        Assert.Equal(0UL, ranges.WriteFence(0x1_0000, 4, serial: 4));
+
+        // A later write into a stamped record makes it wait for the next fence.
+        ranges.Note(0x20_0000, 0x200, serial: 5);
+        Assert.Equal(0UL, ranges.WriteFence(0x20_0000, 4, serial: 5));
+        Assert.Equal(1UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+        ranges.StampFence(serial: 5, fence: 2);
+        Assert.Equal(2UL, ranges.WriteFence(0x20_0000, 4, serial: 5));
+        Assert.Equal(2UL, ranges.WriteFence(0x10_0000, 0x10_0100, serial: 5));
+        Assert.Equal(1UL, ranges.WriteFence(0x10_0000, 4, serial: 5));
+
+        // A newer serial over the bytes, or a label, is not behind the fence.
+        ranges.Note(0x10_0080, 4, serial: 6);
+        Assert.Equal(0UL, ranges.WriteFence(0x10_0000, 0x100, serial: 5));
+        ranges.Note(0x20_0100, 8, serial: 5, MetalGpuWriteOrigin.EndOfPipeLabel);
+        ranges.StampFence(serial: 5, fence: 3);
+        Assert.Equal(0UL, ranges.WriteFence(0x20_0100, 8, serial: 5));
+
+        ranges.NoteUnbounded(serial: 5);
+        Assert.Equal(0UL, ranges.WriteFence(0x20_0000, 4, serial: 5));
+    }
+
     // The indexes over the records and labels (the bucket dictionary PendingSerial uses, the hashed
     // counts the snapshot another thread reads) only let a query skip what cannot reach it: both
     // answer what the unindexed walk of every record and label answers, over narrow and wide writes,
@@ -453,5 +494,184 @@ public sealed class MetalGpuWriteRangesTests
                 Assert.Equal(expected, ranges.PendingSerial(address, size, completed));
             }
         }
+    }
+    // A range a query found nothing live over answers the next query without a walk, until a write
+    // lands in the same 256-byte granule: the neighbours stay answered, the written one does not.
+    [Fact]
+    public void ACleanGranuleIsForgottenWhenAWriteLandsInIt()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        ranges.Note(0x10_0000, 0x40, serial: 4);
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0100, 0x10, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0100, 0x10, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0200, 0x10, completed: 0));
+
+        ranges.Note(0x10_0180, 8, serial: 6, MetalGpuWriteOrigin.EndOfPipeLabel);
+        Assert.Equal(6UL, ranges.PendingSerial(0x10_0100, 0x100, completed: 0));
+        Assert.Equal(6UL, ranges.PendingSerial(0x10_0180, 4, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0200, 0x10, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0100, 0x10, completed: 0));
+
+        // A write wider than the lookups drops every granule, and a granule next to the record
+        // is not answered by the record that ends at its edge.
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0040, 0x10, completed: 0));
+        ranges.Note(0x10_0000, 0x20_0000, serial: 9);
+        Assert.Equal(9UL, ranges.PendingSerial(0x10_0040, 0x10, completed: 0));
+        Assert.Equal(9UL, ranges.PendingSerial(0x10_0200, 0x10, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x30_0000, 0x10, completed: 0));
+    }
+
+    // The unbounded serial is read for every query, not remembered with the granules.
+    [Fact]
+    public void ACleanGranuleStillWaitsForAnUnboundedWrite()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0000, 0x10, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0000, 0x10, completed: 0));
+        ranges.NoteUnbounded(5);
+        Assert.Equal(5UL, ranges.PendingSerial(0x10_0000, 0x10, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0000, 0x10, completed: 5));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0000, 0x10, completed: 5));
+    }
+
+    // Folding merges the oldest records over the gaps between them: granules answered clean
+    // before a fold may lie in such a gap.
+    [Fact]
+    public void AFoldDropsTheGranulesItsMergedRecordsNowCover()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        var gaps = new List<ulong>();
+        for (var index = 0; index < 511; index++)
+        {
+            var start = 0x100_0000UL + (ulong)index * 0x1_0000;
+            ranges.Note(start, 0x100, serial: 3 + (ulong)index / 64);
+            gaps.Add(start + 0x8000);
+        }
+
+        foreach (var gap in gaps)
+        {
+            Assert.Equal(0UL, ranges.PendingSerial(gap, 0x10, completed: 0));
+        }
+
+        var folds = ranges.Folds;
+        for (var index = 0; index < 64 && ranges.Folds == folds; index++)
+        {
+            ranges.Note(0x900_0000UL + (ulong)index * 0x1_0000, 0x100, serial: 20);
+        }
+
+        Assert.True(ranges.Folds > folds);
+        foreach (var gap in gaps)
+        {
+            Assert.Equal(ranges.UnindexedPendingSerial(gap, 0x10, 0), ranges.PendingSerial(gap, 0x10, completed: 0));
+        }
+    }
+
+    // Narrow, repeating queries over a small address space, so granules are answered, dropped by
+    // writes, retired and folded, and every answer is the walk of the records.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void RepeatedNarrowQueriesAlwaysAgreeWithTheWalkOfEveryRecord(int seed)
+    {
+        var random = new Random(seed);
+        var ranges = new MetalGpuWriteRanges();
+        ulong serial = 1;
+        ulong completed = 0;
+        for (var step = 0; step < 6000; step++)
+        {
+            switch (random.Next(12))
+            {
+                case 0 when random.Next(8) == 0:
+                    completed = Math.Min(serial, completed + (ulong)random.Next(1, 4));
+                    break;
+                case 1:
+                    serial++;
+                    break;
+                case 2 when random.Next(200) == 0:
+                    ranges.NoteUnbounded(serial);
+                    break;
+                case 3 when random.Next(100) == 0:
+                    ranges.Clear(completed);
+                    break;
+                case 4 or 5 or 6:
+                {
+                    var origin = random.Next(3) == 0 ? MetalGpuWriteOrigin.EndOfPipeLabel : MetalGpuWriteOrigin.StorageBuffer;
+                    var size = origin == MetalGpuWriteOrigin.EndOfPipeLabel ? 8UL : (ulong)random.Next(1, 0x3000);
+                    ranges.Note(0x40_0000 + (ulong)random.Next(0, 0x80000), size, serial, origin);
+                    break;
+                }
+            }
+
+            for (var query = 0; query < 8; query++)
+            {
+                var address = 0x40_0000 + (ulong)random.Next(0, 0x80000);
+                var size = (ulong)(random.Next(6) == 0 ? random.Next(1, 0x1800) : random.Next(1, 0x20));
+                var hinted = completed > 0 && random.Next(3) == 0 ? completed - 1 : completed;
+                var expected = ranges.UnindexedPendingSerial(address, size, hinted);
+                Assert.Equal(expected, ranges.PendingSerial(address, size, hinted));
+            }
+        }
+    }
+
+    // SHARPEMU_WRITE_RANGES_BENCH_OUTPUT=<path>: nanoseconds per PendingSerial for the stream's
+    // sequential reads (eight 16-byte reads at the start of each page of command memory) over pages
+    // that hold labels and written storage ranges elsewhere on them, so the buckets and label
+    // pages cannot rule a read out; every tenth page has a record over its reads. A label is
+    // noted now and then. Run once per setting of SHARPEMU_METAL_V2_WRITE_CLEAN_MEMO.
+    [Fact]
+    public void MeasurePendingSerialWhenRequested()
+    {
+        var path = Environment.GetEnvironmentVariable("SHARPEMU_WRITE_RANGES_BENCH_OUTPUT");
+        if (path is null) return;
+        var rounds = new List<object>();
+        foreach (var dirtyEvery in new[] { 0, 10 })
+        {
+            foreach (var labels in new[] { 256, 2048 })
+            {
+                for (var round = 0; round < 14; round++)
+                {
+                    var random = new Random(round);
+                    var ranges = new MetalGpuWriteRanges();
+                    const ulong area = 0x10_0000_0000;
+                    for (var index = 0; index < 300; index++)
+                    {
+                        ranges.Note(area + ((ulong)random.Next(0, 0x4000) << 12) + 0x400, (ulong)random.Next(0x100, 0x800), serial: 5);
+                    }
+
+                    for (var index = 0; index < labels; index++)
+                    {
+                        ranges.Note(area + ((ulong)random.Next(0, 0x4000) << 12) + 0x100 + (ulong)random.Next(0, 0xE00) / 8 * 8, 8, serial: 5, MetalGpuWriteOrigin.EndOfPipeLabel);
+                    }
+
+                    for (var page = 0; dirtyEvery != 0 && page < 0x4000; page += dirtyEvery)
+                    {
+                        ranges.Note(area + ((ulong)page << 12), 0x80, serial: 5);
+                    }
+
+                    const int queries = 400_000;
+                    var found = 0UL;
+                    var started = Stopwatch.GetTimestamp();
+                    for (var query = 0; query < queries; query++)
+                    {
+                        var address = area + ((ulong)(query / 8 % 0x4000) << 12) + (ulong)(query % 8) * 16;
+                        found += ranges.PendingSerial(address, 16, completed: 1);
+                        if (query % 512 == 0)
+                        {
+                            ranges.Note(area + ((ulong)random.Next(0, 0x4000) << 12) + 0x100 + (ulong)random.Next(0, 0xE00) / 8 * 8, 8, serial: 5, MetalGpuWriteOrigin.EndOfPipeLabel);
+                        }
+                    }
+
+                    var elapsed = Stopwatch.GetTimestamp() - started;
+                    if (round < 8) continue;
+                    rounds.Add(new { dirtyEvery, labels, round, nsPerQuery = elapsed * 1e9 / Stopwatch.Frequency / queries, nonzero = found });
+                }
+            }
+        }
+
+        File.WriteAllText(path, JsonSerializer.Serialize(new {
+            architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+            cleanMemo = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WRITE_CLEAN_MEMO") != "0", rounds },
+            new JsonSerializerOptions { WriteIndented = true }));
     }
 }

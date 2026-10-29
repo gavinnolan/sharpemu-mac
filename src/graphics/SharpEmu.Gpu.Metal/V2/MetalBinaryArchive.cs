@@ -136,7 +136,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private readonly ConcurrentDictionary<UInt128, byte> _known = new();
     private readonly ConcurrentDictionary<UInt128, byte> _pending = new();
     private readonly BlockingCollection<Job> _jobs = new(MaxQueuedJobs);
-    private readonly Thread _writer;
+    private readonly MetalCompileThread _writer;
     private readonly ManualResetEventSlim _loaded = new(false);
     private readonly object _archivesLock = new();
     private readonly object _trimLock = new();
@@ -189,12 +189,9 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         _directory = Path.Combine(root, Hex64(XxHash3.HashToUInt64(MemoryMarshal.AsBytes(DeviceStamp(device).AsSpan()))));
         _libraries = Path.Combine(_directory, "libraries");
         _lastFlushTicks = Stopwatch.GetTimestamp();
-        _writer = new Thread(RunWriter)
-        {
-            IsBackground = true,
-            Priority = ThreadPriority.BelowNormal,
-            Name = "SharpEmu Metal v2 binary archive",
-        };
+        // Pipelines asked for before the segments are listed miss them, so the listing runs at the
+        // class of the compiles that wait; the writes after it at Utility (RunWriter).
+        _writer = MetalCompileThread.Create("SharpEmu Metal v2 binary archive", SharpEmu.HLE.Host.HostThreadQos.UserInitiated, RunWriter);
     }
 
     /// <summary>The process's archive, once the presenter started it, for this device.</summary>
@@ -321,13 +318,18 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             RuntimeInformation.OSArchitecture);
 
     /// <summary>
-    /// The library key of a source: its text and the options it compiles with (fast math
-    /// off, the MSL version the per-vertex-inputs flag picks).
+    /// The library key of a source: its text and the options it compiles with (the math mode,
+    /// the MSL version the per-vertex-inputs flag picks). A binary built in the safe math
+    /// mode is another binary than the relaxed one, so the mode is part of the seed; the
+    /// safe seed is the one every library was keyed with before the mode existed.
     /// </summary>
-    public static UInt128 LibraryKey(string source, bool usesPerVertexInputs)
+    public static UInt128 LibraryKey(string source, bool usesPerVertexInputs) =>
+        LibraryKey(source, usesPerVertexInputs, MslMathMode.Default);
+
+    internal static UInt128 LibraryKey(string source, bool usesPerVertexInputs, nuint mathMode)
     {
         var version = usesPerVertexInputs ? Gen5MslShader.PerVertexInputsLanguageVersion : MetalNative.MslLanguageVersion;
-        var seed = (long)(((ulong)FormatVersion << 48) ^ version);
+        var seed = (long)(((ulong)FormatVersion << 48) ^ version ^ ((ulong)mathMode << 40));
         return XxHash128.HashToUInt128(MemoryMarshal.AsBytes(source.AsSpan()), seed);
     }
 
@@ -468,6 +470,9 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     /// <summary>Whether the library file of <paramref name="key"/> is on disk (or being written).</summary>
     public bool HasLibrary(UInt128 key) => key != default && (_known.ContainsKey(key) || _pending.ContainsKey(key));
+
+    /// <summary>Whether the library file of <paramref name="key"/> is written (a compute's holds its pipeline's binary too).</summary>
+    public bool IsStored(UInt128 key) => key != default && _known.ContainsKey(key);
 
     /// <summary>
     /// Stores the library file of <paramref name="key"/> from a pipeline that is never made:
@@ -706,6 +711,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             _loaded.Set();
         }
 
+        MetalCompileThread.ApplyToCurrent(SharpEmu.HLE.Host.HostThreadQos.Utility);
         try
         {
             while (!_jobs.IsCompleted)

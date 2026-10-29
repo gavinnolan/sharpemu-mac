@@ -60,7 +60,7 @@ public sealed unsafe class MetalGuestViewTests(ITestOutputHelper output)
         memory.BeginSubmission(1, 0);
         Assert.False(memory.TryResolveInPlace(backing.Base, ViewBytes, out _));
         Assert.True(memory.MayUseGuestView(ViewBytes));
-        Assert.True(memory.TryResolveGuestView(backing.Base, ViewBytes, out var view));
+        Assert.True(memory.TryResolveGuestView(backing.Base, ViewBytes, out var view), $"Guest-view counters: {memory.GuestViewCounts}");
         Assert.Equal(ViewBytes, view.Size);
         Assert.Contains(view.Buffer, memory.ResidentBuffers.ToArray());
 
@@ -77,7 +77,7 @@ public sealed unsafe class MetalGuestViewTests(ITestOutputHelper output)
         // A smaller binding inside it reuses the view; the next submission names it only if it binds it.
         memory.BeginSubmission(2, 1);
         Assert.DoesNotContain(view.Buffer, memory.ResidentBuffers.ToArray());
-        Assert.True(memory.TryResolveGuestView(backing.Base + 3 * ShmScatteredBacking.Piece, 8 * Mib, out var inner));
+        Assert.True(memory.TryResolveGuestView(backing.Base + 3 * ShmScatteredBacking.Piece, 8 * Mib, out var inner), $"Guest-view counters: {memory.GuestViewCounts}");
         Assert.Equal(view.Buffer, inner.Buffer);
         Assert.Equal(3 * ShmScatteredBacking.Piece, inner.Offset);
         Assert.Equal(1L, memory.GuestViewCounts.Created);
@@ -231,6 +231,45 @@ public sealed unsafe class MetalGuestViewTests(ITestOutputHelper output)
         AssertEqualBytes(expected, harness.Read(read, 0, size));
     }
 
+    // A written scattered range bound with no encoder open has its pristine twin copied by the
+    // GPU from the staged copy, cached or in the ring, and the twin holds the staged bytes.
+    [Fact]
+    public void AWrittenScatteredRangeBoundBetweenPassesHasItsPristineTwinCopiedOnTheGpu()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var backing = new ShmScatteredBacking(BackingBytes, ViewBytes);
+        backing.FillAliasPattern(0x2545F491u);
+        using var rig = new HostRig(Device.Value, backing);
+        var host = rig.Host;
+        var before = host.GpuPristines;
+        var expectedSnapshots = MetalRenderHost.GpuPristine ? 1 : 0;
+
+        const ulong cachedSize = 1 * Mib;
+        var cachedAddress = backing.Base + (ShmScatteredBacking.Piece / 2);
+        var cached = host.ResolveStorageBuffer(cachedAddress, cachedSize, written: true);
+        Assert.True(cached.IsValid);
+        Assert.Equal(before + expectedSnapshots, host.GpuPristines);
+
+        const ulong ringSize = 128 * 1024;
+        var ringAddress = backing.Base + (8 * Mib) + (ShmScatteredBacking.Piece / 2);
+        var ring = host.ResolveStorageBuffer(ringAddress, ringSize, written: true);
+        Assert.True(ring.IsValid);
+        Assert.Equal(before + (2 * expectedSnapshots), host.GpuPristines);
+        host.FlushAndWaitForGpu();
+
+        var expected = new byte[cachedSize];
+        Assert.True(backing.TryRead(cachedAddress, expected));
+        var cache = host.ImageCache.StagedRanges!;
+        Assert.True(cache.Acquire(cachedAddress, cachedSize, written: true, host.SubmissionSerial,
+            host.SubmissionSerial - 1, out var entry));
+        AssertEqualBytes(expected, new ReadOnlySpan<byte>((void*)entry!.StagingBuffer!.Contents, (int)cachedSize).ToArray());
+        AssertEqualBytes(expected, new ReadOnlySpan<byte>((void*)entry.PristineBuffer!.Contents, (int)cachedSize).ToArray());
+    }
+
     // A blit from a binding into a new shared buffer, recorded in the host's command buffer
     // the way its own transfers are.
     private static nint CopyOnHost(MetalRenderHost host, MetalTransferHarness harness, BufferBinding binding, ulong size)
@@ -290,13 +329,13 @@ public sealed unsafe class MetalGuestViewTests(ITestOutputHelper output)
         const ulong size = 2 * Mib;
 
         memory.BeginSubmission(1, 0);
-        Assert.True(memory.TryResolveGuestView(backing.Base, size, out var first));
+        Assert.True(memory.TryResolveGuestView(backing.Base, size, out var first), $"Guest-view counters: {memory.GuestViewCounts}");
 
         memory.OnGuestUnmap(backing.Base + ShmScatteredBacking.Piece, ShmScatteredBacking.Piece);
         backing.Remap(1, BackingBytes - ShmScatteredBacking.Piece);
         Assert.Equal(1L, memory.GuestViewCounts.Invalidated);
 
-        Assert.True(memory.TryResolveGuestView(backing.Base, size, out var second));
+        Assert.True(memory.TryResolveGuestView(backing.Base, size, out var second), $"Guest-view counters: {memory.GuestViewCounts}");
         Assert.NotEqual(first.Buffer, second.Buffer);
         Assert.Equal(2L, memory.GuestViewCounts.Created);
         var expected = new byte[size];
@@ -439,6 +478,7 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
 
     private readonly int _descriptor;
     private readonly nint _alias;
+    private readonly nint _viewReservation;
     private readonly ulong _backingBytes;
     private readonly ulong _viewBytes;
     private readonly ulong[] _offsets;
@@ -461,11 +501,15 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
         }
 
         _alias = mmap(0, (nuint)backingBytes, ProtRead | ProtWrite, MapShared, _descriptor, 0);
-        Base = (ulong)mmap(0, (nuint)viewBytes, ProtNone, MapPrivate | MapAnon, -1, 0);
-        if (_alias == -1 || Base == ulong.MaxValue)
+        // Rosetta mmap may return a 4 KiB boundary, while Metal's no-copy view
+        // requires 16 KiB. Keep an extra piece reserved and align inside our own
+        // reservation, so rounding a view down never reaches before its mapping.
+        _viewReservation = mmap(0, (nuint)(viewBytes + Piece), ProtNone, MapPrivate | MapAnon, -1, 0);
+        if (_alias == -1 || _viewReservation == -1)
         {
             throw new InvalidOperationException("mmap failed.");
         }
+        Base = ((ulong)_viewReservation + Piece - 1) & ~(Piece - 1);
 
         var pieces = viewBytes / Piece;
         var backingPieces = backingBytes / Piece;
@@ -511,7 +555,7 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
 
     public void Dispose()
     {
-        munmap((nint)Base, (nuint)_viewBytes);
+        munmap(_viewReservation, (nuint)(_viewBytes + Piece));
         munmap(_alias, (nuint)_backingBytes);
         close(_descriptor);
     }

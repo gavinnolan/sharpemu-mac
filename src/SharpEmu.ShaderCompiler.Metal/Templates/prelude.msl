@@ -1,12 +1,4 @@
-// A raw dword load: the address truncates to the dword it lands in, which is what the
-// hardware does for S_BUFFER_LOAD_DWORD and BUFFER_LOAD_DWORD and what the SPIR-V
-// backend emits. Out of range reads zero.
-static inline uint sharpemu_load_dword(device uint* b, uint bytes, uint addr)
-{
-    uint index = addr >> 2;
-    return index < (bytes >> 2) ? b[index] : 0u;
-}
-
+{{dword_loads_device}}
 // A dword a format access may straddle, assembled from the two it spans. Only the
 // format path needs this: a descriptor's stride is a byte count, so a component can
 // start at any byte.

@@ -32,6 +32,34 @@ internal sealed partial class MetalRenderHost :
 {
     private const uint MaxFramebufferDimension = 16384;
 
+    private readonly MetalGraphicsBindingMemo _graphicsBindings = new();
+    private readonly long[] _graphicsBindingAttempts = new long[3];
+    private readonly long[] _graphicsBindingSkipped = new long[3];
+    private bool _graphicsBindingReuseEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRAPHICS_BINDING_REUSE") != "0";
+
+    internal bool GraphicsBindingReuseEnabled
+    {
+        get => _graphicsBindingReuseEnabled;
+        set
+        {
+            if (_graphicsBindingReuseEnabled == value) return;
+            _graphicsBindingReuseEnabled = value;
+            _graphicsBindings.Reset();
+        }
+    }
+
+    internal long GraphicsBindingAttempts => _graphicsBindingAttempts.Sum();
+    internal long GraphicsBindingSkipped => _graphicsBindingSkipped.Sum();
+
+    internal (long Attempted, long Skipped) GraphicsBindingCounters(MetalGraphicsBindingStage stage) =>
+        (_graphicsBindingAttempts[(int)stage], _graphicsBindingSkipped[(int)stage]);
+
+    private string FormatGraphicsBindingCounters() =>
+        $"graphics_bind=[cumulative=1 enabled={GraphicsBindingReuseEnabled} attempted={GraphicsBindingAttempts} skipped={GraphicsBindingSkipped} " +
+        $"vertex={_graphicsBindingAttempts[0]}/{_graphicsBindingSkipped[0]} mesh={_graphicsBindingAttempts[1]}/{_graphicsBindingSkipped[1]} " +
+        $"fragment={_graphicsBindingAttempts[2]}/{_graphicsBindingSkipped[2]}]";
+
     private static readonly nint SelCommandBuffer = MetalNative.Selector("commandBuffer");
     private static readonly nint SelCommit = MetalNative.Selector("commit");
     private static readonly nint SelEndEncoding = MetalNative.Selector("endEncoding");
@@ -64,6 +92,9 @@ internal sealed partial class MetalRenderHost :
     private nint _commandBuffer;
     private nint _previousCommandBuffer;
     private ulong _previousSerial;
+    // Published before commit: an upper bound on any value the completion event
+    // can reach. A recorded but unsubmitted command buffer cannot advance it.
+    private ulong _submittedSerial;
     private long _failedSubmissions;
     private long _reportedFailedSubmissions;
     private double _gpuBusySeconds;
@@ -193,14 +224,24 @@ internal sealed partial class MetalRenderHost :
         }
     }
 
-    public ulong CompletedSerial
+    public ulong CompletedSerial => ReadCompletedSerial(SerialHintEnabled);
+
+    internal ulong ReadCompletedSerial(bool useCompletedSnapshot)
     {
-        get
+        if (useCompletedSnapshot && _completions is { } completions)
         {
-            var completed = MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
-            _completions?.NoteSignaled(completed);
-            return completed;
+            var submitted = Volatile.Read(ref _submittedSerial);
+            var known = completions.CompletedHint;
+            // The hint is a lower bound on the event. Once it reaches the upper
+            // bound as well, another native read cannot discover more completed
+            // work. Pending submissions still query the live event as before.
+            if (known >= submitted)
+                return known;
         }
+
+        var completed = MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
+        _completions?.NoteSignaled(completed);
+        return completed;
     }
 
     public RenderHostLimits Limits { get; } =
@@ -592,6 +633,7 @@ internal sealed partial class MetalRenderHost :
 
         _slotTrap?.OnCommit(serial);
         PassProfileCommit(serial, cause == PassEndCause.Present);
+        OcclusionAuditCommit(serial);
         if (cause == PassEndCause.Present)
         {
             _imageCache.MarkFrame();
@@ -599,6 +641,7 @@ internal sealed partial class MetalRenderHost :
 
         NoteCommandBufferForTelemetry();
         MetalMemoryTelemetry.Commits.Add();
+        Volatile.Write(ref _submittedSerial, serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         if (DsTrace.Gpu && DsTrace.Armed)
         {
@@ -714,6 +757,7 @@ internal sealed partial class MetalRenderHost :
                 MetalNative.SendVoid(oldest, SelWaitUntilCompleted);
             }
 
+            OcclusionAuditResolve(_inFlightSerials[(_inFlightHead + MaxInFlightSubmissions - 1) % MaxInFlightSubmissions], false);
             PassProfileResolve(
                 _inFlightSerials[(_inFlightHead + MaxInFlightSubmissions - 1) % MaxInFlightSubmissions],
                 PassProfileEnabled,
@@ -786,7 +830,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         var status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
-        if (PassProfileEnabled && status != CommandBufferStatusCompleted && status != CommandBufferStatusError)
+        if ((PassProfileEnabled || OcclusionAuditEnabled) && status != CommandBufferStatusCompleted && status != CommandBufferStatusError)
         {
             // Its serial is signalled from inside it, so it is all but finished; the pass
             // profile needs its timestamps, which are readable only once it has completed.
@@ -804,6 +848,7 @@ internal sealed partial class MetalRenderHost :
                 Console.Error.WriteLine(
                     $"[METAL-V2][WARN] A Metal submission failed and will never signal its serial: serial={serial} " +
                     $"completed={CompletedSerial} {MetalNative.DescribeError(error)}{DescribeEncoderStatus(error)}");
+            OcclusionAuditResolve(serial, false);
             PassProfileResolve(serial, false, 0);
             return;
         }
@@ -811,6 +856,7 @@ internal sealed partial class MetalRenderHost :
         if (status != CommandBufferStatusCompleted)
         {
             _unsampledSubmissions++;
+            OcclusionAuditResolve(serial, false);
             PassProfileResolve(serial, false, 0);
             if (DsTrace.Gpu && DsTrace.Armed)
             {
@@ -831,6 +877,7 @@ internal sealed partial class MetalRenderHost :
             _gpuBusySamples++;
         }
 
+        OcclusionAuditResolve(serial, true);
         PassProfileResolve(serial, true, Math.Max(gpuEnd - gpuStart, 0));
 
         var kernelStart = MetalNative.SendDouble(buffer, SelKernelStartTime);
@@ -1189,10 +1236,19 @@ internal sealed partial class MetalRenderHost :
         // of them has to see from now on, whenever it lands.
         using (var overlayScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteOverlays))
         {
-            _cpOverlay.Forget(address, size);
-            _labelOverlay.Forget(address, size);
+            _cpOverlay.ForgetRecordedWrite(address, size);
+            _labelOverlay.ForgetRecordedWrite(address, size);
         }
 
+        NoteGuestMemoryWriteBeyondOverlays(address, size, origin);
+    }
+
+    /// <summary>
+    /// <see cref="NoteGuestMemoryWrite"/> without the two overlays, for a caller that has forgotten the
+    /// bytes it wrote itself and notes a run that also spans bytes it did not write.
+    /// </summary>
+    public void NoteGuestMemoryWriteBeyondOverlays(ulong address, ulong size, MetalGpuWriteOrigin origin)
+    {
         using (var stagedScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteStaged))
         {
             _stagedStorageCopies?.Forget(address, size);
@@ -1222,6 +1278,7 @@ internal sealed partial class MetalRenderHost :
         var serial = SubmissionSerial;
         var sequence = _gpuWrites.Note(address, size, serial, origin);
         NotePendingCopyDestination(address, size, origin, serial, sequence);
+        NoteFencedWrite(address, size);
     }
 
     /// <summary>
@@ -1567,7 +1624,9 @@ internal sealed partial class MetalRenderHost :
 
         // A packet-sized copy the host can do itself costs nothing and records no GPU
         // write, so the poll that usually follows it does not wait for a submission.
-        if (allowHost && CanWriteGuestOnHost(destination, size))
+        // Not when recorded work still writes the source: the host would have to read it,
+        // which waits for that work (a DMA of a count or a query result the GPU produced).
+        if (allowHost && CanWriteGuestOnHost(destination, size) && !HostCopyWouldWait(source, size))
         {
             CopyGuestBytesOnHost(destination, source, size);
             _imageCache.InvalidateMemory(destination, size);
@@ -1615,6 +1674,33 @@ internal sealed partial class MetalRenderHost :
         NoteGuestMemoryWrite(destination, size, MetalGpuWriteOrigin.Copy);
     }
 
+    // SHARPEMU_METAL_V2_HOST_COPY_PENDING_SOURCE=1 copies on the host even when recorded work
+    // still writes the source, which waits for that work, as before.
+    private static readonly bool HostCopyOfPendingSource =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_COPY_PENDING_SOURCE") == "1";
+
+    private long _hostCopiesDeclined;
+
+    // Whether reading the source of a copy on the host would wait for the GPU. The blit that runs
+    // instead reads it where the copy sits in the stream, after the work that writes it, which is
+    // the order the guest asked for; the destination it writes is a recorded write like any other.
+    private bool HostCopyWouldWait(ulong source, ulong size)
+    {
+        if (HostCopyOfPendingSource ||
+            (!_gpuWrites.MayCover(source, size) && !_imageCache.MayOwn(source, size)))
+        {
+            return false;
+        }
+
+        var wait = _imageCache.HasGpuModifiedImageBytes(source, size) || PendingSerialHinted(source, size) != 0;
+        if (wait)
+        {
+            Interlocked.Increment(ref _hostCopiesDeclined);
+        }
+
+        return wait;
+    }
+
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
     {
         _cpOverlay.Forget(destination, size);
@@ -1660,8 +1746,8 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Publishes every GPU-owned image byte in the range into guest memory.</summary>
-    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause) =>
-        _imageCache.FlushGpuWrites(address, size, cause);
+    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause, bool written = false) =>
+        _imageCache.FlushGpuWrites(address, size, cause, written);
 
     public void RunPendingOperations() => _relay.RunPendingCommands();
 
@@ -1788,6 +1874,30 @@ internal sealed partial class MetalRenderHost :
         }
     }
 
+    // SHARPEMU_METAL_V2_SPECULATIVE_WAITS=1 lets work done ahead of need (the pipeline look-ahead's
+    // program preparation, GpuFatal.IsSpeculative) wait for the GPU like the stream does.
+    private static readonly bool SpeculativeWaits =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SPECULATIVE_WAITS") == "1";
+
+    private long _speculativeWaitsAbandoned;
+
+    // Work done ahead of need reads registers and memory the stream has not reached: bytes the GPU
+    // is still writing there may not even be the ones the stream will read, and the stream reads
+    // them itself when it gets there. So that work is abandoned (as a fatal condition in it is)
+    // instead of the worker waiting for the GPU on its behalf. Nothing has been recorded or waited
+    // for when this throws, so the stream's own read later sees exactly what it saw before.
+    private void AbandonSpeculativeWait(ulong address, ulong size)
+    {
+        if (SpeculativeWaits || !SharpEmu.Libs.Gpu.Scheduling.GpuFatal.IsSpeculative)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _speculativeWaitsAbandoned);
+        throw new SharpEmu.Libs.Gpu.Scheduling.GpuFatal.AbandonedWorkException(
+            $"A read ahead of the stream would wait for the GPU: address=0x{address:X16} size=0x{size:X}.");
+    }
+
     // Lands every recorded write into the range: an image's writeback, or a store or copy.
     private void WaitForGuestBytes(ulong address, ulong size)
     {
@@ -1795,6 +1905,7 @@ internal sealed partial class MetalRenderHost :
         _lastReadSize = size;
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
+            AbandonSpeculativeWait(address, size);
             // The writeback is recorded into the buffer being built, so this one has
             // to be committed before the bytes can be read.
             FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
@@ -1807,9 +1918,16 @@ internal sealed partial class MetalRenderHost :
         var pending = PendingSerialHinted(address, size);
         if (pending != 0)
         {
+            AbandonSpeculativeWait(address, size);
             if (size <= SmallReadWaitBytes)
             {
                 ReportSmallReadWaitSite(address, size);
+            }
+
+            NoteObservedRead(address, size);
+            if (TryWaitForWriteFence(address, size, pending))
+            {
+                return;
             }
 
             if (_commandBuffer != 0 && pending >= _submissionSerial)
@@ -2199,7 +2317,7 @@ internal sealed partial class MetalRenderHost :
     {
         // A buffer binding sees guest memory, so any image that owns these bytes
         // publishes them first; a written binding also invalidates those images.
-        FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding);
+        FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding, isWritten);
         // A read takes the storage path: its window, a guest view, or a staged copy that
         // holds the GPU's writes still in flight in this command buffer - whole, however
         // large, up to the largest window.
@@ -2382,9 +2500,10 @@ internal sealed partial class MetalRenderHost :
             $"prefetch=[{FormatPrefetchCounters()}] " +
             // The command thread's synchronous calls and their wait, its wait for room in the queue, and its items.
             $"cthread=[{FormatCommandThreadCounters()}] " +
+            (NativeOcclusionEnabled ? $"occlusion=[dumps={_oqDumps} reductions={_oqReductions} buffers={_oqBatches.Count} budget_waits={_oqBudgetWaits} unused_passes={_oqUnusedPasses} initialized_slots={_oqInitializedSlots}] " : string.Empty) +
             // Sampled bindings the texture memo answered, those whose stamp failed between the preparation
             // and the bind, lookups made in full, results memoised, and entries held.
-            $"texture_memo=({TakeTextureMemoCounters()}) " +
+            $"texture_memo=({TakeTextureMemoCounters()}) {FormatGraphicsBindingCounters()} " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
@@ -2437,6 +2556,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_gds=").Append(TakeGpuGdsTransfers())
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
+            .Append(" host_copies_declined=").Append(Interlocked.Exchange(ref _hostCopiesDeclined, 0))
+            .Append(" speculative_waits_abandoned=").Append(Interlocked.Exchange(ref _speculativeWaitsAbandoned, 0))
             .Append(TakeCopyReadCounters())
             .Append(" inline_eop=").Append(TakeInlineCompletions())
             .Append(" gpu_labels=").Append(labels.GpuTimed)
@@ -2468,7 +2589,10 @@ internal sealed partial class MetalRenderHost :
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
             .Append(" data_replans=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Replans)
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
-            .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count);
+            .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count)
+            .Append(" window_memo_hits=").Append(_guestMemory.WindowMemoCounts.Hits)
+            .Append(" window_memo_misses=").Append(_guestMemory.WindowMemoCounts.Misses)
+            .Append(TakeWriteFenceCounters());
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
         var bindless = TakeBindlessCost();
         if (bindless.Tables != 0)
@@ -2500,7 +2624,7 @@ internal sealed partial class MetalRenderHost :
             $"linear_views={_imageCache.LinearViewCount} linear_view_promotions={_imageCache.TakeLinearViewPromotions()} " +
             $"usage_promotions={_imageCache.TakeUsagePromotions()} " +
             $"alias_on_device={_imageCache.TakeDeviceAliasPublishes()} " +
-            $"stencil_planes={_imageCache.TakeStencilPlanePublishes()} stencil_device={_imageCache.TakeStencilDeviceHandOvers()} " +
+            $"stencil_planes={_imageCache.TakeStencilPlanePublishes()} stencil_device={_imageCache.TakeStencilDeviceHandOvers()} stencil_to_color={_imageCache.TakeStencilColorCopies()} " +
             $"alias_reused={_imageCache.TakeDeviceAliasReuses()} alias_syncs_skipped={_imageCache.TakeAliasSyncsSkipped()} untested_depth_writes={TakeUntestedDepthWrites()} " +
             $"part_up={subRange.Uploads} part_up_mb={subRange.UploadBytes / (1024 * 1024)} " +
             $"part_wb={subRange.Writebacks} part_wb_mb={subRange.WritebackBytes / (1024 * 1024)} " +
@@ -2534,6 +2658,7 @@ internal sealed partial class MetalRenderHost :
         var (subsetJoins, subsetJoinsSampled) = TakeSubsetJoins();
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
+            _imageCache.TakeAliasTransitionText() + " " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"store_mb={((storeBytes - discardedBytes) / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"discarded_mb={(discardedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
@@ -2543,7 +2668,7 @@ internal sealed partial class MetalRenderHost :
             $"end_other={endOtherCount} end_indirect={TakeIndirectPassEnds()} {TakeExecutorPassEnds()} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
-            $"labels_deferred={TakeDeferredLabelWrites()} clears_folded={foldedClears} " +
+            $"labels_deferred={TakeDeferredLabelWrites()} label_lookup=[{TakeDeferredLabelLookupStats()}] clears_folded={foldedClears} " +
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
             $"transfers=[{TakeTransferCauses()}]");
@@ -2694,6 +2819,10 @@ internal sealed partial class MetalRenderHost :
         }
 
         _completions.Dispose();
+        DisposeNativeOcclusion();
+        DisposeLabelScatter();
+        DisposeOcclusionAudit();
+        DisposeWriteFences();
         DisposeHostMovie();
         DisposeBindlessImages();
         DisposePipelines();

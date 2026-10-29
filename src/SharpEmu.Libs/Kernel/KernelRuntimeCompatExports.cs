@@ -61,6 +61,9 @@ public static class KernelRuntimeCompatExports
     private const uint PageExecuteReadWrite = 0x40;
     private static readonly object _stateGate = new();
     private static readonly long _processStartCounter = Stopwatch.GetTimestamp();
+
+    /// <summary>The Stopwatch reading the process-relative clocks count from (native clock stubs subtract it).</summary>
+    public static long ProcessStartCounter => _processStartCounter;
     private static readonly RdtscDelegate? _rdtscReader = CreateRdtscReader();
     private static readonly ulong _kernelTscFrequency = ResolveKernelTscFrequency();
     private static readonly ulong _stackChkGuardValue = 0xC0DEC0DECAFEBA00UL;
@@ -94,12 +97,25 @@ public static class KernelRuntimeCompatExports
 
     // Adaptive nap for usleep(<1 ms) polling loops (a worker pool waiting for jobs). The
     // first short sleeps of a streak sleep exactly what they ask for, so a wait that ends
-    // quickly stays fast; once one thread has been polling for SHARPEMU_USLEEP_NAP_AFTER_US (default 500 us)
-    // its short sleeps really sleep, for max(requested, SHARPEMU_USLEEP_NAP_US) (default
-    // 250 us; 0 turns naps off). A streak ends when the thread spends more than 2 ms
-    // between short sleeps or sleeps for 1 ms or more. Per thread, not per title.
+    // quickly stays fast. Once one thread has been polling for SHARPEMU_USLEEP_NAP_AFTER_US
+    // (default 500 us) its short sleeps start to nap, but the nap escalates instead of
+    // jumping to its ceiling: it starts at SHARPEMU_USLEEP_NAP_FLOOR_US (default 50 us) and
+    // rises linearly to SHARPEMU_USLEEP_NAP_US (default 250 us; 0 turns naps off) over the
+    // next SHARPEMU_USLEEP_NAP_RAMP_US (default 4000 us), so a short wait stays responsive
+    // and only a long idle spin settles at the cheap ceiling. A request at or above the
+    // floor is never stretched: usleep(100) sleeps ~100 us (a guest's GPU-label poll used to
+    // pay 285 us per iteration). A streak ends when the thread spends more than 2 ms between
+    // short sleeps or sleeps for 1 ms or more. Per thread, not per title.
+    // SHARPEMU_USLEEP_NAP_LEGACY=1 restores the old fixed policy: after the streak window
+    // every short sleep sleeps max(requested, SHARPEMU_USLEEP_NAP_US).
     internal static readonly long UsleepNapMicroseconds =
         ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_US", 250);
+    internal static readonly long UsleepNapFloorMicroseconds =
+        Math.Min(ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_FLOOR_US", 50), UsleepNapMicroseconds);
+    internal static readonly long UsleepNapRampMicroseconds =
+        ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_RAMP_US", 4000);
+    internal static readonly bool UsleepNapLegacy =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_USLEEP_NAP_LEGACY"), "1", StringComparison.Ordinal);
     internal static readonly long _usleepNapAfterTicks =
         ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_AFTER_US", 500) * Stopwatch.Frequency / 1_000_000;
     internal static readonly long _usleepStreakGapTicks = Stopwatch.Frequency * 2 / 1000;
@@ -116,6 +132,54 @@ public static class KernelRuntimeCompatExports
             : fallback;
 
     /// <summary>
+    /// How long a short sleep (or a yield, <paramref name="requestedMicroseconds"/> 0) that
+    /// belongs to a streak of <paramref name="streakAgeTicks"/> should really sleep. Returns
+    /// <paramref name="requestedMicroseconds"/> and sets <paramref name="napped"/> false
+    /// while no nap applies; the arguments are the policy's tunables so tests can pin them.
+    /// </summary>
+    internal static long NapPolicyMicroseconds(
+        long streakAgeTicks,
+        long requestedMicroseconds,
+        long napMicroseconds,
+        long floorMicroseconds,
+        long rampMicroseconds,
+        long afterTicks,
+        bool legacy,
+        out bool napped)
+    {
+        napped = false;
+        if (napMicroseconds <= 0 || streakAgeTicks < afterTicks)
+        {
+            return requestedMicroseconds;
+        }
+
+        if (legacy)
+        {
+            napped = true;
+            return Math.Max(requestedMicroseconds, napMicroseconds);
+        }
+
+        // A request the guest made on purpose is honoured; only tiny requests and yields,
+        // which carry no duration, are the busy-poll backoff the nap exists for.
+        if (requestedMicroseconds >= floorMicroseconds && requestedMicroseconds > 0)
+        {
+            return requestedMicroseconds;
+        }
+
+        var floor = Math.Min(floorMicroseconds, napMicroseconds);
+        var nap = napMicroseconds;
+        if (rampMicroseconds > 0 && napMicroseconds > floor)
+        {
+            var rampTicks = rampMicroseconds * Stopwatch.Frequency / 1_000_000;
+            var progress = Math.Min(1.0, (double)(streakAgeTicks - afterTicks) / rampTicks);
+            nap = floor + (long)((napMicroseconds - floor) * progress);
+        }
+
+        napped = true;
+        return Math.Max(requestedMicroseconds, nap);
+    }
+
+    /// <summary>
     /// The sub-millisecond usleep policy (see <see cref="UsleepNapMicroseconds"/>): returns
     /// true when this call napped, false when it slept just the requested time.
     /// </summary>
@@ -128,13 +192,6 @@ public static class KernelRuntimeCompatExports
         }
 
         _lastShortUsleep = now;
-        if (UsleepNapMicroseconds > 0 && now - _shortUsleepStreakStart >= _usleepNapAfterTicks)
-        {
-            HostTiming.SleepMicroseconds(Math.Max((long)micros, UsleepNapMicroseconds));
-            _lastShortUsleep = Stopwatch.GetTimestamp();
-            return true;
-        }
-
         // Like the FreeBSD kernel (kern_clock_nanosleep always blocks for a nonzero
         // interval), a short sleep never returns before its requested time. A bare yield
         // returned in well under a microsecond, so a guest that counts usleep(1) calls as
@@ -142,8 +199,16 @@ public static class KernelRuntimeCompatExports
         // and before the streak above was old enough to nap. The wait is an
         // absolute-deadline host wait (mach_wait_until on macOS), never a millisecond
         // round-up.
-        HostTiming.SleepMicroseconds((long)micros);
-        return false;
+        var sleepMicros = NapPolicyMicroseconds(
+            now - _shortUsleepStreakStart, (long)micros, UsleepNapMicroseconds, UsleepNapFloorMicroseconds,
+            UsleepNapRampMicroseconds, _usleepNapAfterTicks, UsleepNapLegacy, out var napped);
+        HostTiming.SleepMicroseconds(sleepMicros);
+        if (napped)
+        {
+            _lastShortUsleep = Stopwatch.GetTimestamp();
+        }
+
+        return napped;
     }
 
     private static readonly bool _stopwatchTicksAreNanoseconds =
@@ -462,6 +527,36 @@ public static class KernelRuntimeCompatExports
     {
         ctx[CpuRegister.Rax] = ReadProcessTimeMicroseconds();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// <c>int pthread_getcpuclockid(pthread_t, clockid_t *)</c>, the one thread-CPU-time API the
+    /// SDK headers (pthread.h) declare. The clock id of the calling thread is
+    /// CLOCK_THREAD_CPUTIME_ID (14), which clock_gettime reads; another thread's CPU clock has
+    /// no id the emulator's clock_gettime could serve, so that reports ENOTSUP.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "nnoxZUHK+SA",
+        ExportName = "pthread_getcpuclockid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadGetCpuClockId(CpuContext ctx)
+    {
+        var thread = ctx[CpuRegister.Rdi];
+        var clockIdAddress = ctx[CpuRegister.Rsi];
+        if (clockIdAddress == 0)
+        {
+            return Threading.GuestErrno.EINVAL;
+        }
+
+        if (thread != KernelPthreadState.GetCurrentThreadHandle())
+        {
+            return Threading.GuestErrno.ENOTSUP;
+        }
+
+        return TryWriteInt32(ctx, clockIdAddress, KernelClocks.ThreadCputime)
+            ? 0
+            : Threading.GuestErrno.EFAULT;
     }
 
     internal static ulong ReadProcessTimeMicroseconds()

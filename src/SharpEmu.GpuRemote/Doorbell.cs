@@ -57,6 +57,23 @@ public readonly unsafe struct Doorbell
     }
 
     /// <summary>
+    /// Publishes a signal that one waiter can act on: wakes one registered sleeper, if any. For a
+    /// bell whose waiters are interchangeable servers of a shared queue, where each signal
+    /// announces one item. No wake is lost: the item is published before the ring, every waiter
+    /// re-checks the queue after registering, and a woken waiter drains the queue before it
+    /// sleeps again, so an item posted while the only sleeper is on its way up is still found.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public void RingOne()
+    {
+        Interlocked.Increment(ref _state->Sequence);
+        if (Volatile.Read(ref _state->Sleepers) != 0)
+        {
+            RemoteWait.WakeOne(&_state->Sequence);
+        }
+    }
+
+    /// <summary>
     /// Bumps the sequence and wakes every waiter regardless of registration; used when one side
     /// is going away and every wait must notice.
     /// </summary>

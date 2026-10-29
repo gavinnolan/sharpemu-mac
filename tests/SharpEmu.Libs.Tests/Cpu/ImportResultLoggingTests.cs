@@ -20,7 +20,19 @@ public sealed class ImportResultLoggingTests
         using var backend = new DirectExecutionBackend(modules);
         var method = typeof(DirectExecutionBackend).GetMethod(
             "ShouldLogImportResult", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var filter = method.CreateDelegate<ImportResultFilter>(backend);
+        var entryType = method.GetParameters()[0].ParameterType.GetElementType()!;
+        var entries = new Dictionary<string, object>();
+        bool Filter(string nid, OrbisGen2Result result, out int occurrence)
+        {
+            if (!entries.TryGetValue(nid, out var entry))
+                entries[nid] = entry = Activator.CreateInstance(entryType,
+                    [0UL, nid, null, false, false, false, false, 0UL])!;
+            object?[] arguments = [entry, result, 0];
+            var logged = (bool)method.Invoke(backend, arguments)!;
+            occurrence = (int)arguments[2]!;
+            return logged;
+        }
+        ImportResultFilter filter = Filter;
         bool ShouldLog(string nid, OrbisGen2Result result) => filter(nid, result, out _);
 
         foreach (var nid in new[] { "9UK1vLZQft4", "7H0iTOciTLo" })

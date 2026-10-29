@@ -1,0 +1,27 @@
+<!-- Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later -->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SharpEmu.Tools.PerfAudit</AssemblyName>
+    <RootNamespace>SharpEmu.PerfAudit</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj" />
+    <ProjectReference Include="../../src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.Core/SharpEmu.Core.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.Libs/SharpEmu.Libs.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.HLE/SharpEmu.HLE.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.ShaderCompiler/SharpEmu.ShaderCompiler.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.GpuRemote/SharpEmu.GpuRemote.csproj" />
+    <ProjectReference Include="../../src/SharpEmu.GpuSplit/SharpEmu.GpuSplit.csproj" />
+  </ItemGroup>
+</Project>

@@ -72,6 +72,17 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         }
     }
 
+    // A binary compiled in the safe math mode must not be served for the relaxed one.
+    [Fact]
+    public void TheMathModeIsPartOfTheLibraryKey()
+    {
+        var safe = MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Safe);
+        var relaxed = MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Relaxed);
+        Assert.NotEqual(safe, relaxed);
+        Assert.Equal(relaxed, MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Relaxed));
+        Assert.Equal(MetalBinaryArchive.LibraryKey(ComputeSource, false), MetalBinaryArchive.LibraryKey(ComputeSource, false, MslMathMode.Default));
+    }
+
     [Fact]
     public void ALibraryAndComputePipelineFromTheArchiveComputeWhatTheCompiledOnesDo()
     {
@@ -161,6 +172,28 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Assert.Contains(expected, static value => value == 0);
         Assert.Equal(expected, actual);
         Release(stored, archives, storedDescriptor, storedPixelLibrary, storedVertexLibrary, compiled, descriptor, pixelLibrary, vertexLibrary);
+    }
+
+    // The shader prewarm skips a compute whose file is written (MetalShaderPrewarm): only a
+    // written file counts, in this session and the next.
+    [Fact]
+    public void AComputeLibraryIsStoredOnlyOnceItsFileIsWritten()
+    {
+        if (!RequireDevice()) return;
+        var computeKey = MetalBinaryArchive.LibraryKey(ComputeSource, usesPerVertexInputs: false);
+        var otherKey = MetalBinaryArchive.LibraryKey(ComputeSource + "\n// another\n", usesPerVertexInputs: false);
+        using (var writing = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget))
+        {
+            Assert.False(writing.IsStored(computeKey));
+            Assert.True(Store(writing, ComputeSource, "gen5_cs", Gen5MslStage.Compute, computeKey) > 0);
+            Assert.True(writing.IsStored(computeKey));
+            Assert.False(writing.IsStored(otherKey));
+            Assert.False(writing.IsStored(default));
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+        Assert.True(reading.IsStored(computeKey));
+        Assert.False(reading.IsStored(otherKey));
     }
 
     [Fact]

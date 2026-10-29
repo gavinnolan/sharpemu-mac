@@ -10,7 +10,9 @@ public sealed class CommandStreamWorker
     private readonly ICommandStreamHost _host;
     private readonly Func<bool> _hasPendingCommands;
     private readonly bool _cancelBlockedAtStop;
-    private readonly Thread _thread;
+    private readonly string _threadName;
+    private Thread? _thread;
+    private SharpEmu.HLE.Host.HostQosThread? _qosThread;
     private readonly Action<Exception>? _onTerminalFailure;
     private Exception? _failure;
 
@@ -21,21 +23,51 @@ public sealed class CommandStreamWorker
         _hasPendingCommands = hasPendingCommands;
         _cancelBlockedAtStop = cancelBlockedAtStop;
         _onTerminalFailure = onTerminalFailure;
-        _thread = new Thread(Run) { IsBackground = true, Name = threadName };
+        _threadName = threadName;
     }
 
-    public bool IsWorkerThread => Thread.CurrentThread == _thread;
+    /// <summary>The host QoS class the worker thread runs at (Darwin qos_class_t; 0x21 is user-interactive), read back from the thread itself; 0 until it starts or off macOS.</summary>
+    public uint WorkerQosClass => Volatile.Read(ref _workerQosClass);
 
-    public void Start() => _thread.Start();
+    private uint _workerQosClass;
+
+    // Recorded by Run itself so the answer is right from the worker's first instruction,
+    // before Start has stored the native thread handle.
+    private volatile Thread? _runThread;
+
+    public bool IsWorkerThread => ReferenceEquals(Thread.CurrentThread, _runThread);
+
+    public void Start()
+    {
+        // The GPU submission thread: every guest draw and every flip passes through here on its way
+        // to the backend, so it sits on the frame deadline just as much as the presenter does.
+        // pthread_set_qos_class_self_np fails with EPERM on a CoreCLR-created thread, so the class
+        // goes into the pthread attributes of a thread created natively; the managed thread below
+        // is the fallback for hosts without that (every non-macOS host).
+        _qosThread = SharpEmu.HLE.Host.HostQosThread.TryStart(
+            _threadName, SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 16 * 1024 * 1024, Run, out _);
+        if (_qosThread is null)
+        {
+            _thread = new Thread(Run) { IsBackground = true, Name = _threadName };
+            _thread.Start();
+        }
+    }
 
     // Stops accepting work, drains the queue and joins; a worker failure is rethrown here.
     public IdleOutcome Stop()
     {
         _queue.StopAccepting();
         _queue.Wake();
-        if (_thread.IsAlive && !IsWorkerThread)
+        if (!IsWorkerThread)
         {
-            _thread.Join();
+            if (_qosThread is { } qosThread)
+            {
+                qosThread.Join(Timeout.Infinite);
+            }
+            else if (_thread is { IsAlive: true } thread)
+            {
+                thread.Join();
+            }
         }
 
         if (_failure is not null)
@@ -48,11 +80,8 @@ public sealed class CommandStreamWorker
 
     private void Run()
     {
-        // The GPU submission thread: every guest draw and every flip passes
-        // through here on its way to the backend, so it sits on the frame
-        // deadline just as much as the presenter does.
-        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
-            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        _runThread = Thread.CurrentThread;
+        Volatile.Write(ref _workerQosClass, SharpEmu.HLE.Host.HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics());
         try
         {
             for (;;)

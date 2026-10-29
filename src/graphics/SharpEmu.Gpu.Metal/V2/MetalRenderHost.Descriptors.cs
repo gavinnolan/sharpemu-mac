@@ -45,6 +45,7 @@ internal sealed partial class MetalRenderHost
         public ulong[]?[] MipTextureIds = [];
         public nint[] Samplers = [];
         public ulong[] SamplerIds = [];
+        public byte[] SamplerViewClasses = [];
         public ResourceSlotIdentifier[] Images = [];
         public ImageRequest[] Requests = [];
         public bool[] IsStorage = [];
@@ -93,6 +94,7 @@ internal sealed partial class MetalRenderHost
             {
                 Samplers = new nint[samplers];
                 SamplerIds = new ulong[samplers];
+                SamplerViewClasses = new byte[samplers];
             }
 
             if (Buffers.Length < buffers)
@@ -408,10 +410,15 @@ internal sealed partial class MetalRenderHost
             ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index);
         }
 
+        // All image requests, including movie replacements and texture memo hits, are current.
+        // Classify their sampler pairings once rather than scanning every pair for every sampler.
+        MetalSamplerViewClasses.Resolve(info.SampledPairs, prepared.Requests.AsSpan(0, prepared.ImageCount),
+            prepared.SamplerViewClasses.AsSpan(0, info.Samplers.Count));
         for (var index = 0; index < info.Samplers.Count; index++)
         {
             prepared.Samplers[index] = ResolveSampler(
-                info, prepared, info.Samplers[index], snapshot.Samplers[index], index, out prepared.SamplerIds[index]);
+                prepared, info.Samplers[index], snapshot.Samplers[index], index,
+                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index]);
         }
 
         var shaderData = prepared.ShaderData;
@@ -489,11 +496,11 @@ internal sealed partial class MetalRenderHost
     }
 
     private nint ResolveSampler(
-        ShaderResourceInfo info,
         MetalStageBindings prepared,
         SamplerResource sampler,
         uint[] words,
         int index,
+        bool integerViews,
         out ulong resourceId)
     {
         if (words.Length < 4)
@@ -520,30 +527,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var descriptor = new SamplerDescriptorWords(native);
-        return GetSampler(in descriptor, SamplesIntegerViews(info, prepared, index), out resourceId);
-    }
-
-    // A sampler takes the numeric class of the views it samples; integer only when
-    // every paired view is integer, since a float view needs filtering.
-    private static bool SamplesIntegerViews(ShaderResourceInfo info, MetalStageBindings prepared, int sampler)
-    {
-        var paired = false;
-        foreach (var pair in info.SampledPairs)
-        {
-            if (pair.Sampler != sampler || pair.Image >= prepared.ImageCount)
-            {
-                continue;
-            }
-
-            if (!ViewFormatRules.IsIntegerFormat(prepared.Requests[pair.Image].View.Format))
-            {
-                return false;
-            }
-
-            paired = true;
-        }
-
-        return paired;
+        return GetSampler(in descriptor, integerViews, out resourceId);
     }
 
     // The binding layout gives a dynamic-mip storage image one element per level of its
@@ -673,6 +657,43 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    // The memoised sampled bindings from `first` on that still hold, confirmed under one hold of the
+    // image cache lock (MetalImageCache.HoldForReacquire) rather than one hold each. Stops at the
+    // first binding that is a movie plane, has no memo entry or whose stamp no longer holds, so every
+    // binding is still looked at in order, after the ones before it have taken effect. Returns how
+    // many it bound; zero means the binding at `first` is stale.
+    private int ReacquireMemoRun(MetalStageBindings stage, int first)
+    {
+        var count = 0;
+        using (var held = _imageCache.HoldForReacquire())
+        {
+            for (var index = first; index < stage.ImageCount; index++)
+            {
+                if (index == stage.MovieLuma || index == stage.MovieChroma ||
+                    stage.MemoHits[index] is not { } hit ||
+                    !_imageCache.TryReacquireTextureViewHeld(hit.Image, in hit.Request, in hit.Stamp))
+                {
+                    break;
+                }
+
+                stage.Textures[index] = hit.Texture;
+                stage.TextureIds[index] = hit.ResourceId;
+                stage.MipTextures[index] = null;
+                stage.MipTextureIds[index] = null;
+                count++;
+            }
+        }
+
+        for (var index = first; index < first + count; index++)
+        {
+            var hit = stage.MemoHits[index]!;
+            NotePendingInputDump(hit.Texture, hit.Image, index, ImageRole.Texture);
+        }
+
+        _textureMemoHits += count;
+        return count;
+    }
+
     public void BindResources(IPreparedBindings prepared)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ResourceBinding);
@@ -690,14 +711,10 @@ internal sealed partial class MetalRenderHost
 
             if (stage.MemoHits[index] is { } hit)
             {
-                if (_imageCache.TryReacquireTextureView(hit.Image, in hit.Request, in hit.Stamp))
+                var reacquired = ReacquireMemoRun(stage, index);
+                if (reacquired > 0)
                 {
-                    stage.Textures[index] = hit.Texture;
-                    stage.TextureIds[index] = hit.ResourceId;
-                    NotePendingInputDump(hit.Texture, hit.Image, index, ImageRole.Texture);
-                    stage.MipTextures[index] = null;
-                    stage.MipTextureIds[index] = null;
-                    _textureMemoHits++;
+                    index += reacquired - 1;
                     continue;
                 }
 
@@ -795,7 +812,7 @@ internal sealed partial class MetalRenderHost
 
             var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
-            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
+            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
             if (written)
             {
@@ -890,7 +907,7 @@ internal sealed partial class MetalRenderHost
             var size = ClampMappedSize(range.Base, range.Size);
             OrderAfterDeferredCopies(range.Base, size);
             OrderAfterStagedStores(range.Base, size);
-            FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor);
+            FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor, range.Written);
             if (!range.Written)
             {
                 continue;
@@ -1132,8 +1149,22 @@ internal sealed partial class MetalRenderHost
 
         if (hasPushData)
         {
-            var range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
-            System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData).CopyTo(span);
+            var pushBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData);
+            MetalGuestRange range;
+            if (ArgumentBufferReuse && _pushRegions.TryFind(pushBytes, _submissionSerial, out var found))
+            {
+                range = found;
+            }
+            else
+            {
+                range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
+                pushBytes.CopyTo(span);
+                if (ArgumentBufferReuse)
+                {
+                    _pushRegions.Add(pushBytes, _submissionSerial, in range);
+                }
+            }
+
             _pushBuffer = range.Buffer;
             _pushOffset = range.Offset;
             _hasPushData = true;
@@ -1153,7 +1184,17 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var range = _guestMemory.Allocate(Math.Max(argumentLayout.ByteSize, 16u), 256, out var argument);
+        // Filled in host scratch first: a draw whose argument buffer comes out the same as one this
+        // command buffer already wrote binds that range (ArgumentBufferReuse) instead of reserving,
+        // clearing and filling a new one. Every side effect of the fill (the textures it names, the
+        // tables it uploads, the device-address use) still happens on every draw.
+        var argumentBytes = (int)Math.Max(argumentLayout.ByteSize, 16u);
+        if (_argumentScratch.Length < argumentBytes)
+        {
+            _argumentScratch = new byte[Math.Max(argumentBytes, _argumentScratch.Length * 2)];
+        }
+
+        var argument = _argumentScratch.AsSpan(0, argumentBytes);
         argument.Clear();
         var imageCursor = 0;
         var fields = argumentLayout.Fields;
@@ -1240,9 +1281,71 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        var range = ArgumentBufferReuse ? CommitArgumentBytes(stageIndex, argument) : WriteArgumentRange(argument);
         _stageArgumentBuffers[stageIndex] = range.Buffer;
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;
+    }
+
+    // SHARPEMU_METAL_V2_ARGUMENT_REUSE=0 reserves and fills a ring range for every stage of every draw.
+    private static readonly bool ArgumentBufferReuse =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_ARGUMENT_REUSE");
+
+    private static readonly bool ArgumentReuseVerify =
+        SharpEmu.ShaderCompiler.PerfSwitches.Verify("SHARPEMU_METAL_V2_ARGUMENT_REUSE");
+
+    private byte[] _argumentScratch = new byte[512];
+
+    // Four recent argument buffers per stage: draws alternate between a few materials.
+    private readonly MetalRegionMemo[] _argumentRegions = CreateRegionMemos(StageCount, slots: 4);
+
+    // The push-data block of a draw: the shader data of its stages, as one buffer.
+    private readonly MetalRegionMemo _pushRegions = new(slots: 4);
+
+    // The uploaded tables (flattened resource table, shader data) of every stage.
+    private readonly MetalRegionMemo _uploadedTables = new(slots: 8);
+
+    private static MetalRegionMemo[] CreateRegionMemos(int count, int slots)
+    {
+        var memos = new MetalRegionMemo[count];
+        for (var index = 0; index < memos.Length; index++)
+        {
+            memos[index] = new MetalRegionMemo(slots);
+        }
+
+        return memos;
+    }
+
+    /// <summary>Argument buffers a draw bound from an earlier draw of its command buffer.</summary>
+    internal long ArgumentBufferReuses => _argumentRegions.Sum(memo => memo.Hits) + _pushRegions.Hits;
+
+    /// <summary>Argument buffers written to a new ring range.</summary>
+    internal long ArgumentBufferWrites => _argumentRegions.Sum(memo => memo.Misses) + _pushRegions.Misses;
+
+    private MetalGuestRange WriteArgumentRange(ReadOnlySpan<byte> bytes)
+    {
+        var range = _guestMemory.Allocate((ulong)bytes.Length, 256, out var span);
+        span.Clear();
+        bytes.CopyTo(span);
+        return range;
+    }
+
+    private MetalGuestRange CommitArgumentBytes(int stageIndex, ReadOnlySpan<byte> bytes)
+    {
+        var memo = _argumentRegions[stageIndex];
+        if (memo.TryFind(bytes, _submissionSerial, out var found))
+        {
+            if (ArgumentReuseVerify && !_guestMemory.RingSpan(in found).SequenceEqual(bytes))
+            {
+                throw Fatal($"A reused argument buffer no longer holds what the draw wrote: stage={stageIndex}.");
+            }
+
+            return found;
+        }
+
+        var range = WriteArgumentRange(bytes);
+        memo.Add(bytes, _submissionSerial, in range);
+        return range;
     }
 
     // A binding lists one resource index per declared element; a dynamic-mip storage
@@ -1321,7 +1424,7 @@ internal sealed partial class MetalRenderHost
                     ? ReachFeedbackAddress()
                     : MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
             case DescriptorBindingKind.FlattenedResourceTable:
-                return UploadDwords(stage.StageResources.Resources.FlattenedResourceTable);
+                return UploadFlattenedTable(stage.StageResources.Resources.FlattenedResourceTable, stage.Program.FlattenedTableMinimumWords);
             case DescriptorBindingKind.ShaderData:
                 return UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
             case DescriptorBindingKind.MipStatistics:
@@ -1440,12 +1543,38 @@ internal sealed partial class MetalRenderHost
         int spanCount) =>
         MetalDeviceAddressTable.AddEntry(entries, entry, spanCount, MaxAddressRanges);
 
+    // The program reads the table's fixed slots below minimumWords without a bounds check
+    // (Gen5MslCodegenOptions.ConstantTableSlots), so a shorter table goes up zero-padded:
+    // those slots read the 0 the check gave. The padded words are part of the reuse key.
+    private ulong UploadFlattenedTable(uint[] table, uint minimumWords)
+    {
+        if ((uint)table.Length >= minimumWords)
+        {
+            return UploadDwords(table);
+        }
+
+        Span<uint> padded = minimumWords <= 1024 ? stackalloc uint[(int)minimumWords] : new uint[minimumWords];
+        padded.Clear();
+        table.CopyTo(padded);
+        return UploadDwords(padded);
+    }
+
     private ulong UploadDwords(ReadOnlySpan<uint> words)
     {
         var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(words);
+        if (ArgumentBufferReuse && _uploadedTables.TryFind(bytes, _submissionSerial, out var found))
+        {
+            return found.GpuAddress;
+        }
+
         var range = _guestMemory.Allocate((ulong)Math.Max(bytes.Length, 16), 256, out var span);
         span.Clear();
         bytes.CopyTo(span);
+        if (ArgumentBufferReuse)
+        {
+            _uploadedTables.Add(bytes, _submissionSerial, in range);
+        }
+
         return range.GpuAddress;
     }
 
@@ -1546,7 +1675,7 @@ internal sealed partial class MetalRenderHost
                 : Mtl.RenderStageVertex | Mtl.RenderStageFragment;
             BindStageBuffers(_renderEncoder, StageVertex, meshStage ? SelSetMeshBuffer : SelSetVertexBuffer);
             BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
-            NameResidentBuffers(_renderEncoder, _guestMemory.ResidentBuffers, stages);
+            NameSubmissionResidents(_renderEncoder, stages, ResidentMarkGraphics);
 
             for (var index = 0; index < _usedResourceCount; index++)
             {
@@ -1567,7 +1696,7 @@ internal sealed partial class MetalRenderHost
         }
 
         BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
-        NameResidentBuffers(_computeEncoder, _guestMemory.ResidentBuffers, stages: 0);
+        NameSubmissionResidents(_computeEncoder, stages: 0, ResidentMarkCompute);
 
         for (var index = 0; index < _usedResourceCount; index++)
         {
@@ -1635,7 +1764,15 @@ internal sealed partial class MetalRenderHost
         else
             ResolveDeviceAddressBuffers();
 
+        ref var mark = ref _residentMarks[ResidentMarkDeviceAddress];
+        if (ResidentWatermark && mark.Matches(_encoderEpoch, _deviceAddressBuffersVersion, stages))
+        {
+            _residentWalksSkipped++;
+            return;
+        }
+
         NameResidentBuffers(encoder, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deviceAddressBuffers), stages);
+        mark = new ResidentMark(_encoderEpoch, _deviceAddressBuffersVersion, stages);
     }
 
     // BeginDeviceAddressReach pins the table's window cuts for this submission.
@@ -1650,6 +1787,7 @@ internal sealed partial class MetalRenderHost
     private void ResolveDeviceAddressBuffers()
     {
         _deviceAddressBufferBuilds++;
+        _deviceAddressBuffersVersion++;
         _deviceAddressBuffers.Clear();
         foreach (var id in DeviceAddressNamedWindows())
         {
@@ -1658,6 +1796,56 @@ internal sealed partial class MetalRenderHost
             if (buffer != 0)
                 _deviceAddressBuffers.Add(buffer);
         }
+    }
+
+    private long _deviceAddressBuffersVersion;
+
+    // What an encoder was last told about a list of buffers: the list is the same set while its
+    // version holds, and a name sticks to the encoder for its life, so a draw that finds the
+    // encoder, the version and the stages unchanged has nothing to name and need not walk the
+    // list (one dictionary probe per window per draw otherwise). SHARPEMU_METAL_V2_RESIDENT_WATERMARK=0
+    // walks it every draw.
+    private static readonly bool ResidentWatermark =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_RESIDENT_WATERMARK");
+
+    private const int ResidentMarkGraphics = 0;
+    private const int ResidentMarkCompute = 1;
+    private const int ResidentMarkDeviceAddress = 2;
+
+    // Count: how many of the list's buffers the encoder has been told, for a list that only grows while its version holds.
+    private readonly record struct ResidentMark(long Epoch, long Version, nuint Stages, int Count = 0)
+    {
+        public bool Matches(long epoch, long version, nuint stages) =>
+            Epoch == epoch && Version == version && Stages == stages;
+    }
+
+    private readonly ResidentMark[] _residentMarks = new ResidentMark[3] { new(-1, -1, 0), new(-1, -1, 0), new(-1, -1, 0) };
+    private long _residentWalksSkipped;
+
+    /// <summary>Per-draw walks of a resident list that the encoder watermark skipped.</summary>
+    internal long ResidentWalksSkipped => Volatile.Read(ref _residentWalksSkipped);
+
+    // The submission's window and ring buffers, named on the encoder once per change of the list.
+    private void NameSubmissionResidents(nint encoder, nuint stages, int markIndex)
+    {
+        var buffers = _guestMemory.ResidentBuffers;
+        var version = _guestMemory.ResidentVersion;
+        ref var mark = ref _residentMarks[markIndex];
+        var named = 0;
+        if (ResidentWatermark && mark.Matches(_encoderEpoch, version, stages) && mark.Count <= buffers.Length)
+        {
+            if (mark.Count == buffers.Length)
+            {
+                _residentWalksSkipped++;
+                return;
+            }
+
+            // Windows touched since the last draw were added to the end: name those, not every one again.
+            named = mark.Count;
+        }
+
+        NameResidentBuffers(encoder, buffers[named..], stages);
+        mark = new ResidentMark(_encoderEpoch, version, stages, buffers.Length);
     }
 
     private nint[] _useResourcesScratch = new nint[64];
@@ -1743,23 +1931,37 @@ internal sealed partial class MetalRenderHost
 
         if (_stageArgumentValid[stageIndex])
         {
-            MetalNative.SendSetBuffer(
-                encoder,
-                setBufferSelector,
-                _stageArgumentBuffers[stageIndex],
-                (nuint)_stageArgumentOffsets[stageIndex],
-                Gen5MslArgumentLayout.ResourcesBufferIndex);
+            BindStageBuffer(encoder, setBufferSelector, _stageArgumentBuffers[stageIndex],
+                _stageArgumentOffsets[stageIndex], Gen5MslArgumentLayout.ResourcesBufferIndex);
         }
 
         if (_hasPushData && (_preparedStageMask & (1 << stageIndex)) != 0)
         {
-            MetalNative.SendSetBuffer(
-                encoder,
-                setBufferSelector,
-                _pushBuffer,
-                (nuint)_pushOffset,
-                Gen5MslArgumentLayout.PushDataBufferIndex);
+            BindStageBuffer(encoder, setBufferSelector, _pushBuffer,
+                _pushOffset, Gen5MslArgumentLayout.PushDataBufferIndex);
         }
+    }
+
+    private void BindStageBuffer(nint encoder, nint selector, nint buffer, ulong offset, int slot)
+    {
+        // Compute utility kernels overwrite their slots independently of this path.
+        // Keep their binding calls unchanged, and distinguish physical vertex/mesh state.
+        var stage = selector == SelSetVertexBuffer ? MetalGraphicsBindingStage.Vertex
+            : selector == SelSetMeshBuffer ? MetalGraphicsBindingStage.Mesh
+            : MetalGraphicsBindingStage.Fragment;
+        if (selector != SelSetVertexBuffer && selector != SelSetMeshBuffer && selector != SelSetFragmentBuffer)
+        {
+            MetalNative.SendSetBuffer(encoder, selector, buffer, (nuint)offset, (nuint)slot);
+            return;
+        }
+        _graphicsBindingAttempts[(int)stage]++;
+        if (GraphicsBindingReuseEnabled && _graphicsBindings.Matches(stage, selector, slot, buffer, offset))
+        {
+            _graphicsBindingSkipped[(int)stage]++;
+            return;
+        }
+        MetalNative.SendSetBuffer(encoder, selector, buffer, (nuint)offset, (nuint)slot);
+        if (GraphicsBindingReuseEnabled) _graphicsBindings.Record(stage, selector, slot, buffer, offset);
     }
 
     // One MTLSamplerState per distinct guest descriptor and view numeric class.

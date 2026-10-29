@@ -206,9 +206,13 @@ public sealed class PipelineVertexInputState : IEquatable<PipelineVertexInputSta
         AttributeCount = 0;
     }
 
+    // Only the counted entries are the state, as in GetHashCode: the arrays are MaxBuffers long and their records
+    // are not bitwise comparable, so comparing whole arrays made every pipeline lookup compare the empty tail
+    // one record at a time.
     public bool Equals(PipelineVertexInputState? other) =>
         other is not null && BindingCount == other.BindingCount && AttributeCount == other.AttributeCount &&
-        Bindings.AsSpan().SequenceEqual(other.Bindings) && Attributes.AsSpan().SequenceEqual(other.Attributes);
+        Bindings.AsSpan(0, BindingCount).SequenceEqual(other.Bindings.AsSpan(0, BindingCount)) &&
+        Attributes.AsSpan(0, AttributeCount).SequenceEqual(other.Attributes.AsSpan(0, AttributeCount));
 
     public override bool Equals(object? obj) => Equals(obj as PipelineVertexInputState);
 

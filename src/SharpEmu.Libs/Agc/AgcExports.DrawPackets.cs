@@ -52,9 +52,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_set_index_size buf=0x{commandBufferAddress:X16} " +
-            $"cmd=0x{commandAddress:X16} size={indexSize & 0x3u} " +
-            $"cache={cachePolicy & 0x3u} instance_id={perInstanceObjectIdSupport & 0x1u}");
+            $"agc.dcb_set_index_size buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} size={indexSize & 0x3u} cache={cachePolicy & 0x3u} instance_id={perInstanceObjectIdSupport & 0x1u}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -139,15 +137,21 @@ public static partial class AgcExports
         // With the room for all of them, the index base, buffer size and draw are one allocation and
         // one write; otherwise each packet is allocated on its own, as the buffer's callback expects.
         ulong baseCommand, drawCommand;
-        if (TryAllocateCommandDwordsInPlace(ctx, commandBufferAddress, 11, out baseCommand))
+        if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, 11, out baseCommand, out var nextCursor))
         {
             drawCommand = baseCommand + 5 * sizeof(uint);
-            if (!TryWriteCommandDwords(ctx, baseCommand,
-                    Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount,
-                    Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator))
+            if (!TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, baseCommand,
+                    [Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount,
+                    Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator]))
             {
                 return ReturnPointer(ctx, 0);
             }
+        }
+        else if (TryDeclineLeaf(ctx))
+        {
+            // The two packets would be allocated one at a time, the second after the first was
+            // written, so a leaf backs out before either.
+            return ReturnPointer(ctx, 0);
         }
         else if (!TryEmitCommandDwords(ctx, commandBufferAddress, out baseCommand, Pm4(3, ItIndexBase, 0), (uint)indexAddress, (uint)(indexAddress >> 32), Pm4(2, ItIndexBufferSize, 0), indexCount) ||
             !TryEmitCommandDwords(ctx, commandBufferAddress, out drawCommand, Pm4(6, ItDrawIndex2, 0), indexCount, (uint)indexAddress, (uint)(indexAddress >> 32), indexCount, drawInitiator))
@@ -156,9 +160,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_draw_index buf=0x{commandBufferAddress:X16} " +
-            $"base=0x{baseCommand:X16} draw=0x{drawCommand:X16} " +
-            $"count={indexCount} index=0x{indexAddress:X16} modifier=0x{modifier:X}");
+            $"agc.dcb_draw_index buf=0x{commandBufferAddress:X16} base=0x{baseCommand:X16} draw=0x{drawCommand:X16} count={indexCount} index=0x{indexAddress:X16} modifier=0x{modifier:X}");
 
         return ReturnPointer(ctx, drawCommand);
     }
@@ -207,8 +209,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_draw_indirect buf=0x{commandBufferAddress:X16} " +
-            $"draw=0x{drawCommand:X16} offset=0x{dataOffset:X} modifier=0x{drawModifier:X}");
+            $"agc.dcb_draw_indirect buf=0x{commandBufferAddress:X16} draw=0x{drawCommand:X16} offset=0x{dataOffset:X} modifier=0x{drawModifier:X}");
 
         return ReturnPointer(ctx, drawCommand);
     }
@@ -282,8 +283,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_draw_index_indirect buf=0x{commandBufferAddress:X16} " +
-            $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} modifier=0x{modifier:X8}");
+            $"agc.dcb_draw_index_indirect buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} modifier=0x{modifier:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -332,9 +332,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_draw_index_indirect_multi buf=0x{commandBufferAddress:X16} " +
-            $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} draws={drawCount} " +
-            $"stride={stride} modifier=0x{modifier:X8}");
+            $"agc.dcb_draw_index_indirect_multi buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} draws={drawCount} stride={stride} modifier=0x{modifier:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using SharpEmu.GpuRemote;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
@@ -25,9 +26,9 @@ internal interface IProtectionRequests
 /// <summary>The GPU-interest page summary as the GPU process writes it (<see cref="SplitSharedState"/>).</summary>
 internal interface IInterestSummary
 {
-    void SetGroup(ulong address);
+    void SetPage(ulong address);
 
-    void ClearGroup(ulong address);
+    void ClearPage(ulong address);
 }
 
 /// <summary>
@@ -54,7 +55,8 @@ internal interface IInterestSummary
 /// <para>The GPU side never allocates or maps guest memory: those members refuse.</para>
 /// </remarks>
 internal sealed unsafe class RemoteGuestAddressSpace :
-    ICpuMemory, IGuestBackedSpace, IGuestAddressSpace, IGuestDerivedProtectionAddressSpace, IPageWatchObserver
+    ICpuMemory, IGuestBackedSpace, IGuestAddressSpace, IGuestDerivedProtectionAddressSpace, IPageWatchObserver,
+    IProtectionBatchSpace, IPendingWritebackSource
 {
     private const int MaxMissReports = 16;
 
@@ -64,7 +66,6 @@ internal sealed unsafe class RemoteGuestAddressSpace :
     private readonly GuestReplica? _replica;
     private readonly IProtectionRequests _protections;
     private readonly IInterestSummary _summary;
-    private readonly byte[]?[] _groupWatches = new byte[]?[TrackerLayout.BlockCount];
     private int _missReports;
     private long _misses;
 
@@ -81,6 +82,9 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         _protections = protections;
         _summary = summary;
     }
+
+    /// <summary>The pending-writeback summary the GPU caches keep for the guest process (null: none is kept).</summary>
+    public IPendingWritebackPages? PendingWritebacks { get; set; }
 
     /// <summary>Accesses to memory the backing does not hold.</summary>
     public long PrivateMemoryMisses => Interlocked.Read(ref _misses);
@@ -143,7 +147,7 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         {
             if (!TryPiece(virtualAddress + done, size - done, out var pointer, out var take))
             {
-                NoteMiss(virtualAddress, size, "compare");
+                NoteMiss(virtualAddress, size, "compare", virtualAddress + done);
                 return false;
             }
 
@@ -309,7 +313,7 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         var sequence = _protections.Request(address, size, protection, protection, ProtectRequestFlags.None);
         if (sequence != 0)
         {
-            _ = _protections.WaitApplied(sequence);
+            _ = WaitAppliedTimed(sequence);
         }
 
         return true;
@@ -330,16 +334,102 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         // here would only make the page guard fail the whole process.
         if (sequence != 0 && derivedAccess != guestAccess)
         {
-            _ = _protections.WaitApplied(sequence);
+            if (t_batchDepth != 0 && BatchingEnabled)
+            {
+                // Inside a watch change: the guard waits once, after its block locks are released.
+                // (Requests are applied in order, so the last one's number covers the rest.)
+                if (sequence > t_batchSequence) t_batchSequence = sequence;
+                RaisePending(sequence);
+            }
+            else
+            {
+                _ = WaitAppliedTimed(sequence);
+            }
         }
 
         return true;
     }
 
+    // ---- IProtectionBatchSpace ----
+
+    // SHARPEMU_SPLIT_BATCH_PROTECT=0 waits for every protection where it is made, as before.
+    private static readonly bool BatchingEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_BATCH_PROTECT"), "0", StringComparison.Ordinal);
+
+    // The depth of the watch changes this thread is inside, and the highest protection number it
+    // left unconfirmed in them.
+    [ThreadStatic]
+    private static int t_batchDepth;
+
+    [ThreadStatic]
+    private static ulong t_batchSequence;
+
+    // The highest number any thread left unconfirmed in a batch. A thread whose watch change found
+    // the pages already watched by another (whose protection that thread has not confirmed yet) sent
+    // nothing of its own, but must not return before that protection is applied: the old wait under
+    // the block lock held it back, so it waits for this number as well.
+    private long _pendingSequence;
+
+    public void BeginProtectionBatch() => t_batchDepth++;
+
+    public void EndProtectionBatch()
+    {
+        if (--t_batchDepth != 0)
+        {
+            return;
+        }
+
+        var own = t_batchSequence;
+        t_batchSequence = 0;
+        var target = Math.Max(own, (ulong)Interlocked.Read(ref _pendingSequence));
+        if (target == 0)
+        {
+            return;
+        }
+
+        _ = WaitAppliedTimed(target);
+        // Applied (or the wait failed and was reported): nothing is pending up to target any more.
+        var pending = Interlocked.Read(ref _pendingSequence);
+        while ((ulong)pending <= target && pending != 0 &&
+               Interlocked.CompareExchange(ref _pendingSequence, 0, pending) != pending)
+        {
+            pending = Interlocked.Read(ref _pendingSequence);
+        }
+    }
+
+    private void RaisePending(ulong sequence)
+    {
+        var current = Interlocked.Read(ref _pendingSequence);
+        while ((ulong)current < sequence)
+        {
+            var observed = Interlocked.CompareExchange(ref _pendingSequence, (long)sequence, current);
+            if (observed == current)
+            {
+                break;
+            }
+
+            current = observed;
+        }
+    }
+
+    private bool WaitAppliedTimed(ulong sequence)
+    {
+        if (!SplitCrossingStats.Enabled)
+        {
+            return _protections.WaitApplied(sequence);
+        }
+
+        var start = Stopwatch.GetTimestamp();
+        var applied = _protections.WaitApplied(sequence);
+        SplitCrossingStats.Count(SplitCrossing.ProtectWait);
+        SplitCrossingStats.Time(SplitCrossing.ProtectWait, Stopwatch.GetTimestamp() - start);
+        return applied;
+    }
+
     // ---- IPageWatchObserver ----
 
-    // Under the page guard's block lock: every group of a block (and every bit of its summary
-    // word) changes under that one lock.
+    // Called once per page whose watched state changes, under the page guard's block lock: every
+    // page of a block (and every bit of its summary words) changes under that one lock.
     public void OnPageWatchChanged(ulong page, bool watched)
     {
         if (page >= TrackerLayout.SpaceBytes)
@@ -347,20 +437,13 @@ internal sealed unsafe class RemoteGuestAddressSpace :
             return;
         }
 
-        var block = (int)(page / TrackerLayout.BlockBytes);
-        var group = (int)((page >> SplitSharedState.GroupShift) & 63);
-        var counts = _groupWatches[block];
         if (watched)
         {
-            counts ??= _groupWatches[block] = new byte[(int)(TrackerLayout.BlockBytes >> SplitSharedState.GroupShift)];
-            if (counts[group]++ == 0)
-            {
-                _summary.SetGroup(page);
-            }
+            _summary.SetPage(page);
         }
-        else if (counts is not null && counts[group] != 0 && --counts[group] == 0)
+        else
         {
-            _summary.ClearGroup(page);
+            _summary.ClearPage(page);
         }
     }
 
@@ -392,7 +475,7 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         {
             if (!TryPiece(address + done, size - done, out var pointer, out var take))
             {
-                NoteMiss(address, size, toGuest ? "write" : "read");
+                NoteMiss(address, size, toGuest ? "write" : "read", address + done);
                 return false;
             }
 
@@ -411,14 +494,38 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         return true;
     }
 
-    private void NoteMiss(ulong address, ulong size, string access)
+    private void NoteMiss(ulong address, ulong size, string access, ulong? failedAddress = null)
     {
         Interlocked.Increment(ref _misses);
         if (Interlocked.Increment(ref _missReports) <= MaxMissReports)
         {
             Console.Error.WriteLine(
                 $"[GPU-SPLIT][WARN] GPU {access} of guest 0x{address:X16}+0x{size:X} failed: not in the shared backing " +
-                "(memory private to the guest process).");
+                "(unmapped, private, or outside the mirrored range).");
+            if (Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_MISS_DETAILS") == "1")
+            {
+                var failed = failedAddress ?? address;
+                var snapshot = _translator.Snapshot();
+                var before = snapshot.LastOrDefault(entry => entry.Address <= failed);
+                var after = snapshot.FirstOrDefault(entry => entry.Address > failed);
+                var sequence = _translator.ChangeSequence;
+                Console.Error.WriteLine($"[GPU-SPLIT][MISS] first=0x{failed:X16} generation={_translator.MappingGeneration} " +
+                    $"complete={_translator.IsComplete} mirror_bytes=0x{_mirrorBytes:X} changes={sequence} " +
+                    $"before=[0x{before.Address:X16},0x{before.End:X16}) offset=0x{before.Offset:X} " +
+                    $"after=[0x{after.Address:X16},0x{after.End:X16}) offset=0x{after.Offset:X}");
+                var first = sequence > 65536 ? sequence - 65536 : 0;
+                var reported = 0;
+                for (var number = sequence; number > first && reported < 16;)
+                {
+                    if (_translator.TryReadChange(--number, out var change) && change.Kind != GuestViewLogKind.Protect &&
+                        failed >= change.Address && failed - change.Address < change.Size)
+                    {
+                        Console.Error.WriteLine($"[GPU-SPLIT][MISS-CHANGE] n={number} kind={change.Kind} " +
+                            $"address=0x{change.Address:X16} size=0x{change.Size:X} offset=0x{change.Offset:X}");
+                        reported++;
+                    }
+                }
+            }
         }
     }
 }

@@ -39,6 +39,32 @@ internal sealed partial class ShaderPipelineCache
 
     private readonly HashSet<(ulong Hash, string Path)> _loggedPerVertexPaths = new();
 
+    private static readonly bool CachePixelInputAnalysis =
+        Environment.GetEnvironmentVariable("SHARPEMU_PIXEL_INPUT_ANALYSIS") != "0";
+
+    // Decoded programs have the same immutable lifetime as InterpolatedAttributeCache.
+    // Cache by object identity, not shader address or a draw's mutable control words.
+    // The public compiler analysis stays fresh for callers constructing or editing IR.
+    internal static uint PerVertexParametersOf(Gen5ShaderProgram program, ReadOnlySpan<uint> controls, bool cached)
+    {
+        if (!cached)
+        {
+            return Gen5PixelInputMapping.PerVertexParameterMask(program, controls);
+        }
+
+        var attributes = PixelAnalysisOf(program).PerVertexAttributes;
+        var parameters = 0u;
+        while (attributes != 0)
+        {
+            var attribute = System.Numerics.BitOperations.TrailingZeroCount(attributes);
+            var offset = attribute < controls.Length ? controls[attribute] & 0x1Fu : (uint)attribute;
+            parameters |= 1u << (int)offset;
+            attributes &= attributes - 1;
+        }
+
+        return parameters;
+    }
+
     /// <summary>
     /// Where the per-vertex values of a pixel program's inputs come from: host interpolants
     /// (the plan), the mesh primitives (the returned param mask), or nowhere.
@@ -54,7 +80,7 @@ internal sealed partial class ShaderPipelineCache
     {
         manualInterpolation = null;
         var controls = pixelInfo.InterpolatorSettings.AsSpan(0, (int)pixelInfo.InputCount);
-        var mask = Gen5PixelInputMapping.PerVertexParameterMask(pixelProgram, controls);
+        var mask = PerVertexParametersOf(pixelProgram, controls, CachePixelInputAnalysis);
         if (mask == 0)
         {
             return 0;

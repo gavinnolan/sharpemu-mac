@@ -65,6 +65,37 @@ public sealed unsafe class MacOSExecutionPlatform : IDirectExecutionPlatform
     };
 
     /// <remarks>
+    /// <c>mach_absolute_time</c> counts nanoseconds only when the timebase is 1:1 (Intel, and Apple
+    /// silicon under Rosetta 2, which reports it that way); any other timebase reports no entry
+    /// points so the managed clocks keep their own conversion.
+    /// </remarks>
+    public bool TryGetHostClockEntryPoints(out nint counter, out nint clockGettime)
+    {
+        counter = 0;
+        clockGettime = 0;
+        try
+        {
+            var libSystem = System.Runtime.InteropServices.NativeLibrary.Load("/usr/lib/libSystem.B.dylib");
+            var timebaseInfo = System.Runtime.InteropServices.NativeLibrary.GetExport(libSystem, "mach_timebase_info");
+            var timebase = stackalloc uint[2];
+            if (((delegate* unmanaged<uint*, int>)timebaseInfo)(timebase) != 0 || timebase[0] != timebase[1] || timebase[0] == 0)
+            {
+                return false;
+            }
+
+            counter = System.Runtime.InteropServices.NativeLibrary.GetExport(libSystem, "mach_absolute_time");
+            clockGettime = System.Runtime.InteropServices.NativeLibrary.GetExport(libSystem, "clock_gettime");
+            return true;
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            counter = 0;
+            clockGettime = 0;
+            return false;
+        }
+    }
+
+    /// <remarks>
     /// Managed code is compiled for the SysV ABI on POSIX .NET while the
     /// emitted call sites use Win64, so every managed callback the emitted code
     /// calls goes through a thunk.

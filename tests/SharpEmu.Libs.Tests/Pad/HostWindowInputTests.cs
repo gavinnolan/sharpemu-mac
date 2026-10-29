@@ -10,6 +10,50 @@ namespace SharpEmu.Libs.Tests.Pad;
 public sealed class HostWindowInputTests
 {
     [Fact]
+    public void WaitForChangeReturnsAtOnceWhenTheVersionAlreadyMoved()
+    {
+        var seen = HostWindowInput.Version;
+        HostWindowInput.SetKey(0x41, true);
+        try
+        {
+            Assert.True(HostWindowInput.WaitForChange(seen, TimeSpan.FromSeconds(30)));
+        }
+        finally
+        {
+            HostWindowInput.SetKey(0x41, false);
+        }
+    }
+
+    [Fact]
+    public void WaitForChangeTimesOutWithoutAChangeAndWakesOnOne()
+    {
+        var seen = HostWindowInput.Version;
+        Assert.False(HostWindowInput.WaitForChange(seen, TimeSpan.FromMilliseconds(20)));
+
+        using var waiting = new ManualResetEventSlim();
+        var woke = false;
+        var thread = new Thread(() =>
+        {
+            waiting.Set();
+            woke = HostWindowInput.WaitForChange(seen, TimeSpan.FromSeconds(30));
+        });
+        thread.Start();
+        Assert.True(waiting.Wait(TimeSpan.FromSeconds(10)));
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        HostWindowInput.SetKey(0x42, true);
+        try
+        {
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
+            Assert.True(woke);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            HostWindowInput.SetKey(0x42, false);
+        }
+    }
+
+    [Fact]
     public void ConnectPublishesWindowKeyboardState()
     {
         HostWindowInput.Connect();
@@ -118,6 +162,38 @@ public sealed class HostWindowInputTests
             input.SetLightbar(30, 40, 50);
             Assert.Equal((10, 20), output.Rumble);
             Assert.Equal((30, 40, 50), output.Lightbar);
+        }
+        finally
+        {
+            HostWindowInput.Disconnect();
+        }
+    }
+
+    [Fact]
+    public void ScriptedOnlyInputIgnoresPhysicalKeysControllersAndOutputs()
+    {
+        var output = new RecordingGamepadOutput();
+        var input = new WindowHostInput(scriptedOnly: true);
+        HostWindowInput.Connect(output);
+        try
+        {
+            HostWindowInput.SetKey(0x57, true);
+            HostWindowInput.SetGamepad("Physical pad", new HostGamepadState(
+                true, HostGamepadButtons.Cross, 0, 255, 0, 255, 255, 255));
+            Span<HostGamepadState> states = stackalloc HostGamepadState[1];
+
+            Assert.False(input.IsKeyDown(0x57));
+            Assert.False(input.IsHostWindowFocused());
+            Assert.Equal(0, input.GetGamepadStates(states));
+            Assert.Null(input.DescribeConnectedGamepad());
+            input.SetRumble(10, 20);
+            input.SetTriggerRumble(30, 40);
+            input.SetLightbar(50, 60, 70);
+            input.ResetLightbar();
+            Assert.Equal(((byte)0, (byte)0), output.Rumble);
+            Assert.Equal(((byte?)null, (byte?)null), output.TriggerRumble);
+            Assert.Equal(((byte)0, (byte)0, (byte)0), output.Lightbar);
+            Assert.False(output.LightbarReset);
         }
         finally
         {

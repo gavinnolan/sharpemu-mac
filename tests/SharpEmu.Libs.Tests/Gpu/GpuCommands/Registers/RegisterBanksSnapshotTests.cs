@@ -233,4 +233,67 @@ public sealed class RegisterBanksSnapshotTests
         Assert.True(second.Context.DepthTarget.DepthTestEnabled);
         Assert.False(banks.Context.DepthTarget.DepthTestEnabled);
     }
+
+    [Fact]
+    public void ASnapshotWithNoWriteSinceIsHandedOutAgain()
+    {
+        var banks = NewBanks();
+        WriteContext(banks, DbDepthControl, 0x0000_0006);
+        var first = banks.Snapshot();
+
+        Assert.Same(first, banks.Snapshot());
+        Assert.Same(first, banks.Snapshot());
+    }
+
+    [Fact]
+    public void EveryKindOfWriteEndsTheReuseOfTheLastSnapshot()
+    {
+        var writes = new Action<RegisterBanks>[]
+        {
+            banks => WriteContext(banks, DbDepthControl, 0),
+            banks => WriteShader(banks, SpiShaderPgmLoPs, 0x4000),
+            banks => WriteShader(banks, SpiShaderUserDataPs0, 5),
+            banks => WriteShader(banks, ComputePgmLo, 0x4000),
+            banks => WriteUserConfig(banks, VgtPrimitiveType, 6),
+            banks => banks.ApplyContextState(ContextStateOperation.Clear),
+            banks => banks.Reset(),
+            banks => banks.IndexTypeAndSize = 2,
+            banks => banks.CompositeDepthSizeXy = 0x1234,
+            banks => banks.UserDataMarker = UserScalarKind.BufferResource,
+        };
+        foreach (var write in writes)
+        {
+            var banks = NewBanks();
+            WriteContext(banks, DbDepthControl, 0x0000_0006);
+            var before = banks.Snapshot();
+
+            write(banks);
+            var after = banks.Snapshot();
+
+            Assert.NotSame(before, after);
+            Assert.Same(after, banks.Snapshot());
+        }
+    }
+
+    [Fact]
+    public void AWriteAfterAReusedSnapshotLeavesEveryHolderOfItUnchanged()
+    {
+        var banks = NewBanks();
+        WriteContext(banks, DbDepthControl, 0x0000_0006);
+        WriteShader(banks, SpiShaderUserDataPs0, 11, 12);
+        var first = banks.Snapshot();
+        var second = banks.Snapshot();
+        Assert.Same(first, second);
+
+        WriteContext(banks, DbDepthControl, 0x0000_0000);
+        WriteShader(banks, SpiShaderUserDataPs0, 21, 22);
+        var third = banks.Snapshot();
+
+        Assert.NotSame(second, third);
+        Assert.True(first.Context.DepthTarget.DepthTestEnabled);
+        Assert.True(second.Context.DepthTarget.DepthTestEnabled);
+        Assert.Equal([11u, 12u], first.Shader.Pixel.UserScalars.Values[..2]);
+        Assert.False(third.Context.DepthTarget.DepthTestEnabled);
+        Assert.Equal([21u, 22u], third.Shader.Pixel.UserScalars.Values[..2]);
+    }
 }

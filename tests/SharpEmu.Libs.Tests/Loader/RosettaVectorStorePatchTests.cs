@@ -53,8 +53,10 @@ public sealed class RosettaVectorStorePatchTests
         Assert.Equal(unchecked(originalInstruction.MemoryDisplacement64 + 16), upperStore.MemoryDisplacement64);
     }
 
-    [Fact]
-    public unsafe void RosettaSplitsStoresWithoutRedZoneUseAndPreservesAllBytes()
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 2)]
+    public unsafe void RosettaSplitsStoresWithoutRedZoneUseAndPreservesAllBytes(bool separateSpans, int expectedSites)
     {
         if (!RosettaVectorStorePatch.IsRequired)
             return;
@@ -71,6 +73,10 @@ public sealed class RosettaVectorStorePatchTests
             0xC5, 0xFE, 0x7F, 0x02,
             0xC5, 0xF8, 0x77, 0xC3,
         ];
+        // A branch target closes the first span; straight-line stores share one trampoline.
+        // Both forms must expand both vector stores and preserve all 32 bytes.
+        if (separateSpans)
+            function = [.. function[..12], 0xEB, 0x00, .. function[12..]];
         Assert.True(memory.TryWrite(imageBase, function));
         var exceptionFrameHeader = new byte[32];
         exceptionFrameHeader[0] = 1;
@@ -87,7 +93,7 @@ public sealed class RosettaVectorStorePatchTests
         var result = GuestRedZonePatcher.Patch(memory, memory, programHeaders, imageBase, imageSize);
         Assert.Equal(0, result.RedZoneFunctions);
         Assert.Equal(2, result.VectorStoreCount);
-        Assert.Equal(2, result.PatchedSites);
+        Assert.Equal(expectedSites, result.PatchedSites);
         Assert.Equal(0, result.FailedSites);
 
         byte* source = stackalloc byte[32];

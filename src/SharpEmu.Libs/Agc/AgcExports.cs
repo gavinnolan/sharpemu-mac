@@ -238,7 +238,7 @@ public static partial class AgcExports
         private RegisterBanks? _interpreterBanks;
 
         public Dictionary<uint, uint> CxRegisters { get; private set; } = new();
-        public Dictionary<uint, uint> ShRegisters { get; private set; } = new();
+        public DenseShaderRegisterMap ShRegisters { get; private set; } = new();
         public Dictionary<uint, uint> UcRegisters { get; private set; } = new();
 
         // With an interpreter attached the banks and the composite extent are its own.
@@ -493,26 +493,45 @@ public static partial class AgcExports
     private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
         => TryPrepareCommandDwords(ctx, commandBufferAddress, sizeDwords, true, out commandAddress);
 
-    // Allocates only when the buffer already has the room, never calling its full callback: a caller
-    // that emits several packets takes them in one allocation then, and packet by packet otherwise, so
-    // each packet still reaches the callback with the size it asks for alone.
-    private static bool TryAllocateCommandDwordsInPlace(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
+    // Whether the buffer already has the room, without calling its full callback or moving the
+    // cursor: a caller that emits several packets takes them in one allocation then, and packet by
+    // packet otherwise, so each packet still reaches the callback with the size it asks for alone.
+    // The packet goes to commandAddress and the cursor to nextCursor, together, in TryCommitCommandDwords.
+    private static bool TryReserveCommandDwordsInPlace(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress, out ulong nextCursor)
     {
-        commandAddress = 0;
+        commandAddress = nextCursor = 0;
         if (sizeDwords == 0 ||
             !TryReadCommandBufferState(ctx, commandBufferAddress, out var cursorUp, out var cursorDown, out _, out _, out var reservedDwords) ||
-            sizeDwords > GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords) ||
-            !ctx.TryWriteUInt64(commandBufferAddress + CommandBufferCursorUpOffset, cursorUp + (ulong)sizeDwords * sizeof(uint)))
+            sizeDwords > GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords))
         {
             return false;
         }
 
         commandAddress = cursorUp;
+        nextCursor = cursorUp + (ulong)sizeDwords * sizeof(uint);
         return true;
+    }
+
+    // The cursor store and the packet write of a reservation, as one guest-memory operation (the
+    // cursor first, as when they were two writes; SHARPEMU_PAIR_WRITE=0 makes them two again).
+    private static bool TryCommitCommandDwords(CpuContext ctx, ulong commandBufferAddress, ulong nextCursor, ulong commandAddress, ReadOnlySpan<uint> dwords)
+    {
+        Span<byte> cursor = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(cursor, nextCursor);
+        var packet = System.Runtime.InteropServices.MemoryMarshal.AsBytes(dwords);
+        var cursorAddress = commandBufferAddress + CommandBufferCursorUpOffset;
+        return ctx.Memory.TryWritePair(cursorAddress, cursor, commandAddress, packet);
     }
 
     private static bool TryEmitCommandDwords(CpuContext ctx, ulong commandBufferAddress, out ulong commandAddress, params ReadOnlySpan<uint> dwords)
     {
+        if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, (uint)dwords.Length, out commandAddress, out var nextCursor))
+        {
+            return TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, commandAddress, dwords);
+        }
+
+        // No room (or no readable buffer): the buffer's callback, a leaf's decline and the failure
+        // paths are TryAllocateCommandDwords's.
         return TryAllocateCommandDwords(ctx, commandBufferAddress, (uint)dwords.Length, out commandAddress) &&
             TryWriteCommandDwords(ctx, commandAddress, dwords);
     }
@@ -552,6 +571,13 @@ public static partial class AgcExports
         var remainingDwords = GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords);
         if (sizeDwords > remainingDwords)
         {
+            // A leaf dispatch cannot run the buffer's callback, which is guest code: it backs out
+            // before anything is written and the call is made again through the full import path.
+            if (TryDeclineLeaf(ctx))
+            {
+                return false;
+            }
+
             TraceAgc($"agc.cmd_alloc_full buf=0x{commandBufferAddress:X16} need={sizeDwords} remaining={remainingDwords} callback=0x{callback:X16}");
             var scheduler = GuestThreadExecution.Scheduler;
             ulong callbackResult = 0;
@@ -571,15 +597,12 @@ public static partial class AgcExports
                     out callbackError))
             {
                 TraceAgc(
-                    $"agc.cmd_alloc_callback_failed buf=0x{commandBufferAddress:X16} " +
-                    $"callback=0x{callback:X16} result=0x{callbackResult:X16} " +
-                    $"error={callbackError ?? "none"}");
+                    $"agc.cmd_alloc_callback_failed buf=0x{commandBufferAddress:X16} callback=0x{callback:X16} result=0x{callbackResult:X16} error={callbackError ?? "none"}");
                 return false;
             }
 
             TraceAgc(
-                $"agc.cmd_alloc_callback_complete buf=0x{commandBufferAddress:X16} " +
-                $"callback=0x{callback:X16} result=0x{callbackResult:X16}");
+                $"agc.cmd_alloc_callback_complete buf=0x{commandBufferAddress:X16} callback=0x{callback:X16} result=0x{callbackResult:X16}");
 
             if (!TryReadUInt64(ctx, commandBufferAddress + CommandBufferCursorUpOffset, out cursorUp) ||
                 !TryReadUInt64(ctx, commandBufferAddress + CommandBufferCursorDownOffset, out cursorDown) ||
@@ -598,6 +621,22 @@ public static partial class AgcExports
         }
 
         commandAddress = cursorUp;
+        return true;
+    }
+
+    /// <summary>
+    /// True when the call is running as a leaf, which cannot call back into the guest. The caller
+    /// must return at once, with no command-buffer state changed; the dispatcher then repeats the
+    /// call on the full import path.
+    /// </summary>
+    private static bool TryDeclineLeaf(CpuContext ctx)
+    {
+        if (!ctx.DeclineGuestCallbacks)
+        {
+            return false;
+        }
+
+        ctx.GuestCallbackDeclined = true;
         return true;
     }
 

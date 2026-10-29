@@ -181,7 +181,7 @@ public sealed partial class RenderExecutor
         }
 
         var binding = source.HostData is { } hostData
-            ? _host.UploadTransient(hostData, TransientIndexAlignment)
+            ? _host.UploadTransient(hostData.AsSpan(0, checked((int)source.Size)), TransientIndexAlignment)
             : _host.ObtainBuffer(source.Address, source.Size, isWritten: false);
         return new PreparedIndexBuffer(binding, source.Size, source.Type);
     }
@@ -753,6 +753,11 @@ public sealed partial class RenderExecutor
         if (HasBufferWrites(vertexInput.Stage))
         {
             writeStages |= meshInput is null ? GpuPipelineStage.VertexShaderBit : GpuPipelineStage.MeshShaderBitExt;
+        }
+        else if (vertexProgram.WritesDeviceAddresses || WritesStorageImage(vertexProgram))
+        {
+            _vertexStoresUnordered = true;
+            _vertexStoresPass = _host.RenderPassSerial;
         }
 
         if (state.PixelActive && DrawWritesMemory(pixelInput.Stage))

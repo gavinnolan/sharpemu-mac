@@ -297,6 +297,8 @@ public static class KernelPthreadCompatExports
         if (GuestThreadExecution.CurrentGuestThreadHandle != currentThreadHandle)
         {
             GuestThreadExecution.Scheduler?.RegisterGuestThreadContext(currentThreadHandle, ctx);
+            // Registered: later calls on this host thread can be answered by the native stub.
+            GuestFastPath.PublishHostSelf(currentThreadHandle);
         }
         ctx[CpuRegister.Rax] = currentThreadHandle;
         TracePthreadSelf(ctx, currentThreadHandle);
@@ -333,7 +335,9 @@ public static class KernelPthreadCompatExports
     // A guest that polls with sched_yield / scePthreadYield burns a core exactly like a short-usleep
     // poller. Same streak policy as KernelRuntimeCompatExports.ShortUsleep: yields less than 2 ms
     // apart form a streak; once a thread has yielded continuously for SHARPEMU_USLEEP_NAP_AFTER_US
-    // (default 500 us) each further yield sleeps SHARPEMU_USLEEP_NAP_US (default 250 us) instead.
+    // (default 500 us) each further yield naps instead, escalating from SHARPEMU_USLEEP_NAP_FLOOR_US
+    // (50 us) to SHARPEMU_USLEEP_NAP_US (250 us) over SHARPEMU_USLEEP_NAP_RAMP_US (4 ms); with
+    // SHARPEMU_USLEEP_NAP_LEGACY=1 every yield naps the full SHARPEMU_USLEEP_NAP_US.
     // SHARPEMU_YIELD_NAP=0 restores the bare Thread.Yield().
     private static readonly bool _yieldNapEnabled =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_YIELD_NAP"), "0", StringComparison.Ordinal) &&
@@ -369,9 +373,15 @@ public static class KernelPthreadCompatExports
     public static int PthreadYield(CpuContext ctx)
     {
         _ = ctx;
-        if (_yieldNapEnabled && YieldNapStreak(Stopwatch.GetTimestamp()))
+        var now = Stopwatch.GetTimestamp();
+        if (_yieldNapEnabled && YieldNapStreak(now))
         {
-            HostTiming.SleepMicroseconds(KernelRuntimeCompatExports.UsleepNapMicroseconds);
+            // A yield carries no duration, so it naps for the escalating floor-to-ceiling
+            // short-sleep schedule (KernelRuntimeCompatExports.NapPolicyMicroseconds).
+            HostTiming.SleepMicroseconds(KernelRuntimeCompatExports.NapPolicyMicroseconds(
+                now - _yieldStreakStart, 0, KernelRuntimeCompatExports.UsleepNapMicroseconds,
+                KernelRuntimeCompatExports.UsleepNapFloorMicroseconds, KernelRuntimeCompatExports.UsleepNapRampMicroseconds,
+                KernelRuntimeCompatExports._usleepNapAfterTicks, KernelRuntimeCompatExports.UsleepNapLegacy, out _));
             _lastYield = Stopwatch.GetTimestamp();
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -2751,7 +2761,16 @@ public static class KernelPthreadCompatExports
         state.ProfileOwner = MutexContentionProfile.CurrentThreadName();
     }
 
-    private static readonly long MutexWaiterSpinTicks = Stopwatch.Frequency * 40 / 1_000_000;
+    // Adaptive spin (default): spin at most SHARPEMU_MUTEX_SPIN_US (default 10 us) and only
+    // while the owner is executing on a host CPU; an owner that is blocked, ready or parked
+    // cannot release soon, so the waiter parks at once instead of burning a core.
+    // SHARPEMU_MUTEX_ADAPTIVE_SPIN=0 restores the fixed 40 us spin without the owner check.
+    private static readonly bool MutexAdaptiveSpin =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MUTEX_ADAPTIVE_SPIN"), "0", StringComparison.Ordinal);
+
+    private static readonly long MutexWaiterSpinTicks = Stopwatch.Frequency * (MutexAdaptiveSpin
+        ? (long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MUTEX_SPIN_US"), out var spinUs) && spinUs >= 0 ? spinUs : 10)
+        : 40) / 1_000_000;
 
     // A queued waiter spins briefly for its grant before it parks. Under FIFO handoff the unlock
     // hands the mutex to the queue head, and parking and waking a guest thread costs far more
@@ -2764,6 +2783,7 @@ public static class KernelPthreadCompatExports
         try
         {
             var deadline = Stopwatch.GetTimestamp() + MutexWaiterSpinTicks;
+            var scheduler = MutexAdaptiveSpin ? GuestThreadExecution.Scheduler : null;
             for (var round = 0; ; round++)
             {
                 if (Volatile.Read(ref waiter.Granted) != 0)
@@ -2771,7 +2791,8 @@ public static class KernelPthreadCompatExports
                     return true;
                 }
 
-                if (state.OwnerThreadId == 0)
+                var owner = state.OwnerThreadId;
+                if (owner == 0)
                 {
                     lock (state.SyncRoot)
                     {
@@ -2780,6 +2801,12 @@ public static class KernelPthreadCompatExports
                             return true;
                         }
                     }
+                }
+                else if (scheduler is not null && !scheduler.IsGuestThreadExecuting(owner))
+                {
+                    // Re-check the grant once: the owner may have released and handed off
+                    // between the reads above.
+                    return Volatile.Read(ref waiter.Granted) != 0;
                 }
 
                 if (Stopwatch.GetTimestamp() >= deadline)

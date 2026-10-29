@@ -424,6 +424,7 @@ internal sealed partial class MetalRenderHost
 
     private void ForgetEncoderState()
     {
+        _graphicsBindings.Reset();
         _boundViewportKnown = false;
         _boundGraphicsPipeline = null;
         _boundRenderState = 0;
@@ -998,6 +999,7 @@ internal sealed partial class MetalRenderHost
 
         EndRenderingBefore(in state);
         EndComputeEncoder();
+        NativeOcclusionMakeRoom();
         EncodeStagedStores();
         EncodeDeferredLabelCopies();
         MaterializePendingClears();
@@ -1134,9 +1136,14 @@ internal sealed partial class MetalRenderHost
                 PassProfileAttachRender(descriptor);
             }
 
+            NativeOcclusionAttach(descriptor);
+            OcclusionAuditAttach(descriptor);
             _renderEncoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
             MetalMemoryTelemetry.RenderEncoders.Add();
-            LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
+            if (EncoderStatusEnabled)
+            {
+                LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
+            }
             if (_renderEncoder == 0)
             {
                 throw Fatal(
@@ -1267,8 +1274,10 @@ internal sealed partial class MetalRenderHost
                 ResolveStoreActions(in next, hasNext);
             }
 
+            OcclusionAuditClose();
             EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
+            NativeOcclusionFinish();
             PassProfileClose();
         }
 
@@ -1489,6 +1498,8 @@ internal sealed partial class MetalRenderHost
             _boundDepthStencilState = depthStencilState;
         }
 
+        NativeOcclusionPrepareDraw();
+        OcclusionAuditPrepareDraw();
         ApplyViewportAndScissor();
         if (_boundBlendRed != _dynamicState.BlendRed || _boundBlendGreen != _dynamicState.BlendGreen ||
             _boundBlendBlue != _dynamicState.BlendBlue || _boundBlendAlpha != _dynamicState.BlendAlpha)
@@ -2312,6 +2323,7 @@ internal sealed partial class MetalRenderHost
     private void CountDraw(long startedTicks)
     {
         NoteRecordedWork();
+        OcclusionAuditCountDraw();
         Interlocked.Increment(ref _drawCount);
         NotePassDraw(_boundGraphicsPipeline?.Profile);
         Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
@@ -2353,9 +2365,9 @@ internal sealed partial class MetalRenderHost
 
     private void RecordMemoryBarrier() => RecordMemoryBarrier(Mtl.RenderStageVertex | Mtl.RenderStageFragment);
 
-    private void RecordMemoryBarrier(nuint afterStages)
+    private void RecordMemoryBarrier(nuint afterStages,
+        nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets)
     {
-        const nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets;
         if (_renderEncoder != 0)
         {
             MetalV2Native.SendMemoryBarrierStages(
@@ -2367,7 +2379,9 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        if (_computeEncoder != 0)
+        // Every compute encoder this host opens is serial, where Metal ignores the barrier
+        // (MetalV2Diagnostics.SkipSerialComputeBarriers).
+        if (_computeEncoder != 0 && !MetalV2Diagnostics.SkipSerialComputeBarriers)
         {
             // A compute encoder has no render targets to order against, and Metal
             // rejects a scope that names them: validation fails the assertion rather
@@ -2386,7 +2400,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public void EmitGlobalBarrier()
     {
-        if (PostToWorker(EmitGlobalBarrier))
+        if (PostOrderingToWorker(EmitGlobalBarrier))
         {
             return;
         }
@@ -2401,9 +2415,33 @@ internal sealed partial class MetalRenderHost
     }
 
     private Action? _emitOrderedGlobalBarrier;
+    private long _globalBarriersRecorded;
+    private long _globalBarriersElided;
+
+    /// <summary>Guest barriers recorded and elided in an open render pass, for tests.</summary>
+    internal (long Recorded, long Elided) GlobalBarrierCounts => (_globalBarriersRecorded, _globalBarriersElided);
 
     private void EmitOrderedGlobalBarrier()
     {
+        if (_renderEncoder != 0 && MetalV2Diagnostics.ElideGlobalBarriers)
+        {
+            // What the guest's flush or invalidate must make visible to later work in this pass
+            // is shader stores; the executor has ordered every one but those it reports here.
+            // Attachments need no barrier: their loads and stores run in draw order per fragment.
+            if (_translation is not { HasUnorderedStoresInOpenPass: false })
+            {
+                RecordMemoryBarrier(Mtl.RenderStageVertex | Mtl.RenderStageFragment,
+                    Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+                _globalBarriersRecorded++;
+            }
+            else
+            {
+                _globalBarriersElided++;
+            }
+
+            return;
+        }
+
         if (_renderEncoder != 0 || _computeEncoder != 0)
         {
             RecordMemoryBarrier();
@@ -2417,9 +2455,9 @@ internal sealed partial class MetalRenderHost
     // A barrier or release only orders GPU commands, so behind deferred draws it joins their queue
     // instead of draining them: a drain at every barrier left the program resolver, which only
     // starts a draw's programs once it is submitted, no lead over the draws the drain runs.
-    private bool TryDeferBehindDraws(Action ordered, ulong writeAddress = 0, ulong writeSize = 0)
+    private bool TryDeferBehindDraws(Action ordered, ulong writeAddress = 0, ulong writeSize = 0, bool always = false)
     {
-        if (!MetalV2Diagnostics.DeferBarriers || _translation is not { HasPendingDraws: true, IsDraining: false } translation ||
+        if (!(always || MetalV2Diagnostics.DeferBarriers) || _translation is not { HasPendingDraws: true, IsDraining: false } translation ||
             !_relay.IsGpuQueueThread)
         {
             return false;
