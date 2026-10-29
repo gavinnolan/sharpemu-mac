@@ -1901,6 +1901,26 @@ internal sealed partial class MetalRenderHost
         ProfileWork(entry, "draw-indirect", "indirect");
     }
 
+    // SHARPEMU_METAL_V2_FORCE_INDIRECT_INSTANCES: the draw runs directly with the index count and first index
+    // its arguments hold in guest memory now and the forced instance count, to see what a GPU-written count hides.
+    private unsafe bool TryForceIndirectDraw(MetalPipelineEntry entry, uint instances)
+    {
+        var bytes = new byte[20];
+        if (_tracedIndirectArguments == 0 || !TryReadGuest(_tracedIndirectArguments, bytes))
+        {
+            return false;
+        }
+
+        var indexCount = BitConverter.ToUInt32(bytes, 0);
+        var firstIndex = BitConverter.ToUInt32(bytes, 8);
+        var vertexOffset = BitConverter.ToInt32(bytes, 12);
+        var indexBytes = _indexType == Mtl.IndexTypeUInt32 ? 4UL : 2UL;
+        MetalV2Native.SendDrawIndexedBaseVertex(
+            _renderEncoder, SelDrawIndexedPrimitives, entry.PrimitiveType, indexCount, _indexType, _indexBuffer,
+            (nuint)(_indexOffset + (firstIndex * indexBytes)), instances, vertexOffset, 0);
+        return true;
+    }
+
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1928,6 +1948,13 @@ internal sealed partial class MetalRenderHost
             DrawRectanglesIndexedIndirect(entry, arguments);
             CountDraw(started);
             ProfileWork(entry, "draw-indexed-rect-indirect", "indirect");
+            return;
+        }
+
+        if (MetalV2Diagnostics.ForcedIndirectInstances(entry.VertexHash) is { } forced && TryForceIndirectDraw(entry, forced))
+        {
+            CountDraw(started);
+            ProfileWork(entry, "draw-indexed-indirect", "forced");
             return;
         }
 

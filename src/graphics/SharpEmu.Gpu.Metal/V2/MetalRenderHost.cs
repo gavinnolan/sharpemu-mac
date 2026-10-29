@@ -137,6 +137,7 @@ internal sealed partial class MetalRenderHost :
         _relay = relay;
         PerVertexPixelInputsSupported = SupportsApple10Features(device);
         DepthBoundsTestSupported = SupportsApple10Features(device);
+        GuestPixelFormats.NarrowSrgbFormats = SupportsNarrowSrgb(device);
         _sharedEvent = MetalNative.Send(device, SelNewSharedEvent);
         if (_sharedEvent == 0)
         {
@@ -267,6 +268,16 @@ internal sealed partial class MetalRenderHost :
     public bool DepthBoundsInPipelineState => false;
 
     private const nint GpuFamilyApple10 = 1010;
+
+    // R8Unorm_sRGB and RG8Unorm_sRGB exist on Apple GPUs only (MTLGPUFamilyApple1 and later).
+    private const nint GpuFamilyApple1 = 1001;
+
+    private static bool SupportsNarrowSrgb(nint device)
+    {
+        var supportsFamily = MetalNative.Selector("supportsFamily:");
+        return MetalNative.SendBool(device, MetalNative.Selector("respondsToSelector:"), supportsFamily) &&
+            MetalNative.SendBool(device, supportsFamily, GpuFamilyApple1);
+    }
 
     private static bool SupportsApple10Features(nint device)
     {
@@ -2214,6 +2225,33 @@ internal sealed partial class MetalRenderHost :
 
     public BufferBinding NullBuffer => new((ulong)_guestMemory.NullBuffer, 0);
 
+    // SHARPEMU_TRACE_RING_BINDINGS=<lo>-<hi> (hex, diagnostic): each buffer binding over that range after flip 300, with
+    // the host buffer and offset it resolved to and whether that is guest memory in place, for telling whether a
+    // writer and a later reader of the same guest bytes in one command buffer see one copy.
+    private static readonly (ulong Low, ulong High) TracedRingRange = ParseTracedRingRange(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RING_BINDINGS"));
+    private int _tracedRingBindings;
+
+    private static (ulong, ulong) ParseTracedRingRange(string? text)
+    {
+        var parts = (text ?? string.Empty).Split('-');
+        return parts.Length == 2 &&
+            ulong.TryParse(parts[0], System.Globalization.NumberStyles.HexNumber, null, out var low) &&
+            ulong.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out var high)
+            ? (low, high)
+            : (0, 0);
+    }
+
+    private void TraceRingBinding(ulong address, ulong size, bool isWritten, MetalGuestRange range)
+    {
+        if (TracedRingRange.High == 0 || _flips < 300 || address >= TracedRingRange.High || address + size <= TracedRingRange.Low ||
+            _tracedRingBindings++ > 4000)
+            return;
+        Console.Error.WriteLine(
+            $"[METAL-V2][RING-BINDING] flip={_flips} serial={SubmissionSerial} {(isWritten ? "write" : "read")} addr=0x{address:X} size=0x{size:X} " +
+            $"buffer=0x{(ulong)range.Buffer:X} offset=0x{range.Offset:X} inplace={_guestMemory.IsInPlace(range)}");
+    }
+
     public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
     {
         // A buffer binding sees guest memory, so any image that owns these bytes
@@ -2231,6 +2269,7 @@ internal sealed partial class MetalRenderHost :
             return NullBuffer;
         }
 
+        TraceRingBinding(address, size, isWritten, range);
         _slotTrap?.NoteBinding(
             isWritten ? "binding(write)" : "binding(read)",
             address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
@@ -2503,6 +2542,7 @@ internal sealed partial class MetalRenderHost :
                 $"descriptors={bindless.Descriptors} lookups={bindless.Lookups} image_set={_imageCache.ImageSetVersion} " +
                 $"new_tables={BindlessNewTables} full={BindlessFullResolves} partial={BindlessPartialResolves} " +
                 $"wide={BindlessWideChanges} invalid={BindlessInvalidEntries} declared={BindlessDeclaredTextures} resident={BindlessResidentTextures} " +
+                $"table_memo_hits={BindlessTableMemoHits} " +
                 $"memo_hits={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoHits} memo_changed={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoChanged} " +
                 $"memo_absent={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoAbsent} memo_unread={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoUnread} " +
                 $"memo_class={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoClassHits}");

@@ -26,6 +26,71 @@ internal sealed partial class MetalImageCache
 
     private long _stencilTwinBinds;
 
+    // SHARPEMU_METAL_V2_TRACE_STENCIL_TWIN=1 (diagnostic): each multisampled 8-bit integer request once per address, with
+    // what each stencil owner over its bytes would need to serve it.
+    internal static readonly bool TraceStencilTwins = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE_STENCIL_TWIN") == "1";
+    private readonly Dictionary<ulong, int> _tracedStencilTwins = new();
+
+    internal void TraceStencilTwin(in ImageRequest request, bool storage = false)
+    {
+        ref readonly var requested = ref request.Description;
+        var key = requested.Data.Address ^ ((ulong)request.Role << 56);
+        var seen = _tracedStencilTwins.GetValueOrDefault(key) + 1;
+        _tracedStencilTwins[key] = seen;
+        if (_tracedStencilTwins.Count > 64 || seen is not (1 or 50 or 500 or 5000))
+        {
+            return;
+        }
+
+        var owners = new System.Text.StringBuilder();
+        using (_lock.Hold())
+        {
+            foreach (var ownerIdentifier in _stencilOwners)
+            {
+                if (_slots.TryGet(ownerIdentifier) is not { } depth || !depth.Description.HasStencil)
+                {
+                    continue;
+                }
+
+                ref readonly var described = ref depth.Description;
+                if (described.Stencil.Address != requested.Data.Address &&
+                    !GuestRangeOverlap.Bytes(described.Stencil.Address, described.Stencil.Size, requested.Data.Address, requested.Data.Size))
+                {
+                    continue;
+                }
+
+                owners.Append($" owner@0x{described.Data.Address:X} stencil=0x{described.Stencil.Address:X}+0x{described.Stencil.Size:X} " +
+                    $"fmt={depth.Shape.PixelFormat} samples={described.Samples} extent={described.Extent.Width}x{described.Extent.Height} " +
+                    $"level0={depth.FirstLevel == 0} view_usage={(depth.Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0} tex={depth.Texture != 0};");
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[METAL-V2][STENCIL-TWIN] request@0x{requested.Data.Address:X}+0x{requested.Data.Size:X} role={request.Role} storage={storage} " +
+            $"view={request.View.Format} samples={requested.Samples} extent={requested.Extent.Width}x{requested.Extent.Height} " +
+            $"levels={requested.Resources.Levels} layers={requested.TransferLayers}{(owners.Length == 0 ? " no stencil owner" : owners.ToString())}" +
+            (owners.Length == 0 ? AllStencilOwners() : string.Empty));
+    }
+
+    private string AllStencilOwners()
+    {
+        var all = new System.Text.StringBuilder(" all:");
+        using (_lock.Hold())
+        {
+            foreach (var ownerIdentifier in _stencilOwners)
+            {
+                if (_slots.TryGet(ownerIdentifier) is { } depth)
+                {
+                    ref readonly var described = ref depth.Description;
+                    all.Append($" [0x{described.Data.Address:X}+0x{described.Data.Size:X} stencil=0x{described.Stencil.Address:X}+0x{described.Stencil.Size:X} " +
+                        $"samples={described.Samples} {described.Extent.Width}x{described.Extent.Height}]");
+                }
+            }
+        }
+
+        return all.ToString();
+    }
+
     /// <summary>Sampled stencil reads served by a depth texture's stencil view since the last read.</summary>
     public long TakeStencilTwinBinds() => Interlocked.Exchange(ref _stencilTwinBinds, 0);
 
@@ -37,6 +102,11 @@ internal sealed partial class MetalImageCache
     {
         depthImage = ResourceSlotIdentifier.Invalid;
         ref readonly var requested = ref request.Description;
+        if (TraceStencilTwins && requested.PixelFormat == GpuFormat.R8Uint && requested.Samples > 1)
+        {
+            TraceStencilTwin(in request);
+        }
+
         if (!StencilTwinsEnabled || request.Role != ImageRole.Texture || requested.Samples <= 1 ||
             requested.PixelFormat != GpuFormat.R8Uint || request.View.Format != GpuFormat.R8Uint ||
             requested.Resources.Levels != 1 || requested.TransferLayers != 1)

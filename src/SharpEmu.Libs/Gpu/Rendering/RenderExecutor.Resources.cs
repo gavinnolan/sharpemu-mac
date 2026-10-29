@@ -436,6 +436,70 @@ public sealed partial class RenderExecutor
             .Where(static hash => hash != 0)
             .ToHashSet();
 
+    // SHARPEMU_SKIP_CS=<hash>[,<hash>...]: dispatches of these compute programs are not made, as SKIP_PS does for draws.
+    private static readonly HashSet<ulong> SkippedComputePrograms =
+        (Environment.GetEnvironmentVariable("SHARPEMU_SKIP_CS") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static text => ulong.TryParse(text.Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash) ? hash : 0)
+            .Where(static hash => hash != 0)
+            .ToHashSet();
+
+    // SHARPEMU_SKIP_FILE=<path>: more programs to skip, pixel or compute, one hash a line, read again whenever
+    // the file changes, so one session can take the passes of a frame away one after another.
+    private static class LiveSkips
+    {
+        private static readonly string? FilePath = Environment.GetEnvironmentVariable("SHARPEMU_SKIP_FILE");
+        private static long _checkedTicks;
+        private static DateTime _written;
+        private static volatile HashSet<ulong> _hashes = [];
+
+        public static bool Enabled => FilePath is not null;
+
+        public static bool Contains(ulong hash)
+        {
+            if (FilePath is null)
+            {
+                return false;
+            }
+
+            var now = Environment.TickCount64;
+            if (now - Interlocked.Read(ref _checkedTicks) > 500)
+            {
+                Interlocked.Exchange(ref _checkedTicks, now);
+                Reload();
+            }
+
+            return _hashes.Contains(hash);
+        }
+
+        private static void Reload()
+        {
+            try
+            {
+                var written = File.Exists(FilePath) ? File.GetLastWriteTimeUtc(FilePath!) : DateTime.MinValue;
+                if (written == _written)
+                {
+                    return;
+                }
+
+                _written = written;
+                var hashes = written == DateTime.MinValue ? [] : File.ReadAllLines(FilePath!)
+                    .Select(static line => line.Split('#')[0].Trim())
+                    .Select(static text => ulong.TryParse(text.Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                        System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash) ? hash : 0)
+                    .Where(static hash => hash != 0)
+                    .ToHashSet();
+                _hashes = hashes;
+                Console.Error.WriteLine($"[GPU][INFO] SHARPEMU_SKIP_FILE: skipping {hashes.Count} programs: " +
+                    string.Join(",", hashes.Select(static hash => hash.ToString("X16", System.Globalization.CultureInfo.InvariantCulture))));
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
     private string RecordDraw(
         ulong submitId,
         RegisterBanks banks,
@@ -467,8 +531,10 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
-        if (SkippedPixelPrograms.Count != 0 && state.PixelActive &&
-            SkippedPixelPrograms.Contains(pixelInput.Stage.Program?.Hash ?? 0))
+        TraceTargetWriters(ref state, pixelInput.Stage.Program?.Hash ?? 0, vertexInput.Stage);
+        TraceBlendState(ref state, context, pixelInput.Stage.Program?.Hash ?? 0);
+        if (state.PixelActive && (SkippedPixelPrograms.Count != 0 || LiveSkips.Enabled) &&
+            (SkippedPixelPrograms.Contains(pixelInput.Stage.Program?.Hash ?? 0) || LiveSkips.Contains(pixelInput.Stage.Program?.Hash ?? 0)))
         {
             return "skipped-by-request";
         }
