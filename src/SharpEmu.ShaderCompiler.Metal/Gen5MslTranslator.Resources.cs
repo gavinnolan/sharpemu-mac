@@ -229,6 +229,8 @@ public static partial class Gen5MslTranslator
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
+            _bridgedComputeWaves = BridgesComputeWaves(request, _stage, _waveLaneCount,
+                (ulong)_localSizeX * _localSizeY * _localSizeZ, _computeLdsDwords);
             _requiredVertexOutputCount = request.RequiredVertexOutputCount;
             _pixelInputEnable = request.PixelInputEnable;
             _pixelInputAddress = request.PixelInputAddress;
