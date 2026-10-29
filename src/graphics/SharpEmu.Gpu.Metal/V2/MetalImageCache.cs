@@ -847,6 +847,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             NoteForeignStencilShare(depth, image);
+            if (TracedStencilPlane != 0 && depth.Description.Stencil.Address == TracedStencilPlane)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][STENCIL-VIEW] view={image.Description.PixelFormat} {image.Description.Extent.Width}x{image.Description.Extent.Height}s{image.Description.Samples} " +
+                    $"v{image.ContentVersion} takesGpu={takesGpuOwnership} depth {depth.Description.Extent.Width}x{depth.Description.Extent.Height} " +
+                    $"depthGpu={depth.IsGpuModified} depthStale={depth.StencilPlaneStale}");
+            }
+
             var (start, end) = image.OverlapWithin(depth.Description.Stencil.Address, depth.Description.Stencil.Size);
             if (depth.IsGpuModified)
             {
@@ -895,6 +903,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             NoteForeignStencilShare(image, other);
+            var wasModified = other.IsGpuModified;
+            var wasStale = image.StencilPlaneStale;
+            var wasHeld = image.HoldsStencilFrom(other);
             var handedOver = false;
             if (StencilDeviceHandOver && image.IsCpuDirty && other.IsGpuModified && !other.IsCpuDirty &&
                 CanCopyStencilOnDevice(image, other))
@@ -912,6 +923,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 handedOver = (other.IsGpuModified || image.StencilPlaneStale) && TryCopyStencilOnDevice(image, other);
             }
 
+            if (TracedStencilPlane != 0 && stencil.Address == TracedStencilPlane)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][STENCIL-HANDOVER] depth=0x{image.Description.Data.Address:X} {image.Description.Extent.Width}x{image.Description.Extent.Height}s{image.Description.Samples} " +
+                    $"depthGpu={image.IsGpuModified} depthCpuDirty={image.IsCpuDirty} other={other.Description.PixelFormat} " +
+                    $"{other.Description.Extent.Width}x{other.Description.Extent.Height}s{other.Description.Samples} tile={other.Description.TileMode} " +
+                    $"tex=0x{other.Texture:X} v{other.ContentVersion} gpuModified={wasModified} cpuDirty={other.IsCpuDirty} " +
+                    $"stale={wasStale} held={wasHeld} handedOver={handedOver} takesGpu={takesGpuOwnership}");
+            }
             if (!handedOver && other.IsGpuModified)
             {
                 // The depth plane is written out first so the reload keeps it, and the
@@ -939,6 +959,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
         }
     }
+
+    // SHARPEMU_METAL_V2_TRACE_STENCIL_PLANE=<hex address>: every hand-over decision into the depth image whose
+    // stencil plane starts there.
+    private static readonly ulong TracedStencilPlane =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE_STENCIL_PLANE"),
+            System.Globalization.NumberStyles.HexNumber, null, out var tracedPlane) ? tracedPlane : 0;
 
     // SHARPEMU_METAL_V2_STENCIL_DEVICE=0 hands a stencil plane written through another image
     // back to its depth image through guest memory again (both planes reloaded).
@@ -1236,6 +1262,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         DrainDeferredRefreshesLocked();
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
+        var traced = TracedImageAddress != 0 && image.Description.Data.Address == TracedImageAddress &&
+            (_tracedAcquires++ < 64 || request.Role == ImageRole.StorageImage && _tracedAcquires < 4000);
+        if (traced)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][IMAGE-TRACE] acquire role={request.Role} view={request.View.Type}/{request.View.Format} tex=0x{image.Texture:X} " +
+                $"gpuModified={image.IsGpuModified} cpuDirty={image.IsCpuDirty} v{image.ContentVersion} serial={_owner.CurrentSerial}");
+        }
+
         if (request.Role == ImageRole.StorageImage)
         {
             PromoteLinearView(image);
@@ -1288,8 +1323,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         EnsureViewUsageLocked(image, in request.View);
-        return image.GetOrCreateView(request.View, out resourceId);
+        var acquired = image.GetOrCreateView(request.View, out resourceId);
+        if (traced)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][IMAGE-TRACE]   -> tex=0x{image.Texture:X} view=0x{acquired:X} gpuModified={image.IsGpuModified} " +
+                $"cpuDirty={image.IsCpuDirty} v{image.ContentVersion}");
+        }
+
+        return acquired;
     }
+
+    private int _tracedAcquires;
 
     /// <summary>
     /// The per-use part of <see cref="AcquireTextureView(ResourceSlotIdentifier, in ImageRequest, out ulong)"/>
@@ -1299,6 +1344,25 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// binding (a reshape moves its version and answers false). False sends the caller to the full
     /// acquire.
     /// </summary>
+    /// <summary>
+    /// Stamps the images of a memoised bindless table as this submission's, as reacquiring each view
+    /// would (<see cref="TryReacquireTextureView"/>): the caller has seen that nothing a binding resolves
+    /// to has changed since the stamps were taken.
+    /// </summary>
+    public void NoteMemoisedTextureUses(ReadOnlySpan<TextureMemoStamp?> stamps)
+    {
+        using var held = _lock.Hold();
+        var serial = _owner.CurrentSerial;
+        foreach (var stamp in stamps)
+        {
+            if (stamp is { } taken)
+            {
+                taken.Image.LastAccessTick = _collectionTick;
+                taken.Image.NoteUse(serial);
+            }
+        }
+    }
+
     public bool TryReacquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, in TextureMemoStamp stamp)
     {
         using var held = _lock.Hold();
@@ -2244,9 +2308,25 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         Interlocked.Increment(ref _createdImages);
+        if (TracedImageAddress != 0 && admitted.Data.Address == TracedImageAddress)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][IMAGE-TRACE] insert 0x{admitted.Data.Address:X} {admitted.PixelFormat} {admitted.Type} {admitted.TileMode} " +
+                $"{admitted.Extent.Width}x{admitted.Extent.Height}x{admitted.Extent.Depth} role={role} sampledOnly={sampledOnly} " +
+                $"window={windowView} tex=0x{texture:X} slot={imageIdentifier.Index}{Environment.NewLine}{Environment.StackTrace}");
+        }
+
         CollectIfOverBudget();
         return imageIdentifier;
     }
+
+    // SHARPEMU_METAL_V2_TRACE_IMAGE_ADDR=<hex> (diagnostic): every image created or released at that guest address, with
+    // the stack that asked for it.
+    private int _tracedWritebacks;
+
+    internal static readonly ulong TracedImageAddress =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE_IMAGE_ADDR"),
+            System.Globalization.NumberStyles.HexNumber, null, out var tracedImage) ? tracedImage : 0;
 
     // Minimum linear texture alignment of a pixel format, asked of the device once.
     private ulong LinearAlignment(ulong pixelFormat)
@@ -2789,6 +2869,34 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     // Retiles a GPU-written image back into guest memory; afterwards guest memory and
     // the texture agree, so the image stays cached and clean.
+    // SHARPEMU_METAL_V2_TRACE_BIG_WRITEBACKS=<MB> (diagnostic): each writeback of an image at least that large, once
+    // per address and cause, with the stack that asked for it.
+    private static readonly ulong TraceBigWritebackBytes =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE_BIG_WRITEBACKS"), out var bigMegabytes)
+            ? bigMegabytes << 20 : 0;
+
+    private readonly HashSet<(ulong, MetalWritebackCause)> _tracedBigWritebacks = new();
+
+    // Writebacks over that size so far, for a caller that wants to know whether its flush made one.
+    internal long BigWritebacks;
+
+    private void TraceBigWriteback(in ImageDescription description, MetalWritebackCause cause)
+    {
+        if (_tracedBigWritebacks.Count >= 64 || !_tracedBigWritebacks.Add((description.Data.Address, cause)))
+        {
+            return;
+        }
+
+        var frames = new System.Diagnostics.StackTrace(2, false).GetFrames()
+            .Select(static frame => frame.GetMethod())
+            .Where(static method => method?.DeclaringType is not null)
+            .Take(14)
+            .Select(static method => $"{method!.DeclaringType!.Name}.{method.Name}");
+        Console.Error.WriteLine(
+            $"[METAL-V2][BIG-WRITEBACK] address=0x{description.Data.Address:X} {ProfileLabel("writeback", in description)} " +
+            $"cause={cause} stack={string.Join(" < ", frames)}");
+    }
+
     private MetalWritebackOutcome WriteBackToGuest(MetalCachedImage image, MetalWritebackCause cause)
     {
         using var censusScope = MetalGpuReferenceCensus.Scope(MetalRefKind.ImageWriteback);
@@ -2800,6 +2908,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
+        if (TraceBigWritebackBytes != 0 && description.Data.Size >= TraceBigWritebackBytes)
+        {
+            BigWritebacks++;
+            TraceBigWriteback(in description, cause);
+        }
+
         _owner.LandHeldCopies(description.Data.Address, description.Data.Size);
         var destination = description.Data.Size <= TransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
@@ -2854,6 +2968,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         _writebackCauses[(int)cause]++;
         Interlocked.Increment(ref _writebacks);
+        if (TracedImageAddress != 0 && description.Data.Address == TracedImageAddress && _tracedWritebacks++ < 200)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][IMAGE-TRACE] writeback cause={cause} written=0x{written:X}/0x{description.Data.Size:X} " +
+                $"tex=0x{image.Texture:X} levels={description.Resources.Levels} serial={context.SubmissionSerial}");
+        }
+
         if (written < description.Data.Size)
         {
             // Some bytes no run could carry: guest memory holds the old ones there.
