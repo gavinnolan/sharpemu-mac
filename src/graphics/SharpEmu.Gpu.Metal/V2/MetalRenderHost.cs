@@ -1550,6 +1550,14 @@ internal sealed partial class MetalRenderHost :
 
         // A label held for the commit over these bytes lands first, so the fill overwrites it in stream order.
         OrderAfterDeferredCopies(address, size);
+        if (TryFillInComputeEncoder(address, size, value, in range))
+        {
+            _imageCache.InvalidateMemoryFromGpu(address, size);
+            NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
+            Interlocked.Increment(ref _gpuFills);
+            return;
+        }
+
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -2640,6 +2648,7 @@ internal sealed partial class MetalRenderHost :
         var clocks = TakeClockLabelCounters();
         reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
+            .Append(" fills_in_encoder=").Append(Interlocked.Exchange(ref _fillsInEncoder, 0))
             .Append(" gpu_gds=").Append(TakeGpuGdsTransfers())
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
@@ -2910,6 +2919,7 @@ internal sealed partial class MetalRenderHost :
         _completions.Dispose();
         DisposeNativeOcclusion();
         DisposeLabelScatter();
+        DisposeFillWords();
         DisposeOcclusionAudit();
         DisposeWriteFences();
         DisposeHostMovie();
