@@ -195,6 +195,10 @@ internal sealed partial class MetalRenderHost
             }
             else
             {
+                if (device.MemoBinding < 0) BindlessMemoMissUnset++;
+                else if (_imageCache.HasDeferredRefreshes) BindlessMemoMissDeferred++;
+                else if (device.MemoBinding != bindingEpoch) BindlessMemoMissBinding++;
+                else BindlessMemoMissImageSet++;
                 ResolveBindlessEntries(stage, info, table, device, count);
                 var memoised = !_imageCache.HasDeferredRefreshes && _imageCache.Epochs.Binding == bindingEpoch &&
                     _imageCache.ImageSetVersion == memoImageSet;
@@ -352,6 +356,10 @@ internal sealed partial class MetalRenderHost
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS_TABLE_MEMO") != "0";
 
     internal long BindlessTableMemoHits;
+
+    // Why a bind missed the table memo: no memo (a new table, or the last pass left an entry to look at again), a
+    // deferred refresh waiting, the binding epoch moved, or only the image set did.
+    internal long BindlessMemoMissUnset, BindlessMemoMissDeferred, BindlessMemoMissBinding, BindlessMemoMissImageSet;
 
     // The residency set of bindless textures no pass writes, on the render queue; null when residency sets are unavailable.
     private BindlessTextureResidency? _bindlessResidency;

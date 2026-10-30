@@ -559,6 +559,29 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // SHARPEMU_TRACE_BOUNDARY_WAITS=1 (diagnostic): a frame boundary wait that lasts past 5 s says, every 5 s, which
+    // ticket it waits for, how far the worker has retired them and what heads the queues.
+    internal static readonly bool TraceBoundaryWaits = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_BOUNDARY_WAITS") == "1";
+
+    private CommandSubmission? _runningSubmission;
+
+    private string DescribeRunning()
+    {
+        if (_runningSubmission is not { } running)
+        {
+            return " running=none";
+        }
+
+        var interpreter = running.Kind is CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary
+            ? null
+            : GetInterpreter(running.QueueId);
+        return $" running=q{running.QueueId}/sub={running.SubmissionId}/{running.Kind}@0x{running.Address:X}+{running.DwordCount}" +
+            (interpreter is null ? string.Empty
+                : $" packet=0x{interpreter.LastPacketAddress:X} depth={interpreter.LastPacketDepth} serial={interpreter.DsPacketSerial}" +
+                  $" words=[{interpreter.LastPacketWords.Header:X8} {interpreter.LastPacketWords.W1:X8} {interpreter.LastPacketWords.W2:X8} {interpreter.LastPacketWords.W3:X8}]" +
+                  $" opcode=0x{(interpreter.LastPacketWords.Header >> 8) & 0xFF:X2}");
+    }
+
     // The waiting half of Done: blocks while more than the allowed boundaries up to and including
     // this ticket's are still ahead of the worker. A boundary queued after it does not extend the wait.
     public IdleOutcome WaitDone(long ticket)
@@ -568,9 +591,20 @@ public sealed class CommandStreamQueue
             var dsSuspend = DsTrace.Gpu && DsTrace.Armed;
             var dsPending = ticket - _boundariesRetired;
             var dsStarted = dsSuspend ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            var lastReport = waitStarted;
             while (_outcome == IdleOutcome.Completed && ticket - _boundariesRetired > _boundariesInFlight)
             {
-                WaitLocked(Timeout.Infinite);
+                WaitLocked(TraceBoundaryWaits ? 1000 : Timeout.Infinite);
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (TraceBoundaryWaits && now - lastReport >= 5 * System.Diagnostics.Stopwatch.Frequency)
+                {
+                    lastReport = now;
+                    Console.Error.WriteLine(
+                        $"[GPU][BOUNDARY-WAIT] ticket={ticket} retired={_boundariesRetired} queued={_boundaryTickets} " +
+                        $"in_flight={_boundariesInFlight} waited_s={(now - waitStarted) / (double)System.Diagnostics.Stopwatch.Frequency:F0} " +
+                        $"processing={_processing} submissions={_submissionCount} barriers={_controlBarriers.Count}{DescribeRunning()}{DescribeHeads()}");
+                }
             }
 
             if (dsSuspend)
@@ -1417,6 +1451,11 @@ public sealed class CommandStreamQueue
             }
 
             _processing = true;
+            if (TraceBoundaryWaits)
+            {
+                _runningSubmission = submission;
+            }
+
             _processingThread = Thread.CurrentThread;
             _activePreparation = submission?.Preparation;
             // What this slice is about to wait for may change while it runs, and the wake

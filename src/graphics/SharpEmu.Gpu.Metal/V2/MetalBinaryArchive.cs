@@ -81,7 +81,9 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     // A queued capture keeps its descriptor's functions alive; past this many the newest
     // are dropped (their pipelines are stored by a later start).
-    private const int MaxQueuedJobs = 256;
+    // SHARPEMU_METAL_V2_BINARY_ARCHIVE_QUEUE=<n> sets it.
+    private static readonly int MaxQueuedJobs =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINARY_ARCHIVE_QUEUE"), out var queued) && queued > 0 ? queued : 256;
 
     // MTLPipelineOptionFailOnBinaryArchiveMiss.
     internal const nuint FailOnBinaryArchiveMiss = 1 << 2;
@@ -175,10 +177,24 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private int _pipelinesAdded;
     private int _loadedSegments;
     private int _segmentsOpened;
+    private int _capturesDropped;
+    private long _acquireTicks;
+    private int _acquires;
+    private int _maxSegmentsPerPair;
     private int _pipelinesRefused;
     private int _librariesStored;
     private long _libraryBytesStored;
     private long _loadedSegmentBytes;
+
+    // Adds the time an AcquirePipelineArchives call took to the closed line's acquire_ms.
+    private readonly struct AcquireTimer(MetalBinaryArchive archive, long started) : IDisposable
+    {
+        public void Dispose()
+        {
+            Interlocked.Add(ref archive._acquireTicks, Stopwatch.GetTimestamp() - started);
+            Interlocked.Increment(ref archive._acquires);
+        }
+    }
 
     private MetalBinaryArchive(nint device, string root, string translatorStamp, long budget)
     {
@@ -396,6 +412,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         var pair = PairKey(vertexKey, pixelKey);
+        var acquireStarted = Stopwatch.GetTimestamp();
+        using var acquireTimer = new AcquireTimer(this, acquireStarted);
         lock (_archivesLock)
         {
             if (Volatile.Read(ref _disposed) != 0 || !_segmentsByPair.TryGetValue(pair, out var sequences))
@@ -405,6 +423,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
             var array = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSMutableArray"), SelAlloc), SelInit);
             var added = 0;
+            if (sequences.Count > _maxSegmentsPerPair) _maxSegmentsPerPair = sequences.Count;
             foreach (var sequence in sequences.ToArray())
             {
                 var archive = OpenSegment(sequence, sequences);
@@ -558,6 +577,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         MetalNative.Send(descriptor, SelRetain);
         if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelKey))))
         {
+            Interlocked.Increment(ref _capturesDropped);
             MetalNative.SendVoid(descriptor, SelRelease);
             Forget(vertex);
             Forget(pixel);
@@ -612,7 +632,9 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             $"[METAL-V2][ARCHIVE] closed library_hits={hits} library_misses={misses} rejected={rejected} " +
             $"libraries_written={written} pipeline_hits={pipelineHits} pipeline_misses={pipelineMisses} " +
             $"pipelines_added={added} pipelines_refused={Volatile.Read(ref _pipelinesRefused)} " +
-            $"segments_listed={segments} segments_opened={Volatile.Read(ref _segmentsOpened)}");
+            $"segments_listed={segments} segments_opened={Volatile.Read(ref _segmentsOpened)} " +
+            $"captures_dropped={Volatile.Read(ref _capturesDropped)} acquires={Volatile.Read(ref _acquires)} " +
+            $"acquire_ms={Volatile.Read(ref _acquireTicks) * 1000.0 / Stopwatch.Frequency:F0} max_segments_per_pair={_maxSegmentsPerPair}");
     }
 
     private bool NeedsLibrary(UInt128 key) =>

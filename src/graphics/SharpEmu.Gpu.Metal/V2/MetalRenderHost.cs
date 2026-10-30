@@ -1185,6 +1185,29 @@ internal sealed partial class MetalRenderHost :
             line.Append($" reader=0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}");
         }
 
+        if (MetalV2Diagnostics.WaitStack)
+        {
+            // The emulator frames that asked for the read, innermost first.
+            line.Append(" stack=");
+            var frames = new System.Diagnostics.StackTrace(1, false).GetFrames();
+            var shown = 0;
+            foreach (var frame in frames)
+            {
+                var method = frame.GetMethod();
+                var type = method?.DeclaringType?.FullName;
+                if (method is null || type is null || !type.StartsWith("SharpEmu.", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                line.Append(shown++ == 0 ? string.Empty : "<").Append(type[(type.LastIndexOf('.') + 1)..]).Append('.').Append(method.Name);
+                if (shown == 14)
+                {
+                    break;
+                }
+            }
+        }
+
         Console.Error.WriteLine(line.ToString());
     }
 
@@ -2666,7 +2689,8 @@ internal sealed partial class MetalRenderHost :
                 $"descriptors={bindless.Descriptors} lookups={bindless.Lookups} image_set={_imageCache.ImageSetVersion} " +
                 $"new_tables={BindlessNewTables} full={BindlessFullResolves} partial={BindlessPartialResolves} " +
                 $"wide={BindlessWideChanges} invalid={BindlessInvalidEntries} declared={BindlessDeclaredTextures} resident={BindlessResidentTextures} " +
-                $"table_memo_hits={BindlessTableMemoHits} " +
+                $"table_memo_hits={BindlessTableMemoHits} memo_miss=[unset={BindlessMemoMissUnset} deferred={BindlessMemoMissDeferred} " +
+                $"binding={BindlessMemoMissBinding} image_set={BindlessMemoMissImageSet}] " +
                 $"memo_hits={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoHits} memo_changed={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoChanged} " +
                 $"memo_absent={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoAbsent} memo_unread={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoUnread} " +
                 $"memo_class={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoClassHits}");

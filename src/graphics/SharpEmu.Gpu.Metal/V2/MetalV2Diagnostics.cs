@@ -256,6 +256,10 @@ internal static class MetalV2Diagnostics
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_TRACE"), "1", StringComparison.Ordinal) ||
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_TRACE"), "1", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_WAIT_STACK=1 adds the emulator frames that asked for the read to each SLOW-WAIT line.
+    public static readonly bool WaitStack =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_STACK"), "1", StringComparison.Ordinal);
+
     public static readonly bool FoldClearsIntoPasses =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FOLD_CLEARS"), "0", StringComparison.Ordinal);
 
